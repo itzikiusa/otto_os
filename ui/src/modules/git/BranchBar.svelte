@@ -65,7 +65,7 @@
   }
 </script>
 
-<div class="branchbar">
+<div class="branchbar" class:dd-open={open}>
   <div class="branch-dd">
     <button class="btn branch-btn" onclick={toggle}>
       <Icon name="branch" size={12} />
@@ -215,6 +215,12 @@
       flex-wrap: nowrap;
       overflow-x: auto;
       scrollbar-width: none;
+    }
+    /* overflow-x:auto forces overflow-y to compute to auto too, turning the
+       ~34px bar into a clip container that swallows the dropdown. While the
+       dropdown is open, let the bar overflow so the menu overlays the page. */
+    .branchbar.dd-open {
+      overflow-x: visible;
     }
     .branchbar::-webkit-scrollbar { display: none; }
     .branch-btn,

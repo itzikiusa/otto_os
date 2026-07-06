@@ -13,6 +13,7 @@
   // walking the edge graph from the first-added (base) table.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import {
     buildSql,
@@ -48,7 +49,6 @@
   let limit = $state<number>(100);
   let bottomOpen = $state(true);
   let exprsOpen = $state(false);
-  let fnMenuFor = $state<string | null>(null); // expr id whose fn menu is open
 
   // Engine-specific aggregate list for the per-column dropdown.
   const aggOptions = $derived(aggregateOptions(database.capabilities?.engine));
@@ -72,6 +72,44 @@
   let paletteTables = $state<{ label: string; path: string; kind: string }[]>([]);
   let paletteSearch = $state('');
   let paletteLoading = $state(false);
+
+  // Resizable palette column: drag the divider between the palette and the
+  // canvas; the chosen width survives reloads (double-click resets). Mirrors
+  // the DatabasePage sidebar resizer, applied to the grid via a CSS var.
+  const PALETTE_W_DEFAULT = 220;
+  let paletteW = $state(loadPaletteW());
+  function loadPaletteW(): number {
+    if (typeof localStorage === 'undefined') return PALETTE_W_DEFAULT;
+    const v = Number(localStorage.getItem('db.qbPaletteW'));
+    return Number.isFinite(v) && v >= 180 ? Math.min(400, v) : PALETTE_W_DEFAULT;
+  }
+  function persistPaletteW(): void {
+    try {
+      localStorage.setItem('db.qbPaletteW', String(Math.round(paletteW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startPaletteResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = paletteW;
+    const onMove = (ev: PointerEvent): void => {
+      // The palette is pinned to the LEFT edge, so dragging RIGHT widens it.
+      paletteW = Math.max(180, Math.min(400, startW + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      persistPaletteW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetPaletteW(): void {
+    paletteW = PALETTE_W_DEFAULT;
+    persistPaletteW();
+  }
 
   // Canvas scroll container. Cards + edges are positioned in content
   // coordinates inside an inner sized layer, so native scrolling just works.
@@ -257,7 +295,6 @@
   }
   function removeExpr(id: string): void {
     exprs = exprs.filter((e) => e.id !== id);
-    if (fnMenuFor === id) fnMenuFor = null;
   }
   function setExprField(id: string, field: 'expression' | 'alias', value: string): void {
     exprs = exprs.map((e) => (e.id === id ? { ...e, [field]: value } : e));
@@ -267,7 +304,6 @@
     exprs = exprs.map((e) =>
       e.id === id ? { ...e, expression: e.expression ? `${e.expression} ${snippet}` : snippet } : e,
     );
-    fnMenuFor = null;
   }
 
   // ── Card dragging ────────────────────────────────────────────────────────
@@ -574,7 +610,7 @@
     body="The visual JOIN builder is only available for SQL engines."
   />
 {:else}
-  <div class="builder" class:bottom-open={bottomOpen}>
+  <div class="builder" class:bottom-open={bottomOpen} style="--qb-palette-w:{paletteW}px">
     <!-- ── Palette ─────────────────────────────────────────────────────── -->
     <aside class="palette">
       <div class="pal-head">Tables</div>
@@ -603,6 +639,17 @@
         {/if}
       </div>
     </aside>
+
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="side-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Drag to resize the table palette (double-click to reset)"
+      title="Drag to resize · double-click to reset"
+      ondblclick={resetPaletteW}
+      onpointerdown={startPaletteResize}
+    ></div>
 
     <!-- ── Canvas ──────────────────────────────────────────────────────── -->
     <!-- Non-scrolling wrapper holds the pinned overlays (hint, FK bar). -->
@@ -907,19 +954,20 @@
                           onclick={() =>
                             insertSnippet(e.id, 'CASE WHEN condition THEN value ELSE value END')}
                         >CASE</button>
-                        <div class="fn-wrap">
-                          <button
-                            class="snip"
-                            onclick={() => (fnMenuFor = fnMenuFor === e.id ? null : e.id)}
-                          >fn ▾</button>
-                          {#if fnMenuFor === e.id}
-                            <div class="fn-menu">
-                              {#each FN_SNIPPETS as fn (fn)}
-                                <button class="fn-item mono" onclick={() => insertSnippet(e.id, fn)}>{fn}</button>
-                              {/each}
-                            </div>
-                          {/if}
-                        </div>
+                        <!-- Routed through the global ctxMenu (viewport-clamped
+                             overlay): an in-place absolute menu gets clipped by
+                             the scrolling .bottom-body panel. -->
+                        <button
+                          class="snip"
+                          onclick={(ev) =>
+                            ctxMenu.show(
+                              ev,
+                              FN_SNIPPETS.map((fn) => ({
+                                label: fn,
+                                action: () => insertSnippet(e.id, fn),
+                              })),
+                            )}
+                        >fn ▾</button>
                       </div>
                     </div>
                   {/each}
@@ -963,13 +1011,31 @@
   .builder {
     height: 100%;
     display: grid;
-    grid-template-columns: 220px 1fr;
+    /* Palette column is drag-resizable via the .side-resizer (persisted). */
+    grid-template-columns: var(--qb-palette-w, 220px) 1fr;
     grid-template-rows: 1fr auto;
     grid-template-areas:
       'palette canvas'
       'bottom  bottom';
     gap: 0;
     overflow: hidden;
+  }
+  /* Draggable divider between the palette and the canvas. Overlays the
+     palette's inline-end border (same grid cell, pinned to its end edge);
+     a hit-area wider than the visible line makes it easy to grab. */
+  .side-resizer {
+    grid-area: palette;
+    justify-self: end;
+    width: 5px;
+    margin-inline-end: -3px;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    z-index: 2;
+    touch-action: none;
+  }
+  .side-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
 
   /* ── Palette ── */
@@ -1639,38 +1705,6 @@
     color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
-  .fn-wrap {
-    position: relative;
-  }
-  .fn-menu {
-    position: absolute;
-    top: calc(100% + 4px);
-    inset-inline-start: 0;
-    z-index: 6;
-    display: flex;
-    flex-direction: column;
-    min-width: 140px;
-    padding: 4px;
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow);
-  }
-  .fn-item {
-    text-align: start;
-    padding: 4px 7px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: var(--text);
-    font-size: 11px;
-    cursor: pointer;
-  }
-  .fn-item:hover {
-    background: var(--surface-2);
-    color: var(--accent);
-  }
-
   .gen-sql {
     margin: 0;
     flex: 1;

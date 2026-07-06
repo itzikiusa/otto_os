@@ -177,6 +177,11 @@
     border-radius: 14px 14px 0 0;
     box-shadow: var(--shadow);
     padding: 8px 12px calc(16px + env(safe-area-inset-bottom, 0));
+    /* The grid is data-driven (all overflow modules + every installed plugin):
+       cap the sheet so it never grows past the top edge and scroll inside. */
+    max-height: calc(100vh - 48px);
+    display: flex;
+    flex-direction: column;
   }
   .sheet-grip {
     width: 36px;
@@ -190,6 +195,9 @@
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 8px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
   }
   .sheet-item {
     display: flex;

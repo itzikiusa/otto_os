@@ -44,9 +44,17 @@
     debounceTimer = setTimeout(runSearch, 120);
   }
 
-  // ---- content root ----
-  function getContentRoot(): Element {
-    return document.querySelector('.content') ?? document.getElementById('app') ?? document.body;
+  // ---- content roots ----
+  // The page pane plus overlays that visually sit on top of / beside it: the
+  // agents right panel (.rpanel) and any open modal sheet — a browser ⌘F would
+  // reach those too. Chrome (Navigator, tab strip, toolbars) stays excluded so
+  // nav labels don't pollute the match list.
+  function getContentRoots(): Element[] {
+    const all = [...document.querySelectorAll('.content, .rpanel, .sheet[role="dialog"]')];
+    // Drop roots nested inside another selected root (e.g. a modal mounted
+    // within .content) so their text isn't walked — and matched — twice.
+    const roots = all.filter((el) => !all.some((other) => other !== el && other.contains(el)));
+    return roots.length > 0 ? roots : [document.getElementById('app') ?? document.body];
   }
 
   // ---- core search ----
@@ -59,40 +67,41 @@
       return;
     }
 
-    const root = getContentRoot();
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const parent = node.parentElement;
-        if (!parent) return NodeFilter.FILTER_REJECT;
-        // Skip find bar itself, script, style, and hidden elements.
-        if (parent.closest('.otto-find-bar')) return NodeFilter.FILTER_REJECT;
-        const tag = parent.tagName.toLowerCase();
-        if (tag === 'script' || tag === 'style') return NodeFilter.FILTER_REJECT;
-        if ((parent as HTMLElement).offsetParent === null && parent.tagName !== 'BODY') {
-          // hidden via display:none or visibility:hidden — skip
-          const style = getComputedStyle(parent);
-          if (style.display === 'none' || style.visibility === 'hidden') {
-            return NodeFilter.FILTER_REJECT;
-          }
-        }
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-
     const lower = query.toLowerCase();
     const found: Range[] = [];
 
-    let textNode: Text | null;
-    while ((textNode = walker.nextNode() as Text | null)) {
-      const content = textNode.textContent ?? '';
-      const contentLower = content.toLowerCase();
-      let pos = 0;
-      while ((pos = contentLower.indexOf(lower, pos)) !== -1) {
-        const range = document.createRange();
-        range.setStart(textNode, pos);
-        range.setEnd(textNode, pos + lower.length);
-        found.push(range);
-        pos += lower.length;
+    for (const root of getContentRoots()) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          const parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          // Skip find bar itself, script, style, and hidden elements.
+          if (parent.closest('.otto-find-bar')) return NodeFilter.FILTER_REJECT;
+          const tag = parent.tagName.toLowerCase();
+          if (tag === 'script' || tag === 'style') return NodeFilter.FILTER_REJECT;
+          if ((parent as HTMLElement).offsetParent === null && parent.tagName !== 'BODY') {
+            // hidden via display:none or visibility:hidden — skip
+            const style = getComputedStyle(parent);
+            if (style.display === 'none' || style.visibility === 'hidden') {
+              return NodeFilter.FILTER_REJECT;
+            }
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      });
+
+      let textNode: Text | null;
+      while ((textNode = walker.nextNode() as Text | null)) {
+        const content = textNode.textContent ?? '';
+        const contentLower = content.toLowerCase();
+        let pos = 0;
+        while ((pos = contentLower.indexOf(lower, pos)) !== -1) {
+          const range = document.createRange();
+          range.setStart(textNode, pos);
+          range.setEnd(textNode, pos + lower.length);
+          found.push(range);
+          pos += lower.length;
+        }
       }
     }
 

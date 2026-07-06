@@ -5,6 +5,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { BrokerCluster, ConnectionSection, TestClusterResp } from '../../lib/api/types';
   import ClusterForm from './ClusterForm.svelte';
   import OverviewTab from './OverviewTab.svelte';
@@ -31,6 +32,46 @@
     if (brokers.selectedId) clustersOpen = false;
     else clustersOpen = true;
   });
+
+  // ---- resizable cluster sidebar --------------------------------------------
+  // Drag the divider between the cluster list and the content to resize it; the
+  // chosen width survives reloads. Mirrors the Database page's sidebar resizer.
+  // (On phones the list is a full-width stacked band — the width var is ignored
+  // by the media query there and the divider is hidden.)
+  const SIDE_W_DEFAULT = 220;
+  let sideW = $state(loadSideW());
+  function loadSideW(): number {
+    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
+    const v = Number(localStorage.getItem('brokers.sideW'));
+    return Number.isFinite(v) && v >= 180 ? Math.min(420, v) : SIDE_W_DEFAULT;
+  }
+  function persistSideW(): void {
+    try {
+      localStorage.setItem('brokers.sideW', String(Math.round(sideW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startSideResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sideW;
+    const onMove = (ev: PointerEvent): void => {
+      // The list is pinned to the LEFT edge, so dragging RIGHT widens it.
+      sideW = Math.max(180, Math.min(420, startW + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      persistSideW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetSideW(): void {
+    sideW = SIDE_W_DEFAULT;
+    persistSideW();
+  }
 
   $effect(() => {
     const id = ws.currentId;
@@ -132,19 +173,28 @@
   let collapsed = $state<Record<string, boolean>>({});
   let draggedClusterId = $state<string | null>(null);
   let draggedSectionId = $state<string | null>(null);
-  // Right-click context menu (cluster row or section header).
-  let menu = $state<{ x: number; y: number; kind: 'cluster' | 'section'; id: string } | null>(null);
-
+  // Right-click context menu (cluster row or section header) — routed through
+  // the global ctxMenu overlay, which clamps into the viewport.
   function openMenu(e: MouseEvent, kind: 'cluster' | 'section', id: string): void {
-    e.preventDefault();
-    menu = { x: e.clientX, y: e.clientY, kind, id };
+    if (kind === 'cluster') {
+      const c = brokers.clusters.find((x) => x.id === id);
+      if (!c) return;
+      ctxMenu.show(e, [
+        { label: 'Open in tab', action: () => brokers.select(c.id) },
+        { label: 'Test', action: () => void testConn(c) },
+        { label: 'Edit…', action: () => openEdit(c) },
+        { label: 'Remove', danger: true, action: () => void removeCluster(c) },
+      ]);
+    } else {
+      const s = brokers.sections.find((x) => x.id === id);
+      if (!s) return;
+      ctxMenu.show(e, [
+        { label: 'New sub-section', action: () => void newSection(s.id) },
+        { label: 'Rename…', action: () => void renameSec(s) },
+        { label: 'Delete', danger: true, action: () => void delSec(s) },
+      ]);
+    }
   }
-  const menuCluster = $derived(
-    menu?.kind === 'cluster' ? (brokers.clusters.find((c) => c.id === menu!.id) ?? null) : null,
-  );
-  const menuSection = $derived(
-    menu?.kind === 'section' ? (brokers.sections.find((s) => s.id === menu!.id) ?? null) : null,
-  );
 
   async function newSection(parentId: string | null): Promise<void> {
     const name = await confirmer.promptText(parentId ? 'Sub-section name' : 'Section name', {
@@ -245,7 +295,7 @@
 </script>
 
 <div class="brokers-page">
-  <aside class="clusters" class:collapsed={!clustersOpen}>
+  <aside class="clusters" class:collapsed={!clustersOpen} style="--clusters-w:{sideW}px">
     <div class="aside-head">
       <button
         class="sec-toggle"
@@ -300,6 +350,17 @@
       {/if}
     </div>
   </aside>
+
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="side-resizer"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Drag to resize the cluster list (double-click to reset)"
+    title="Drag to resize · double-click to reset"
+    ondblclick={resetSideW}
+    onpointerdown={startSideResize}
+  ></div>
 
   <main class="cluster-main" class:collapsed={!contentOpen}>
     {#if brokers.openClusters.length > 0}
@@ -466,23 +527,6 @@
   </div>
 {/snippet}
 
-{#if menu}
-  <button class="menu-backdrop" aria-label="Close menu" onclick={() => (menu = null)}></button>
-  <div class="ctxmenu" style="left: {menu.x}px; top: {menu.y}px" role="menu">
-    {#if menuCluster}
-      {@const c = menuCluster}
-      <button role="menuitem" onclick={() => { brokers.select(c.id); menu = null; }}>Open in tab</button>
-      <button role="menuitem" onclick={() => { void testConn(c); menu = null; }}>Test</button>
-      <button role="menuitem" onclick={() => { openEdit(c); menu = null; }}>Edit…</button>
-      <button role="menuitem" class="danger" onclick={() => { void removeCluster(c); menu = null; }}>Remove</button>
-    {:else if menuSection}
-      {@const s = menuSection}
-      <button role="menuitem" onclick={() => { void newSection(s.id); menu = null; }}>New sub-section</button>
-      <button role="menuitem" onclick={() => { void renameSec(s); menu = null; }}>Rename…</button>
-      <button role="menuitem" class="danger" onclick={() => { void delSec(s); menu = null; }}>Delete</button>
-    {/if}
-  </div>
-{/if}
 
 {#if formOpen}
   <ClusterForm cluster={editTarget} onclose={() => (formOpen = false)} />
@@ -495,11 +539,30 @@
     min-height: 0;
   }
   .clusters {
-    width: 220px;
+    /* Default width; drag-resizable via the .side-resizer (persisted). The
+       phone media query below overrides back to a full-width band. */
+    width: var(--clusters-w, 220px);
     border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
+    flex: none;
+  }
+  /* Draggable divider between the cluster list and the content. Sits flush
+     against the list's inline-end border; a hit-area wider than its visible
+     line makes it easy to grab. */
+  .side-resizer {
+    flex: none;
+    width: 5px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    z-index: 2;
+    touch-action: none;
+  }
+  .side-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .aside-head {
     display: flex;
@@ -581,43 +644,6 @@
     border-radius: 8px;
     padding: 0 6px;
     flex: none;
-  }
-  /* Right-click context menu */
-  .menu-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 40;
-    border: none;
-    background: transparent;
-    cursor: default;
-  }
-  .ctxmenu {
-    position: fixed;
-    z-index: 41;
-    min-width: 150px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m, 8px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
-    padding: 4px;
-    display: flex;
-    flex-direction: column;
-  }
-  .ctxmenu button {
-    text-align: start;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    padding: 6px 10px;
-    border-radius: var(--radius-s, 6px);
-    cursor: pointer;
-    font-size: 12.5px;
-  }
-  .ctxmenu button:hover {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
-  .ctxmenu button.danger {
-    color: var(--status-exited, #ff5f57);
   }
   .cluster {
     width: 100%;
@@ -894,6 +920,10 @@
       border-bottom: 1px solid var(--border);
       flex: none;
       min-height: 0;
+    }
+    /* Stacked layout — nothing to drag sideways. */
+    .side-resizer {
+      display: none;
     }
     .aside-head {
       padding: 12px 14px;

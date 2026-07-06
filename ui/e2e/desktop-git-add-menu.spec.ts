@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
-import { openPage } from './helpers';
+import { expectFullyInViewport, openPage } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Git "+" repo picker with MANY registered repos (desktop-browser only).
@@ -48,13 +48,7 @@ test('add-repo picker stays inside the viewport and every entry is reachable', a
   // Give the post-render clamp (rAF) a beat to land before measuring.
   await page.waitForTimeout(100);
 
-  const box = await menu.boundingBox();
-  const viewport = page.viewportSize()!;
-  expect(box, 'menu should render').not.toBeNull();
-  expect(box!.y, 'menu top must be inside the viewport').toBeGreaterThanOrEqual(0);
-  expect(box!.y + box!.height, 'menu bottom must be inside the viewport').toBeLessThanOrEqual(
-    viewport.height,
-  );
+  await expectFullyInViewport(page, menu, 'add-repo picker menu');
 
   // The static "add" actions at the top must be visible…
   await expect(menu.getByRole('menuitem', { name: 'Clone a repository…' })).toBeVisible();

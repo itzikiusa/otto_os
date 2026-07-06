@@ -25,6 +25,11 @@
     flex-direction: column;
     gap: 8px;
     width: 320px;
+    /* A burst of toasts must never stack past the top edge: cap the column and
+       let it scroll (newest stay visible at the bottom anchor). */
+    max-height: calc(100vh - 54px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
   .toast {
     display: flex;

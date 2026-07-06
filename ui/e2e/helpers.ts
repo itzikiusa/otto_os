@@ -60,6 +60,34 @@ export async function expectContentHasHeight(page: Page, min = 120): Promise<voi
 }
 
 /**
+ * Assert a floating element (menu / dropdown / popover / typeahead) is FULLY
+ * inside the viewport. This is the core check for the "popup rendered
+ * off-screen / clipped" class of bugs: flip-style positioning (`top = y - h`)
+ * goes negative when the popup is taller than the window, leaving the whole
+ * thing unreachable. Popups with data-driven lists must be tested with enough
+ * items to overflow the window (they should clamp + scroll internally) — see
+ * desktop-git-add-menu.spec.ts.
+ */
+export async function expectFullyInViewport(
+  page: Page,
+  locator: import('@playwright/test').Locator,
+  what = 'floating element',
+): Promise<void> {
+  await expect(locator).toBeVisible();
+  const box = await locator.boundingBox();
+  const viewport = page.viewportSize()!;
+  expect(box, `${what} should render`).not.toBeNull();
+  expect(box!.y, `${what} top must be inside the viewport`).toBeGreaterThanOrEqual(0);
+  expect(box!.x, `${what} left must be inside the viewport`).toBeGreaterThanOrEqual(0);
+  expect(box!.y + box!.height, `${what} bottom must be inside the viewport`).toBeLessThanOrEqual(
+    viewport.height,
+  );
+  expect(box!.x + box!.width, `${what} right must be inside the viewport`).toBeLessThanOrEqual(
+    viewport.width,
+  );
+}
+
+/**
  * Run an axe-core accessibility scan. Fails on any `critical` violation; returns
  * the full violation list so callers can additionally inspect `serious` ones.
  */

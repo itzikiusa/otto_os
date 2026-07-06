@@ -5,6 +5,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
@@ -1126,8 +1127,49 @@
     refMenu = { commit, branches, tags, x: r.left, y: r.bottom + 4 };
   }
 
+  // Clamp the popover into the viewport once its size is known (mirrors
+  // ContextMenu): an anchor near the bottom/right edge would otherwise push
+  // part of the (internally scrollable) popover off-screen and unreachable.
+  let refPopEl = $state<HTMLDivElement | null>(null);
+  let refPopX = $state(0);
+  let refPopY = $state(0);
+  $effect(() => {
+    const m = refMenu;
+    if (!m) return;
+    refPopX = m.x;
+    refPopY = m.y;
+    requestAnimationFrame(() => {
+      if (!refPopEl || refMenu !== m) return;
+      const pad = 8;
+      refPopX = Math.max(pad, Math.min(m.x, window.innerWidth - refPopEl.offsetWidth - pad));
+      refPopY = Math.max(pad, Math.min(m.y, window.innerHeight - refPopEl.offsetHeight - pad));
+    });
+  });
+
   function closeRefMenu(): void {
     refMenu = null;
+  }
+
+  // Drag-to-resize the commit-list column while the detail panel is open
+  // (desktop only; persisted via ui.gitGraphListWidth).
+  let listResizing = $state(false); // suspends the panel's flex transition
+  function startListResize(e: MouseEvent): void {
+    e.preventDefault();
+    listResizing = true;
+    const startX = e.clientX;
+    const startW = ui.gitGraphListWidth;
+    const onMove = (ev: MouseEvent) => ui.setGitGraphListWidth(startW + (ev.clientX - startX));
+    const onUp = () => {
+      listResizing = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
   }
 
   // Single-click a popover row → select the commit (this lights up the branch's
@@ -1487,6 +1529,8 @@
     class="graph-panel"
     class:panel-shrunk={selectedSha !== null && !isMobile}
     class:mob-collapsed={isMobile && !secCommitsOpen}
+    class:resizing={listResizing}
+    style:flex-basis={selectedSha !== null && !isMobile ? `${ui.gitGraphListWidth}px` : null}
   >
     {#if commitsLoading}
       <div style="padding: 10px"><Skeleton rows={12} height={28} /></div>
@@ -1630,6 +1674,16 @@
   {/if}
 
   <!-- ── RIGHT: commit detail + diff ─────────────────────────────────────── -->
+  {#if selectedSha !== null && !isMobile}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="graph-resizer"
+      onmousedown={startListResize}
+      ondblclick={() => ui.setGitGraphListWidth(420)}
+      title="Drag to resize · double-click to reset"
+    ></div>
+  {/if}
+
   {#if isMobile && selectedSha !== null}
     <!-- Mobile: a sticky section header for the open commit's diff, with a tap
          target to close it (re-opening the commit list). -->
@@ -1761,7 +1815,7 @@
      full-screen backdrop closes it on any outside click; Escape also closes. -->
 {#if refMenu}
   <button type="button" class="ref-pop-backdrop" aria-label="Close" onclick={closeRefMenu}></button>
-  <div class="ref-popover" style="left: {refMenu.x}px; top: {refMenu.y}px;">
+  <div class="ref-popover" bind:this={refPopEl} style="left: {refPopX}px; top: {refPopY}px;">
     {#if refMenu.branches.length > 0}
       <div class="ref-pop-group">Branches</div>
       {#each refMenu.branches as chip (chip.kind + chip.label)}
@@ -2000,10 +2054,21 @@
      detail panel flexes to fill the rest of the page (see .detail-visible). */
   .graph-panel.panel-shrunk {
     --branch-col-w: 88px;
-    flex: 0 0 420px;
+    flex: 0 0 420px; /* basis overridden by the inline ui.gitGraphListWidth */
     width: auto;
     min-width: 300px;
     border-inline-end: 1px solid var(--border);
+  }
+  .graph-panel.resizing {
+    transition: none;
+  }
+  .graph-resizer {
+    flex: 0 0 6px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+  }
+  .graph-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .graph-list {
     display: flex;

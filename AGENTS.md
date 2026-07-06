@@ -128,6 +128,16 @@ macOS-only.
 - **Secrets never live in the repo.** Tokens/passwords go through the macOS
   Keychain (`otto-keychain`); the DB stores only opaque key references. Never
   commit `.env`, `*.pem`, `*.key`, `*.p12`, or local DBs (see `.gitignore`).
+- **Floating UI must survive long content.** Any menu / dropdown / popover /
+  typeahead that positions itself with coordinates must (a) CLAMP into the
+  viewport — never "flip" to the other side of the anchor without a floor, a
+  popup taller than the window flips to a negative top and becomes unreachable —
+  and (b) cap its height (`max-height` vs the viewport + `overflow-y: auto`) so
+  every entry stays scrollable when the list is data-driven (repos, branches,
+  completions…). Prefer the global `ctxMenu` store (already clamped) over a new
+  hand-rolled popup. E2E: assert with `expectFullyInViewport` from
+  `ui/e2e/helpers.ts`, seeding ENOUGH items to overflow the window (see
+  `ui/e2e/desktop-git-add-menu.spec.ts`).
 
 ## Do NOT damage user work
 
