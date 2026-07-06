@@ -4,6 +4,7 @@
   // a separate Summary (title) + Description, like the PR dialog.
   import { api } from '../../lib/api/client';
   import type {
+    CommitInfo,
     DiffResp,
     DraftCommitMessageResp,
     FileChange,
@@ -369,6 +370,19 @@
       composer?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }),
     );
   }
+
+  // Amend prefill: ticking Amend with an empty subject pulls HEAD's message in
+  // so the user sees (and can edit) what they're amending. Leaving it empty
+  // still works — the server does `--amend --no-edit` (keeps the message).
+  $effect(() => {
+    if (!amend || subject.trim() !== '') return;
+    void api
+      .get<CommitInfo[]>(`/repos/${repoId}/log?limit=1&skip=0`)
+      .then((commits) => {
+        if (amend && subject.trim() === '' && commits[0]) subject = commits[0].subject;
+      })
+      .catch(() => {});
+  });
 
   async function commit(): Promise<void> {
     if (committing) return;

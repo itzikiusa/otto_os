@@ -535,7 +535,14 @@ impl LocalGit {
             _ => Vec::new(),
         };
         let with_path = |base: &[&str]| -> Vec<String> {
-            base.iter()
+            // `core.quotePath=false` on every diff-family call: git's default
+            // quotePath octal-escapes non-ASCII names (`"caf\303\251.txt"`),
+            // which breaks feeding `ls-files` output back into `--no-index`
+            // (file never found → silently missing from Changes) and litters
+            // parsed headers with escapes. Raw UTF-8 round-trips cleanly.
+            ["-c", "core.quotePath=false"]
+                .iter()
+                .chain(base.iter())
                 .chain(path_args.iter())
                 .map(|s| s.to_string())
                 .collect()
@@ -577,7 +584,10 @@ impl LocalGit {
                 for f in untracked.lines().filter(|l| !l.trim().is_empty()) {
                     let (_, stdout, _, _) = self
                         .run_raw(
-                            &["diff", "--no-color", "-U3", "--no-index", "--", "/dev/null", f],
+                            &[
+                                "-c", "core.quotePath=false", "diff", "--no-color", "-U3",
+                                "--no-index", "--", "/dev/null", f,
+                            ],
                             &[],
                         )
                         .await?;
@@ -589,7 +599,16 @@ impl LocalGit {
                 run_v(with_path(&["diff", "--no-color", "-U3", "-M", "--cached"])).await?
             }
             DiffTarget::Commit(sha) => {
-                run_v(with_path(&["show", "--no-color", "-U3", "-M", "--format=", sha])).await?
+                // `-m --first-parent`: a merge commit's default `git show`
+                // output is a combined (--cc) diff — files identical to any
+                // parent are omitted (a normal integration merge shows "no
+                // changes") and its `@@@` hunks don't parse. Diffing against
+                // the first parent yields the reviewable "what this merge
+                // brought in" diff; non-merge commits are unaffected.
+                run_v(with_path(&[
+                    "show", "-m", "--first-parent", "--no-color", "-U3", "-M", "--format=", sha,
+                ]))
+                .await?
             }
             DiffTarget::Range(a, b) => {
                 let range = format!("{a}..{b}");
@@ -687,6 +706,17 @@ impl LocalGit {
             }
             match c.kind.as_str() {
                 "untracked" | "added" => remove.push(c.path.clone()),
+                "renamed" => {
+                    // Restore BOTH sides: the new name is absent at HEAD, so
+                    // restoring it alone REMOVES the file (index + worktree)
+                    // while the old name stays staged-deleted — i.e. "discard"
+                    // would delete the user's file. Restoring old + new undoes
+                    // the rename and brings the content back at the old path.
+                    restore.push(c.path.clone());
+                    if let Some(orig) = &c.orig_path {
+                        restore.push(orig.clone());
+                    }
+                }
                 _ => restore.push(c.path.clone()),
             }
         }
@@ -709,15 +739,23 @@ impl LocalGit {
     }
 
     /// Commit staged changes; returns the new HEAD sha.
+    ///
+    /// Amend with an EMPTY message keeps the previous commit's message
+    /// (`--amend --no-edit`) — the "fold staged changes into the last commit"
+    /// flow; rejecting it forced users to retype the message.
     pub async fn commit(&self, message: &str, amend: bool) -> Result<String> {
         if message.trim().is_empty() {
-            return Err(Error::Invalid("empty commit message".into()));
+            if !amend {
+                return Err(Error::Invalid("empty commit message".into()));
+            }
+            self.run(&["commit", "--amend", "--no-edit"]).await?;
+        } else {
+            let mut args = vec!["commit", "-m", message];
+            if amend {
+                args.push("--amend");
+            }
+            self.run(&args).await?;
         }
-        let mut args = vec!["commit", "-m", message];
-        if amend {
-            args.push("--amend");
-        }
-        self.run(&args).await?;
         let sha = self.run(&["rev-parse", "HEAD"]).await?;
         Ok(sha.trim().to_string())
     }
@@ -729,27 +767,49 @@ impl LocalGit {
     /// fails ("has no upstream branch"). We detect that and retry with
     /// `--set-upstream origin <branch>`, so pushing (and creating a PR from) a
     /// fresh branch just works.
+    ///
+    /// `branch: Some(b)` pushes THAT branch explicitly (`git push origin b`)
+    /// regardless of what's checked out — the Create-PR flow pushes the
+    /// user-selected source branch, which previously silently pushed HEAD.
+    pub async fn push_branch(&self, token: Option<String>, branch: Option<&str>) -> Result<String> {
+        match branch {
+            None => self.push(token).await,
+            Some(b) => {
+                let askpass = match &token {
+                    Some(t) => Some(AskPass::new(t)?),
+                    None => None,
+                };
+                let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
+                let (ok, stdout, stderr, code) =
+                    self.run_raw(&["push", "origin", b], &envs).await?;
+                if ok {
+                    return Ok(combine_push_output(&stdout, &stderr));
+                }
+                // First push of a fresh branch: set the upstream explicitly.
+                if stderr.contains("has no upstream branch") || stderr.contains("--set-upstream") {
+                    let (ok2, stdout2, stderr2, code2) = self
+                        .run_raw(&["push", "--set-upstream", "origin", b], &envs)
+                        .await?;
+                    if ok2 {
+                        return Ok(combine_push_output(&stdout2, &stderr2));
+                    }
+                    return Err(upstream_err(&stderr2, &stdout2, code2));
+                }
+                Err(upstream_err(&stderr, &stdout, code))
+            }
+        }
+    }
+
     pub async fn push(&self, token: Option<String>) -> Result<String> {
         let askpass = match &token {
             Some(t) => Some(AskPass::new(t)?),
             None => None,
         };
         let envs = askpass.as_ref().map(AskPass::envs).unwrap_or_default();
-        let combine = |stdout: &str, stderr: &str| {
-            let mut c = strip_noise(stdout);
-            let err = strip_noise(stderr);
-            if !err.is_empty() {
-                if !c.is_empty() {
-                    c.push('\n');
-                }
-                c.push_str(&err);
-            }
-            c
-        };
 
         let (ok, stdout, stderr, code) = self.run_raw(&["push"], &envs).await?;
         if ok {
-            return Ok(combine(&stdout, &stderr));
+            return Ok(combine_push_output(&stdout, &stderr));
         }
         if stderr.contains("has no upstream branch") || stderr.contains("--set-upstream") {
             let branch = self.current_branch().await?;
@@ -757,7 +817,7 @@ impl LocalGit {
                 .run_raw(&["push", "--set-upstream", "origin", &branch], &envs)
                 .await?;
             if ok2 {
-                return Ok(combine(&stdout2, &stderr2));
+                return Ok(combine_push_output(&stdout2, &stderr2));
             }
             return Err(upstream_err(&stderr2, &stdout2, code2));
         }
@@ -1428,6 +1488,20 @@ fn strip_noise(s: &str) -> String {
         .join("\n")
         .trim_end()
         .to_string()
+}
+
+/// Combine a push's stdout+stderr into one denoised block (git writes its
+/// human summary to stderr). Shared by `push` and `push_branch`.
+fn combine_push_output(stdout: &str, stderr: &str) -> String {
+    let mut c = strip_noise(stdout);
+    let err = strip_noise(stderr);
+    if !err.is_empty() {
+        if !c.is_empty() {
+            c.push('\n');
+        }
+        c.push_str(&err);
+    }
+    c
 }
 
 /// True when `git push origin --delete <ref>` failed only because the ref is
@@ -2245,5 +2319,88 @@ mod tests {
             std::fs::canonicalize(&dir).unwrap()
         );
         assert!(git.worktree_for_branch("nope").await.is_none());
+    }
+
+    /// Regression: discarding a STAGED RENAME must restore the file at its
+    /// original path — restoring only the new name removed the file entirely
+    /// (absent at HEAD) and left the old name staged-deleted.
+    #[tokio::test]
+    async fn discard_staged_rename_restores_original_file() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+
+        git.discard(&["d.txt".to_string()]).await.unwrap();
+
+        let original = "carrot content that is long enough to track renames\n";
+        assert_eq!(
+            std::fs::read_to_string(dir.join("c.txt")).unwrap(),
+            original,
+            "file restored at its ORIGINAL path with original content"
+        );
+        assert!(!dir.join("d.txt").exists(), "new name gone after discard");
+        let st = git.status().await.unwrap();
+        assert!(
+            !st.changes.iter().any(|c| c.path == "c.txt" || c.path == "d.txt"),
+            "rename fully undone — no residual staged entries: {:?}",
+            st.changes
+        );
+    }
+
+    /// Amend with an EMPTY message folds staged changes into HEAD and keeps
+    /// the previous commit message (`--amend --no-edit`).
+    #[tokio::test]
+    async fn amend_empty_message_keeps_previous_message() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+
+        // Fold the staged rename + add into "second commit".
+        let before = git.log(1, 0, false).await.unwrap()[0].clone();
+        let sha = git.commit("", true).await.unwrap();
+        assert_ne!(sha, before.sha, "amend rewrote HEAD");
+        let after = git.log(1, 0, false).await.unwrap()[0].clone();
+        assert_eq!(after.subject, "second commit", "message preserved");
+        // Empty message WITHOUT amend still rejects.
+        assert!(git.commit("", false).await.is_err());
+    }
+
+    /// A merge commit's diff must show the changes it brought in (first-parent
+    /// diff); the combined default rendered an empty/garbled diff.
+    #[tokio::test]
+    async fn merge_commit_diff_shows_first_parent_changes() {
+        let (_tmp, dir) = fixture();
+        // Clean the dirty fixture state so branching is simple.
+        sh_git(&dir, &["checkout", "--", "."]);
+        sh_git(&dir, &["stash", "--include-untracked"]);
+        sh_git(&dir, &["checkout", "-b", "feature"]);
+        write(&dir, "merged.txt", "from the feature branch\n");
+        sh_git(&dir, &["add", "merged.txt"]);
+        sh_git(&dir, &["commit", "-m", "feature work"]);
+        sh_git(&dir, &["checkout", "main"]);
+        sh_git(&dir, &["merge", "--no-ff", "--no-edit", "feature"]);
+
+        let git = LocalGit::new(&dir);
+        let head = git.log(1, 0, false).await.unwrap()[0].clone();
+        assert_eq!(head.parents.len(), 2, "fixture produced a merge commit");
+        let diff = git.diff(DiffTarget::Commit(head.sha.clone()), None).await.unwrap();
+        assert!(
+            diff.files.iter().any(|f| f.path == "merged.txt"),
+            "merge diff lists the merged file: {:?}",
+            diff.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+    }
+
+    /// Untracked files with non-ASCII names must appear in the Working diff —
+    /// quotePath escaping made `--no-index` miss them silently.
+    #[tokio::test]
+    async fn untracked_non_ascii_filename_appears_in_working_diff() {
+        let (_tmp, dir) = fixture();
+        write(&dir, "café.txt", "accented\n");
+        let git = LocalGit::new(&dir);
+        let diff = git.diff(DiffTarget::Working, None).await.unwrap();
+        assert!(
+            diff.files.iter().any(|f| f.path.contains("café")),
+            "non-ASCII untracked file present: {:?}",
+            diff.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
     }
 }

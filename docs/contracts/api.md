@@ -58,7 +58,7 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 41 | POST /api/v1/repos/{id}/stage | ws editor | StagePathsReq | RepoStatusResp |
 | 42 | POST /api/v1/repos/{id}/unstage | ws editor | StagePathsReq | RepoStatusResp |
 | 43 | POST /api/v1/repos/{id}/commit | ws editor | CommitReq | `{"sha":"..."}` |
-| 44 | POST /api/v1/repos/{id}/push | ws editor | — | RepoStatusResp |
+| 44 | POST /api/v1/repos/{id}/push | ws editor | `{branch?}` (optional; pushes THAT branch explicitly — Create-PR passes its source branch; absent = current branch) | RepoStatusResp |
 | 45 | POST /api/v1/repos/{id}/pull | ws editor | — | RepoStatusResp |
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | CheckoutReq | RepoStatusResp |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
