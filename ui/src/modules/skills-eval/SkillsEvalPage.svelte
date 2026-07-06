@@ -131,6 +131,44 @@
     if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
     return `${Math.floor(s / 86400)}d ago`;
   }
+
+  // Resizable run list: drag the divider between the list and the report to
+  // resize it; the chosen width survives reloads. Mirrors the Database page's
+  // sidebar resizer (double-click resets).
+  const SIDE_W_DEFAULT = 280;
+  let sideW = $state(loadSideW());
+  function loadSideW(): number {
+    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
+    const v = Number(localStorage.getItem('skillsEval.sideW'));
+    return Number.isFinite(v) && v >= 220 ? Math.min(480, v) : SIDE_W_DEFAULT;
+  }
+  function persistSideW(): void {
+    try {
+      localStorage.setItem('skillsEval.sideW', String(Math.round(sideW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startSideResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sideW;
+    const onMove = (ev: PointerEvent): void => {
+      // The list is pinned to the LEFT edge, so dragging RIGHT widens it.
+      sideW = Math.max(220, Math.min(480, startW + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      persistSideW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetSideW(): void {
+    sideW = SIDE_W_DEFAULT;
+    persistSideW();
+  }
 </script>
 
 <div class="se-wrap">
@@ -152,7 +190,7 @@
       <MatrixView onopenrun={openRunById} />
     {:else}
 <div class="se-page">
-  <aside class="se-side">
+  <aside class="se-side" style="width:{sideW}px">
     <div class="se-side-head">
       <span class="se-side-title">Evaluations</span>
       <button
@@ -210,6 +248,17 @@
       {/if}
     </div>
   </aside>
+
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="side-resizer"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Drag to resize the evaluations list (double-click to reset)"
+    title="Drag to resize · double-click to reset"
+    ondblclick={resetSideW}
+    onpointerdown={startSideResize}
+  ></div>
 
   <main class="se-main">
     {#if !ws.currentId}
@@ -293,12 +342,30 @@
     min-height: 0;
   }
   .se-side {
+    /* Default width; an inline `width:{sideW}px` (drag-resizable, persisted)
+       takes over at runtime. */
     width: 280px;
     flex-shrink: 0;
     border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+  /* Draggable divider between the run list and the report. Sits flush against
+     the list's inline-end border; a hit-area wider than its visible line makes
+     it easy to grab. */
+  .side-resizer {
+    flex-shrink: 0;
+    width: 5px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    z-index: 2;
+    touch-action: none;
+  }
+  .side-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .se-side-head {
     display: flex;

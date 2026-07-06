@@ -16,6 +16,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
 
   interface Props {
     repoId: string;
@@ -354,6 +355,25 @@
   });
   let secFilesOpen = $state(true);
 
+  // Drag-to-resize the file-list pane (desktop; persisted via the ui store,
+  // shared with HistoryView so the git side panes feel like one control).
+  function startSideResize(e: MouseEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = ui.gitSideWidth;
+    const onMove = (ev: MouseEvent) => ui.setGitSideWidth(startW + (ev.clientX - startX));
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
   function selectFileMobile(c: FileChange, e: MouseEvent): void {
     selectFile(c, e);
     if (isMobile && !(e.metaKey || e.ctrlKey || e.shiftKey)) secFilesOpen = false;
@@ -470,7 +490,11 @@
       <span class="mob-sec-count">{status.changes.length}</span>
     </button>
   {/if}
-  <div class="changes-side" class:mob-files-collapsed={isMobile && !secFilesOpen}>
+  <div
+    class="changes-side"
+    class:mob-files-collapsed={isMobile && !secFilesOpen}
+    style:width={isMobile ? null : `${ui.gitSideWidth}px`}
+  >
     <div class="cs-head">
       <span class="dim">{status.changes.length} changed · {stagedCount} staged</span>
       <span class="grow"></span>
@@ -555,6 +579,16 @@
     </div>
   </div>
 
+  {#if !isMobile}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="cs-resizer"
+      onmousedown={startSideResize}
+      ondblclick={() => ui.setGitSideWidth(300)}
+      title="Drag to resize · double-click to reset"
+    ></div>
+  {/if}
+
   {#if isMobile}
     <button
       class="mob-sec-head mob-diff-head"
@@ -585,11 +619,19 @@
     min-height: 0;
   }
   .changes-side {
-    width: 300px;
+    width: 300px; /* desktop width comes from the inline ui.gitSideWidth */
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
     border-inline-end: 1px solid var(--border);
+  }
+  .cs-resizer {
+    flex: 0 0 6px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+  }
+  .cs-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .cs-head {
     display: flex;

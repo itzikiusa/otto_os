@@ -30,6 +30,16 @@ export const DB_PANE_ID = '__db_explorer__';
 
 export type SplitAxis = 'col' | 'row';
 
+/** Restore a persisted split-gutter fraction (0.2–0.8), else the 50/50 default. */
+function readFrac(key: string): number {
+  try {
+    const v = Number(localStorage.getItem(winKey(key)));
+    return Number.isFinite(v) && v >= 0.2 && v <= 0.8 ? v : 0.5;
+  } catch {
+    return 0.5;
+  }
+}
+
 class WorkspaceStore {
   workspaces: WorkspaceWithRole[] = $state([]);
   currentId: Id | null = $state(null);
@@ -59,8 +69,24 @@ class WorkspaceStore {
   panes: Id[] = $state([]);
   focusedPane = $state(0);
   splitAxis: SplitAxis = $state('col');
-  colFrac = $state(0.5);
-  rowFrac = $state(0.5);
+  // Split gutter fractions survive reloads (per window, like the other layout
+  // state); writes go through setSplitFrac so the drag persists what it sets.
+  colFrac = $state(readFrac('otto_split_col_frac'));
+  rowFrac = $state(readFrac('otto_split_row_frac'));
+
+  setSplitFrac(axis: SplitAxis, frac: number): void {
+    const f = Math.min(0.8, Math.max(0.2, frac));
+    if (axis === 'col') this.colFrac = f;
+    else this.rowFrac = f;
+    try {
+      localStorage.setItem(
+        winKey(axis === 'col' ? 'otto_split_col_frac' : 'otto_split_row_frac'),
+        String(f),
+      );
+    } catch {
+      /* private mode */
+    }
+  }
 
   /** global session-status map (fed by loads + events WS) */
   statusMap: Record<Id, SessionStatus> = $state({});

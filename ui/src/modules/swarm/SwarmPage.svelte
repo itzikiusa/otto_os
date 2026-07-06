@@ -51,8 +51,23 @@
   let recruitProposalRunId = $state<string | null>(null);
 
   // --- Resizable session panel (drag the divider) --------------------------
-  let viewPct = $state(55); // width % of the board/view; rest goes to the session
+  // width % of the board/view; rest goes to the session. Persisted so the
+  // chosen split survives reloads (clamped on read in case the stored value
+  // predates the current bounds).
+  let viewPct = $state(loadViewPct());
   let bodyEl = $state<HTMLDivElement | null>(null);
+  function loadViewPct(): number {
+    if (typeof localStorage === 'undefined') return 55;
+    const v = Number(localStorage.getItem('swarm.viewPct'));
+    return Number.isFinite(v) && v >= 25 ? Math.min(75, v) : 55;
+  }
+  function persistViewPct(): void {
+    try {
+      localStorage.setItem('swarm.viewPct', String(Math.round(viewPct)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
   function startResize(e: MouseEvent) {
     e.preventDefault();
     const el = bodyEl;
@@ -63,6 +78,7 @@
       viewPct = Math.min(80, Math.max(20, pct));
     };
     const onUp = () => {
+      persistViewPct();
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       document.body.style.userSelect = '';
@@ -70,6 +86,45 @@
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     document.body.style.userSelect = 'none';
+  }
+
+  // --- Resizable swarms rail (drag the divider) -----------------------------
+  // Same idea as the Database page's sidebar resizer: drag to taste, width
+  // persists, double-click resets. On a phone the rail is a full-width
+  // accordion band, so the width binding is skipped and the divider hidden.
+  const RAIL_W_DEFAULT = 220;
+  let railW = $state(loadRailW());
+  function loadRailW(): number {
+    if (typeof localStorage === 'undefined') return RAIL_W_DEFAULT;
+    const v = Number(localStorage.getItem('swarm.railW'));
+    return Number.isFinite(v) && v >= 180 ? Math.min(400, v) : RAIL_W_DEFAULT;
+  }
+  function persistRailW(): void {
+    try {
+      localStorage.setItem('swarm.railW', String(Math.round(railW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startRailResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = railW;
+    const onMove = (ev: PointerEvent): void => {
+      // The rail is pinned to the LEFT edge, so dragging RIGHT widens it.
+      railW = Math.max(180, Math.min(400, startW + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      persistRailW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetRailW(): void {
+    railW = RAIL_W_DEFAULT;
+    persistRailW();
   }
   let editAgent = $state<SwarmAgent | null>(null);
   let editorOpen = $state(false);
@@ -273,7 +328,7 @@
 <div class="swarm-page" class:phone={viewport.isPhone}>
   <!-- Swarms rail — a plain sidebar on desktop/tablet; a collapsible accordion
        section on a phone (tap the header to toggle the list). -->
-  <aside class="rail" class:collapsed={viewport.isPhone && !railOpen}>
+  <aside class="rail" class:collapsed={viewport.isPhone && !railOpen} style={viewport.isPhone ? '' : `width:${railW}px`}>
     <div class="rail-head">
       <button
         class="rail-toggle"
@@ -303,6 +358,19 @@
       {/if}
     </div>
   </aside>
+
+  {#if !viewport.isPhone}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="side-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Drag to resize the swarms rail (double-click to reset)"
+      title="Drag to resize · double-click to reset"
+      ondblclick={resetRailW}
+      onpointerdown={startRailResize}
+    ></div>
+  {/if}
 
   <!-- Main -->
   <section class="main">
@@ -495,12 +563,30 @@
     min-height: 0;
   }
   .rail {
+    /* Default width; on tablet/desktop an inline `width:{railW}px`
+       (drag-resizable, persisted) takes over. */
     width: 220px;
     flex: none;
     border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+  /* Draggable divider between the swarms rail and the main area. Sits flush
+     against the rail's inline-end border; a hit-area wider than its visible
+     line makes it easy to grab. */
+  .side-resizer {
+    flex: none;
+    width: 5px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    z-index: 2;
+    touch-action: none;
+  }
+  .side-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .rail-head {
     display: flex;

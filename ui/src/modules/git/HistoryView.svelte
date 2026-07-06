@@ -6,6 +6,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
 
   interface Props {
     repoId: string;
@@ -79,6 +80,25 @@
     await select(sha);
     if (isMobile) secListOpen = false;
   }
+
+  // Drag-to-resize the commit-list pane (desktop; ui.gitSideWidth is shared
+  // with ChangesView so the git side panes track together).
+  function startSideResize(e: MouseEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = ui.gitSideWidth;
+    const onMove = (ev: MouseEvent) => ui.setGitSideWidth(startW + (ev.clientX - startX));
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
 </script>
 
 <div class="history" class:mobile={isMobile}>
@@ -95,7 +115,11 @@
       {#if !loading}<span class="mob-sec-count">{commits.length}</span>{/if}
     </button>
   {/if}
-  <div class="hist-side" class:mob-collapsed={isMobile && !secListOpen}>
+  <div
+    class="hist-side"
+    class:mob-collapsed={isMobile && !secListOpen}
+    style:width={isMobile ? null : `${ui.gitSideWidth}px`}
+  >
     {#if loading}
       <div style="padding: 10px"><Skeleton rows={8} height={34} /></div>
     {:else}
@@ -117,6 +141,16 @@
       {/if}
     {/if}
   </div>
+
+  {#if !isMobile}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="hist-resizer"
+      onmousedown={startSideResize}
+      ondblclick={() => ui.setGitSideWidth(300)}
+      title="Drag to resize · double-click to reset"
+    ></div>
+  {/if}
 
   {#if isMobile && selected !== null}
     <button
@@ -148,13 +182,21 @@
     min-height: 0;
   }
   .hist-side {
-    width: 320px;
+    width: 320px; /* desktop width comes from the inline ui.gitSideWidth */
     flex-shrink: 0;
     overflow-y: auto;
     border-inline-end: 1px solid var(--border);
     padding: 6px;
     display: flex;
     flex-direction: column;
+  }
+  .hist-resizer {
+    flex: 0 0 6px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+  }
+  .hist-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .commit {
     text-align: start;

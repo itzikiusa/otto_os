@@ -195,9 +195,47 @@
     { value: 'stale', label: 'stale' },
     { value: 'contradicted', label: 'contradicted' },
   ];
+
+  // ── Index pane width (drag-resizable, persisted) ──────────────────────────
+  // Mirrors the DatabasePage sidebar idiom: the chosen width survives reloads.
+  // Applied via a CSS var so the phone layout (single column) still wins.
+  const SIDE_W_DEFAULT = 300;
+  let sideW = $state(loadSideW());
+  function loadSideW(): number {
+    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
+    const v = Number(localStorage.getItem('vault.sideW'));
+    return Number.isFinite(v) && v >= 220 ? v : SIDE_W_DEFAULT;
+  }
+  function persistSideW(): void {
+    try {
+      localStorage.setItem('vault.sideW', String(Math.round(sideW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startSideResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sideW;
+    const onMove = (ev: PointerEvent): void => {
+      // The pane is pinned to the LEFT edge, so dragging RIGHT widens it.
+      sideW = Math.max(220, Math.min(560, startW + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      persistSideW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetSideW(): void {
+    sideW = SIDE_W_DEFAULT;
+    persistSideW();
+  }
 </script>
 
-<div class="vault" class:has-selection={!!vault.selected}>
+<div class="vault" class:has-selection={!!vault.selected} style={`--vault-side-w:${sideW}px`}>
   <aside class="vault-side">
     <div class="vault-search">
       <input
@@ -430,6 +468,17 @@
         <li class="empty">No memories yet — run an analysis or ingest a story.</li>
       {/each}
     </ul>
+
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="side-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Drag to resize the index pane (double-click to reset)"
+      title="Drag to resize · double-click to reset"
+      ondblclick={resetSideW}
+      onpointerdown={startSideResize}
+    ></div>
   </aside>
 
   <main class="vault-main">
@@ -559,7 +608,9 @@
 <style>
   .vault {
     display: grid;
-    grid-template-columns: 300px 1fr;
+    /* Default width; on tablet/desktop an inline `--vault-side-w` (drag-resizable,
+       persisted) overrides it. The phone media query below falls back to 1fr. */
+    grid-template-columns: var(--vault-side-w, 300px) 1fr;
     height: 100%;
     overflow: hidden;
   }
@@ -568,6 +619,23 @@
     flex-direction: column;
     border-inline-end: 1px solid var(--border, #2a2a2a);
     min-height: 0;
+    position: relative; /* anchors the drag handle on the inline-end edge */
+  }
+  /* Draggable divider between the index pane and the reader. Straddles the
+     pane's inline-end border; a hit-area wider than the border line makes it
+     easy to grab. */
+  .side-resizer {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: -3px;
+    width: 6px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 2;
+    touch-action: none;
+  }
+  .side-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .vault-search {
     padding: 8px;
@@ -1004,6 +1072,10 @@
       border-inline-end: none;
       min-height: 0;
       overflow: hidden;
+    }
+    /* Single-column layout — nothing to drag. */
+    .side-resizer {
+      display: none;
     }
     .vault-main {
       grid-row: 1;

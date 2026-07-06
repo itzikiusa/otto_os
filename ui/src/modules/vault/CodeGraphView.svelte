@@ -508,9 +508,69 @@
 
   // hover info for the open tooltip's reason chips (knowledge hits only)
   const hoverHit = $derived(hoverNode ? vault.hitsById.get(hoverNode.id) : undefined);
+
+  // ── Side-pane widths (drag-resizable, persisted) ────────────────────────
+  // Mirrors the DatabasePage sidebar idiom, applied via CSS vars on the grid
+  // so the ≤1024px media query (fixed 200px panels, no tree) still wins.
+  const TREE_W_DEFAULT = 230;
+  const PANELS_W_DEFAULT = 230;
+  let treeW = $state(loadPaneW('vault.cgTreeW', TREE_W_DEFAULT));
+  let panelsW = $state(loadPaneW('vault.cgPanelsW', PANELS_W_DEFAULT));
+  function loadPaneW(key: string, dflt: number): number {
+    if (typeof localStorage === 'undefined') return dflt;
+    const v = Number(localStorage.getItem(key));
+    return Number.isFinite(v) && v >= 180 ? v : dflt;
+  }
+  function persistPaneW(key: string, w: number): void {
+    try {
+      localStorage.setItem(key, String(Math.round(w)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startTreeResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = treeW;
+    const onMove = (ev: PointerEvent): void => {
+      // The tree is pinned to the LEFT edge, so dragging RIGHT widens it.
+      treeW = Math.max(180, Math.min(420, startW + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      persistPaneW('vault.cgTreeW', treeW);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function startPanelsResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = panelsW;
+    const onMove = (ev: PointerEvent): void => {
+      // The panels are anchored RIGHT, so dragging LEFT widens them.
+      panelsW = Math.max(180, Math.min(420, startW + (startX - ev.clientX)));
+    };
+    const onUp = (): void => {
+      persistPaneW('vault.cgPanelsW', panelsW);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetTreeW(): void {
+    treeW = TREE_W_DEFAULT;
+    persistPaneW('vault.cgTreeW', treeW);
+  }
+  function resetPanelsW(): void {
+    panelsW = PANELS_W_DEFAULT;
+    persistPaneW('vault.cgPanelsW', panelsW);
+  }
 </script>
 
-<div class="cg" class:no-tree={!showTree}>
+<div class="cg" class:no-tree={!showTree} style={`--cg-tree-w:${treeW}px; --cg-panels-w:${panelsW}px`}>
   <!-- ── Left: content tree ─────────────────────────────────────────── -->
   {#if showTree}
     <aside class="cg-tree">
@@ -839,18 +899,66 @@
       {/if}
     </section>
   </aside>
+
+  <!-- Drag handles: absolutely positioned over the grid column seams (the
+       panes themselves scroll, so the handles live on the grid container). -->
+  {#if showTree}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="cg-resizer tree"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Drag to resize the content tree (double-click to reset)"
+      title="Drag to resize · double-click to reset"
+      ondblclick={resetTreeW}
+      onpointerdown={startTreeResize}
+    ></div>
+  {/if}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="cg-resizer panels"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Drag to resize the control panels (double-click to reset)"
+    title="Drag to resize · double-click to reset"
+    ondblclick={resetPanelsW}
+    onpointerdown={startPanelsResize}
+  ></div>
 </div>
 
 <style>
   .cg {
     display: grid;
-    grid-template-columns: 230px 1fr 230px;
+    /* Defaults; inline `--cg-tree-w` / `--cg-panels-w` (drag-resizable,
+       persisted) override them. The ≤1024px media query below ignores both. */
+    grid-template-columns: var(--cg-tree-w, 230px) 1fr var(--cg-panels-w, 230px);
     height: 100%;
     min-height: 0;
     overflow: hidden;
+    position: relative; /* anchors the .cg-resizer drag handles */
   }
   .cg.no-tree {
-    grid-template-columns: 1fr 230px;
+    grid-template-columns: 1fr var(--cg-panels-w, 230px);
+  }
+  /* Draggable dividers straddling the column seams; a hit-area wider than the
+     border line makes them easy to grab. */
+  .cg-resizer {
+    position: absolute;
+    inset-block: 0;
+    width: 6px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 2;
+    touch-action: none;
+  }
+  .cg-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .cg-resizer.tree {
+    inset-inline-start: calc(var(--cg-tree-w, 230px) - 3px);
+  }
+  .cg-resizer.panels {
+    inset-inline-end: calc(var(--cg-panels-w, 230px) - 3px);
   }
 
   /* ── tree ─────────────────────────────────────────────── */
@@ -1240,6 +1348,8 @@
   @media (max-width: 1024px) {
     .cg { grid-template-columns: 1fr 200px; }
     .cg-tree { display: none; }
+    /* Columns are fixed here (no tree, 200px panels) — nothing to drag. */
+    .cg-resizer { display: none; }
   }
   @media (max-width: 640px) {
     .cg, .cg.no-tree { grid-template-columns: 1fr; }

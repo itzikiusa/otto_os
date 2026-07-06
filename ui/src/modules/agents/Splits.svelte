@@ -28,9 +28,9 @@
     const rect = host.getBoundingClientRect();
     const move = (ev: PointerEvent) => {
       if (axis === 'col') {
-        ws.colFrac = Math.min(0.8, Math.max(0.2, (ev.clientX - rect.left) / rect.width));
+        ws.setSplitFrac('col', (ev.clientX - rect.left) / rect.width);
       } else {
-        ws.rowFrac = Math.min(0.8, Math.max(0.2, (ev.clientY - rect.top) / rect.height));
+        ws.setSplitFrac('row', (ev.clientY - rect.top) / rect.height);
       }
     };
     const up = () => {

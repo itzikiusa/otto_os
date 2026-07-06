@@ -106,6 +106,44 @@
     const id = ws.currentId;
     if (id) void reload(id);
   }
+
+  // ── Detail pane width (drag-resizable, persisted) ──────────────────────────
+  // Mirrors the DatabasePage sidebar idiom: the chosen width survives reloads.
+  // Applied via a CSS var so the ≤900px fullscreen overlay still wins.
+  const DETAIL_W_DEFAULT = 380;
+  let detailW = $state(loadDetailW());
+  function loadDetailW(): number {
+    if (typeof localStorage === 'undefined') return DETAIL_W_DEFAULT;
+    const v = Number(localStorage.getItem('mc.detailW'));
+    return Number.isFinite(v) && v >= 300 ? v : DETAIL_W_DEFAULT;
+  }
+  function persistDetailW(): void {
+    try {
+      localStorage.setItem('mc.detailW', String(Math.round(detailW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startDetailResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = detailW;
+    const onMove = (ev: PointerEvent): void => {
+      // The pane is anchored RIGHT, so dragging LEFT widens it.
+      detailW = Math.max(300, Math.min(720, startW + (startX - ev.clientX)));
+    };
+    const onUp = (): void => {
+      persistDetailW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetDetailW(): void {
+    detailW = DETAIL_W_DEFAULT;
+    persistDetailW();
+  }
 </script>
 
 <div class="page mission-control" class:detail-open={selectedId}>
@@ -201,7 +239,17 @@
     </div>
 
     {#if selectedId}
-      <div class="mc-detail">
+      <div class="mc-detail" style={`--mc-detail-w:${detailW}px`}>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="detail-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Drag to resize the detail pane (double-click to reset)"
+          title="Drag to resize · double-click to reset"
+          ondblclick={resetDetailW}
+          onpointerdown={startDetailResize}
+        ></div>
         <WorkItemDetail
           wsId={ws.currentId ?? ''}
           id={selectedId}
@@ -336,12 +384,30 @@
     min-width: 0;
   }
   .mc-detail {
-    flex: 0 0 380px;
-    width: 380px;
+    /* Default width; an inline `--mc-detail-w` (drag-resizable, persisted)
+       overrides it. The ≤900px overlay below goes fullscreen instead. */
+    flex: 0 0 var(--mc-detail-w, 380px);
+    width: var(--mc-detail-w, 380px);
     border-radius: var(--radius-m, 8px);
     overflow: hidden;
     border: 1px solid var(--border);
     align-self: stretch;
+    position: relative; /* anchors the drag handle on the inline-start edge */
+  }
+  /* Draggable divider on the detail pane's inline-start edge (the pane clips
+     its overflow, so the handle sits just inside the border). */
+  .detail-resizer {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: 6px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 2;
+    touch-action: none;
+  }
+  .detail-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .empty {
     text-align: center;
@@ -383,6 +449,10 @@
       flex: none;
       border: none;
       border-radius: 0;
+    }
+    /* Fullscreen overlay — nothing to drag. */
+    .detail-resizer {
+      display: none;
     }
   }
   @media (max-width: 560px) {

@@ -33,6 +33,45 @@
   let dryRunLoading = $state(false);
   let dryRunResult = $state<DryRunResp | null>(null);
 
+  // Resizable group list: drag the divider between the list and the detail;
+  // the chosen width survives reloads. Mirrors the Database page's sidebar
+  // resizer. (On phones the list stacks full-width — the media query wins and
+  // the divider is hidden.)
+  const LIST_W_DEFAULT = 300;
+  let listW = $state(loadListW());
+  function loadListW(): number {
+    if (typeof localStorage === 'undefined') return LIST_W_DEFAULT;
+    const v = Number(localStorage.getItem('brokers.groupsListW'));
+    return Number.isFinite(v) && v >= 220 ? Math.min(520, v) : LIST_W_DEFAULT;
+  }
+  function persistListW(): void {
+    try {
+      localStorage.setItem('brokers.groupsListW', String(Math.round(listW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startListResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = listW;
+    const onMove = (ev: PointerEvent): void => {
+      // The list is pinned to the LEFT edge, so dragging RIGHT widens it.
+      listW = Math.max(220, Math.min(520, startW + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      persistListW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetListW(): void {
+    listW = LIST_W_DEFAULT;
+    persistListW();
+  }
+
   $effect(() => {
     void cluster.id;
     selected = null;
@@ -171,7 +210,7 @@
 </script>
 
 <div class="groups">
-  <div class="list">
+  <div class="list" style="--groups-list-w:{listW}px">
     {#if loading}
       <p class="muted pad">Loading…</p>
     {:else if accessDenied}
@@ -198,6 +237,17 @@
       {/each}
     {/if}
   </div>
+
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="side-resizer"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Drag to resize the group list (double-click to reset)"
+    title="Drag to resize · double-click to reset"
+    ondblclick={resetListW}
+    onpointerdown={startListResize}
+  ></div>
 
   <div class="detail">
     {#if detailLoading}
@@ -365,9 +415,28 @@
     min-height: 0;
   }
   .list {
-    width: 300px;
+    /* Default width; drag-resizable via the .side-resizer (persisted). The
+       phone media query below overrides back to a full-width band. */
+    width: var(--groups-list-w, 300px);
     border-inline-end: 1px solid var(--border);
     overflow: auto;
+    flex: none;
+  }
+  /* Draggable divider between the group list and the detail. Sits flush
+     against the list's inline-end border; a hit-area wider than its visible
+     line makes it easy to grab. */
+  .side-resizer {
+    flex: none;
+    width: 5px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+    z-index: 2;
+    touch-action: none;
+  }
+  .side-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .grow-row {
     width: 100%;
@@ -626,6 +695,10 @@
       max-height: 35vh;
       border-inline-end: none;
       border-bottom: 1px solid var(--border);
+    }
+    /* Stacked layout — nothing to drag sideways. */
+    .side-resizer {
+      display: none;
     }
     .detail {
       min-height: 200px;

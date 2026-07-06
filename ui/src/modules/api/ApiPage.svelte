@@ -10,9 +10,58 @@
   import AutomationsView from './AutomationsView.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
 
   type SideTab = 'collections' | 'automations' | 'history' | 'env';
   let sideTab: SideTab = $state('collections');
+
+  // Phone breakpoint (matches the 640px media query below): inline pane sizes
+  // are dropped there so the stacked full-width layout wins.
+  let isPhone = $state(false);
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 640px)');
+    const sync = () => (isPhone = mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
+
+  // Drag-to-resize: sidebar width + builder-pane height (both persisted).
+  function startSideResize(e: MouseEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = ui.apiSideWidth;
+    const onMove = (ev: MouseEvent) => ui.setApiSideWidth(startW + (ev.clientX - startX));
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+  let builderEl: HTMLDivElement | null = $state(null);
+  function startBuilderResize(e: MouseEvent): void {
+    e.preventDefault();
+    const startY = e.clientY;
+    // Until the first drag the height is CSS-driven (max-height:60%) — seed
+    // from the rendered height so the divider doesn't jump on grab.
+    const startH = ui.apiBuilderHeight || builderEl?.offsetHeight || 300;
+    const onMove = (ev: MouseEvent) => ui.setApiBuilderHeight(startH + (ev.clientY - startY));
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+  }
 
   // Load everything when the workspace changes (collections/requests/envs/history
   // plus automations, which the runner chains together).
@@ -32,7 +81,7 @@
 </script>
 
 <div class="api-page">
-  <aside class="api-side">
+  <aside class="api-side" style:width={isPhone ? null : `${ui.apiSideWidth}px`}>
     <div class="side-tabs" role="tablist">
       {#each sideTabs as t (t.id)}
         <button
@@ -61,6 +110,16 @@
     </div>
   </aside>
 
+  {#if !isPhone}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="api-side-resizer"
+      onmousedown={startSideResize}
+      ondblclick={() => ui.setApiSideWidth(280)}
+      title="Drag to resize · double-click to reset"
+    ></div>
+  {/if}
+
   <div class="api-main">
     <div class="req-tabs">
       <!-- tablist must contain only role="tab" children (ARIA
@@ -78,9 +137,23 @@
       </div>
       <button class="req-tab-new" title="New request (⌘T)" aria-label="New request tab" onclick={() => apiClient.newDraft()}>+</button>
     </div>
-    <div class="builder-pane">
+    <div
+      class="builder-pane"
+      bind:this={builderEl}
+      style:height={!isPhone && ui.apiBuilderHeight > 0 ? `${ui.apiBuilderHeight}px` : null}
+      style:max-height={!isPhone && ui.apiBuilderHeight > 0 ? 'none' : null}
+    >
       <RequestBuilder />
     </div>
+    {#if !isPhone}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="api-row-resizer"
+        onmousedown={startBuilderResize}
+        ondblclick={() => ui.resetApiBuilderHeight()}
+        title="Drag to resize · double-click to reset"
+      ></div>
+    {/if}
     <div class="resp-pane">
       <ResponseViewer />
     </div>
@@ -240,6 +313,22 @@
     padding: 10px 16px 16px;
     display: flex;
     flex-direction: column;
+  }
+  .api-side-resizer {
+    flex: 0 0 6px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+  }
+  .api-side-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .api-row-resizer {
+    flex: 0 0 6px;
+    margin-top: -3px;
+    cursor: row-resize;
+  }
+  .api-row-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
   }
 
   @media (max-width: 640px) {

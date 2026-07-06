@@ -51,6 +51,10 @@ const LS = {
   sessionIsolation: 'otto_session_isolation',
   sidebarOrder: 'otto_sidebar_order',
   sidebarHidden: 'otto_sidebar_hidden',
+  gitSideWidth: 'otto_git_side_width',
+  gitGraphListWidth: 'otto_git_graph_list_width',
+  apiSideWidth: 'otto_api_side_width',
+  apiBuilderH: 'otto_api_builder_h',
 };
 
 export const RIGHT_MIN = 260;
@@ -132,6 +136,23 @@ function clampRunDetail(px: number): number {
   const max = Math.max(RUN_DETAIL_MIN, Math.round(vh * 0.85));
   return Math.max(RUN_DETAIL_MIN, Math.min(max, Math.round(px)));
 }
+/** Git Changes/History file-or-commit list pane. */
+function clampGitSide(px: number): number {
+  return Math.max(220, Math.min(600, Math.round(px)));
+}
+/** Git graph list pane when a commit detail is open. */
+function clampGitGraphList(px: number): number {
+  return Math.max(300, Math.min(720, Math.round(px)));
+}
+/** API client Collections/History sidebar. */
+function clampApiSide(px: number): number {
+  return Math.max(220, Math.min(520, Math.round(px)));
+}
+/** API client builder pane height (above the response pane). */
+function clampApiBuilder(px: number): number {
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
+  return Math.max(180, Math.min(Math.round(vh * 0.8), Math.round(px)));
+}
 
 class UiStore {
   railExpanded = $state(lsGet(LS.rail) !== '0');
@@ -150,6 +171,14 @@ class UiStore {
   wfSideWidth = $state(clampWfSide(Number(lsGet(LS.wfSideWidth)) || 270));
   // Workflow run-detail (inspector) resizable max-height cap.
   runDetailHeight = $state(clampRunDetail(Number(lsGet(LS.runDetailH)) || 300));
+  // Git page pane widths (Changes/History list; Graph list in detail mode).
+  gitSideWidth = $state(clampGitSide(Number(lsGet(LS.gitSideWidth)) || 300));
+  gitGraphListWidth = $state(clampGitGraphList(Number(lsGet(LS.gitGraphListWidth)) || 420));
+  // API client sidebar width + builder pane height (0 = unset → CSS default).
+  apiSideWidth = $state(clampApiSide(Number(lsGet(LS.apiSideWidth)) || 280));
+  apiBuilderHeight = $state(
+    Number(lsGet(LS.apiBuilderH)) > 0 ? clampApiBuilder(Number(lsGet(LS.apiBuilderH))) : 0,
+  );
   paletteOpen = $state(false);
   /** Which mode the palette should open in. */
   paletteMode: 'commands' | 'english' = $state('commands');
@@ -364,6 +393,28 @@ class UiStore {
   setRailWidth(px: number): void {
     this.railWidth = clampRail(px);
     lsSet(LS.railWidth, String(this.railWidth));
+  }
+
+  setGitSideWidth(px: number): void {
+    this.gitSideWidth = clampGitSide(px);
+    lsSet(LS.gitSideWidth, String(this.gitSideWidth));
+  }
+  setGitGraphListWidth(px: number): void {
+    this.gitGraphListWidth = clampGitGraphList(px);
+    lsSet(LS.gitGraphListWidth, String(this.gitGraphListWidth));
+  }
+  setApiSideWidth(px: number): void {
+    this.apiSideWidth = clampApiSide(px);
+    lsSet(LS.apiSideWidth, String(this.apiSideWidth));
+  }
+  setApiBuilderHeight(px: number): void {
+    this.apiBuilderHeight = clampApiBuilder(px);
+    lsSet(LS.apiBuilderH, String(this.apiBuilderHeight));
+  }
+  /** Back to the CSS default (max-height: 60%). */
+  resetApiBuilderHeight(): void {
+    this.apiBuilderHeight = 0;
+    lsSet(LS.apiBuilderH, '0');
   }
   toggleDbDock(): void {
     this.dbDockOpen = !this.dbDockOpen;

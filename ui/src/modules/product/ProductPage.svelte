@@ -185,9 +185,47 @@
     if (!ok) return;
     void product.deleteStory(s.id);
   }
+
+  // ── Sidebar width (drag-resizable, persisted) ─────────────────────────────
+  // Mirrors the DatabasePage sidebar idiom: the chosen width survives reloads.
+  // Applied via a CSS var so the phone accordion (full-width bands) still wins.
+  const SIDE_W_DEFAULT = 260;
+  let sideW = $state(loadSideW());
+  function loadSideW(): number {
+    if (typeof localStorage === 'undefined') return SIDE_W_DEFAULT;
+    const v = Number(localStorage.getItem('product.sideW'));
+    return Number.isFinite(v) && v >= 200 ? v : SIDE_W_DEFAULT;
+  }
+  function persistSideW(): void {
+    try {
+      localStorage.setItem('product.sideW', String(Math.round(sideW)));
+    } catch {
+      /* storage unavailable — non-fatal */
+    }
+  }
+  function startSideResize(e: PointerEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sideW;
+    const onMove = (ev: PointerEvent): void => {
+      // The sidebar is pinned to the LEFT edge, so dragging RIGHT widens it.
+      sideW = Math.max(200, Math.min(480, startW + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      persistSideW();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+  function resetSideW(): void {
+    sideW = SIDE_W_DEFAULT;
+    persistSideW();
+  }
 </script>
 
-<div class="product-page" class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'}>
+<div class="product-page" class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
   <!-- ── Mobile accordion header for the list panel (phone only) ───────── -->
   <button
     class="m-acc-head"
@@ -347,6 +385,17 @@
         {/each}
       </div>
     {/if}
+
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="side-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Drag to resize the sidebar (double-click to reset)"
+      title="Drag to resize · double-click to reset"
+      ondblclick={resetSideW}
+      onpointerdown={startSideResize}
+    ></div>
   </aside>
 
   <!-- ── Mobile accordion header for the content panel (phone only) ────── -->
@@ -477,12 +526,31 @@
 
   /* ── Sidebar ─────────────────────────────────────────────────── */
   .product-side {
-    width: 260px;
+    /* Default width; an inline `--product-side-w` (drag-resizable, persisted)
+       overrides it. The phone accordion below falls back to full width. */
+    width: var(--product-side-w, 260px);
     flex-shrink: 0;
     border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-height: 0;
+    position: relative; /* anchors the drag handle on the inline-end edge */
+  }
+  /* Draggable divider between the sidebar and the main area. Straddles the
+     sidebar's inline-end border; a hit-area wider than the border line makes
+     it easy to grab. */
+  .side-resizer {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: -3px;
+    width: 6px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 2;
+    touch-action: none;
+  }
+  .side-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .side-head {
     display: flex;
@@ -980,6 +1048,10 @@
       overflow: hidden;
       flex: 0 0 0;
       height: 0;
+    }
+    /* Full-width accordion band — nothing to drag. */
+    .side-resizer {
+      display: none;
     }
     .product-main {
       min-height: 0;
