@@ -68,6 +68,10 @@ pub struct PtyHandle {
     /// Instant the handle was created; `last_output_ms` is relative to it.
     epoch: Instant,
     last_output_ms: Arc<AtomicU64>,
+    /// OS pid of the direct child, captured at spawn (None if the OS didn't
+    /// report one). Used by the idle-suspend sweep to check for live descendant
+    /// processes before killing a "quiet" session.
+    child_pid: Option<u32>,
 }
 
 fn lock_unpoisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -176,6 +180,9 @@ impl PtyHandle {
             });
         }
 
+        // Capture the child's OS pid before the waiter thread takes ownership.
+        let child_pid = child.process_id();
+
         // Waiter thread: reap the child and publish the exit code.
         std::thread::spawn(move || {
             let code = match child.wait() {
@@ -195,7 +202,13 @@ impl PtyHandle {
             exit_rx,
             epoch,
             last_output_ms,
+            child_pid,
         })
+    }
+
+    /// OS pid of the direct child process (None when the OS didn't report one).
+    pub fn pid(&self) -> Option<u32> {
+        self.child_pid
     }
 
     /// Write bytes to the child's stdin.

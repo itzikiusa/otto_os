@@ -32,14 +32,13 @@ pub enum Resumability {
 }
 
 /// Encode a session cwd into the claude `~/.claude/projects` directory name:
-/// every `/`, `.` and `_` becomes `-`. (Verified: `/Users/dev/project`
-/// → `-Users-dev-project`; a leading `/` yields the leading `-`.)
+/// every non-alphanumeric character becomes `-` (claude's real convention —
+/// covers spaces, `@`, `+`, `(` … not just `/`, `.`, `_`; mirrors the encoder
+/// in otto-orchestrator's `claude_pty::project_dir`). `/Users/dev/project`
+/// → `-Users-dev-project`; a leading `/` yields the leading `-`.
 pub fn claude_project_dir_name(cwd: &str) -> String {
     cwd.chars()
-        .map(|c| match c {
-            '/' | '.' | '_' => '-',
-            other => other,
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
 
@@ -144,6 +143,11 @@ mod tests {
         assert_eq!(
             claude_project_dir_name("/Users/x/.config/my.app"),
             "-Users-x--config-my-app"
+        );
+        // ALL non-alphanumerics map to '-' (claude's convention) — spaces, @, +.
+        assert_eq!(
+            claude_project_dir_name("/Users/x/my app@v2+beta"),
+            "-Users-x-my-app-v2-beta"
         );
     }
 

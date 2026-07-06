@@ -186,11 +186,22 @@
     if (serverMatches.length === 0) return;
     const clamped = ((idx % serverMatches.length) + serverMatches.length) % serverMatches.length;
     serverMatchIdx = clamped;
-    const lineIdx = serverMatches[clamped].line;
-    // xterm's scrollToLine(n) scrolls to line n in the buffer (0-based from top
-    // of the scrollback). The ring buffer line indices are oldest → newest, which
-    // matches the xterm buffer order when the scrollback is full.
-    term?.scrollToLine(lineIdx);
+    const m = serverMatches[clamped];
+    // Coarse jump first: the ring buffer's `line` is a LOGICAL (unwrapped)
+    // index while xterm's scrollToLine addresses visual/wrapped rows, and after
+    // a reconnect the client holds only the replayed tail of the history — so
+    // the number alone can land on the wrong row.
+    term?.scrollToLine(m.line);
+    // Precise re-anchor: locate the match's actual text via the SearchAddon
+    // from the coarse position (wraps if needed) — this scrolls to and
+    // highlights the real occurrence regardless of wrapping/replay offsets.
+    // When the match predates the client's replayed history the text isn't in
+    // the buffer at all; the coarse jump (top of scrollback) is the best we
+    // can show.
+    const needle = m.text.trim();
+    if (needle && search) {
+      search.findNext(needle, { incremental: false });
+    }
   }
 
   function sendJson(obj: unknown): void {

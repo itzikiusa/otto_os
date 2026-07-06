@@ -412,7 +412,7 @@ async fn serve_terminal<S: SessionsCtx>(
         return;
     }
 
-    let handle: Option<Arc<PtyHandle>> = ctx.manager().live_handle(&session_id);
+    let mut handle: Option<Arc<PtyHandle>> = ctx.manager().live_handle(&session_id);
     let mut out_rx = handle.as_ref().map(|h| h.subscribe());
     let mut exit_rx = handle.as_ref().map(|h| h.on_exit());
     // Forced-disconnect signal: admin terminate / share-link revoke fire this
@@ -467,6 +467,34 @@ async fn serve_terminal<S: SessionsCtx>(
             _ = ping.tick() => {
                 if socket.send(Message::Ping(Bytes::new())).await.is_err() {
                     return;
+                }
+                // Revival: a viewer attached while the session was dead (or
+                // whose PTY died mid-watch) pends on `None` forever, even if
+                // another client later restarts the session — it would get the
+                // status→running event but a blank terminal. On the ping
+                // cadence, pick up a fresh live handle, resubscribe, and replay
+                // a snapshot so the terminal comes alive without a manual
+                // reconnect.
+                if out_rx.is_none() {
+                    if let Some(fresh) = ctx.manager().live_handle(&session_id) {
+                        let is_new = handle
+                            .as_ref()
+                            .map(|old| !Arc::ptr_eq(old, &fresh))
+                            .unwrap_or(true);
+                        if is_new {
+                            out_rx = Some(fresh.subscribe());
+                            exit_rx = Some(fresh.on_exit());
+                            let data = fresh.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES);
+                            let frame = format!(
+                                r#"{{"type":"scrollback","data":"{}"}}"#,
+                                B64.encode(&data)
+                            );
+                            if socket.send(Message::Text(frame.into())).await.is_err() {
+                                return;
+                            }
+                            handle = Some(fresh);
+                        }
+                    }
                 }
             }
             // Forced disconnect: the session was terminated (admin terminate or

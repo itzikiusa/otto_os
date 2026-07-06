@@ -570,6 +570,19 @@ async fn handle_session_transition(
         return;
     }
 
+    // Provider-agnostic "needs you": for AGENT sessions, a Working→Idle
+    // transition is the turn finishing — the agent is now awaiting input. Use
+    // the `:waiting` source_key suffix so the UI raises its sticky needs-you
+    // flag (events.svelte.ts keys off `:waiting` + open_session), exactly like
+    // claude's native Notification hook — this extends the same signal to
+    // codex/agy/custom providers. Shell sessions keep the plain `:idle` key
+    // (every command ending would otherwise light up the wall).
+    let suffix = if suffix == "idle" && s.kind == otto_core::domain::SessionKind::Agent {
+        "waiting"
+    } else {
+        suffix
+    };
+
     // Build an informative body: "«title» (provider)" + the current task, if any.
     // For idle, the in-progress task is the most useful "what it was on" hint.
     let label = format!("{} ({})", s.title, s.provider);

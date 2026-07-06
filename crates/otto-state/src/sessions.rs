@@ -217,6 +217,29 @@ impl SessionsRepo {
         Ok(())
     }
 
+    /// Atomically merge `patch` (a JSON object) into `sessions.meta_json` in a
+    /// single UPDATE — RFC-7396 semantics via SQLite's `json_patch`: null values
+    /// remove keys, everything else upserts. Unlike a read-modify-write through
+    /// `get`+`set_meta`, two concurrent merges (e.g. a resize racing a
+    /// keep-alive toggle) can never overwrite each other with a stale snapshot.
+    /// Non-object / NULL / invalid existing meta is treated as `{}`.
+    pub async fn merge_meta(&self, id: &Id, patch: &serde_json::Value) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET meta_json = json_patch(
+                 CASE WHEN meta_json IS NOT NULL AND json_valid(meta_json)
+                           AND json_type(meta_json) = 'object'
+                      THEN meta_json ELSE '{}' END,
+                 ?)
+             WHERE id = ?",
+        )
+        .bind(patch.to_string())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("merge session meta"))?;
+        Ok(())
+    }
+
     pub async fn set_archived(&self, id: &Id, archived: bool) -> Result<()> {
         sqlx::query("UPDATE sessions SET archived = ? WHERE id = ?")
             .bind(archived as i64)
@@ -447,6 +470,47 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    #[tokio::test]
+    async fn merge_meta_is_atomic_and_preserves_other_keys() {
+        let pool = mem_pool().await;
+        let (user, ws) = seed_user_ws(&pool).await;
+        let repo = SessionsRepo::new(pool.clone());
+        let s = repo
+            .create(NewSession {
+                workspace_id: ws.clone(),
+                kind: SessionKind::Agent,
+                provider: "claude".into(),
+                title: "merge-meta-test".into(),
+                cwd: "/tmp".into(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: user.clone(),
+                meta: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        // Two independent merges (a keep-alive toggle racing a resize persist):
+        // neither may clobber the other's key — the old get→set read-modify-
+        // write lost one of them.
+        repo.merge_meta(&s.id, &serde_json::json!({ "keep_alive": true })).await.unwrap();
+        repo.merge_meta(&s.id, &serde_json::json!({ "pty_cols": 120, "pty_rows": 40 }))
+            .await
+            .unwrap();
+        let got = repo.get(&s.id).await.unwrap();
+        assert_eq!(got.meta.get("keep_alive"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(got.meta.get("pty_cols"), Some(&serde_json::json!(120)));
+
+        // Null removes a key (RFC-7396); scalars replace.
+        repo.merge_meta(&s.id, &serde_json::json!({ "keep_alive": null, "pty_cols": 80 }))
+            .await
+            .unwrap();
+        let got = repo.get(&s.id).await.unwrap();
+        assert!(got.meta.get("keep_alive").is_none());
+        assert_eq!(got.meta.get("pty_cols"), Some(&serde_json::json!(80)));
+        assert_eq!(got.meta.get("pty_rows"), Some(&serde_json::json!(40)));
     }
 
     #[tokio::test]
