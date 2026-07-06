@@ -356,6 +356,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             post(api_client::execute),
         )
         .route(
+            "/workspaces/{wid}/api-client/secure-all",
+            post(api_client::secure_all),
+        )
+        .route(
             "/workspaces/{wid}/api-client/grpc/describe",
             post(grpc::describe),
         )

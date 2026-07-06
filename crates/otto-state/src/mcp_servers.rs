@@ -35,6 +35,10 @@ fn row_to_server(r: &sqlx::sqlite::SqliteRow) -> Result<McpServer> {
         .unwrap_or_default();
     let env: BTreeMap<String, String> =
         serde_json::from_value(json(&r.get::<String, _>("env_json"))?).unwrap_or_default();
+    // Control-plane columns (0077) shared by this surface: key NAMES of the
+    // Keychain-backed env vars + the opaque blob ref. Values never hit a row.
+    let secret_env_keys: Vec<String> =
+        serde_json::from_str(&r.get::<String, _>("secret_env_keys")).unwrap_or_default();
     Ok(McpServer {
         id: r.get("id"),
         workspace_id: r.get("workspace_id"),
@@ -42,6 +46,8 @@ fn row_to_server(r: &sqlx::sqlite::SqliteRow) -> Result<McpServer> {
         command: r.get("command"),
         args,
         env,
+        secret_env_keys,
+        secret_ref: r.get("secret_ref"),
         enabled: r.get::<i64, _>("enabled") != 0,
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
@@ -178,6 +184,28 @@ impl McpServersRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("update mcp server"))?;
+        self.get(id).await
+    }
+
+    /// Persist secret metadata: the Keychain blob ref + the env-var key names.
+    /// Values are already in the Keychain by the time this runs; the row only
+    /// ever records where they live and what they're called.
+    pub async fn set_secret_meta(
+        &self,
+        id: &Id,
+        secret_ref: Option<&str>,
+        secret_env_keys: &[String],
+    ) -> Result<McpServer> {
+        sqlx::query(
+            "UPDATE mcp_servers SET secret_ref = ?, secret_env_keys = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(secret_ref)
+        .bind(serde_json::to_string(secret_env_keys).unwrap_or_else(|_| "[]".into()))
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("update mcp server secrets"))?;
         self.get(id).await
     }
 

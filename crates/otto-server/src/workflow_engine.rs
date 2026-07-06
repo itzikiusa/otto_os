@@ -3706,6 +3706,8 @@ async fn execute_node(
                     target_branch: draft.target_branch.clone(),
                     proof_pack_id: None,
                     allow_unproven: Some(true),
+                    draft: None,
+                    reviewers: None,
                 };
                 let auth = otto_core::auth::AuthUser(user.clone());
                 match otto_git::http::create_pr_for_repo(ctx, &auth, &repo, &req).await {

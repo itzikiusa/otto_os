@@ -203,9 +203,13 @@ async fn run(cfg: Config) -> Result<(), String> {
             .with_name_themes_repo(otto_state::NameThemesRepo::new(pool.clone()))
             .with_pre_spawn_hook(provisioner.clone())
             .with_output_scanner(scanner)
-            // User-configured MCP servers merged into `.mcp.json` on agent spawn.
+            // User-configured MCP servers merged into `.mcp.json` on agent spawn
+            // (Keychain-backed secret env values resolved at merge time).
             .with_mcp_servers(Arc::new(
-                otto_server::routes::mcp_servers::DbMcpServerProvider::new(pool.clone()),
+                otto_server::routes::mcp_servers::DbMcpServerProvider::new(
+                    pool.clone(),
+                    secrets.clone(),
+                ),
             ))
             // Agent activity hooks post back to this loopback daemon.
             .with_ingest_base(format!("http://127.0.0.1:{}", cfg.port))
@@ -434,6 +438,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
         skill_review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         wf_skip_current: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         orchestrator: Arc::clone(&orchestrator),
         improve_engine: Arc::clone(&improve_engine),

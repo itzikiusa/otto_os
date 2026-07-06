@@ -6,6 +6,8 @@
 pub mod agent_run;
 pub mod agent_session;
 pub mod api_helpers;
+pub mod api_scripts;
+pub mod api_secrets;
 pub mod auth;
 pub mod cadence;
 pub mod canvas_assist;
@@ -45,6 +47,7 @@ pub mod product_refine;
 pub mod product_run;
 pub mod product_swarm;
 pub mod product_watcher;
+pub mod review_fallback;
 pub mod review_session;
 pub mod routes;
 pub mod run_callback;

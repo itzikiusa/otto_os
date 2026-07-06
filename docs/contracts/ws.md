@@ -202,7 +202,10 @@ Emitted by the metrics sampler after each system-metrics sample is stored:
 ## PR-review status change (A2)
 
 Workspace-scoped. Emitted by `crates/otto-server/src/modules.rs` whenever a
-review row transitions state (queued → running → done / error / cancelled).
+review row transitions state (queued → running → done / error / cancelled —
+`cancelled` comes from `POST /reviews/{review_id}/cancel`). A per-agent stop
+(`POST /reviews/{review_id}/agents/{index}/stop`) re-emits the event with
+`status: "running"` (no new event type) so open panels refresh the agent rows.
 Clients that have the Review Panel open use this to trigger an immediate poll
 instead of waiting for the next timed tick.
 

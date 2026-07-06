@@ -12,8 +12,10 @@ import type {
   ApiHistoryEntry,
   ApiKeyVal,
   ApiRequest,
+  ApiRequestExtras,
   ApiResponse,
   ApiRunResult,
+  ApiSecretable,
   Connection,
   ExecuteApiReq,
   Id,
@@ -24,6 +26,7 @@ import type {
   UpsertApiEnvironmentReq,
   UpsertApiRequestReq,
 } from '../api/types';
+import { isSecretRef } from '../api/types';
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
 import { runPreRequest, runPostResponse, type PreRequestReq, type TestResult } from '../api/scripts';
@@ -108,6 +111,56 @@ function blankDraft(): ApiDraft {
 /** Drop empty/disabled key-vals before sending; keep enabled (default true). */
 function liveKv(rows: ApiKeyVal[]): ApiKeyVal[] {
   return rows.filter((r) => r.enabled !== false && r.key.trim() !== '');
+}
+
+/** Masked rendering for exports/snippets: markers become `***`. */
+function secretMasked(v: ApiSecretable | undefined | null): string {
+  if (isSecretRef(v)) return '***';
+  return typeof v === 'string' ? v : '';
+}
+
+/** Serialize the draft's once-draft-only fields into the persisted `extras`
+ * object. Returns null when everything is unset/default so untouched requests
+ * keep a NULL column. */
+export function draftToExtras(d: ApiDraft): ApiRequestExtras | null {
+  const extras: ApiRequestExtras = { v: 1 };
+  let any = false;
+  if (d.kind && d.kind !== 'http') { extras.transport = d.kind; any = true; }
+  if (d.graphql_variables?.trim()) { extras.graphql_variables = d.graphql_variables; any = true; }
+  if (d.docs?.trim()) { extras.docs_md = d.docs; any = true; }
+  const pre = d.pre_request_script?.trim() ? d.pre_request_script : undefined;
+  const post = d.post_response_script?.trim() ? d.post_response_script : undefined;
+  if (pre || post) { extras.scripts = { ...(pre ? { pre } : {}), ...(post ? { post } : {}) }; any = true; }
+  const s = d.settings;
+  if (s && (s.timeout_ms != null || !s.follow_redirects || !s.verify_ssl)) {
+    extras.settings = {
+      timeout_ms: s.timeout_ms,
+      follow_redirects: s.follow_redirects,
+      tls_verify: s.verify_ssl,
+    };
+    any = true;
+  }
+  return any ? extras : null;
+}
+
+/** Restore persisted `extras` onto a draft loaded from a saved request. */
+function extrasToDraft(d: ApiDraft, extras: ApiRequestExtras | null | undefined): ApiDraft {
+  if (!extras) return d;
+  const kinds: ApiRequestKind[] = ['http', 'sse', 'websocket', 'grpc'];
+  const out = { ...d };
+  if (extras.transport && kinds.includes(extras.transport)) out.kind = extras.transport;
+  if (typeof extras.graphql_variables === 'string') out.graphql_variables = extras.graphql_variables;
+  if (typeof extras.docs_md === 'string') out.docs = extras.docs_md;
+  if (extras.scripts?.pre) out.pre_request_script = extras.scripts.pre;
+  if (extras.scripts?.post) out.post_response_script = extras.scripts.post;
+  if (extras.settings) {
+    out.settings = {
+      timeout_ms: extras.settings.timeout_ms ?? null,
+      follow_redirects: extras.settings.follow_redirects ?? true,
+      verify_ssl: extras.settings.tls_verify ?? true,
+    };
+  }
+  return out;
 }
 
 // ── Open-tab persistence ─────────────────────────────────────────────────────
@@ -451,6 +504,27 @@ class ApiClientStore {
     }
   }
 
+  /** One-pass sweep moving every plaintext secret (request auth members +
+   * secret-shaped environment variables) into the macOS Keychain. */
+  async secureAll(): Promise<void> {
+    const base = this.base();
+    if (!base) return;
+    try {
+      const res = await api.post<{ requests_secured: number; env_keys_secured: number }>(
+        `${base}/secure-all`, {},
+      );
+      toasts.success(
+        'Secrets secured',
+        `${res.requests_secured} request(s) · ${res.env_keys_secured} env value(s) moved to the Keychain`,
+      );
+      // Rows were rewritten (markers / stripped variables) — refresh both.
+      void this.loadRequests();
+      void this.loadEnvironments();
+    } catch (e) {
+      toasts.error('Secure secrets failed', errMsg(e));
+    }
+  }
+
   // ── Collections ─────────────────────────────────────────────────────────
 
   async saveCollection(req: UpsertApiCollectionReq, id?: Id): Promise<ApiCollection | null> {
@@ -494,6 +568,7 @@ class ApiClientStore {
       await this.saveRequest({
         collection_id: parentId, name: req.name, method: req.method, url: req.url,
         headers: req.headers, query: req.query, body_mode: req.body_mode, body: req.body, auth: req.auth,
+        extras: req.extras ?? null,
       });
     }
     await this.loadRequests();
@@ -594,17 +669,16 @@ class ApiClientStore {
       body: d.body,
       auth: d.auth,
       ssh_connection_id: d.ssh_connection_id ?? null,
-      // Extras now persist server-side (they were draft-only and silently
-      // lost on save/reload before).
-      pre_request_script: d.pre_request_script || null,
-      post_response_script: d.post_response_script || null,
-      settings: d.settings ?? null,
-      docs: d.docs || null,
-      graphql_variables: d.graphql_variables || null,
+      // Scripts / docs / settings / GraphQL variables / transport persist with
+      // the request now — a reload no longer discards them.
+      extras: draftToExtras(d),
     };
     const saved = await this.saveRequest(body, d.requestId ?? undefined);
     if (saved) {
-      this.draft = { ...this.draft, requestId: saved.id, name: saved.name };
+      // Re-adopt the SAVED auth: secret members the daemon just moved to the
+      // Keychain come back as `$secret` markers, and the builder shows them
+      // masked instead of holding plaintext in tab-persisted localStorage.
+      this.draft = { ...this.draft, requestId: saved.id, name: saved.name, auth: { ...saved.auth } };
       toasts.success('Request saved', saved.name);
     }
     return saved;
@@ -867,19 +941,20 @@ class ApiClientStore {
       parts.push('-H', sh(`${h.key}: ${h.value}`));
     }
 
-    // Auth.
+    // Auth. Keychain-backed members render as `***` — a copied snippet must
+    // never leak a resolved secret.
     const a = draft.auth;
-    if (a.type === 'bearer' && a.token) {
-      parts.push('-H', sh(`Authorization: Bearer ${a.token}`));
+    if (a.type === 'bearer' && (isSecretRef(a.token) || a.token)) {
+      parts.push('-H', sh(`Authorization: Bearer ${secretMasked(a.token)}`));
     } else if (a.type === 'basic') {
-      parts.push('-u', sh(`${a.username}:${a.password}`));
+      parts.push('-u', sh(`${a.username}:${secretMasked(a.password)}`));
     } else if (a.type === 'api_key' && a.key) {
-      if (a.in === 'header') parts.push('-H', sh(`${a.key}: ${a.value}`));
+      if (a.in === 'header') parts.push('-H', sh(`${a.key}: ${secretMasked(a.value)}`));
       else {
         const sep = url.includes('?') ? '&' : '?';
         // already appended to url above only for query rows; add the api_key here
         parts[parts.indexOf(sh(url))] = sh(
-          url + sep + `${encodeURIComponent(a.key)}=${encodeURIComponent(a.value)}`,
+          url + sep + `${encodeURIComponent(a.key)}=${encodeURIComponent(secretMasked(a.value))}`,
         );
       }
     }
@@ -996,35 +1071,54 @@ class ApiClientStore {
     this.openTab(blankDraft());
   }
 
-  /** Load a saved request into the builder. */
+  /** Load a saved request into the builder (persisted extras included). */
   loadRequestIntoDraft(r: ApiRequest): void {
-    this.draft = {
-      requestId: r.id,
-      name: r.name,
-      kind: 'http',
-      method: r.method,
-      url: r.url,
-      headers: r.headers.map((h) => ({ ...h })),
-      query: r.query.map((q) => ({ ...q })),
-      body_mode: r.body_mode,
-      body: r.body,
-      auth: { ...r.auth },
-      ssh_connection_id: r.ssh_connection_id ?? null,
-      pre_request_script: r.pre_request_script ?? undefined,
-      post_response_script: r.post_response_script ?? undefined,
-      settings: r.settings
-        ? {
-            timeout_ms: r.settings.timeout_ms ?? null,
-            follow_redirects: r.settings.follow_redirects ?? true,
-            verify_ssl: r.settings.verify_ssl ?? true,
-          }
-        : undefined,
-      docs: r.docs ?? undefined,
-      graphql_variables: r.graphql_variables ?? undefined,
-      proto: '',
-      grpc_method: '',
-    };
+    this.draft = extrasToDraft(
+      {
+        requestId: r.id,
+        name: r.name,
+        kind: 'http',
+        method: r.method,
+        url: r.url,
+        headers: r.headers.map((h) => ({ ...h })),
+        query: r.query.map((q) => ({ ...q })),
+        body_mode: r.body_mode,
+        body: r.body,
+        auth: { ...r.auth },
+        ssh_connection_id: r.ssh_connection_id ?? null,
+        proto: '',
+        grpc_method: '',
+      },
+      r.extras,
+    );
     this.lastResponse = null;
+  }
+
+  /** True when a tab's draft differs from its saved request (or is a
+   * non-empty unsaved draft) — includes the extras fields (scripts / docs /
+   * settings / GraphQL variables / transport). Drives the tab's unsaved dot. */
+  isDirty(d: ApiDraft): boolean {
+    const saved = d.requestId ? this.requests.find((r) => r.id === d.requestId) : undefined;
+    if (!saved) {
+      // Unsaved draft: dirty once anything meaningful was entered.
+      return Boolean(
+        d.url.trim() || d.body.trim() || d.headers.length || d.query.length ||
+        d.auth.type !== 'none' || draftToExtras(d),
+      );
+    }
+    const kv = (rows: ApiKeyVal[]): string =>
+      JSON.stringify(rows.filter((r) => r.key.trim() !== '' || r.value.trim() !== ''));
+    return (
+      d.method !== saved.method ||
+      d.url !== saved.url ||
+      d.body !== saved.body ||
+      d.body_mode !== saved.body_mode ||
+      kv(d.headers) !== kv(saved.headers) ||
+      kv(d.query) !== kv(saved.query) ||
+      JSON.stringify(d.auth) !== JSON.stringify(saved.auth) ||
+      (d.ssh_connection_id ?? null) !== (saved.ssh_connection_id ?? null) ||
+      JSON.stringify(draftToExtras(d)) !== JSON.stringify(saved.extras ?? null)
+    );
   }
 
   /** Load a history entry's request snapshot into the builder (best-effort). */

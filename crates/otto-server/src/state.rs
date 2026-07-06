@@ -75,6 +75,10 @@ pub struct ServerCtx {
     /// button). A running review threads its flag into the agent recovery loop;
     /// cancel sets it, kills the live agent sessions and marks the run cancelled.
     pub review_cancels: crate::skill_eval::CancelRegistry,
+    /// Per-AGENT cancellation flags for in-flight review agents, keyed
+    /// "{review_id}:{index}" (the per-agent Stop button). Each reviewer's
+    /// recovery loop watches its own flag; whole-review cancel trips them all.
+    pub review_agent_cancels: crate::skill_eval::CancelRegistry,
     /// Persistent review finding identity + lifecycle (A1 verified-review loop).
     pub findings_store: ReviewFindingsRepo,
     /// Audit trail for the findings workflow (one row per triage action).

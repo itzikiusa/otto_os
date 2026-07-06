@@ -1,7 +1,8 @@
 // Import API collections from Postman (v2.1), OpenAPI 3, and HAR into Otto's
 // collection/request model. All parsing is client-side.
 
-import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiCollection, ApiRequest } from './types';
+import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiCollection, ApiRequest, ApiRequestExtras } from './types';
+import { isSecretRef } from './types';
 
 export interface ImportedRequest {
   folderPath: string[];
@@ -13,6 +14,9 @@ export interface ImportedRequest {
   body_mode: ApiBodyMode;
   body: string;
   auth: ApiAuth;
+  /** Durable extras (scripts / docs / settings / GraphQL variables) — round-
+   * trips through the Postman export so git-synced collections stay lossless. */
+  extras?: ApiRequestExtras | null;
 }
 
 export interface ImportedCollection {
@@ -97,7 +101,49 @@ function pmRequest(item: Record<string, unknown>, path: string[]): ImportedReque
     }
   }
 
-  return { folderPath: path, name: String(item.name ?? `${method} ${url}`), method, url, headers, query, body_mode, body, auth: pmAuth(req.auth) };
+  return {
+    folderPath: path,
+    name: String(item.name ?? `${method} ${url}`),
+    method, url, headers, query, body_mode, body,
+    auth: pmAuth(req.auth),
+    extras: pmExtras(item, req, b),
+  };
+}
+
+/** Rebuild Otto's `extras` from a Postman item (events / description /
+ * graphql variables / protocolProfileBehavior), so an exported collection
+ * imports back without losing scripts, docs or settings. */
+function pmExtras(
+  item: Record<string, unknown>,
+  req: Record<string, unknown>,
+  body: Record<string, unknown> | undefined,
+): ApiRequestExtras | null {
+  const extras: ApiRequestExtras = { v: 1 };
+  let any = false;
+  for (const ev of (item.event as { listen?: string; script?: { exec?: string[] | string } }[]) ?? []) {
+    const exec = ev.script?.exec;
+    const code = Array.isArray(exec) ? exec.join('\n') : String(exec ?? '');
+    if (!code.trim()) continue;
+    extras.scripts = extras.scripts ?? {};
+    if (ev.listen === 'prerequest') { extras.scripts.pre = code; any = true; }
+    else if (ev.listen === 'test') { extras.scripts.post = code; any = true; }
+  }
+  const desc = req.description;
+  const descText = typeof desc === 'string' ? desc : String((desc as { content?: string })?.content ?? '');
+  if (descText.trim()) { extras.docs_md = descText; any = true; }
+  const gqlVars = (body?.graphql as { variables?: string })?.variables;
+  if (typeof gqlVars === 'string' && gqlVars.trim()) { extras.graphql_variables = gqlVars; any = true; }
+  const ppb = item.protocolProfileBehavior as { followRedirects?: boolean; strictSSL?: boolean } | undefined;
+  const otto = (item._otto as { settings?: ApiRequestExtras['settings'] })?.settings;
+  if (ppb || otto) {
+    extras.settings = {
+      timeout_ms: otto?.timeout_ms ?? null,
+      follow_redirects: ppb?.followRedirects ?? otto?.follow_redirects ?? true,
+      tls_verify: ppb?.strictSSL ?? otto?.tls_verify ?? true,
+    };
+    any = true;
+  }
+  return any ? extras : null;
 }
 
 function pmAuth(auth: unknown): ApiAuth {
@@ -230,7 +276,34 @@ function pmItem(r: ApiRequest): Record<string, unknown> {
     }
   }
   const auth = r.auth as ApiAuth;
-  if (auth.type === 'bearer') request.auth = { type: 'bearer', bearer: [{ key: 'token', value: auth.token }] };
-  else if (auth.type === 'basic') request.auth = { type: 'basic', basic: [{ key: 'username', value: auth.username }, { key: 'password', value: auth.password }] };
-  return { name: r.name, request };
+  // Keychain-backed members export as the literal `{{otto:secret}}` placeholder
+  // — a git-synced collection must never contain a resolved secret.
+  const authVal = (v: unknown): string => (isSecretRef(v as never) ? '{{otto:secret}}' : String(v ?? ''));
+  if (auth.type === 'bearer') request.auth = { type: 'bearer', bearer: [{ key: 'token', value: authVal(auth.token) }] };
+  else if (auth.type === 'basic') request.auth = { type: 'basic', basic: [{ key: 'username', value: auth.username }, { key: 'password', value: authVal(auth.password) }] };
+
+  const item: Record<string, unknown> = { name: r.name, request };
+
+  // Durable extras → native Postman fields where the format has them.
+  const extras = r.extras;
+  if (extras) {
+    if (extras.docs_md?.trim()) request.description = extras.docs_md;
+    if (r.body_mode === 'graphql' && extras.graphql_variables?.trim()) {
+      const gb = (request.body ?? { mode: 'graphql', graphql: {} }) as { graphql?: Record<string, unknown> };
+      gb.graphql = { ...(gb.graphql ?? {}), variables: extras.graphql_variables };
+      request.body = gb;
+    }
+    const events: unknown[] = [];
+    if (extras.scripts?.pre?.trim()) events.push({ listen: 'prerequest', script: { type: 'text/javascript', exec: extras.scripts.pre.split('\n') } });
+    if (extras.scripts?.post?.trim()) events.push({ listen: 'test', script: { type: 'text/javascript', exec: extras.scripts.post.split('\n') } });
+    if (events.length) item.event = events;
+    if (extras.settings) {
+      item.protocolProfileBehavior = {
+        followRedirects: extras.settings.follow_redirects ?? true,
+        strictSSL: extras.settings.tls_verify ?? true,
+      };
+      if (extras.settings.timeout_ms != null) item._otto = { settings: { timeout_ms: extras.settings.timeout_ms } };
+    }
+  }
+  return item;
 }

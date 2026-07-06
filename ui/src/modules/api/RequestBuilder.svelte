@@ -9,7 +9,8 @@
   import { api } from '../../lib/api/client';
   import { generateCode, CODE_LANGS, type CodeLang } from '../../lib/api/codegen';
   import { marked } from 'marked';
-  import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiResponse } from '../../lib/api/types';
+  import type { ApiAuth, ApiBodyMode, ApiKeyVal, ApiResponse, ApiSecretable } from '../../lib/api/types';
+  import { isSecretRef } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -375,6 +376,16 @@
       default: auth = { type: 'none' };
     }
     apiClient.draft = { ...draft, auth };
+  }
+  // ── Keychain-backed secret members ─────────────────────────────────────────
+  // A saved secret comes back as a {"$secret": ref} marker: render it masked
+  // (empty input + placeholder); typing replaces it with plaintext, which the
+  // daemon re-migrates to the Keychain on the next save.
+  function secretValue(v: ApiSecretable | undefined): string {
+    return typeof v === 'string' ? v : '';
+  }
+  function secretPlaceholder(v: ApiSecretable | undefined, fallback: string): string {
+    return isSecretRef(v) ? '•••••• stored in Keychain — type to replace' : fallback;
   }
   let fetchingToken = $state(false);
   async function fetchOAuthToken(): Promise<void> {
@@ -1024,7 +1035,7 @@
         {#if draft.auth.type === 'bearer'}
           <div class="field-row">
             <label for="auth-token">Token</label>
-            <input id="auth-token" class="input mono grow" value={draft.auth.token} oninput={(e) => setAuth({ token: (e.currentTarget as HTMLInputElement).value })} placeholder="token or {'{{var}}'}" />
+            <input id="auth-token" class="input mono grow" value={secretValue(draft.auth.token)} oninput={(e) => setAuth({ token: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.token, 'token or {{var}}')} />
           </div>
         {:else if draft.auth.type === 'basic'}
           <div class="field-row">
@@ -1033,7 +1044,7 @@
           </div>
           <div class="field-row">
             <label for="auth-pass">Password</label>
-            <input id="auth-pass" class="input grow" type="password" value={draft.auth.password} oninput={(e) => setAuth({ password: (e.currentTarget as HTMLInputElement).value })} />
+            <input id="auth-pass" class="input grow" type="password" value={secretValue(draft.auth.password)} oninput={(e) => setAuth({ password: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.password, '')} />
           </div>
         {:else if draft.auth.type === 'api_key'}
           <div class="field-row">
@@ -1042,7 +1053,7 @@
           </div>
           <div class="field-row">
             <label for="auth-value">Value</label>
-            <input id="auth-value" class="input mono grow" value={draft.auth.value} oninput={(e) => setAuth({ value: (e.currentTarget as HTMLInputElement).value })} />
+            <input id="auth-value" class="input mono grow" value={secretValue(draft.auth.value)} oninput={(e) => setAuth({ value: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.value, '')} />
           </div>
           <div class="field-row">
             <label for="auth-in">Add to</label>
@@ -1070,7 +1081,7 @@
           </div>
           <div class="field-row">
             <label for="auth-csec">Client Secret</label>
-            <input id="auth-csec" class="input mono grow" type="password" value={draft.auth.client_secret} oninput={(e) => setAuth({ client_secret: (e.currentTarget as HTMLInputElement).value })} />
+            <input id="auth-csec" class="input mono grow" type="password" value={secretValue(draft.auth.client_secret)} oninput={(e) => setAuth({ client_secret: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.client_secret, '')} />
           </div>
           {#if draft.auth.grant === 'password'}
             <div class="field-row">
@@ -1079,13 +1090,13 @@
             </div>
             <div class="field-row">
               <label for="auth-opass">Password</label>
-              <input id="auth-opass" class="input grow" type="password" value={draft.auth.password} oninput={(e) => setAuth({ password: (e.currentTarget as HTMLInputElement).value })} />
+              <input id="auth-opass" class="input grow" type="password" value={secretValue(draft.auth.password)} oninput={(e) => setAuth({ password: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.password, '')} />
             </div>
           {/if}
           {#if draft.auth.grant === 'refresh_token'}
             <div class="field-row">
               <label for="auth-rt">Refresh Token</label>
-              <input id="auth-rt" class="input mono grow" value={draft.auth.refresh_token} oninput={(e) => setAuth({ refresh_token: (e.currentTarget as HTMLInputElement).value })} />
+              <input id="auth-rt" class="input mono grow" value={secretValue(draft.auth.refresh_token)} oninput={(e) => setAuth({ refresh_token: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.refresh_token, '')} />
             </div>
           {/if}
           <div class="field-row">
@@ -1098,10 +1109,10 @@
               <Icon name="refresh" size={11} />{fetchingToken ? 'Requesting…' : 'Get New Token'}
             </button>
           </div>
-          {#if draft.auth.access_token}
+          {#if isSecretRef(draft.auth.access_token) || draft.auth.access_token}
             <div class="field-row">
               <label for="auth-at">Access Token</label>
-              <input id="auth-at" class="input mono grow oauth-token" value={draft.auth.access_token} readonly title={draft.auth.access_token} />
+              <input id="auth-at" class="input mono grow oauth-token" value={isSecretRef(draft.auth.access_token) ? '•••••• stored in Keychain' : draft.auth.access_token} readonly title={secretValue(draft.auth.access_token)} />
             </div>
           {/if}
         {:else}

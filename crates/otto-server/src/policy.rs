@@ -1487,6 +1487,22 @@ mod tests {
             pol(Method::POST, "/api/v1/git/accounts"),
             Require(Git, Edit)
         );
+        // Connection test (stored + draft-token variants) = Edit; the handlers
+        // additionally enforce the S4 owner-or-root token guard.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/git/accounts/{id}/test"),
+            Require(Git, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/git/accounts/test"),
+            Require(Git, Edit)
+        );
+        // Reviewer typeahead is a read (View); the handler's provider_ctx
+        // enforces S4 on the bound token, mirroring pr_list.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/repos/{id}/collaborators"),
+            Require(Git, View)
+        );
         assert_eq!(
             pol(Method::POST, "/api/v1/pr-review-comments/{cid}/approve"),
             Require(Git, Edit)

@@ -409,6 +409,26 @@ pub fn collection_to_openapi(collection: &ApiCollection, requests: &[ApiRequest]
         operation.insert("summary".into(), json!(req.name));
         operation.insert("operationId".into(), json!(operation_id(req)));
 
+        // Durable extras: request docs become the operation description;
+        // settings + GraphQL variables ride along as x-otto extensions.
+        // Scripts and auth are NEVER serialized here (auth may hold Keychain
+        // markers; even those stay out of the export).
+        if let Some(extras) = &req.extras {
+            if let Some(docs) = extras.get("docs_md").and_then(Value::as_str) {
+                if !docs.trim().is_empty() {
+                    operation.insert("description".into(), json!(docs));
+                }
+            }
+            if let Some(settings) = extras.get("settings").filter(|s| s.is_object()) {
+                operation.insert("x-otto-settings".into(), settings.clone());
+            }
+            if let Some(gql) = extras.get("graphql_variables").and_then(Value::as_str) {
+                if !gql.trim().is_empty() {
+                    operation.insert("x-otto-graphql-variables".into(), json!(gql));
+                }
+            }
+        }
+
         // Parameters: query + headers.
         let mut params: Vec<Value> = Vec::new();
         for entry in enabled_entries(&req.query) {
@@ -919,11 +939,13 @@ mod tests {
             body: r#"{"name":"x"}"#.into(),
             auth: json!({"type":"none"}),
             ssh_connection_id: None,
-            pre_request_script: None,
-            post_response_script: None,
-            settings: None,
-            docs: None,
-            graphql_variables: None,
+            extras: Some(json!({
+                "v": 1,
+                "docs_md": "Creates an item.",
+                "settings": { "timeout_ms": 5000 },
+                "graphql_variables": "",
+                "scripts": { "pre": "pm.environment.set('x','1')" },
+            })),
             position: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -933,6 +955,12 @@ mod tests {
         assert_eq!(doc["info"]["title"], "Test API");
         let op = &doc["paths"]["/v1/items"]["post"];
         assert_eq!(op["summary"], "create item");
+        // Extras: docs → description; settings ride as x-otto-settings; empty
+        // graphql_variables and scripts are NOT serialized.
+        assert_eq!(op["description"], "Creates an item.");
+        assert_eq!(op["x-otto-settings"]["timeout_ms"], 5000);
+        assert!(op.get("x-otto-graphql-variables").is_none());
+        assert!(op.to_string().find("pm.environment").is_none());
         assert!(op["parameters"].as_array().unwrap().iter().any(|p| p["name"] == "dry"));
         assert!(op["parameters"].as_array().unwrap().iter().any(|p| p["name"] == "X-Trace"));
         assert_eq!(

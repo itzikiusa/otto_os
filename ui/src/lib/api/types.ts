@@ -124,8 +124,12 @@ export interface McpServer {
   name: string;
   command: string;
   args: string[];
-  /** Extra env passed to the server. Stored in plaintext for now (like `.mcp.json`). */
+  /** NON-secret env pairs only; secret values live in the macOS Keychain. */
   env: Record<string, string>;
+  /** Names of env vars whose values are Keychain-backed (values never returned). */
+  secret_env_keys: string[];
+  /** Opaque Keychain blob ref when secrets exist (never a secret itself). */
+  secret_ref?: string | null;
   /** Off by default — only written to `.mcp.json` once enabled. */
   enabled: boolean;
   created_by: Id;
@@ -138,6 +142,8 @@ export interface CreateMcpServerReq {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /** WRITE-ONLY: secret env values → Keychain (response returns key names only). */
+  secret_env?: Record<string, string>;
   enabled?: boolean;
 }
 
@@ -146,6 +152,8 @@ export interface UpdateMcpServerReq {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** WRITE-ONLY: when present, replaces the secret env set (values → Keychain). */
+  secret_env?: Record<string, string>;
   enabled?: boolean;
 }
 
@@ -582,6 +590,26 @@ export interface Repo {
   provider: GitProviderKind | null;
   git_account_id: Id | null;
   created_at: string;
+  /** Forge discriminator computed from remote_url: a supported forge,
+   *  'unrecognized' (remote exists but isn't GitHub/Bitbucket Cloud/GitLab —
+   *  e.g. Bitbucket Server), or null when the repo has no remote. */
+  forge?: GitProviderKind | 'unrecognized' | null;
+}
+
+/** One reviewer-typeahead entry from `GET /repos/{id}/collaborators?q=`.
+ *  `name` is the provider-native handle to submit in `CreatePrReq.reviewers`. */
+export interface Collaborator {
+  name: string;
+  display_name: string;
+}
+
+/** `POST /git/accounts/{id}/test` / `POST /git/accounts/test` result. Auth
+ *  failures come back ok:false + error (HTTP 200) for inline rendering. */
+export interface GitAccountTestResp {
+  ok: boolean;
+  login?: string | null;
+  scopes?: string[];
+  error?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1734,23 +1762,6 @@ export interface TestConnectionResp {
   warn_key_perms?: string | null;
 }
 
-/** POST /connections/unsaved/db/test — probe an UNSAVED connection config
- *  (form "Test" button). Nothing is persisted; DB kinds only. */
-export interface TestUnsavedConnectionReq {
-  workspace_id: string;
-  kind: ConnectionKind;
-  params: Record<string, unknown>;
-  secret?: string;
-}
-
-/** Response of the unsaved-config probe (the DB Explorer's TestResult). */
-export interface TestUnsavedConnectionResp {
-  ok: boolean;
-  latency_ms?: number | null;
-  message: string;
-  server_version?: string | null;
-}
-
 // ---------------------------------------------------------------------------
 // Import connections from other DB tools
 // ---------------------------------------------------------------------------
@@ -2147,6 +2158,9 @@ export interface PrSummary {
   draft?: boolean | null;
   ci_status?: string | null;
   labels?: string[];
+  /** Create-response only: e.g. a reviewer request that failed after the PR
+   *  was opened. Empty/omitted everywhere else. */
+  reviewer_warnings?: string[];
 }
 
 export interface PrComment {
@@ -2181,6 +2195,12 @@ export interface CreatePrReq {
   description: string;
   source_branch: string;
   target_branch: string;
+  /** Open as a draft (GitHub native flag; GitLab `Draft:` title prefix;
+   *  Bitbucket Cloud draft field). Absent = ready for review. */
+  draft?: boolean;
+  /** Provider-native reviewer handles to request at creation. Failures surface
+   *  in `PrSummary.reviewer_warnings`, never as a creation error. */
+  reviewers?: string[];
 }
 
 export interface DraftPrReq {
@@ -2535,6 +2555,9 @@ export interface ReviewAgentState {
   session_id?: string | null;
   /** This agent's own findings (before summarization). */
   findings?: ReviewFinding[];
+  /** True on the summarizer row when its output came from the deterministic
+   *  Rust-side dedupe/rank fallback (claude summarizer unavailable). */
+  fallback?: boolean;
 }
 
 export interface ReviewComment {
@@ -2561,6 +2584,9 @@ export interface Review {
   verdict?: string | null;
   blocker_count?: number | null;
   summary_md?: string | null;
+  /** true when the final comments came from the deterministic summarizer
+   *  fallback (claude unavailable) — derived from the agents' fallback flags. */
+  summary_fallback?: boolean;
 }
 
 export interface ReviewAgentCfg {
@@ -3326,24 +3352,54 @@ export interface ApiKeyVal {
   enabled?: boolean;
 }
 
+/** A Keychain-backed secret placeholder: the stored row (and any export)
+ * carries this marker instead of the value; the daemon resolves it in-memory
+ * at execute time only. */
+export interface ApiSecretRef {
+  $secret: string;
+}
+
+/** An auth member that is either plaintext (being typed) or a Keychain
+ * marker (loaded from a saved request whose secret was already migrated). */
+export type ApiSecretable = string | ApiSecretRef;
+
+export function isSecretRef(v: ApiSecretable | undefined | null): v is ApiSecretRef {
+  return typeof v === 'object' && v !== null && typeof v.$secret === 'string';
+}
+
 export type ApiAuth =
   | { type: 'none' }
-  | { type: 'bearer'; token: string }
-  | { type: 'basic'; username: string; password: string }
-  | { type: 'api_key'; key: string; value: string; in: 'header' | 'query' }
+  | { type: 'bearer'; token: ApiSecretable }
+  | { type: 'basic'; username: string; password: ApiSecretable }
+  | { type: 'api_key'; key: string; value: ApiSecretable; in: 'header' | 'query' }
   | {
       type: 'oauth2';
       grant: 'client_credentials' | 'password' | 'refresh_token';
       token_url: string;
       client_id: string;
-      client_secret: string;
+      client_secret: ApiSecretable;
       scope: string;
       username: string;
-      password: string;
-      refresh_token: string;
-      access_token: string;
+      password: ApiSecretable;
+      refresh_token: ApiSecretable;
+      access_token: ApiSecretable;
       token_type: string;
     };
+
+/** Versioned extension object persisted on a saved request (scripts / docs /
+ * settings / GraphQL variables / transport). The UI owns this shape; the
+ * daemon validates only that it is an object within the size cap. */
+export interface ApiRequestExtras {
+  v: number;
+  /** Transport kind; absent = http. */
+  transport?: 'http' | 'sse' | 'websocket' | 'grpc';
+  /** GraphQL variables, raw JSON text as authored. */
+  graphql_variables?: string;
+  /** Request docs, markdown. */
+  docs_md?: string;
+  scripts?: { pre?: string; post?: string };
+  settings?: { timeout_ms?: number | null; follow_redirects?: boolean; tls_verify?: boolean };
+}
 
 export type ApiBodyMode = 'none' | 'json' | 'raw' | 'form' | 'multipart' | 'graphql';
 
@@ -3370,12 +3426,8 @@ export interface ApiRequest {
   auth: ApiAuth;
   /** Optional `ssh`-kind connection id to tunnel executions through (null = direct). */
   ssh_connection_id?: Id | null;
-  /** Persisted request extras (scripts/settings/docs/GraphQL vars). */
-  pre_request_script?: string | null;
-  post_response_script?: string | null;
-  settings?: { timeout_ms?: number | null; follow_redirects?: boolean; verify_ssl?: boolean } | null;
-  docs?: string | null;
-  graphql_variables?: string | null;
+  /** Persisted scripts / docs / settings / GraphQL variables / transport. */
+  extras?: ApiRequestExtras | null;
   position: number;
   created_at: string;
   updated_at: string;
@@ -3385,7 +3437,11 @@ export interface ApiEnvironment {
   id: Id;
   workspace_id: Id;
   name: string;
+  /** Non-secret variables only; keys in `secret_keys` never appear here. */
   variables: Record<string, string>;
+  /** Names of variables whose values are Keychain-backed (resolved only at
+   * execute time; never returned over REST). */
+  secret_keys: string[];
   is_active: boolean;
   created_at: string;
 }
@@ -3419,17 +3475,18 @@ export interface UpsertApiRequestReq {
   auth?: ApiAuth;
   /** Optional `ssh`-kind connection id to tunnel executions through. */
   ssh_connection_id?: Id | null;
-  /** Persisted request extras (scripts/settings/docs/GraphQL vars). */
-  pre_request_script?: string | null;
-  post_response_script?: string | null;
-  settings?: { timeout_ms?: number | null; follow_redirects?: boolean; verify_ssl?: boolean } | null;
-  docs?: string | null;
-  graphql_variables?: string | null;
+  /** Persisted scripts / docs / settings / GraphQL variables / transport. */
+  extras?: ApiRequestExtras | null;
 }
 
 export interface UpsertApiEnvironmentReq {
   name: string;
+  /** Non-secret variables (keys listed in secret_keys are stripped server-side). */
   variables?: Record<string, string>;
+  /** Names of variables whose values are Keychain-backed. */
+  secret_keys?: string[];
+  /** WRITE-ONLY: new/changed secret values; absent keys keep stored values. */
+  secret_values?: Record<string, string>;
 }
 
 export interface ExecuteApiReq {

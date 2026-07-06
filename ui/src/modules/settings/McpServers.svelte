@@ -64,6 +64,9 @@
   let fCommand = $state('');
   let fArgs = $state(''); // one arg per line
   let fEnv = $state(''); // KEY=value per line
+  // Secret env: values go to the macOS Keychain, never the DB row. On edit the
+  // stored keys show as KEY= lines (value blank = keep the stored value).
+  let fSecretEnv = $state('');
   let fEnabled = $state(false);
   let saving = $state(false);
 
@@ -94,6 +97,7 @@
     fCommand = '';
     fArgs = '';
     fEnv = '';
+    fSecretEnv = '';
     fEnabled = false;
   }
 
@@ -110,6 +114,9 @@
     fEnv = Object.entries(s.env)
       .map(([k, v]) => `${k}=${v}`)
       .join('\n');
+    // Stored secret values are never returned — surface the key names so a
+    // blank value means "keep what's in the Keychain".
+    fSecretEnv = s.secret_env_keys.map((k) => `${k}=`).join('\n');
     fEnabled = s.enabled;
     formOpen = true;
   }
@@ -128,12 +135,15 @@
   }
 
   // Parse "KEY=value" lines into an object (first '=' splits; later ones kept).
-  function parseEnv(text: string): Record<string, string> {
+  // `allowEmpty` keeps KEY= lines (used by the secret editor's keep-sentinel).
+  function parseEnv(text: string, allowEmpty = false): Record<string, string> {
     const out: Record<string, string> = {};
     for (const line of lines(text)) {
       const eq = line.indexOf('=');
       if (eq <= 0) continue; // skip lines without a key
-      out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+      const v = line.slice(eq + 1).trim();
+      if (v === '' && !allowEmpty) continue;
+      out[line.slice(0, eq).trim()] = v;
     }
     return out;
   }
@@ -146,11 +156,27 @@
       toasts.error('Name and command are required');
       return;
     }
+    // Secret env: parse KEY=value lines; a KEY= line with an empty value keeps
+    // the currently stored Keychain value (edit flow surfaces keys that way).
+    const secretPairs = parseEnv(fSecretEnv, true);
+    const keptKeys = lines(fSecretEnv)
+      .map((l) => l.split('=')[0]?.trim() ?? '')
+      .filter(Boolean);
+    const existing = editing ? servers.find((x) => x.id === editing) : undefined;
+    const secret_env: Record<string, string> = {};
+    for (const k of keptKeys) {
+      if (secretPairs[k] !== undefined && secretPairs[k] !== '') secret_env[k] = secretPairs[k];
+      else if (existing?.secret_env_keys.includes(k)) secret_env[k] = ''; // sentinel: keep stored
+    }
+    // Drop keep-sentinels for create (nothing stored yet) and warn once.
+    if (!editing) for (const k of Object.keys(secret_env)) if (secret_env[k] === '') delete secret_env[k];
+
     const body: CreateMcpServerReq = {
       name,
       command,
       args: lines(fArgs),
       env: parseEnv(fEnv),
+      secret_env,
       enabled: fEnabled,
     };
     saving = true;
@@ -299,8 +325,25 @@
             placeholder={'API_KEY=...'}
           ></textarea>
           <span class="hint">
-            Stored in plaintext for now (like <code>.mcp.json</code> itself, which lives in the
-            workspace). Avoid putting long-lived secrets here until Keychain refs land.
+            Non-secret configuration only — these values are stored in Otto's database. Put
+            tokens/keys in the secret field below instead.
+          </span>
+        </div>
+        <div class="field">
+          <label for="mcp-secret-env">Secret environment (KEY=value, one per line) 🔒</label>
+          <textarea
+            id="mcp-secret-env"
+            class="input mono"
+            rows="3"
+            bind:value={fSecretEnv}
+            spellcheck="false"
+            placeholder={'API_TOKEN=...'}
+          ></textarea>
+          <span class="hint">
+            Values are stored in the macOS Keychain, never in Otto's database, and are injected
+            into <code>.mcp.json</code> only when a session spawns. When editing, a bare
+            <code>KEY=</code> line keeps the stored value. Note the rendered
+            <code>.mcp.json</code> on disk does contain the real value — the agent CLI needs it.
           </span>
         </div>
         <div class="field field-row">
@@ -340,6 +383,9 @@
               </div>
               {#if Object.keys(s.env).length}
                 <div class="server-env dim">env: {Object.keys(s.env).join(', ')}</div>
+              {/if}
+              {#if s.secret_env_keys.length}
+                <div class="server-env dim">secret env 🔒: {s.secret_env_keys.join(', ')}</div>
               {/if}
             </div>
             <div class="server-actions">

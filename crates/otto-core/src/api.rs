@@ -704,6 +704,10 @@ pub struct CreateMcpServerReq {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// WRITE-ONLY: secret env values. Persisted to the Keychain (never the
+    /// row); the response carries only the key names (`secret_env_keys`).
+    #[serde(default)]
+    pub secret_env: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub enabled: bool,
 }
@@ -790,6 +794,10 @@ pub struct UpdateMcpServerReq {
     pub args: Option<Vec<String>>,
     #[serde(default)]
     pub env: Option<std::collections::BTreeMap<String, String>>,
+    /// WRITE-ONLY: when present, replaces the server's secret env set (values
+    /// to the Keychain, key names to the row). `None` keeps existing secrets.
+    #[serde(default)]
+    pub secret_env: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     pub enabled: Option<bool>,
 }
@@ -1365,6 +1373,11 @@ pub struct PrSummary {
     /// Labels on the PR (empty when provider doesn't expose them).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Warnings from PR creation (e.g. a reviewer request that failed after the
+    /// PR was opened). Only ever populated on the create response; empty (and
+    /// omitted from JSON) everywhere else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1427,6 +1440,47 @@ pub struct PrCommit {
     pub subject: String,
 }
 
+/// One entry from `GET /repos/{id}/collaborators?q=` — a person the bound
+/// forge account can request as a reviewer. `name` is the provider-native
+/// handle submitted back in `CreatePrReq::reviewers`; `display_name` is for
+/// the typeahead UI only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Collaborator {
+    pub name: String,
+    pub display_name: String,
+}
+
+/// `POST /git/accounts/test` — verify a not-yet-saved account form. The token
+/// travels in the body exactly once and is never persisted or logged. The
+/// stored-token variant (`POST /git/accounts/{id}/test`) takes no body.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TestGitAccountReq {
+    #[serde(default)]
+    pub provider: Option<crate::domain::GitProviderKind>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub api_base_url: Option<String>,
+}
+
+/// Result of a git-account connection test. Auth/provider failures come back
+/// as `ok: false` + `error` (HTTP 200) so the form can render them inline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitAccountTestResp {
+    pub ok: bool,
+    /// Login the provider authenticated us as (when `ok`).
+    #[serde(default)]
+    pub login: Option<String>,
+    /// Token scopes echoed from response headers where the provider exposes
+    /// them (`X-OAuth-Scopes` on GitHub/Bitbucket); empty otherwise.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// `POST /repos/{id}/prs/{number}/request-changes`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestChangesReq {
@@ -1450,6 +1504,18 @@ pub struct CreatePrReq {
     /// `approval` artifact on the pack ("PR opened over unproven proof").
     #[serde(default)]
     pub allow_unproven: Option<bool>,
+    /// Open the PR as a draft. GitHub: native `draft` flag; GitLab: `Draft: `
+    /// title prefix (the API-blessed convention); Bitbucket Cloud: `draft` on
+    /// the create payload. Absent/None = today's ready-for-review behavior.
+    #[serde(default)]
+    pub draft: Option<bool>,
+    /// Reviewers to request at creation (provider-native usernames). GitHub
+    /// requests them in a best-effort second call after create; GitLab resolves
+    /// usernames to `reviewer_ids`; Bitbucket resolves workspace members to
+    /// `{uuid}` entries. Names that can't be requested/resolved surface in
+    /// `PrSummary::reviewer_warnings` — they never fail the PR creation.
+    #[serde(default)]
+    pub reviewers: Option<Vec<String>>,
 }
 
 /// `POST /repos/{id}/pr/draft` — ask an agent to draft a PR title + description
@@ -2201,27 +2267,28 @@ pub struct UpsertApiRequestReq {
     /// Optional `ssh`-kind connection id to tunnel this request through.
     #[serde(default)]
     pub ssh_connection_id: Option<Id>,
-    /// Persisted request extras — scripts, per-request settings
-    /// (`{timeout_ms?, follow_redirects?, verify_ssl?}`), docs, GraphQL vars.
-    /// Previously draft-only and silently dropped on Save.
+    /// Versioned extension object (scripts / docs / settings / GraphQL
+    /// variables / transport). Must be a JSON object when present; capped at
+    /// 256 KiB. See `ApiRequest::extras`.
     #[serde(default)]
-    pub pre_request_script: Option<String>,
-    #[serde(default)]
-    pub post_response_script: Option<String>,
-    #[serde(default)]
-    pub settings: Option<Value>,
-    #[serde(default)]
-    pub docs: Option<String>,
-    #[serde(default)]
-    pub graphql_variables: Option<String>,
+    pub extras: Option<Value>,
 }
 
 /// `POST/PATCH /workspaces/{wid}/api-client/environments[/{id}]`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpsertApiEnvironmentReq {
     pub name: String,
+    /// Non-secret variables. Any key also listed in `secret_keys` is stripped
+    /// from the row (its value belongs in `secret_values`).
     #[serde(default)]
     pub variables: Value,
+    /// Names of variables whose values are Keychain-backed.
+    #[serde(default)]
+    pub secret_keys: Vec<String>,
+    /// WRITE-ONLY: new/changed secret values, keyed by variable name. Absent
+    /// keys keep their previously stored value; values are never echoed back.
+    #[serde(default)]
+    pub secret_values: std::collections::BTreeMap<String, String>,
 }
 
 /// `POST /workspaces/{wid}/api-client/execute` — run a request through the

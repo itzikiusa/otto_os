@@ -394,8 +394,14 @@ workspace's `.mcp.json` (alongside Otto's own managed entries) when an agent
 session spawns there. Never auto-enabled: `enabled` defaults `false`, and a server
 is only written once you flip it on **and** a session then spawns in the workspace.
 `GET/POST /workspaces/{id}/mcp-servers`, `PATCH/DELETE /mcp-servers/{id}`
-(`McpServer{name, command, args, env, enabled, …}`; `env` is plaintext for now —
-keep long-lived secrets in your own MCP config until Keychain secret-refs land).
+(`McpServer{name, command, args, env, secret_env_keys, enabled, …}`). `env`
+holds NON-secret pairs; put tokens/keys in the write-only `secret_env` map
+instead — values are stored in the macOS **Keychain** (never Otto's DB) and
+responses return only the key names. Secret values are resolved when
+`.mcp.json` is rendered at agent spawn, so **the rendered `.mcp.json` on disk
+does contain the real values** — the agent CLI needs them; that file is
+user-local and out-of-tree. That residual is the accepted trade-off (fixing it
+would require per-CLI env-passing support).
 
 > Database-Explorer engine routes (`/connections/{id}/db/*`) reuse these same
 > connection profiles — see [`./database-explorer.md`](./database-explorer.md).

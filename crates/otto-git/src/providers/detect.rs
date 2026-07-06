@@ -37,6 +37,20 @@ pub fn detect(remote_url: &str) -> Option<(GitProviderKind, RemoteRef)> {
     Some((kind, RemoteRef { owner, repo }))
 }
 
+/// Forge discriminator for the repo payload: which PR backend a remote maps
+/// to. `"unrecognized"` = the repo *has* a remote but no supported forge
+/// matches (e.g. Bitbucket Server/DC, Gitea) — the UI renders an honest
+/// "PRs aren't available for <host>" empty state instead of nothing. The
+/// "no remote at all" case is the caller's (`Repo::forge` stays None).
+pub fn forge(remote_url: &str) -> &'static str {
+    match detect(remote_url) {
+        Some((GitProviderKind::Github, _)) => "github",
+        Some((GitProviderKind::Bitbucket, _)) => "bitbucket",
+        Some((GitProviderKind::Gitlab, _)) => "gitlab",
+        None => "unrecognized",
+    }
+}
+
 /// Split a remote URL into (host, path) for https://, ssh:// and scp-like
 /// (git@host:path) forms.
 fn split_host_path(url: &str) -> Option<(String, String)> {
@@ -138,6 +152,21 @@ mod tests {
         assert_eq!(detect("not a url"), None);
         assert_eq!(detect("https://github.com/only-owner"), None);
         assert_eq!(detect(""), None);
+    }
+
+    #[test]
+    fn forge_discriminator() {
+        assert_eq!(forge("git@github.com:octo/hello.git"), "github");
+        assert_eq!(forge("https://bitbucket.org/team/proj"), "bitbucket");
+        assert_eq!(forge("https://gitlab.com/o/g/r.git"), "gitlab");
+        // Bitbucket Server / DC and other unknown hosts: recognizably *a*
+        // remote, but not a supported forge.
+        assert_eq!(
+            forge("https://bitbucket-server.corp.example.com/scm/proj/repo.git"),
+            "unrecognized"
+        );
+        assert_eq!(forge("ssh://git@git.corp.example.com/team/app.git"), "unrecognized");
+        assert_eq!(forge("not a url"), "unrecognized");
     }
 
     #[test]

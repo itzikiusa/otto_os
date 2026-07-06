@@ -71,6 +71,7 @@
         <div class="req-tab" class:active={apiClient.activeTab === i} role="tab" tabindex="0" aria-selected={apiClient.activeTab === i} onclick={() => apiClient.switchTab(i)} onkeydown={(e) => { if (e.key === 'Enter') apiClient.switchTab(i); }}>
           <span class="req-tab-method {(t.method || 'GET').toLowerCase()}">{t.method}</span>
           <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
+          {#if apiClient.isDirty(t)}<span class="req-tab-dirty" title="Unsaved changes (includes scripts / docs / settings)"></span>{/if}
           <button class="req-tab-close" title="Close tab" aria-label="Close tab" onclick={(e) => { e.stopPropagation(); apiClient.closeTab(i); }}>×</button>
         </div>
       {/each}
@@ -197,6 +198,13 @@
   .req-tab-label {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .req-tab-dirty {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
   }
   .req-tab-close {
     border: none;

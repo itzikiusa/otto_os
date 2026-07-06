@@ -63,7 +63,7 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | CheckoutReq | RepoStatusResp |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
 | 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all | ws viewer | — | `PrSummary[]` |
-| 49 | POST /api/v1/repos/{id}/prs | ws editor | CreatePrReq | PrSummary |
+| 49 | POST /api/v1/repos/{id}/prs | ws editor | CreatePrReq (optional `draft` — GitHub native flag, GitLab `Draft:` title prefix, Bitbucket Cloud draft field; optional `reviewers: string[]` of provider-native handles) | PrSummary (`reviewer_warnings: string[]` — reviewer requests/lookups that failed after the PR opened; never fails the creation) |
 | 50 | GET /api/v1/repos/{id}/prs/{number} | ws viewer | — | PrDetail |
 | 51 | GET /api/v1/repos/{id}/prs/{number}/diff | ws viewer | — | DiffResp |
 | 52 | PATCH /api/v1/repos/{id}/prs/{number} | ws editor | UpdatePrReq | 204 |
@@ -505,14 +505,21 @@ auto-enabled: `enabled` defaults `false` on create, and a server is only written
 | DELETE /mcp-servers/{id} | ws editor | — | 204 |
 
 Notes:
-- `McpServer` = `{id, workspace_id, name, command, args:[string], env:{string:string}, enabled,
-  created_by, created_at, updated_at}`. `name` is the key under `.mcp.json`'s `mcpServers` map
-  and is unique within the workspace.
-- `CreateMcpServerReq{name, command, args?, env?, enabled?}` — `enabled` defaults `false`
-  (never auto-enabled). Empty `name`/`command` → 400 `invalid`.
-- `env` is stored in plaintext for now (like `.mcp.json` itself, which lives in the workspace);
-  long-lived secrets belong in the user's own MCP config until Keychain secret-refs land. The
-  merge preserves all other `.mcp.json` keys and never overwrites Otto's `otto-browser` entry.
+- `McpServer` = `{id, workspace_id, name, command, args:[string], env:{string:string},
+  secret_env_keys:[string], secret_ref?, enabled, created_by, created_at, updated_at}`. `name`
+  is the key under `.mcp.json`'s `mcpServers` map and is unique within the workspace.
+- `CreateMcpServerReq{name, command, args?, env?, secret_env?, enabled?}` — `enabled` defaults
+  `false` (never auto-enabled). Empty `name`/`command` → 400 `invalid`.
+- `env` holds NON-secret pairs only. `secret_env` (write-only, `{key: value}`) values are
+  persisted to the macOS Keychain (blob ref `mcp-{id}`, shared with the MCP Control Plane —
+  the two surfaces share `mcp_servers` rows) and never to the DB; responses carry only the key
+  names in `secret_env_keys`. On PATCH, `secret_env` present = full replacement of the secret
+  set; an EMPTY value keeps the currently stored value (`KEY=` sentinel); absent = unchanged.
+  A key listed in both `env` and `secret_env` is stored as secret only.
+- Secret values are resolved exclusively when `.mcp.json` is rendered at agent spawn — the
+  rendered file on disk contains real values (the agent CLI needs them; it is user-local and
+  out-of-tree), but Otto's DB does not. The merge preserves all other `.mcp.json` keys and
+  never overwrites Otto's `otto-browser` entry.
 
 ## SFTP file browser (`/connections/{id}/sftp/*`)
 
@@ -762,7 +769,10 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /git/accounts/{id}/remote-repos | member (owner) | — | remote repos visible to the git account |
-| GET /git/repos | Git:View | — | `Repo[]` across **all** workspaces the caller may view (root → all); workspace-independent list backing the Git page's top-level repo tabs + landing |
+| POST /git/accounts/{id}/test | member (owner) | — | GitAccountTestResp `{ok, login?, scopes: string[], error?}` — exercises the **stored** token with the provider's cheapest authenticated call (`GET /user`); scopes echoed from `X-OAuth-Scopes` where exposed. Auth failures are `200 {ok:false, error}` (inline rendering), the token never leaves the daemon |
+| POST /git/accounts/test | member | TestGitAccountReq `{provider, username, token, api_base_url?}` | GitAccountTestResp — same probe for a **not-yet-saved** form; the draft token travels in the body exactly once and is never persisted or logged |
+| GET /repos/{id}/collaborators?q= | ws viewer (+ bound-account owner, S4) | — | `Collaborator[] {name, display_name}` — provider-backed reviewer typeahead (GitHub repo collaborators / GitLab project members / Bitbucket workspace members), unfiltered list cached in-memory per repo for 30 s, `q` filters case-insensitively |
+| GET /git/repos | Git:View | — | `Repo[]` (each carries `forge`: `github`\|`bitbucket`\|`gitlab`\|`unrecognized`\|null — computed live from `remote_url`; `unrecognized` = remote exists but isn't a supported forge, null = no remote) across **all** workspaces the caller may view (root → all); workspace-independent list backing the Git page's top-level repo tabs + landing |
 | POST /workspaces/{id}/repos/detect | ws editor | DetectRepoReq | detect a local git repo (resolve remote/provider) |
 | GET /repos/{id}/refs | ws viewer | — | branch/tag refs |
 | POST /repos/{id}/fetch | ws editor | — | RepoStatusResp |
@@ -803,7 +813,8 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
-| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent |
+| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. |
+| POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). `409` if the row is not running/waiting or is the trailing summarizer; broadcasts `review_changed`. |
 | GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
 | POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |
 | GET /reviews/{review_id}/merge-readiness | ws viewer | — | `MergeReadiness` (open/total findings + approvals + ci_status + mergeable + conflicts + branch freshness) |
@@ -1495,6 +1506,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/history | ws viewer | — | request history |
 | DELETE /workspaces/{wid}/api-client/history | ws editor | — | clear history |
 | POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request |
+| POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
 | POST /workspaces/{wid}/api-client/grpc/describe | ws editor | GrpcDescribeReq | service/method descriptors |
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
@@ -1507,6 +1519,39 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | DELETE /workspaces/{wid}/api-client/automations/{id} | ws editor | — | 204 |
 | POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | — | run an automation |
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command |
+
+**Durable request extras.** `CreateRequestReq` / `UpdateRequestReq` → `Request` carry an
+optional `extras` object persisting the once-draft-only fields:
+`{v, transport?, graphql_variables?, docs_md?, scripts:{pre?,post?}?, settings:{timeout_ms?,
+follow_redirects?, tls_verify?}?}`. The UI owns the inner shape (like `auth`); the server
+validates only that it is a JSON object ≤ 256 KiB (else 400). `NULL`/absent = never set.
+Automation runs honour `extras`: pre/post scripts execute server-side with the same `pm` API
+as the interactive runner, `settings` map onto the per-request execution options, and
+`graphql_variables` are combined with the query body. Non-`http` transports are not runnable
+in automations (the step reports an error). The OpenAPI export serializes `docs_md` (operation
+`description`), `settings` (`x-otto-settings`) and `graphql_variables`
+(`x-otto-graphql-variables`); scripts map to Postman `prerequest`/`test` events in the
+git-sync export.
+
+**Keychain-backed secrets.** Secret auth members (bearer `token`, basic `password`, api_key
+`value`, oauth2 `client_secret`/`refresh_token`/`password`/`access_token`) never persist in
+SQLite: on save the daemon moves a plaintext member to the macOS Keychain
+(`otto.api.request.<request_id>`, one JSON blob per request) and stores a
+`{"$secret": "<ref>"}` marker in its place (lazy migration — old rows stay valid until
+touched, or swept via `POST …/secure-all`). Environments mirror this: `Environment` gains
+`secret_keys:[string]`; `CreateEnvironmentReq`/`UpdateEnvironmentReq` accept `secret_keys` +
+write-only `secret_values:{k:v}` (absent keys keep stored values); the row's `variables`
+holds non-secret pairs only and GET never returns a secret value. Markers resolve in-memory
+only at execute/automation time — the ref must point at a request in the same workspace
+(else 400) — and every export path (OpenAPI, git-sync, history) sees markers or `***`, never
+values. History snapshots redact secret members to `"***"`. `secure-all` additionally marks
+environment variables with secret-shaped NAMES (token/secret/passw/api-key/authorization/
+credential) as secret; it is idempotent and requires ws editor. The `oauth2/token` endpoint
+accepts `client_secret`/`password`/`refresh_token` as plain strings or `$secret` markers.
+
+**Cookie jar scope.** The cookie jar is per-WORKSPACE (in-memory per daemon run): cookies
+captured executing in one workspace are never replayed for another. The cookies endpoints
+above operate on the caller's workspace jar.
 
 **SSH tunnel (IP whitelisting).** Both the saved request (`CreateRequestReq` /
 `UpdateRequestReq` → `Request`) and `ExecuteRequestReq` accept an optional

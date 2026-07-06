@@ -5,7 +5,7 @@ Otto ships a "Postman"-style HTTP workbench inside the desktop app: organize
 variables**, fire them off through the daemon, and read a rich **response**
 viewer (status, timing, size, headers, body, trace). It also runs **automations**
 (saved requests chained with assertions + variable extraction), captures
-**history** and a shared **cookie jar**, and speaks **GraphQL, Server-Sent
+**history** and a per-workspace **cookie jar**, and speaks **GraphQL, Server-Sent
 Events, WebSocket, and unary/server-streaming gRPC** in addition to plain HTTP.
 
 > This document describes the **in-app REST workbench** — the thing you use to
@@ -31,7 +31,7 @@ under [Capabilities & limitations](#10-capabilities--limitations) and
 | **Persistence** | Workspace-scoped SQLite (collections, requests, environments, history, automations). |
 | **Scoping & auth** | All data is per-workspace. Reads need workspace **Viewer**; mutations + execution need **Editor**. |
 | **Guarded by default** | SSRF guard blocks loopback, private, link-local (incl. `169.254.169.254`), CGNAT, etc. Two sanctioned ways through: an SSH-tunnelled request (the bastion resolves + dials, so the local check is skipped) and the per-workspace **"Local: on"** toggle in the request toolbar (admin-only; `settings.api_client.allow_local`) for localhost/private dev servers. All other daemon egress keeps the full guard. |
-| **Secrets** | Stored as plaintext JSON in the workspace DB — **not** the macOS Keychain. Treat tokens/passwords accordingly. |
+| **Secrets** | Keychain-backed: secret auth members + secret environment variables live in the macOS **Keychain**; the DB stores opaque `$secret` markers (lazy-migrated on save, or in one pass via **Secure secrets**). History snapshots redact them to `***`. |
 
 ---
 
@@ -103,15 +103,14 @@ From the builder, **Save** (`⌘S`):
    keeps its existing collection unless you change it.
 3. Viewers are refused with a "Read-only" toast.
 
-> **What gets saved (and what does NOT):** A saved request persists exactly these
-> fields: `name`, `method`, `url`, `headers`, `query`, `body_mode`, `body`,
-> `auth`, the **SSH tunnel** choice (`ssh_connection_id`), plus its
-> `collection_id` and `position`. **Scripts, Docs, the other Settings
-> (timeout/redirects/TLS), GraphQL variables, and the transport kind
-> (SSE/WS/gRPC) are NOT stored with the request** — they live on the draft
-> only. An *open tab* keeps them across reloads (local tab persistence, see
-> above), but loading the saved request fresh from a collection won't bring
-> them back. See [§10](#10-capabilities--limitations).
+> **What gets saved:** A saved request persists `name`, `method`, `url`,
+> `headers`, `query`, `body_mode`, `body`, `auth`, the **SSH tunnel** choice
+> (`ssh_connection_id`), its `collection_id`/`position`, **and** an `extras`
+> object carrying **Scripts, Docs, Settings (timeout/redirects/TLS), GraphQL
+> variables and the transport kind** — reloading or loading the request fresh
+> from a collection restores all of them. Only the gRPC `.proto` upload stays
+> draft-local. Secret auth members are stored as Keychain `$secret` markers,
+> never plaintext (see [§11](#11-security)).
 
 ### Import / export
 
@@ -170,7 +169,7 @@ strip and URL bar change with it:
 - **Copy as curl** — builds a `curl` string from the current draft (client-side).
 - **Code** — generate a request snippet in **cURL, JavaScript (fetch), TypeScript
   (fetch), Python (requests), or Go (net/http)** and copy it.
-- **Cookies** — opens the shared cookie jar (see [§6](#6-sending--reading-responses)).
+- **Cookies** — opens this workspace's cookie jar (see [§6](#6-sending--reading-responses)).
 - **Vars** — session/runtime variables editor (see [§5](#5-environments--variables)).
 - **Active environment** chip — shows the active env name.
 - **Save** — save the draft (see [§3](#3-collections--requests)).
@@ -225,21 +224,24 @@ the three server-to-server grants above.
   set variables for chaining. Supported matchers: `toBe`, `toEqual`/`eql`,
   `toContain`, `toBeTruthy`, `toBeFalsy`, `above`, `below`.
 
-> **Scripts run in the webview, client-side** (`new Function(...)`), **not** in
-> the daemon, and are explicitly *not a security sandbox* — they are a
-> convenience runtime for your own endpoints. They are also **not persisted**
-> with the saved request (draft-only).
+> **Interactive runs execute scripts in the webview, client-side**
+> (`new Function(...)`); **automation runs execute them in the daemon** (a
+> `boa`-based engine exposing the same `pm` API). Neither is a security
+> sandbox — they are a convenience runtime for your own endpoints. Scripts
+> **persist with the saved request** (in `extras.scripts`) and round-trip to
+> Postman `prerequest`/`test` events on git sync.
 
-**Docs** — free-form **Markdown** notes for the request, with a rendered preview.
-(Draft-only; kept on the open tab across reloads, but not saved with the request.)
+**Docs** — free-form **Markdown** notes for the request, with a rendered
+preview. Saved with the request (`extras.docs_md`) and exported as the OpenAPI
+operation `description` / Postman request description.
 
 **Settings** — per-request execution options:
 
 - **Request timeout** (ms; blank = daemon default **60 s**).
 - **Automatically follow redirects** (default on).
 - **Verify TLS certificate** (default on; turning it off accepts self-signed /
-  invalid certs for that request). (Draft-only; kept on the open tab across
-  reloads, but not saved with the request.)
+  invalid certs for that request). Saved with the request
+  (`extras.settings`) and honoured by automation runs.
 - **SSH tunnel** (HTTP only) — pick one of the workspace's `ssh`-kind
   connections to route the request through a **SOCKS5-over-SSH** proxy, so it
   egresses from the bastion's IP. Use this for upstreams that **IP-whitelist**
@@ -393,9 +395,11 @@ variables for later steps (request chaining).
 
 After a run the environments are refreshed (extracts may have updated variables).
 
-> Automations run the request's **stored** fields only — they do **not** run
-> per-request pre/post Scripts (those are draft-only and not persisted), and they
-> don't take an explicit environment id (they always use the active one).
+> Automations replay the request's **stored** fields — including its persisted
+> **Scripts** (pre/post run server-side; `pm.test` results appear alongside the
+> step's assertions and affect its pass/fail), **Settings** and **GraphQL
+> variables**. They don't take an explicit environment id (they always use the
+> active one). Non-HTTP transports (SSE/WS/gRPC) are not runnable in automations.
 
 ---
 
@@ -462,10 +466,9 @@ ApiResponse     { status, status_text, headers[], body, body_base64,
 
 `body_mode` persists as one of `none | json | raw | form | graphql`
 (form-data/multipart and the raw sub-types are encoded into `body`/headers).
-**Scripts, Docs, GraphQL variables, transport kind, and `.proto` are
-not part of `ApiRequest`** — they live only in the UI draft. The Settings tab is
-draft-only too, **except** its **SSH tunnel** choice (`ssh_connection_id`), which
-is persisted.
+**Scripts, Docs, GraphQL variables, Settings and the transport kind persist in
+`ApiRequest.extras`** (a versioned extension object; `NULL` = never set). Only
+the gRPC `.proto` upload remains draft-local.
 
 ---
 
@@ -496,7 +499,7 @@ is persisted.
 - Chain saved requests into **automations** with assertions + JSONPath extraction.
 - Read responses with pretty/raw view, JSONPath filtering, image preview, header
   table, a timing **trace**, and **save to disk**; review **history** and the
-  shared **cookie jar**; **copy as curl** or generate code in 5 languages.
+  per-workspace **cookie jar**; **copy as curl** or generate code in 5 languages.
 - Configure **per-request timeout**, redirect-following, and TLS verification.
 
 ### You CANNOT
@@ -515,21 +518,19 @@ is persisted.
   server-side grants are implemented.
 - **Call client-streaming or bidirectional gRPC** — only unary and
   server-streaming are supported.
-- **Persist Scripts, Docs, Settings, GraphQL variables, or the transport kind
-  with a saved request** — these are draft-only: an open tab keeps them across
-  reloads (local tab persistence), but they are not stored in `ApiRequest`, so
-  loading the saved request fresh drops them. (They are *not* sent to git or
-  OpenAPI export either.)
-- **Run scripts inside automations** — automation steps execute the request's
-  stored fields only; per-request pre/post scripts don't run there.
-- **Run scripts server-side / sandboxed** — scripts execute in the webview and
-  are not a security boundary.
+- **Persist the gRPC `.proto` upload with a saved request** — it stays
+  draft-local (everything else — Scripts, Docs, Settings, GraphQL variables,
+  transport — persists in `extras` and rides the git/OpenAPI exports).
+- **Treat scripts as a sandbox** — interactive runs execute in the webview,
+  automation runs in the daemon's `boa` engine (loop-limited, but not a
+  security boundary).
 - **Inspect bodies over 25 MB inline** (not loaded) or see more than the first
   512 KB of text without **Save**; JSON pretty-print is skipped above 256 KB.
 - **See more than the last 500 streamed messages** (older ones are dropped from
   the console).
-- **Store secrets in the Keychain** — environment variables and auth credentials
-  live in the workspace SQLite DB as plaintext JSON (see [§11](#11-security)).
+- **Read a stored secret back over REST** — Keychain-backed auth members and
+  secret environment values are write-only; reads return `$secret` markers or
+  key names (see [§11](#11-security)).
 - Requests **time out at 60 s** by default (override per request in Settings).
 
 ---
@@ -568,19 +569,24 @@ ottod binds **loopback only** (`127.0.0.1:7700`) by default. The API client is a
 UI on top of it. (Note the irony made useful: the workbench's own SSRF guard means
 you can't point the workbench at the daemon — or any other localhost service.)
 
-### Secrets storage — important
+### Secrets storage
 
-Unlike the rest of Otto (which routes tokens/passwords through the macOS
-**Keychain** via `otto-keychain`), the API client **does not** use the Keychain.
-**Environment variables and request auth — bearer tokens, basic-auth passwords,
-API keys, OAuth client secrets and access tokens — are stored as plaintext JSON
-in the workspace SQLite state DB**, and request/response **history snapshots**
-(which may contain auth headers and response bodies) are persisted too. The
-**cookie jar is daemon-global** (shared across the whole daemon, not isolated per
-workspace) and is captured automatically from `Set-Cookie` and resent on matching
-requests. Treat the workbench data as sensitive; use `{{var}}` references rather
-than inlining long-lived secrets where practical, and clear history/cookies when
-appropriate.
+The API client uses the macOS **Keychain** (via `otto-keychain`), like the rest
+of Otto. Secret auth members — bearer tokens, basic-auth passwords, API-key
+values, OAuth client secrets / refresh tokens / passwords / access tokens — are
+moved to the Keychain on save (`otto.api.request.<id>`, one blob per request)
+and the DB row keeps only a `{"$secret": …}` marker. Environment variables
+marked **secret** (lock toggle) live in `otto.api.env.<id>`; the row's
+`variables` never holds their values and GET never returns them. Markers
+resolve **in-memory at execute time only** — exports (git sync, OpenAPI,
+curl/code snippets) always see markers or `***`. **History snapshots redact
+secret members to `***`.** Pre-existing plaintext rows migrate lazily on their
+next save, or all at once via the **Secure secrets** action
+(`POST …/secure-all`), which also auto-marks secret-shaped environment variable
+names (token/secret/password/api-key/…). The **cookie jar is per-workspace**
+(in-memory per daemon run) — cookies captured in one workspace are never
+replayed for another. Response **bodies** in history may still contain
+sensitive data your endpoints returned; clear history when appropriate.
 
 ### Roles
 
@@ -601,7 +607,8 @@ counts as Editor). The Viewer/Editor split matches the contract; see
 | TLS / certificate errors | Turn off **Settings → Verify TLS certificate** for that request to accept self-signed/invalid certs. |
 | "Read-only" toast on Save/edit | You have **Viewer** access to this workspace; you need **Editor** to save, mutate, or execute. |
 | Nothing loads / empty lists | No workspace is selected — the API client is workspace-scoped. |
-| My Scripts / Docs / Settings vanished after loading a saved request | Expected — those are draft-only and not persisted with a saved request; they survive only on the open tab (see [§10](#10-capabilities--limitations)). |
+| My Scripts / Docs / Settings vanished after loading a saved request | They persist now (in `extras`) — requests saved before this feature landed have none stored; re-save the request once to attach them. |
+| Auth field shows "•••••• stored in Keychain" | The value was migrated to the macOS Keychain; it is used at execute time. Type into the field to replace it. |
 | Saved request lost its body type as form-data | form-data/multipart and raw sub-types are encoded into `body`/headers; the stored `body_mode` is `none/json/raw/form/graphql` only. |
 | `client-streaming gRPC methods are not supported` | Only unary and server-streaming gRPC are implemented. |
 | OAuth2 "Get New Token" fails | Check the **Token URL** and grant; the authorization-code (redirect) grant isn't supported — use client-credentials / password / refresh-token. |

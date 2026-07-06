@@ -97,7 +97,15 @@ in the macOS Keychain; the database holds only an opaque reference to it.
    - **Token expiry** (optional) — GitHub/GitLab auto-detect expiry server-side;
      set a date here to get a reminder (and for Bitbucket, which exposes no
      expiry, to get one at all).
-6. Click **Add Account**.
+6. **(Optional) Test connection.** Click **Test connection** in the form to
+   verify the credentials before saving — Otto makes the provider's cheapest
+   authenticated call (`GET /user`) and renders the verdict inline: green
+   "ok — authenticated as <login>" (with token scopes where the provider exposes
+   them via `X-OAuth-Scopes`) or the provider's error verbatim. A typed token
+   tests the **draft** value (sent once, never persisted or logged); in Edit
+   mode with the token left blank it tests the **stored** one. Every saved
+   account row also has a **Test** button for the stored token.
+7. Click **Add Account**.
 
 When you add or clone a repo, Otto auto-binds it to your first account matching
 the repo's detected provider; you can also pick the account explicitly in the
@@ -305,7 +313,25 @@ branch/commit context menu, which pre-fills the source branch).
      `--set-upstream` for a fresh branch) so the provider can see it. A real push
      failure (e.g. auth) stops the flow before the PR call.
    - **opens the PR** (`POST /repos/{id}/prs` with `CreatePrReq` =
-     `{title, description, source_branch, target_branch}`) on the bound provider.
+     `{title, description, source_branch, target_branch, draft?, reviewers?}`)
+     on the bound provider.
+
+The sheet also carries:
+
+- **Open as draft** — a checkbox next to the action row, persisted **per repo**
+  in localStorage (teams that always draft don't re-tick it). Mapping: GitHub
+  sends the native `draft` flag; GitLab prefixes the title with `Draft: ` (and
+  Otto strips that prefix when rendering titles, so lists stay clean); Bitbucket
+  Cloud sends `draft` on the create payload — if the workspace plan rejects it,
+  the provider's error surfaces verbatim.
+- **Reviewers (optional)** — a chips input with typeahead backed by
+  `GET /repos/{id}/collaborators?q=` (GitHub repo collaborators, GitLab project
+  members, Bitbucket workspace members; 30 s per-repo cache). If the lookup
+  fails the input degrades to free text and names pass through verbatim.
+  Requests that fail after the PR opens (e.g. GitHub's second
+  `requested_reviewers` call, or a name that doesn't resolve on GitLab/
+  Bitbucket) come back as `reviewer_warnings` on the response and show as a
+  warning toast — they never fail the PR creation.
 
 **After creation**, the PR appears in the **Pull Requests** list. From PR detail
 you can read the diff, comments (inline + general, threaded), reviewers/approvals,
@@ -324,11 +350,12 @@ CI status, and mergeability; comment; approve; request changes; merge; or declin
 
 ### What about draft PRs?
 
-There is **no draft-PR toggle on creation**. `CreatePrReq` carries only
-title/description/source/target; Otto always opens a ready PR. (GitLab's
-`draft` flag is only *read* from a `Draft:`/`WIP:` title prefix, and Bitbucket's
-draft flag is not populated.) The "Draft message with agent" button refers to
-drafting the **text**, not a GitHub draft PR.
+**Supported.** Tick **Open as draft** in the create sheet (persisted per repo).
+GitHub uses the native `draft` field, GitLab the `Draft: ` title-prefix
+convention (stripped again when Otto renders titles), and Bitbucket Cloud the
+`draft` create field (plans that reject it surface the provider error). Note the
+distinction from the **"Draft message with agent"** button, which drafts the
+**text** (title + description), not the PR's draft state.
 
 ---
 
@@ -407,16 +434,23 @@ in **[code-review.md](./code-review.md)**.
   cherry-pick, revert, and stash — all in-app.
 - Run a **local merge** and resolve conflicts visually, with a dry-run preview.
 - **Open a PR** with the branch pushed for you and the title/description drafted
-  by an agent from the branch diff.
+  by an agent from the branch diff — optionally **as a draft** and with
+  **reviewers requested at creation** (typeahead from the forge's collaborator/
+  member list).
+- **Test a git account's credentials** from Settings → Git Accounts (row button
+  for the stored token, form button for a not-yet-saved one).
 - List/read/comment/approve/request-changes/merge/decline PRs across all three
   forges, with CI status and mergeability shown.
 - Push/pull over HTTPS using a Keychain-stored token, or over SSH via your agent.
 
 **You cannot (by design / current behavior):**
 
-- Create a provider **draft PR** — PRs are always opened ready (see §7).
-- Use providers other than GitHub / Bitbucket Cloud / GitLab. Unrecognized hosts
-  have no PR client; **Bitbucket Server / Data Center is not auto-detected.**
+- Use providers other than GitHub / Bitbucket Cloud / GitLab. Unrecognized
+  hosts have no PR client — the PR tab says so explicitly ("PRs aren't available
+  for `<host>`") instead of failing silently; **Bitbucket Server / Data Center
+  is not supported.**
+- Edit reviewers on an **existing** PR from Otto (create-time only), request
+  team/group reviewers, or get CODEOWNERS-derived suggestions.
 - Push to a **protected branch** directly. In this repo `main` is PR-protected —
   **default to opening a PR over `main`**, not pushing to it.
 - Use another user's bound git credential. A repo binds exactly one account, and
@@ -452,6 +486,7 @@ in **[code-review.md](./code-review.md)**.
 
 | Symptom | Likely cause & fix |
 |---|---|
+| **Not sure a token works at all** | Use **Test** on the account row (or **Test connection** in the form) — it runs `GET /user` with the token and shows who you authenticated as + scopes, or the provider's exact error. |
 | **403 / "Bad credentials" creating or listing a PR** | Token missing the right scope. GitHub: `repo` (classic) or Contents+Pull-requests read/write (fine-grained). Bitbucket: Pull-requests read/write. GitLab: `api`. Re-add/edit the account with a fresh token. |
 | **"repo has no git account" (400) on PR routes** | The repo isn't bound to an account, or its provider doesn't match the account's. Bind a matching account (Add-Repository sheet or re-detect). |
 | **403 even though the token is fine** | You're not the account **owner**. A repo's credential is usable only by the owner or root (S4). Have the owner act, or bind your own account. |

@@ -39,15 +39,17 @@ function effective(d: ApiDraft): Effective {
   if (d.body_mode === 'json' && d.body.trim() && !hasCt) headers.push(['Content-Type', 'application/json']);
   if (d.body_mode === 'form' && d.body.trim() && !hasCt) headers.push(['Content-Type', 'application/x-www-form-urlencoded']);
 
-  // Auth → header / query (api_key in query handled inline below)
+  // Auth → header / query (api_key in query handled inline below).
+  // Keychain-backed members render as *** — a snippet must never leak one.
+  const sv = (v: unknown): string => (typeof v === 'string' ? v : '***');
   const a = d.auth;
-  if (a.type === 'bearer' && a.token) headers.push(['Authorization', `Bearer ${a.token}`]);
-  else if (a.type === 'basic') headers.push(['Authorization', `Basic <base64(${a.username}:${a.password})>`]);
+  if (a.type === 'bearer' && a.token) headers.push(['Authorization', `Bearer ${sv(a.token)}`]);
+  else if (a.type === 'basic') headers.push(['Authorization', `Basic <base64(${a.username}:${sv(a.password)})>`]);
   else if (a.type === 'api_key' && a.key) {
-    if (a.in === 'header') headers.push([a.key, a.value]);
-    else url += (url.includes('?') ? '&' : '?') + `${encodeURIComponent(a.key)}=${encodeURIComponent(a.value)}`;
+    if (a.in === 'header') headers.push([a.key, sv(a.value)]);
+    else url += (url.includes('?') ? '&' : '?') + `${encodeURIComponent(a.key)}=${encodeURIComponent(sv(a.value))}`;
   }
-  else if (a.type === 'oauth2' && a.access_token) headers.push(['Authorization', `${a.token_type || 'Bearer'} ${a.access_token}`]);
+  else if (a.type === 'oauth2' && a.access_token) headers.push(['Authorization', `${a.token_type || 'Bearer'} ${sv(a.access_token)}`]);
 
   const body = d.body_mode !== 'none' && d.body.trim() ? d.body : null;
   return { method: d.method.toUpperCase(), url, headers, body };
