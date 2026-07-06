@@ -325,6 +325,8 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
         target_branch: draft.target_branch,
         proof_pack_id: run.proof_pack_id.clone(),
         allow_unproven: None,
+        draft: None,
+        reviewers: None,
     };
     let pr = provider.create_pr(&remote, &create).await?;
     ctx.runs

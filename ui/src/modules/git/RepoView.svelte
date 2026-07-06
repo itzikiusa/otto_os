@@ -13,6 +13,7 @@
   import MergeApprovalModal from './MergeApprovalModal.svelte';
   import ConflictResolverView from './ConflictResolverView.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
@@ -108,6 +109,22 @@
   // Bumping this key re-mounts GraphView so its refs/commits effect re-runs
   // after a merge changes history.
   let graphKey = $state(0);
+
+  /** Host of a remote URL for the unsupported-forge message — handles
+   *  https://, ssh:// and scp-like (git@host:path) forms (mirrors the daemon's
+   *  detect.rs split). */
+  function remoteHost(url: string | null): string {
+    if (!url) return 'this remote';
+    const u = url.trim();
+    for (const scheme of ['https://', 'http://', 'ssh://', 'git://']) {
+      if (u.startsWith(scheme)) {
+        const rest = u.slice(scheme.length).replace(/^[^@/]+@/, '');
+        return rest.split('/')[0]?.split(':')[0] || 'this remote';
+      }
+    }
+    const scp = u.match(/^(?:[^@/]+@)?([^:/]+):/);
+    return scp?.[1] ?? 'this remote';
+  }
 
   const tabs = [
     { id: 'graph', label: 'Graph' },
@@ -224,7 +241,17 @@
     {:else if tab === 'history'}
       <HistoryView repoId={repo.id} />
     {:else if tab === 'prs'}
-      <PrList repoId={repo.id} />
+      {#if repo.forge === 'unrecognized'}
+        <!-- Honest dead-end instead of a silent one: the remote host isn't a
+             forge Otto can open PRs on (e.g. Bitbucket Server / Data Center). -->
+        <EmptyState
+          icon="pr"
+          title="Pull requests aren't available for {remoteHost(repo.remote_url)}"
+          body="Otto supports GitHub, Bitbucket Cloud, and GitLab. This repository's remote isn't one of them, so there's no PR surface here."
+        />
+      {:else}
+        <PrList repoId={repo.id} />
+      {/if}
     {:else if tab === 'review'}
       <div class="rv-tab-scroll">
         <LocalReviewPanel repoId={repo.id} />

@@ -63,6 +63,9 @@ fn row_to_repo(r: &sqlx::sqlite::SqliteRow) -> Result<Repo> {
         provider: provider.as_deref().and_then(GitProviderKind::parse),
         git_account_id: r.get("git_account_id"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
+        // Computed from remote_url by the otto-git API layer (detect::forge);
+        // the store has no detection logic.
+        forge: None,
     })
 }
 
