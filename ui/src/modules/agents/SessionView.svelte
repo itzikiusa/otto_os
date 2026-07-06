@@ -10,7 +10,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { now } from '../../lib/stores/now.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { router } from '../../lib/router.svelte';
@@ -75,7 +75,6 @@
     ((session?.meta?.name_full as string | undefined) ?? '').trim(),
   );
 
-  let menuOpen = $state(false);
   let renaming = $state(false);
   // Bumped after a successful restart so the embedded <Terminal> drops its
   // exited overlay and reconnects to the freshly respawned/resumed PTY.
@@ -109,7 +108,6 @@
   let dirDraft = $state('');
 
   function openDirs(): void {
-    menuOpen = false;
     const seed = session?.meta?.extra_dirs;
     extraDirs = Array.isArray(seed) ? seed.filter((d): d is string => typeof d === 'string') : [];
     dirDraft = '';
@@ -200,7 +198,6 @@
   const keepAlive = $derived(session?.meta?.keep_alive === true);
 
   async function toggleKeepAlive(): Promise<void> {
-    menuOpen = false;
     try {
       await ws.updateSessionMeta(sessionId, { keep_alive: !keepAlive });
       toasts.info(keepAlive ? 'Keep-alive disabled' : 'Keep-alive enabled', keepAlive ? 'Session may auto-suspend.' : 'Session will not be auto-suspended.');
@@ -210,7 +207,6 @@
   }
 
   async function archive(): Promise<void> {
-    menuOpen = false;
     try {
       await ws.archiveSession(sessionId);
     } catch (e) {
@@ -219,7 +215,6 @@
   }
 
   async function del(): Promise<void> {
-    menuOpen = false;
     try {
       await ws.killSession(sessionId);
     } catch (e) {
@@ -228,7 +223,6 @@
   }
 
   async function detachIssue(): Promise<void> {
-    menuOpen = false;
     try {
       await ws.detachIssue(sessionId);
       toasts.info('Issue detached');
@@ -238,17 +232,14 @@
   }
 
   function openAttachIssue(): void {
-    menuOpen = false;
     attachIssueOpen = true;
   }
 
   function openAttachProductStory(): void {
-    menuOpen = false;
     attachProductOpen = true;
   }
 
   function openHandover(): void {
-    menuOpen = false;
     handoverOpen = true;
   }
 
@@ -256,16 +247,42 @@
    *  kinds (connections) have no right panel, so navigate to the Canvas
    *  module directly instead. */
   function openCanvas(): void {
-    menuOpen = false;
     if (isAgent) {
       ui.openRight('canvas');
     } else {
       router.go('canvas');
     }
   }
-</script>
 
-<svelte:window onclick={() => (menuOpen = false)} />
+  /** Single source of truth for the session actions menu — served both by the
+   *  header ⋯ button and the title's right-click, through the global clamped
+   *  ctxMenu (viewport clamp + max-height come for free). */
+  function sessionMenuItems(): MenuItem[] {
+    return [
+      { label: 'Rename…', icon: 'edit', action: startRename },
+      ...(isAgent ? [{ label: 'Additional directories…', icon: 'folder', action: openDirs }] : []),
+      ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover }] : []),
+      { separator: true },
+      { label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…', icon: 'ticket', action: openAttachIssue },
+      ...(attachedIssue ? [{ label: 'Detach issue', icon: 'link', action: detachIssue }] : []),
+      { label: 'Attach product story…', icon: 'file', action: openAttachProductStory },
+      { label: 'Canvas…', icon: 'shapes', action: openCanvas },
+      ...(isAgent
+        ? [
+            { separator: true } as MenuItem,
+            {
+              label: keepAlive ? 'Unpin (allow auto-suspend)' : 'Pin (keep alive)',
+              icon: 'pin',
+              action: () => void toggleKeepAlive(),
+            },
+          ]
+        : []),
+      { separator: true },
+      { label: 'Archive', icon: 'archive', action: () => void archive() },
+      { label: 'Delete', icon: 'trash', danger: true, action: () => void del() },
+    ];
+  }
+</script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <section
@@ -299,19 +316,7 @@
         tabindex="0"
         title="Double-click to rename; right-click for options"
         ondblclick={startRename}
-        oncontextmenu={!readOnly ? (e) => ctxMenu.show(e, [
-          { label: 'Rename…', icon: 'edit', action: startRename },
-          ...(isAgent ? [{ label: 'Additional directories…', icon: 'folder', action: openDirs }] : []),
-          ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover }] : []),
-          { separator: true },
-          { label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…', icon: 'ticket', action: openAttachIssue },
-          ...(attachedIssue ? [{ label: 'Detach issue', icon: 'link', action: detachIssue }] : []),
-          { label: 'Attach product story…', icon: 'file', action: openAttachProductStory },
-          { label: 'Canvas…', icon: 'shapes', action: openCanvas },
-          { separator: true },
-          { label: 'Archive', icon: 'archive', action: archive },
-          { label: 'Delete', icon: 'trash', danger: true as const, action: del },
-        ]) : undefined}
+        oncontextmenu={!readOnly ? (e) => ctxMenu.show(e, sessionMenuItems()) : undefined}
       >{session?.title ?? sessionId}</span>
     {/if}
     {#if nameFull && nameFull !== session?.title}
@@ -366,37 +371,12 @@
       <button class="icon-btn" onclick={restart} title="Restart session"><Icon name="refresh" size={13} /></button>
     {/if}
     {#if !readOnly}
-      <div class="menu-wrap" onmousedown={(e) => e.stopPropagation()} role="presentation">
-        <button
-          class="icon-btn"
-          onclick={(e) => { e.stopPropagation(); menuOpen = !menuOpen; }}
-          title="More…"
-        >⋯</button>
-        {#if menuOpen}
-          <div class="menu" role="menu">
-            <button role="menuitem" onclick={startRename}>Rename…</button>
-            {#if isAgent}
-              <button role="menuitem" onclick={openDirs}>Additional directories…</button>
-              <button role="menuitem" onclick={openHandover}>Hand over to…</button>
-            {/if}
-            <button role="menuitem" onclick={openAttachIssue}>
-              {attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…'}
-            </button>
-            {#if attachedIssue}
-              <button role="menuitem" onclick={detachIssue}>Detach issue</button>
-            {/if}
-            <button role="menuitem" onclick={openAttachProductStory}>Attach product story…</button>
-            <button role="menuitem" onclick={openCanvas}>Canvas…</button>
-            {#if isAgent}
-              <button role="menuitem" onclick={toggleKeepAlive} title={keepAlive ? 'Disable keep-alive so the session may auto-suspend when idle' : 'Prevent this session from auto-suspending when idle'}>
-                {keepAlive ? 'Unpin (allow auto-suspend)' : 'Pin (keep alive)'}
-              </button>
-            {/if}
-            <button role="menuitem" onclick={archive}>Archive</button>
-            <button role="menuitem" class="danger" onclick={del}>Delete</button>
-          </div>
-        {/if}
-      </div>
+      <button
+        class="icon-btn"
+        onmousedown={(e) => e.stopPropagation()}
+        onclick={(e) => ctxMenu.show(e, sessionMenuItems())}
+        title="More…"
+      >⋯</button>
     {/if}
     {#if showClose}
       <button class="icon-btn" onclick={onclosepane} title="Close pane (keeps running)"><Icon name="x" size={12} /></button>
@@ -628,41 +608,6 @@
     max-width: 200px;
     outline: none;
   }
-  .menu-wrap {
-    position: relative;
-    display: inline-flex;
-  }
-  .menu {
-    position: absolute;
-    top: 22px;
-    inset-inline-end: 0;
-    z-index: 30;
-    min-width: 130px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
-    padding: 4px;
-    display: flex;
-    flex-direction: column;
-  }
-  .menu button {
-    text-align: start;
-    background: transparent;
-    border: none;
-    color: var(--text);
-    font-size: 12px;
-    padding: 5px 8px;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-  }
-  .menu button:hover {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-  }
-  .menu button.danger {
-    color: var(--status-exited);
-  }
-
   /* Additional directories editor (mirrors New Session). */
   .dir-list {
     list-style: none;
