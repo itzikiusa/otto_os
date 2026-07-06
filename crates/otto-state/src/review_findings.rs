@@ -143,15 +143,35 @@ pub fn compute_fingerprint(
     hasher.update(b"|");
     hasher.update(category.unwrap_or("").trim().to_lowercase().as_bytes());
     hasher.update(b"|");
-    // Cap body to 512 chars (unicode-safe via char boundary trim) to avoid
-    // tiny wording changes producing different fingerprints.
+    hasher.update(normalized_body_cap(body).as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Body normalization shared by [`compute_fingerprint`] and
+/// [`fallback_dedupe_key`]: trim, cap to 512 chars (unicode-safe via char
+/// boundary), lowercase — so tiny wording changes don't produce distinct keys.
+fn normalized_body_cap(body: &str) -> String {
     let body_trimmed = body.trim();
     let cap = body_trimmed
         .char_indices()
         .nth(512)
         .map(|(i, _)| i)
         .unwrap_or(body_trimmed.len());
-    hasher.update(body_trimmed[..cap].to_lowercase().as_bytes());
+    body_trimmed[..cap].to_lowercase()
+}
+
+/// Dedupe key for the deterministic summarizer FALLBACK — collapses the same
+/// issue reported by multiple review agents. Normalized (path, line-bucket,
+/// body): raw per-agent findings carry no category, so a 10-line bucket plus
+/// the fingerprint body normalization stands in for it. Not persisted; only
+/// used to merge duplicates within a single run.
+pub fn fallback_dedupe_key(path: Option<&str>, line: Option<u32>, body: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(path.unwrap_or("").trim().to_lowercase().as_bytes());
+    hasher.update(b"|");
+    hasher.update(line.map(|l| l / 10).unwrap_or(u32::MAX).to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(normalized_body_cap(body).as_bytes());
     hex::encode(hasher.finalize())
 }
 
