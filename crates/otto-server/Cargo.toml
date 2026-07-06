@@ -62,6 +62,9 @@ uuid.workspace = true
 rand.workspace = true
 reqwest_cookie_store.workspace = true
 sha2.workspace = true
+# Server-side pre/post request scripts for API-client automations: pure-Rust JS
+# engine (no native build deps) running the same `pm` API the UI runner defines.
+boa_engine = "0.20"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -7,7 +7,7 @@
 //! Execution runs through the daemon via a shared `reqwest` client (mirroring
 //! the browser proxy), so requests dodge webview CORS/CSP and get real timing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -34,9 +34,14 @@ use serde_json::{json, Value};
 use crate::api_helpers::{
     collection_to_openapi, eval_assertion, json_path, parse_curl, percent_decode,
 };
+use crate::api_scripts::{self, ScriptRequest, ScriptResponse};
+use crate::api_secrets;
 use crate::auth::{require_ws_role, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
+
+/// Hard cap for a request's `extras` extension object (serialized).
+const EXTRAS_MAX_BYTES: usize = 256 * 1024;
 
 /// Hard cap for `GET .../history?limit=`.
 const HISTORY_MAX: i64 = 500;
@@ -62,32 +67,42 @@ fn repo(ctx: &ServerCtx) -> ApiClientRepo {
     ApiClientRepo::new(ctx.pool.clone())
 }
 
-/// Shared outbound HTTP client (built once). Follows redirects, generous body
-/// timeout enforced per-request via `.timeout()`.
-/// Daemon-global cookie jar shared by the API client (captures Set-Cookie and
-/// resends on matching requests, so login/session flows just work).
-fn cookie_jar() -> std::sync::Arc<reqwest_cookie_store::CookieStoreMutex> {
-    static JAR: OnceLock<std::sync::Arc<reqwest_cookie_store::CookieStoreMutex>> = OnceLock::new();
-    JAR.get_or_init(|| {
-        std::sync::Arc::new(reqwest_cookie_store::CookieStoreMutex::new(
-            reqwest_cookie_store::CookieStore::default(),
-        ))
-    })
-    .clone()
+/// Per-WORKSPACE cookie jars (captures Set-Cookie and resends on matching
+/// requests, so login/session flows just work). Keyed by the executing
+/// workspace so cookies captured while working in workspace A are never
+/// replayed for workspace B. In-memory per daemon run, like the old global.
+fn cookie_jar(wid: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
+    static JARS: OnceLock<StdMutex<HashMap<Id, Arc<reqwest_cookie_store::CookieStoreMutex>>>> =
+        OnceLock::new();
+    let jars = JARS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut map = jars.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(wid.clone())
+        .or_insert_with(|| {
+            Arc::new(reqwest_cookie_store::CookieStoreMutex::new(
+                reqwest_cookie_store::CookieStore::default(),
+            ))
+        })
+        .clone()
 }
 
-fn http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent("Otto-ApiClient/1.0")
-            // SSRF guard: cap + re-validate each redirect hop's host so an
-            // upstream 30x can't bounce us into a private/loopback address.
-            .redirect(net_guard::redirect_policy())
-            .cookie_provider(cookie_jar())
-            .build()
-            .unwrap_or_default()
-    })
+/// Shared outbound HTTP client per workspace (built once per wid). Follows
+/// redirects, generous body timeout enforced per-request via `.timeout()`.
+fn http_client(wid: &Id) -> reqwest::Client {
+    static CLIENTS: OnceLock<StdMutex<HashMap<Id, reqwest::Client>>> = OnceLock::new();
+    let clients = CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut map = clients.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(wid.clone())
+        .or_insert_with(|| {
+            reqwest::Client::builder()
+                .user_agent("Otto-ApiClient/1.0")
+                // SSRF guard: cap + re-validate each redirect hop's host so an
+                // upstream 30x can't bounce us into a private/loopback address.
+                .redirect(net_guard::redirect_policy())
+                .cookie_provider(cookie_jar(wid))
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
 }
 
 /// Build a one-off client when per-request settings deviate from the defaults
@@ -95,7 +110,11 @@ fn http_client() -> &'static reqwest::Client {
 /// through a SOCKS5 proxy. `None` → use the shared client. TLS verification is
 /// only ever skipped when the request explicitly sets `verify_ssl=false` (never
 /// the default).
-fn build_settings_client(req: &ExecuteApiReq, proxy: Option<&str>) -> Option<reqwest::Client> {
+fn build_settings_client(
+    wid: &Id,
+    req: &ExecuteApiReq,
+    proxy: Option<&str>,
+) -> Option<reqwest::Client> {
     let no_redirect = req.follow_redirects == Some(false);
     let no_verify = req.verify_ssl == Some(false);
     if !no_redirect && !no_verify && proxy.is_none() {
@@ -103,7 +122,7 @@ fn build_settings_client(req: &ExecuteApiReq, proxy: Option<&str>) -> Option<req
     }
     let mut builder = reqwest::Client::builder()
         .user_agent("Otto-ApiClient/1.0")
-        .cookie_provider(cookie_jar());
+        .cookie_provider(cookie_jar(wid));
     builder = if no_redirect {
         builder.redirect(reqwest::redirect::Policy::none())
     } else {
@@ -375,13 +394,25 @@ pub async fn create_request(
     if req.name.trim().is_empty() {
         return Err(Error::Invalid("request name must not be empty".into()).into());
     }
+    let extras = validate_extras(req.extras.clone())?;
     let position = repo(&ctx)
         .list_requests(&wid, req.collection_id.as_ref())
         .await?
         .len() as i64;
-    let created = repo(&ctx)
-        .create_request(req_to_new(&wid, req, position))
-        .await?;
+
+    // Pre-generate the id so secret members can move to the Keychain BEFORE the
+    // row exists (lazy migration on save; plaintext never touches SQLite).
+    let id = otto_core::new_id();
+    let own_ref = api_secrets::request_ref(&id);
+    let (auth_row, blob) =
+        api_secrets::split_auth_secrets(&normalize_json_object(req.auth.clone()), &own_ref, &BTreeMap::new())
+            .map_err(|m| ApiError(Error::Invalid(m)))?;
+    api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob)?;
+
+    let mut new = req_to_new(&wid, req, position, extras);
+    new.id = Some(id);
+    new.auth = auth_row;
+    let created = repo(&ctx).create_request(new).await?;
     Ok(Json(created))
 }
 
@@ -396,9 +427,20 @@ pub async fn update_request(
     let repo = repo(&ctx);
     let existing = repo.get_request(&id).await?;
     ensure_in_workspace(&existing.workspace_id, &wid)?;
-    let updated = repo
-        .update_request(&id, req_to_new(&wid, req, existing.position))
-        .await?;
+    let extras = validate_extras(req.extras.clone())?;
+
+    // Lazy secret migration: plaintext secret members move to the Keychain;
+    // markers sent back unchanged keep their stored values.
+    let own_ref = api_secrets::request_ref(&id);
+    let existing_blob = api_secrets::load_blob(ctx.secrets.as_ref(), &own_ref);
+    let (auth_row, blob) =
+        api_secrets::split_auth_secrets(&normalize_json_object(req.auth.clone()), &own_ref, &existing_blob)
+            .map_err(|m| ApiError(Error::Invalid(m)))?;
+    api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob)?;
+
+    let mut new = req_to_new(&wid, req, existing.position, extras);
+    new.auth = auth_row;
+    let updated = repo.update_request(&id, new).await?;
     Ok(Json(updated))
 }
 
@@ -412,11 +454,39 @@ pub async fn delete_request(
     let repo = repo(&ctx);
     ensure_in_workspace(&repo.get_request(&id).await?.workspace_id, &wid)?;
     repo.delete_request(&id).await?;
+    // Best-effort: drop the request's Keychain blob with it.
+    let _ = ctx.secrets.delete(&api_secrets::request_ref(&id));
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn req_to_new(wid: &Id, req: UpsertApiRequestReq, position: i64) -> NewApiRequest {
+/// Enforce the `extras` contract: JSON object, ≤ 256 KiB serialized. The UI
+/// owns the inner shape (like `auth`).
+fn validate_extras(extras: Option<Value>) -> Result<Option<Value>, ApiError> {
+    match extras {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) if !v.is_object() => {
+            Err(ApiError(Error::Invalid("extras must be a JSON object".into())))
+        }
+        Some(v) => {
+            if v.to_string().len() > EXTRAS_MAX_BYTES {
+                return Err(ApiError(Error::Invalid(format!(
+                    "extras exceeds the {} KiB cap",
+                    EXTRAS_MAX_BYTES / 1024
+                ))));
+            }
+            Ok(Some(v))
+        }
+    }
+}
+
+fn req_to_new(
+    wid: &Id,
+    req: UpsertApiRequestReq,
+    position: i64,
+    extras: Option<Value>,
+) -> NewApiRequest {
     NewApiRequest {
+        id: None,
         workspace_id: wid.clone(),
         collection_id: req.collection_id,
         name: req.name.trim().to_string(),
@@ -428,6 +498,7 @@ fn req_to_new(wid: &Id, req: UpsertApiRequestReq, position: i64) -> NewApiReques
         body: req.body,
         auth: normalize_json_object(req.auth),
         ssh_connection_id: req.ssh_connection_id,
+        extras,
         position,
     }
 }
@@ -457,13 +528,26 @@ pub async fn create_environment(
     if req.name.trim().is_empty() {
         return Err(Error::Invalid("environment name must not be empty".into()).into());
     }
+    // The row never holds a value for a key marked secret; those arrive only
+    // via the write-only `secret_values` and go straight to the Keychain.
+    let variables = api_secrets::strip_secret_variables(
+        &normalize_json_object(req.variables),
+        &req.secret_keys,
+    );
     let env = repo(&ctx)
         .create_environment(NewApiEnvironment {
             workspace_id: wid,
             name: req.name.trim().to_string(),
-            variables: normalize_json_object(req.variables),
+            variables,
+            secret_keys: req.secret_keys.clone(),
         })
         .await?;
+    let blob: BTreeMap<String, String> = req
+        .secret_values
+        .into_iter()
+        .filter(|(k, _)| req.secret_keys.contains(k))
+        .collect();
+    api_secrets::store_blob(ctx.secrets.as_ref(), &api_secrets::env_ref(&env.id), &blob)?;
     Ok(Json(env))
 }
 
@@ -477,9 +561,23 @@ pub async fn update_environment(
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let repo = repo(&ctx);
     ensure_in_workspace(&repo.get_environment(&id).await?.workspace_id, &wid)?;
-    let vars = normalize_json_object(req.variables);
+    let vars = api_secrets::strip_secret_variables(
+        &normalize_json_object(req.variables),
+        &req.secret_keys,
+    );
+    // Keychain blob: keep stored values for keys still marked secret, overlay
+    // the write-only new/changed values, drop everything unmarked.
+    let sref = api_secrets::env_ref(&id);
+    let mut blob = api_secrets::load_blob(ctx.secrets.as_ref(), &sref);
+    blob.retain(|k, _| req.secret_keys.contains(k));
+    for (k, v) in req.secret_values {
+        if req.secret_keys.contains(&k) {
+            blob.insert(k, v);
+        }
+    }
+    api_secrets::store_blob(ctx.secrets.as_ref(), &sref, &blob)?;
     let env = repo
-        .update_environment(&id, Some(req.name.trim()), Some(&vars))
+        .update_environment(&id, Some(req.name.trim()), Some(&vars), Some(&req.secret_keys))
         .await?;
     Ok(Json(env))
 }
@@ -494,6 +592,8 @@ pub async fn delete_environment(
     let repo = repo(&ctx);
     ensure_in_workspace(&repo.get_environment(&id).await?.workspace_id, &wid)?;
     repo.delete_environment(&id).await?;
+    // Best-effort: drop the environment's Keychain blob with it.
+    let _ = ctx.secrets.delete(&api_secrets::env_ref(&id));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -575,14 +675,14 @@ pub async fn import_curl(
     Ok(Json(parse_curl(&req.curl)?))
 }
 
-/// `GET /workspaces/{wid}/api-client/cookies` — list the shared cookie jar.
+/// `GET /workspaces/{wid}/api-client/cookies` — list this workspace's jar.
 pub async fn list_cookies(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let jar = cookie_jar();
+    let jar = cookie_jar(&wid);
     let store = jar
         .lock()
         .map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?;
@@ -600,14 +700,14 @@ pub async fn list_cookies(
     Ok(Json(Value::Array(cookies)))
 }
 
-/// `DELETE /workspaces/{wid}/api-client/cookies` — clear the shared cookie jar.
+/// `DELETE /workspaces/{wid}/api-client/cookies` — clear this workspace's jar.
 pub async fn clear_cookies(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let jar = cookie_jar();
+    let jar = cookie_jar(&wid);
     jar.lock()
         .map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?
         .clear();
@@ -620,16 +720,18 @@ pub struct OAuth2TokenReq {
     token_url: String,
     #[serde(default)]
     client_id: String,
+    /// Plain string, or a `{"$secret": …}` marker when the stored request's
+    /// Keychain-backed value is being replayed (resolved server-side).
     #[serde(default)]
-    client_secret: String,
+    client_secret: Value,
     #[serde(default)]
     scope: String,
     #[serde(default)]
     username: String,
     #[serde(default)]
-    password: String,
+    password: Value,
     #[serde(default)]
-    refresh_token: String,
+    refresh_token: Value,
 }
 
 /// `POST /workspaces/{wid}/api-client/oauth2/token` — perform an OAuth 2.0
@@ -644,17 +746,26 @@ pub async fn oauth2_token(
 ) -> ApiResult<Json<Value>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
 
+    // Secret-shaped fields may arrive as `$secret` markers (stored request
+    // auth replayed by the UI) — resolve them from the Keychain, workspace-
+    // checked, exactly like execute.
+    let client_secret =
+        resolve_marker_or_string(&ctx, &wid, &req.client_secret, "client_secret").await?;
+    let password = resolve_marker_or_string(&ctx, &wid, &req.password, "password").await?;
+    let refresh_token =
+        resolve_marker_or_string(&ctx, &wid, &req.refresh_token, "refresh_token").await?;
+
     let mut form: Vec<(&str, &str)> = Vec::new();
     match req.grant.as_str() {
         "client_credentials" => form.push(("grant_type", "client_credentials")),
         "password" => {
             form.push(("grant_type", "password"));
             form.push(("username", &req.username));
-            form.push(("password", &req.password));
+            form.push(("password", &password));
         }
         "refresh_token" => {
             form.push(("grant_type", "refresh_token"));
-            form.push(("refresh_token", &req.refresh_token));
+            form.push(("refresh_token", &refresh_token));
         }
         other => {
             return Err(ApiError(Error::Invalid(format!(
@@ -668,8 +779,8 @@ pub async fn oauth2_token(
     if !req.client_id.is_empty() {
         form.push(("client_id", &req.client_id));
     }
-    if !req.client_secret.is_empty() {
-        form.push(("client_secret", &req.client_secret));
+    if !client_secret.is_empty() {
+        form.push(("client_secret", &client_secret));
     }
 
     // SSRF guard: never let the token endpoint point at an internal address.
@@ -677,7 +788,7 @@ pub async fn oauth2_token(
         .await
         .map_err(|m| ApiError(Error::Invalid(m)))?;
 
-    let resp = http_client()
+    let resp = http_client(&wid)
         .post(&req.token_url)
         .header("Accept", "application/json")
         .form(&form)
@@ -699,6 +810,38 @@ pub async fn oauth2_token(
     Ok(Json(parsed))
 }
 
+/// Resolve one string-or-marker field (`oauth2/token`): plain strings pass
+/// through; a `{"$secret": "otto.api.request.<id>"}` marker is looked up in
+/// the Keychain after verifying the referenced request lives in `wid`. The
+/// blob member is `field` (member names match the oauth2 auth object).
+async fn resolve_marker_or_string(
+    ctx: &ServerCtx,
+    wid: &Id,
+    v: &Value,
+    field: &str,
+) -> Result<String, ApiError> {
+    match v {
+        Value::Null => Ok(String::new()),
+        Value::String(s) => Ok(s.clone()),
+        other => {
+            let Some(r) = api_secrets::marker_ref(other) else {
+                return Err(ApiError(Error::Invalid(format!(
+                    "{field} must be a string or a $secret marker"
+                ))));
+            };
+            let rid = api_secrets::parse_request_ref(r).ok_or_else(|| {
+                ApiError(Error::Invalid(format!("{field} has an unsupported secret ref")))
+            })?;
+            let request = repo(ctx).get_request(&rid.to_string()).await.map_err(|_| {
+                ApiError(Error::Invalid(format!("{field} references an unknown request")))
+            })?;
+            ensure_in_workspace(&request.workspace_id, wid)?;
+            let blob = api_secrets::load_blob(ctx.secrets.as_ref(), r);
+            Ok(blob.get(field).cloned().unwrap_or_default())
+        }
+    }
+}
+
 // ===========================================================================
 // Execute
 // ===========================================================================
@@ -718,16 +861,17 @@ pub async fn execute(
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let repo = repo(&ctx);
 
-    // Resolve the environment variable map, then layer runtime overrides
-    // (from post-response scripts / chaining) on top.
-    let mut vars = resolve_variables(&repo, &wid, req.environment_id.as_ref()).await?;
+    // Resolve the environment variable map (Keychain-backed secrets included),
+    // then layer runtime overrides (from post-response scripts / chaining).
+    let mut vars = resolve_variables(&ctx, &repo, &wid, req.environment_id.as_ref()).await?;
     if let Some(Value::Object(overrides)) = &req.vars {
         for (k, v) in overrides {
             vars.insert(k.clone(), v.clone());
         }
     }
 
-    // Snapshot of the request as executed (post-substitution view recorded too).
+    // Snapshot of the request as executed. Secret auth members are REDACTED —
+    // history must never become the plaintext copy that defeats the Keychain.
     let request_snapshot = json!({
         "method": req.method,
         "url": req.url,
@@ -735,15 +879,36 @@ pub async fn execute(
         "query": req.query,
         "body_mode": req.body_mode,
         "body": req.body,
-        "auth": req.auth,
+        "auth": api_secrets::redact_auth(&req.auth),
         "environment_id": req.environment_id,
         "ssh_connection_id": req.ssh_connection_id,
     });
 
+    // Resolve `$secret` auth markers in-memory, immediately before send. The
+    // referenced request must live in this workspace.
+    let exec_req = match resolve_exec_auth(&repo, ctx.secrets.as_ref(), &wid, &req).await {
+        Ok(r) => Some(r),
+        Err(msg) => {
+            let _ = repo
+                .insert_history(NewApiHistory {
+                    workspace_id: wid.clone(),
+                    method: req.method.to_uppercase(),
+                    url: substitute(&req.url, &vars),
+                    status: None,
+                    duration_ms: None,
+                    request: request_snapshot.clone(),
+                    response: json!({ "error": msg }),
+                })
+                .await;
+            return Err(ApiError(Error::Invalid(msg)));
+        }
+    };
+    let exec_req = exec_req.expect("checked above");
+
     // Resolve the optional SSH tunnel first; a resolution failure flows through
     // the same error/history path as a network failure below.
     let send = match resolve_socks_proxy(&ctx, &wid, req.ssh_connection_id.as_ref()).await {
-        Ok(proxy) => build_and_send(&req, &vars, proxy.as_deref()).await,
+        Ok(proxy) => build_and_send(&wid, &exec_req, &vars, proxy.as_deref()).await,
         Err(msg) => Err(msg),
     };
     match send {
@@ -781,8 +946,11 @@ pub async fn execute(
 }
 
 /// Resolve the variable map: explicit `environment_id`, else the workspace's
-/// active environment, else empty.
+/// active environment, else empty. Keychain-backed secret variables are
+/// resolved in-memory here (execute/automation time only — no read path
+/// returns them).
 async fn resolve_variables(
+    ctx: &ServerCtx,
     repo: &ApiClientRepo,
     wid: &Id,
     environment_id: Option<&Id>,
@@ -795,9 +963,60 @@ async fn resolve_variables(
         }
         None => repo.active_environment(wid).await?,
     };
-    Ok(env
-        .and_then(|e| e.variables.as_object().cloned())
-        .unwrap_or_default())
+    let Some(env) = env else {
+        return Ok(serde_json::Map::new());
+    };
+    let mut vars = env.variables.as_object().cloned().unwrap_or_default();
+    if !env.secret_keys.is_empty() {
+        let blob = api_secrets::load_blob(ctx.secrets.as_ref(), &api_secrets::env_ref(&env.id));
+        for key in &env.secret_keys {
+            if let Some(v) = blob.get(key) {
+                vars.insert(key.clone(), Value::String(v.clone()));
+            }
+        }
+    }
+    Ok(vars)
+}
+
+/// Clone `req` with every `{"$secret": …}` auth marker resolved from the
+/// Keychain. Marker refs must point at requests in `wid` (checked against the
+/// DB), otherwise the whole call is rejected — a foreign ref is an attempt to
+/// exfiltrate another workspace's credential through execute.
+async fn resolve_exec_auth(
+    repo: &ApiClientRepo,
+    secrets: &dyn otto_core::secrets::SecretStore,
+    wid: &Id,
+    req: &ExecuteApiReq,
+) -> Result<ExecuteApiReq, String> {
+    let mut out = req.clone();
+    let refs: Vec<String> = out
+        .auth
+        .as_object()
+        .map(|o| {
+            o.values()
+                .filter_map(api_secrets::marker_ref)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if refs.is_empty() {
+        return Ok(out);
+    }
+    let mut allowed: Vec<String> = Vec::new();
+    for r in &refs {
+        let rid = api_secrets::parse_request_ref(r)
+            .ok_or_else(|| "auth contains an unsupported secret ref".to_string())?;
+        let request = repo
+            .get_request(&rid.to_string())
+            .await
+            .map_err(|_| "auth references a secret for an unknown request".to_string())?;
+        if &request.workspace_id != wid {
+            return Err("auth references a secret outside this workspace".to_string());
+        }
+        allowed.push(rid.to_string());
+    }
+    api_secrets::resolve_auth_markers(secrets, &mut out.auth, &allowed)?;
+    Ok(out)
 }
 
 /// Build the outbound request and send it, returning an `ApiResponse` or an
@@ -887,6 +1106,7 @@ fn guess_mime(filename: &str) -> Option<&'static str> {
 }
 
 async fn build_and_send(
+    wid: &Id,
     req: &ExecuteApiReq,
     vars: &serde_json::Map<String, Value>,
     proxy: Option<&str>,
@@ -925,9 +1145,10 @@ async fn build_and_send(
     apply_auth(&req.auth, vars, &mut headers, &mut query)?;
 
     // Per-request settings: a custom client when any non-default is set or the
-    // request is tunnelled, otherwise the shared pooled client.
-    let custom_client = build_settings_client(req, proxy);
-    let client = custom_client.as_ref().unwrap_or_else(|| http_client());
+    // request is tunnelled, otherwise the workspace's shared pooled client.
+    let shared_client = http_client(wid);
+    let custom_client = build_settings_client(wid, req, proxy);
+    let client = custom_client.as_ref().unwrap_or(&shared_client);
     let timeout = req
         .timeout_ms
         .map(Duration::from_millis)
@@ -1320,8 +1541,9 @@ pub async fn run_automation(
     let automation = repo.get_automation(&id).await?;
     ensure_in_workspace(&automation.workspace_id, &wid)?;
 
-    // Seed the chained variable map from the workspace's active environment.
-    let mut vars = resolve_variables(&repo, &wid, None).await?;
+    // Seed the chained variable map from the workspace's active environment
+    // (Keychain-backed secret variables included).
+    let mut vars = resolve_variables(&ctx, &repo, &wid, None).await?;
 
     let steps = automation.steps.as_array().cloned().unwrap_or_default();
     let mut results: Vec<ApiRunStepResult> = Vec::with_capacity(steps.len());
@@ -1386,10 +1608,97 @@ async fn run_step(
         }
     };
 
-    let exec = request_to_execute(&request);
+    // The persisted `extras` unlock scripts / settings / GraphQL variables for
+    // stored-request replay (this is what automations previously lost).
+    let extras = request.extras.clone().unwrap_or(Value::Null);
+    let transport = extras
+        .get("transport")
+        .and_then(Value::as_str)
+        .unwrap_or("http");
+    if transport != "http" {
+        return ApiRunStepResult {
+            request_id,
+            name: request.name,
+            status: None,
+            duration_ms: 0,
+            ok: false,
+            assertions: Value::Array(Vec::new()),
+            error: Some(format!(
+                "'{transport}' requests are not runnable in automations (HTTP only)"
+            )),
+        };
+    }
+
+    let mut exec = request_to_execute(&request);
+    apply_extras_settings(&extras, &mut exec);
+    let mut script_asserts: Vec<Value> = Vec::new();
+    let mut scripts_ok = true;
+
+    // Pre-request script: may mutate method/url/headers/body and set vars.
+    let pre_code = extras
+        .pointer("/scripts/pre")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !pre_code.trim().is_empty() {
+        let script_req = ScriptRequest {
+            method: exec.method.clone(),
+            url: exec.url.clone(),
+            headers: exec.headers.clone(),
+            body: exec.body.clone(),
+        };
+        let mut svars = string_vars(vars);
+        let out = api_scripts::run_pre_request(pre_code, &script_req, &svars);
+        if let Some(err) = out.error {
+            return ApiRunStepResult {
+                request_id,
+                name: request.name,
+                status: None,
+                duration_ms: 0,
+                ok: false,
+                assertions: Value::Array(Vec::new()),
+                error: Some(format!("pre-request script failed: {err}")),
+            };
+        }
+        if let Some(mutated) = out.request {
+            exec.method = mutated.method;
+            exec.url = mutated.url;
+            exec.headers = mutated.headers;
+            exec.body = mutated.body;
+        }
+        svars = out.vars;
+        merge_string_vars(vars, &svars);
+    }
+
+    // GraphQL: combine the query body + stored variables into the standard
+    // JSON payload, exactly like the interactive runner.
+    if exec.body_mode == "graphql" {
+        let gql_vars = extras
+            .get("graphql_variables")
+            .and_then(Value::as_str)
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .unwrap_or_else(|| json!({}));
+        exec.body = json!({ "query": exec.body, "variables": gql_vars }).to_string();
+    }
+
+    // Resolve `$secret` auth markers (this stored request's own ref only).
+    if let Err(msg) = api_secrets::resolve_auth_markers(
+        ctx.secrets.as_ref(),
+        &mut exec.auth,
+        &[request.id.clone()],
+    ) {
+        return ApiRunStepResult {
+            request_id,
+            name: request.name,
+            status: None,
+            duration_ms: 0,
+            ok: false,
+            assertions: Value::Array(Vec::new()),
+            error: Some(msg),
+        };
+    }
 
     // Send via the shared single-request path (same reqwest logic as /execute).
-    match build_and_send(&exec, vars, proxy.as_deref()).await {
+    match build_and_send(wid, &exec, vars, proxy.as_deref()).await {
         Ok(resp) => {
             // Parse the body as JSON once for json_path assertions/extraction;
             // a non-JSON body yields Null (assertions/extracts simply miss).
@@ -1402,13 +1711,62 @@ async fn run_step(
             // Apply extractions into the chained variable map.
             apply_extractions(step, &body_json, vars);
 
+            // Post-response script: chaining (set vars) + pm.test results,
+            // reported alongside the step's declarative assertions.
+            let post_code = extras
+                .pointer("/scripts/post")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !post_code.trim().is_empty() {
+                let mut headers_map = BTreeMap::new();
+                if let Some(arr) = resp.headers.as_array() {
+                    for h in arr {
+                        let k = h.get("key").and_then(Value::as_str).unwrap_or("");
+                        let v = h.get("value").and_then(Value::as_str).unwrap_or("");
+                        if !k.is_empty() {
+                            headers_map.insert(k.to_ascii_lowercase(), v.to_string());
+                        }
+                    }
+                }
+                let script_resp = ScriptResponse {
+                    code: resp.status,
+                    status: resp.status_text.clone(),
+                    response_time: resp.duration_ms,
+                    headers: headers_map,
+                    body_text: resp.body.clone(),
+                };
+                let svars = string_vars(vars);
+                let out = api_scripts::run_post_response(post_code, &script_resp, &svars);
+                merge_string_vars(vars, &out.vars);
+                for t in &out.tests {
+                    if !t.passed {
+                        scripts_ok = false;
+                    }
+                    script_asserts.push(json!({
+                        "desc": format!("script: {}", t.name),
+                        "passed": t.passed,
+                    }));
+                }
+                if let Some(err) = out.error {
+                    scripts_ok = false;
+                    script_asserts.push(json!({
+                        "desc": format!("post-response script error: {err}"),
+                        "passed": false,
+                    }));
+                }
+            }
+
+            let mut all_asserts = assertions_value.as_array().cloned().unwrap_or_default();
+            all_asserts.extend(script_asserts);
+
             ApiRunStepResult {
                 request_id,
                 name: request.name,
                 status: Some(resp.status),
                 duration_ms: resp.duration_ms,
-                ok: all_passed, // request succeeded; ok iff every assertion held
-                assertions: assertions_value,
+                // request succeeded; ok iff every assertion AND script test held
+                ok: all_passed && scripts_ok,
+                assertions: Value::Array(all_asserts),
                 error: None,
             }
         }
@@ -1426,6 +1784,36 @@ async fn run_step(
                 error: Some(err),
             }
         }
+    }
+}
+
+/// Map `extras.settings` onto the per-request execution settings.
+fn apply_extras_settings(extras: &Value, exec: &mut ExecuteApiReq) {
+    let Some(settings) = extras.get("settings") else {
+        return;
+    };
+    if let Some(ms) = settings.get("timeout_ms").and_then(Value::as_u64) {
+        exec.timeout_ms = Some(ms);
+    }
+    if let Some(b) = settings.get("follow_redirects").and_then(Value::as_bool) {
+        exec.follow_redirects = Some(b);
+    }
+    if let Some(b) = settings.get("tls_verify").and_then(Value::as_bool) {
+        exec.verify_ssl = Some(b);
+    }
+}
+
+/// String view of the chained variable map for the script engine.
+fn string_vars(vars: &serde_json::Map<String, Value>) -> BTreeMap<String, String> {
+    vars.iter()
+        .map(|(k, v)| (k.clone(), value_to_string(v)))
+        .collect()
+}
+
+/// Fold the script engine's (string) variables back into the chained map.
+fn merge_string_vars(vars: &mut serde_json::Map<String, Value>, svars: &BTreeMap<String, String>) {
+    for (k, v) in svars {
+        vars.insert(k.clone(), Value::String(v.clone()));
     }
 }
 
@@ -1508,6 +1896,108 @@ fn apply_extractions(step: &Value, body: &Value, vars: &mut serde_json::Map<Stri
             }
         }
     }
+}
+
+// ===========================================================================
+// secure-all (bulk lazy-migration sweep)
+// ===========================================================================
+
+/// `POST /workspaces/{wid}/api-client/secure-all` — sweep every saved request
+/// and environment in the workspace, moving plaintext secrets to the Keychain
+/// in one pass (the bulk counterpart of the lazy on-save migration). Requests:
+/// every secret auth member. Environments: variables whose NAME is
+/// secret-shaped become `secret_keys`. Idempotent — markers already in place
+/// are left alone. No automatic sweep ever runs at boot (Keychain prompts at
+/// daemon start are a known launchd/E2E hazard).
+pub async fn secure_all(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Value>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    let (requests_secured, env_keys_secured) =
+        secure_all_sweep(&repo(&ctx), ctx.secrets.as_ref(), &wid).await?;
+    Ok(Json(json!({
+        "requests_secured": requests_secured,
+        "env_keys_secured": env_keys_secured,
+    })))
+}
+
+/// The sweep itself, separated from the HTTP handler so it is testable
+/// against a bare repo + secret store.
+async fn secure_all_sweep(
+    repo: &ApiClientRepo,
+    secrets: &dyn otto_core::secrets::SecretStore,
+    wid: &Id,
+) -> Result<(usize, usize), ApiError> {
+    let mut requests_secured = 0usize;
+    for request in repo.list_requests(wid, None).await? {
+        let own_ref = api_secrets::request_ref(&request.id);
+        let existing_blob = api_secrets::load_blob(secrets, &own_ref);
+        let (auth_row, blob) =
+            api_secrets::split_auth_secrets(&request.auth, &own_ref, &existing_blob)
+                .map_err(|m| ApiError(Error::Internal(m)))?;
+        if auth_row == request.auth {
+            continue; // nothing plaintext left — already secured (idempotency)
+        }
+        api_secrets::store_blob(secrets, &own_ref, &blob)?;
+        repo.update_request(
+            &request.id,
+            NewApiRequest {
+                id: None,
+                workspace_id: request.workspace_id.clone(),
+                collection_id: request.collection_id.clone(),
+                name: request.name.clone(),
+                method: request.method.clone(),
+                url: request.url.clone(),
+                headers: request.headers.clone(),
+                query: request.query.clone(),
+                body_mode: request.body_mode.clone(),
+                body: request.body.clone(),
+                auth: auth_row,
+                ssh_connection_id: request.ssh_connection_id.clone(),
+                extras: request.extras.clone(),
+                position: request.position,
+            },
+        )
+        .await?;
+        requests_secured += 1;
+    }
+
+    let mut env_keys_secured = 0usize;
+    for env in repo.list_environments(wid).await? {
+        let candidates: Vec<(String, String)> = env
+            .variables
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .filter(|(k, v)| {
+                        api_secrets::secret_shaped(k)
+                            && v.as_str().is_some_and(|s| !s.is_empty())
+                            && !env.secret_keys.contains(*k)
+                    })
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if candidates.is_empty() {
+            continue;
+        }
+        let sref = api_secrets::env_ref(&env.id);
+        let mut blob = api_secrets::load_blob(secrets, &sref);
+        let mut secret_keys = env.secret_keys.clone();
+        for (k, v) in &candidates {
+            blob.insert(k.clone(), v.clone());
+            secret_keys.push(k.clone());
+        }
+        api_secrets::store_blob(secrets, &sref, &blob)?;
+        let vars = api_secrets::strip_secret_variables(&env.variables, &secret_keys);
+        repo.update_environment(&env.id, None, Some(&vars), Some(&secret_keys))
+            .await?;
+        env_keys_secured += candidates.len();
+    }
+
+    Ok((requests_secured, env_keys_secured))
 }
 
 // ===========================================================================
@@ -1628,6 +2118,181 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// In-memory `SecretStore` stand-in for the Keychain in tests.
+    struct MemStore(StdMutex<BTreeMap<String, String>>);
+    impl MemStore {
+        fn new() -> Self {
+            Self(StdMutex::new(BTreeMap::new()))
+        }
+    }
+    impl otto_core::secrets::SecretStore for MemStore {
+        fn put(&self, k: &str, v: &str) -> otto_core::Result<()> {
+            self.0.lock().unwrap().insert(k.into(), v.into());
+            Ok(())
+        }
+        fn get(&self, k: &str) -> otto_core::Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(k).cloned())
+        }
+        fn delete(&self, k: &str) -> otto_core::Result<()> {
+            self.0.lock().unwrap().remove(k);
+            Ok(())
+        }
+    }
+
+    async fn mk_repo() -> (sqlx::SqlitePool, ApiClientRepo, Id) {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let ws = otto_core::new_id();
+        let user = otto_core::new_id();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, '', ?)")
+            .bind(&user)
+            .bind(format!("u-{user}"))
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'ws', '/tmp', ?)")
+            .bind(&ws)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        (pool.clone(), ApiClientRepo::new(pool), ws)
+    }
+
+    fn legacy_request(ws: &Id, name: &str, auth: Value) -> NewApiRequest {
+        NewApiRequest {
+            id: None,
+            workspace_id: ws.clone(),
+            collection_id: None,
+            name: name.into(),
+            method: "GET".into(),
+            url: "https://api.test/x".into(),
+            headers: json!([]),
+            query: json!([]),
+            body_mode: "none".into(),
+            body: String::new(),
+            auth,
+            ssh_connection_id: None,
+            extras: None,
+            position: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn secure_all_sweeps_and_is_idempotent() {
+        let (_pool, repo, ws) = mk_repo().await;
+        let store = MemStore::new();
+
+        // Legacy rows: plaintext bearer token + a secret-shaped env variable.
+        let req = repo
+            .create_request(legacy_request(&ws, "legacy", json!({"type":"bearer","token":"tk-1"})))
+            .await
+            .unwrap();
+        let env = repo
+            .create_environment(NewApiEnvironment {
+                workspace_id: ws.clone(),
+                name: "prod".into(),
+                variables: json!({"base":"https://x","api_token":"sekret"}),
+                secret_keys: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        let (r, e) = secure_all_sweep(&repo, &store, &ws).await.unwrap();
+        assert_eq!((r, e), (1, 1));
+
+        // Row now carries a marker; the value lives only in the store.
+        let after = repo.get_request(&req.id).await.unwrap();
+        let own_ref = api_secrets::request_ref(&req.id);
+        assert_eq!(after.auth["token"], json!({"$secret": own_ref.clone()}));
+        assert!(store.0.lock().unwrap().get(&own_ref).unwrap().contains("tk-1"));
+        assert!(!after.auth.to_string().contains("tk-1"));
+
+        // Environment: key moved to secret_keys, value stripped from the row.
+        let env_after = repo.get_environment(&env.id).await.unwrap();
+        assert_eq!(env_after.secret_keys, vec!["api_token".to_string()]);
+        assert!(env_after.variables.get("api_token").is_none());
+        assert_eq!(env_after.variables["base"], "https://x");
+        assert!(store.0.lock().unwrap().get(&api_secrets::env_ref(&env.id)).unwrap().contains("sekret"));
+
+        // Second sweep finds nothing to do (idempotent).
+        let (r2, e2) = secure_all_sweep(&repo, &store, &ws).await.unwrap();
+        assert_eq!((r2, e2), (0, 0));
+
+        // The OpenAPI export of the secured request contains marker refs only.
+        let col = otto_core::domain::ApiCollection {
+            id: "c".into(),
+            workspace_id: ws.clone(),
+            name: "col".into(),
+            parent_id: None,
+            position: 0,
+            created_at: chrono::Utc::now(),
+        };
+        let doc = crate::api_helpers::collection_to_openapi(&col, &[after]);
+        assert!(!doc.to_string().contains("tk-1"));
+    }
+
+    #[tokio::test]
+    async fn resolve_exec_auth_resolves_own_and_rejects_foreign() {
+        let (pool, repo, ws) = mk_repo().await;
+        let store = MemStore::new();
+
+        let req = repo
+            .create_request(legacy_request(&ws, "mine", json!({"type":"bearer","token":"live-tok"})))
+            .await
+            .unwrap();
+        secure_all_sweep(&repo, &store, &ws).await.unwrap();
+        let stored = repo.get_request(&req.id).await.unwrap();
+
+        let exec = ExecuteApiReq {
+            method: "GET".into(),
+            url: "https://api.test/x".into(),
+            headers: json!([]),
+            query: json!([]),
+            body_mode: "none".into(),
+            body: String::new(),
+            auth: stored.auth.clone(),
+            environment_id: None,
+            timeout_ms: None,
+            follow_redirects: None,
+            verify_ssl: None,
+            vars: None,
+            ssh_connection_id: None,
+        };
+        // Same-workspace marker resolves in-memory only.
+        let resolved = resolve_exec_auth(&repo, &store, &ws, &exec).await.unwrap();
+        assert_eq!(resolved.auth["token"], "live-tok");
+        assert!(repo.get_request(&req.id).await.unwrap().auth["token"].is_object());
+
+        // A caller in another workspace replaying the marker is rejected.
+        let ws2 = otto_core::new_id();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w2', '/tmp', ?)")
+            .bind(&ws2)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let err = resolve_exec_auth(&repo, &store, &ws2, &exec).await.unwrap_err();
+        assert!(err.contains("outside this workspace"), "{err}");
+
+        // History snapshots redact markers AND plaintext to ***.
+        let red = api_secrets::redact_auth(&stored.auth);
+        assert_eq!(red["token"], api_secrets::REDACTED);
+    }
+
     #[test]
     fn substitute_replaces_known_and_keeps_unknown() {
         let mut vars = serde_json::Map::new();
@@ -1684,6 +2349,62 @@ mod tests {
         // Non-fetchable schemes are rejected outright.
         assert!(check_url("file:///etc/passwd").await.is_err());
         assert!(check_url("not a url").await.is_err());
+    }
+
+    #[test]
+    fn cookie_jars_are_workspace_isolated() {
+        let w1: Id = "ws-cookie-a".to_string();
+        let w2: Id = "ws-cookie-b".to_string();
+        // Same wid → same Arc; different wid → different store.
+        assert!(Arc::ptr_eq(&cookie_jar(&w1), &cookie_jar(&w1)));
+        assert!(!Arc::ptr_eq(&cookie_jar(&w1), &cookie_jar(&w2)));
+
+        // A cookie set in workspace A never shows up in workspace B's jar.
+        let url = "https://cookies.test/".parse().unwrap();
+        {
+            let jar = cookie_jar(&w1);
+            let mut store = jar.lock().unwrap();
+            let cookie = reqwest_cookie_store::RawCookie::parse("sess=abc; Path=/").unwrap();
+            store.insert_raw(&cookie, &url).unwrap();
+        }
+        assert_eq!(cookie_jar(&w1).lock().unwrap().iter_any().count(), 1);
+        assert_eq!(cookie_jar(&w2).lock().unwrap().iter_any().count(), 0);
+
+        // Clearing B leaves A intact (list/clear operate on the caller's jar).
+        cookie_jar(&w2).lock().unwrap().clear();
+        assert_eq!(cookie_jar(&w1).lock().unwrap().iter_any().count(), 1);
+        cookie_jar(&w1).lock().unwrap().clear();
+    }
+
+    #[test]
+    fn apply_extras_settings_maps_onto_exec() {
+        let mut exec = ExecuteApiReq {
+            method: "GET".into(),
+            url: "https://x.test".into(),
+            headers: json!([]),
+            query: json!([]),
+            body_mode: "none".into(),
+            body: String::new(),
+            auth: json!({"type":"none"}),
+            environment_id: None,
+            timeout_ms: None,
+            follow_redirects: None,
+            verify_ssl: None,
+            vars: None,
+            ssh_connection_id: None,
+        };
+        apply_extras_settings(
+            &json!({"settings": {"timeout_ms": 1500, "follow_redirects": false, "tls_verify": false}}),
+            &mut exec,
+        );
+        assert_eq!(exec.timeout_ms, Some(1500));
+        assert_eq!(exec.follow_redirects, Some(false));
+        assert_eq!(exec.verify_ssl, Some(false));
+        // No settings object → untouched.
+        let mut exec2 = exec.clone();
+        exec2.timeout_ms = None;
+        apply_extras_settings(&json!({}), &mut exec2);
+        assert_eq!(exec2.timeout_ms, None);
     }
 
     #[test]

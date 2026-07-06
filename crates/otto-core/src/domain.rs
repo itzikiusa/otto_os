@@ -311,10 +311,19 @@ pub struct McpServer {
     pub command: String,
     /// Command arguments, in order.
     pub args: Vec<String>,
-    /// Extra environment passed to the server process. Stored in plaintext for
-    /// now (like `.mcp.json` on disk) — sensitive values belong in the user's
-    /// own MCP config until Keychain secret-refs land.
+    /// Extra environment passed to the server process — NON-secret pairs only.
+    /// Secret values are stored in the macOS Keychain (see `secret_env_keys` /
+    /// `secret_ref`) and resolved only when `.mcp.json` is rendered at spawn.
     pub env: std::collections::BTreeMap<String, String>,
+    /// Names of env vars whose values live in the Keychain (values are never
+    /// returned over REST). Shares the Control Plane's storage convention:
+    /// one blob per server under ref `mcp-{id}`.
+    #[serde(default)]
+    pub secret_env_keys: Vec<String>,
+    /// Opaque Keychain ref for this server's secret blob, when any secrets
+    /// exist. Never contains a secret itself.
+    #[serde(default)]
+    pub secret_ref: Option<String>,
     /// Off by default: a server is only written to `.mcp.json` once enabled.
     pub enabled: bool,
     pub created_by: Id,
@@ -2086,6 +2095,13 @@ pub struct ApiRequest {
     /// directly.
     #[serde(default)]
     pub ssh_connection_id: Option<Id>,
+    /// Versioned extension object holding the once-draft-only fields:
+    /// `{ v, transport, graphql_variables, docs_md, scripts:{pre,post},
+    ///    settings:{timeout_ms,follow_redirects,tls_verify} }`.
+    /// The UI owns the shape (like `auth`); the server validates only that it
+    /// is an object and within the size cap. None = never set.
+    #[serde(default)]
+    pub extras: Option<Value>,
     pub position: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -2097,8 +2113,14 @@ pub struct ApiEnvironment {
     pub id: Id,
     pub workspace_id: Id,
     pub name: String,
-    /// `{ "<key>": "<value>" }`
+    /// `{ "<key>": "<value>" }` — non-secret variables only; keys listed in
+    /// `secret_keys` have their values in the Keychain (`otto.api.env.<id>`)
+    /// and are never returned here.
     pub variables: Value,
+    /// Names of variables whose values live in the Keychain. Resolution
+    /// happens server-side at execute time only.
+    #[serde(default)]
+    pub secret_keys: Vec<String>,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
 }

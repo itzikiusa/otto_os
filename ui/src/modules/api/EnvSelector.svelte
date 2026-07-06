@@ -16,31 +16,57 @@
   const canEdit = $derived(ws.myRole !== 'viewer');
   let editing: string | null = $state(null);
 
-  // Local key/value rows for the env being edited.
-  interface VarRow { key: string; value: string; }
+  // Local key/value rows for the env being edited. A `secret` row's value
+  // lives in the macOS Keychain: it renders masked, `touched` marks a newly
+  // typed replacement value (the only case where a value is sent on save).
+  interface VarRow { key: string; value: string; secret: boolean; touched: boolean; }
   let rows: VarRow[] = $state([]);
 
   function startEdit(env: ApiEnvironment): void {
     editing = editing === env.id ? null : env.id;
     if (editing) {
-      rows = Object.entries(env.variables).map(([key, value]) => ({ key, value }));
+      rows = [
+        ...Object.entries(env.variables).map(([key, value]) => ({ key, value, secret: false, touched: false })),
+        // Secret keys carry no value in the row — masked placeholder instead.
+        ...env.secret_keys.map((key) => ({ key, value: '', secret: true, touched: false })),
+      ];
     }
   }
 
   function addRow(): void {
-    rows = [...rows, { key: '', value: '' }];
+    rows = [...rows, { key: '', value: '', secret: false, touched: false }];
   }
   function updateRow(i: number, patch: Partial<VarRow>): void {
-    rows = rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
+    rows = rows.map((r, idx) => (idx === i ? { ...r, ...patch, ...(patch.value !== undefined ? { touched: true } : {}) } : r));
   }
   function removeRow(i: number): void {
     rows = rows.filter((_, idx) => idx !== i);
   }
+  /** Toggle the lock: marking secret hides the value from the row on save;
+   * unmarking turns it back into a plain variable (value must be re-typed
+   * unless it was just entered). */
+  function toggleSecret(i: number): void {
+    rows = rows.map((r, idx) => (idx === i ? { ...r, secret: !r.secret } : r));
+  }
 
   async function saveVars(env: ApiEnvironment): Promise<void> {
     const variables: Record<string, string> = {};
-    for (const r of rows) if (r.key.trim() !== '') variables[r.key.trim()] = r.value;
-    const saved = await apiClient.saveEnvironment({ name: env.name, variables }, env.id);
+    const secret_keys: string[] = [];
+    const secret_values: Record<string, string> = {};
+    for (const r of rows) {
+      const key = r.key.trim();
+      if (key === '') continue;
+      if (r.secret) {
+        secret_keys.push(key);
+        // Only new/changed values travel; untouched secrets keep their stored value.
+        if (r.touched && r.value !== '') secret_values[key] = r.value;
+      } else {
+        variables[key] = r.value;
+      }
+    }
+    const saved = await apiClient.saveEnvironment(
+      { name: env.name, variables, secret_keys, secret_values }, env.id,
+    );
     if (saved) editing = null;
   }
 
@@ -62,7 +88,10 @@
       initial: env.name,
     });
     if (!name || name === env.name) return;
-    await apiClient.saveEnvironment({ name, variables: env.variables }, env.id);
+    // Carry secret_keys through — omitting them would un-mark every secret.
+    await apiClient.saveEnvironment(
+      { name, variables: env.variables, secret_keys: env.secret_keys }, env.id,
+    );
   }
 
   async function remove(env: ApiEnvironment): Promise<void> {
@@ -81,7 +110,10 @@
   <div class="env-head">
     <span class="env-title">Environments</span>
     {#if canEdit}
-      <button class="icon-btn" title="New environment" aria-label="New environment" onclick={create}><Icon name="plus" size={13} /></button>
+      <span class="env-actions">
+        <button class="icon-btn" title="Secure secrets: move plaintext tokens/passwords (requests + environments) to the macOS Keychain" aria-label="Secure secrets" onclick={() => apiClient.secureAll()}><Icon name="shield" size={13} /></button>
+        <button class="icon-btn" title="New environment" aria-label="New environment" onclick={create}><Icon name="plus" size={13} /></button>
+      </span>
     {/if}
   </div>
 
@@ -102,7 +134,7 @@
                 {#if env.is_active}<Icon name="check" size={10} />{/if}
               </span>
               <span class="env-name ellipsis grow">{env.name}</span>
-              <span class="env-count">{Object.keys(env.variables).length} vars</span>
+              <span class="env-count">{Object.keys(env.variables).length + env.secret_keys.length} vars{#if env.secret_keys.length}&nbsp;· {env.secret_keys.length} 🔒{/if}</span>
             </button>
             {#if !compact && canEdit}
               <button class="icon-btn" title="Edit variables" aria-label="Edit variables" onclick={() => startEdit(env)}><Icon name="edit" size={12} /></button>
@@ -116,7 +148,15 @@
               {#each rows as row, i (i)}
                 <div class="var-row">
                   <input class="input var-key mono" placeholder="key" value={row.key} oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
-                  <input class="input var-val mono" placeholder="value" value={row.value} oninput={(e) => updateRow(i, { value: (e.currentTarget as HTMLInputElement).value })} />
+                  <input
+                    class="input var-val mono"
+                    class:secret={row.secret}
+                    type={row.secret ? 'password' : 'text'}
+                    placeholder={row.secret && !row.touched ? '•••••• stored in Keychain — type to replace' : 'value'}
+                    value={row.value}
+                    oninput={(e) => updateRow(i, { value: (e.currentTarget as HTMLInputElement).value })}
+                  />
+                  <button class="icon-btn" class:lock-on={row.secret} title={row.secret ? 'Secret (value in Keychain) — click to make plain' : 'Mark secret (move value to Keychain on save)'} aria-label="Toggle secret" onclick={() => toggleSecret(i)}><Icon name={row.secret ? 'lock' : 'unlock'} size={12} /></button>
                   <button class="icon-btn" title="Remove" aria-label="Remove variable" onclick={() => removeRow(i)}><Icon name="x" size={12} /></button>
                 </div>
               {/each}
@@ -144,6 +184,14 @@
     align-items: center;
     justify-content: space-between;
     padding: 0 2px 6px;
+  }
+  .env-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+  :global(.icon-btn.lock-on) {
+    color: var(--accent);
   }
   .env-title {
     font-size: 11px;

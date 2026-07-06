@@ -505,14 +505,21 @@ auto-enabled: `enabled` defaults `false` on create, and a server is only written
 | DELETE /mcp-servers/{id} | ws editor | — | 204 |
 
 Notes:
-- `McpServer` = `{id, workspace_id, name, command, args:[string], env:{string:string}, enabled,
-  created_by, created_at, updated_at}`. `name` is the key under `.mcp.json`'s `mcpServers` map
-  and is unique within the workspace.
-- `CreateMcpServerReq{name, command, args?, env?, enabled?}` — `enabled` defaults `false`
-  (never auto-enabled). Empty `name`/`command` → 400 `invalid`.
-- `env` is stored in plaintext for now (like `.mcp.json` itself, which lives in the workspace);
-  long-lived secrets belong in the user's own MCP config until Keychain secret-refs land. The
-  merge preserves all other `.mcp.json` keys and never overwrites Otto's `otto-browser` entry.
+- `McpServer` = `{id, workspace_id, name, command, args:[string], env:{string:string},
+  secret_env_keys:[string], secret_ref?, enabled, created_by, created_at, updated_at}`. `name`
+  is the key under `.mcp.json`'s `mcpServers` map and is unique within the workspace.
+- `CreateMcpServerReq{name, command, args?, env?, secret_env?, enabled?}` — `enabled` defaults
+  `false` (never auto-enabled). Empty `name`/`command` → 400 `invalid`.
+- `env` holds NON-secret pairs only. `secret_env` (write-only, `{key: value}`) values are
+  persisted to the macOS Keychain (blob ref `mcp-{id}`, shared with the MCP Control Plane —
+  the two surfaces share `mcp_servers` rows) and never to the DB; responses carry only the key
+  names in `secret_env_keys`. On PATCH, `secret_env` present = full replacement of the secret
+  set; an EMPTY value keeps the currently stored value (`KEY=` sentinel); absent = unchanged.
+  A key listed in both `env` and `secret_env` is stored as secret only.
+- Secret values are resolved exclusively when `.mcp.json` is rendered at agent spawn — the
+  rendered file on disk contains real values (the agent CLI needs them; it is user-local and
+  out-of-tree), but Otto's DB does not. The merge preserves all other `.mcp.json` keys and
+  never overwrites Otto's `otto-browser` entry.
 
 ## SFTP file browser (`/connections/{id}/sftp/*`)
 
@@ -1494,18 +1501,52 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/history | ws viewer | — | request history |
 | DELETE /workspaces/{wid}/api-client/history | ws editor | — | clear history |
 | POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request |
+| POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
 | POST /workspaces/{wid}/api-client/grpc/describe | ws editor | GrpcDescribeReq | service/method descriptors |
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
 | POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token |
-| GET /workspaces/{wid}/api-client/cookies | ws viewer | — | cookie jar |
-| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear cookies |
+| GET /workspaces/{wid}/api-client/cookies | ws viewer | — | this workspace's cookie jar |
+| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear this workspace's cookies |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
 | POST /workspaces/{wid}/api-client/automations | ws editor | CreateAutomationReq | Automation |
 | PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | UpdateAutomationReq | Automation |
 | DELETE /workspaces/{wid}/api-client/automations/{id} | ws editor | — | 204 |
 | POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | — | run an automation |
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command |
+
+**Durable request extras.** `CreateRequestReq` / `UpdateRequestReq` → `Request` carry an
+optional `extras` object persisting the once-draft-only fields:
+`{v, transport?, graphql_variables?, docs_md?, scripts:{pre?,post?}?, settings:{timeout_ms?,
+follow_redirects?, tls_verify?}?}`. The UI owns the inner shape (like `auth`); the server
+validates only that it is a JSON object ≤ 256 KiB (else 400). `NULL`/absent = never set.
+Automation runs honour `extras`: pre/post scripts execute server-side with the same `pm` API
+as the interactive runner, `settings` map onto the per-request execution options, and
+`graphql_variables` are combined with the query body. Non-`http` transports are not runnable
+in automations (the step reports an error). The OpenAPI export serializes `docs_md` (operation
+`description`), `settings` (`x-otto-settings`) and `graphql_variables`
+(`x-otto-graphql-variables`); scripts map to Postman `prerequest`/`test` events in the
+git-sync export.
+
+**Keychain-backed secrets.** Secret auth members (bearer `token`, basic `password`, api_key
+`value`, oauth2 `client_secret`/`refresh_token`/`password`/`access_token`) never persist in
+SQLite: on save the daemon moves a plaintext member to the macOS Keychain
+(`otto.api.request.<request_id>`, one JSON blob per request) and stores a
+`{"$secret": "<ref>"}` marker in its place (lazy migration — old rows stay valid until
+touched, or swept via `POST …/secure-all`). Environments mirror this: `Environment` gains
+`secret_keys:[string]`; `CreateEnvironmentReq`/`UpdateEnvironmentReq` accept `secret_keys` +
+write-only `secret_values:{k:v}` (absent keys keep stored values); the row's `variables`
+holds non-secret pairs only and GET never returns a secret value. Markers resolve in-memory
+only at execute/automation time — the ref must point at a request in the same workspace
+(else 400) — and every export path (OpenAPI, git-sync, history) sees markers or `***`, never
+values. History snapshots redact secret members to `"***"`. `secure-all` additionally marks
+environment variables with secret-shaped NAMES (token/secret/passw/api-key/authorization/
+credential) as secret; it is idempotent and requires ws editor. The `oauth2/token` endpoint
+accepts `client_secret`/`password`/`refresh_token` as plain strings or `$secret` markers.
+
+**Cookie jar scope.** The cookie jar is per-WORKSPACE (in-memory per daemon run): cookies
+captured executing in one workspace are never replayed for another. The cookies endpoints
+above operate on the caller's workspace jar.
 
 **SSH tunnel (IP whitelisting).** Both the saved request (`CreateRequestReq` /
 `UpdateRequestReq` → `Request`) and `ExecuteRequestReq` accept an optional

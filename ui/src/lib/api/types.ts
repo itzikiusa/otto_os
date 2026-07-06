@@ -124,8 +124,12 @@ export interface McpServer {
   name: string;
   command: string;
   args: string[];
-  /** Extra env passed to the server. Stored in plaintext for now (like `.mcp.json`). */
+  /** NON-secret env pairs only; secret values live in the macOS Keychain. */
   env: Record<string, string>;
+  /** Names of env vars whose values are Keychain-backed (values never returned). */
+  secret_env_keys: string[];
+  /** Opaque Keychain blob ref when secrets exist (never a secret itself). */
+  secret_ref?: string | null;
   /** Off by default — only written to `.mcp.json` once enabled. */
   enabled: boolean;
   created_by: Id;
@@ -138,6 +142,8 @@ export interface CreateMcpServerReq {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /** WRITE-ONLY: secret env values → Keychain (response returns key names only). */
+  secret_env?: Record<string, string>;
   enabled?: boolean;
 }
 
@@ -146,6 +152,8 @@ export interface UpdateMcpServerReq {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** WRITE-ONLY: when present, replaces the secret env set (values → Keychain). */
+  secret_env?: Record<string, string>;
   enabled?: boolean;
 }
 
@@ -3309,24 +3317,54 @@ export interface ApiKeyVal {
   enabled?: boolean;
 }
 
+/** A Keychain-backed secret placeholder: the stored row (and any export)
+ * carries this marker instead of the value; the daemon resolves it in-memory
+ * at execute time only. */
+export interface ApiSecretRef {
+  $secret: string;
+}
+
+/** An auth member that is either plaintext (being typed) or a Keychain
+ * marker (loaded from a saved request whose secret was already migrated). */
+export type ApiSecretable = string | ApiSecretRef;
+
+export function isSecretRef(v: ApiSecretable | undefined | null): v is ApiSecretRef {
+  return typeof v === 'object' && v !== null && typeof v.$secret === 'string';
+}
+
 export type ApiAuth =
   | { type: 'none' }
-  | { type: 'bearer'; token: string }
-  | { type: 'basic'; username: string; password: string }
-  | { type: 'api_key'; key: string; value: string; in: 'header' | 'query' }
+  | { type: 'bearer'; token: ApiSecretable }
+  | { type: 'basic'; username: string; password: ApiSecretable }
+  | { type: 'api_key'; key: string; value: ApiSecretable; in: 'header' | 'query' }
   | {
       type: 'oauth2';
       grant: 'client_credentials' | 'password' | 'refresh_token';
       token_url: string;
       client_id: string;
-      client_secret: string;
+      client_secret: ApiSecretable;
       scope: string;
       username: string;
-      password: string;
-      refresh_token: string;
-      access_token: string;
+      password: ApiSecretable;
+      refresh_token: ApiSecretable;
+      access_token: ApiSecretable;
       token_type: string;
     };
+
+/** Versioned extension object persisted on a saved request (scripts / docs /
+ * settings / GraphQL variables / transport). The UI owns this shape; the
+ * daemon validates only that it is an object within the size cap. */
+export interface ApiRequestExtras {
+  v: number;
+  /** Transport kind; absent = http. */
+  transport?: 'http' | 'sse' | 'websocket' | 'grpc';
+  /** GraphQL variables, raw JSON text as authored. */
+  graphql_variables?: string;
+  /** Request docs, markdown. */
+  docs_md?: string;
+  scripts?: { pre?: string; post?: string };
+  settings?: { timeout_ms?: number | null; follow_redirects?: boolean; tls_verify?: boolean };
+}
 
 export type ApiBodyMode = 'none' | 'json' | 'raw' | 'form' | 'multipart' | 'graphql';
 
@@ -3353,6 +3391,8 @@ export interface ApiRequest {
   auth: ApiAuth;
   /** Optional `ssh`-kind connection id to tunnel executions through (null = direct). */
   ssh_connection_id?: Id | null;
+  /** Persisted scripts / docs / settings / GraphQL variables / transport. */
+  extras?: ApiRequestExtras | null;
   position: number;
   created_at: string;
   updated_at: string;
@@ -3362,7 +3402,11 @@ export interface ApiEnvironment {
   id: Id;
   workspace_id: Id;
   name: string;
+  /** Non-secret variables only; keys in `secret_keys` never appear here. */
   variables: Record<string, string>;
+  /** Names of variables whose values are Keychain-backed (resolved only at
+   * execute time; never returned over REST). */
+  secret_keys: string[];
   is_active: boolean;
   created_at: string;
 }
@@ -3396,11 +3440,18 @@ export interface UpsertApiRequestReq {
   auth?: ApiAuth;
   /** Optional `ssh`-kind connection id to tunnel executions through. */
   ssh_connection_id?: Id | null;
+  /** Persisted scripts / docs / settings / GraphQL variables / transport. */
+  extras?: ApiRequestExtras | null;
 }
 
 export interface UpsertApiEnvironmentReq {
   name: string;
+  /** Non-secret variables (keys listed in secret_keys are stripped server-side). */
   variables?: Record<string, string>;
+  /** Names of variables whose values are Keychain-backed. */
+  secret_keys?: string[];
+  /** WRITE-ONLY: new/changed secret values; absent keys keep stored values. */
+  secret_values?: Record<string, string>;
 }
 
 export interface ExecuteApiReq {

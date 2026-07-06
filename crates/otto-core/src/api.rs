@@ -704,6 +704,10 @@ pub struct CreateMcpServerReq {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// WRITE-ONLY: secret env values. Persisted to the Keychain (never the
+    /// row); the response carries only the key names (`secret_env_keys`).
+    #[serde(default)]
+    pub secret_env: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub enabled: bool,
 }
@@ -790,6 +794,10 @@ pub struct UpdateMcpServerReq {
     pub args: Option<Vec<String>>,
     #[serde(default)]
     pub env: Option<std::collections::BTreeMap<String, String>>,
+    /// WRITE-ONLY: when present, replaces the server's secret env set (values
+    /// to the Keychain, key names to the row). `None` keeps existing secrets.
+    #[serde(default)]
+    pub secret_env: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     pub enabled: Option<bool>,
 }
@@ -2201,14 +2209,28 @@ pub struct UpsertApiRequestReq {
     /// Optional `ssh`-kind connection id to tunnel this request through.
     #[serde(default)]
     pub ssh_connection_id: Option<Id>,
+    /// Versioned extension object (scripts / docs / settings / GraphQL
+    /// variables / transport). Must be a JSON object when present; capped at
+    /// 256 KiB. See `ApiRequest::extras`.
+    #[serde(default)]
+    pub extras: Option<Value>,
 }
 
 /// `POST/PATCH /workspaces/{wid}/api-client/environments[/{id}]`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpsertApiEnvironmentReq {
     pub name: String,
+    /// Non-secret variables. Any key also listed in `secret_keys` is stripped
+    /// from the row (its value belongs in `secret_values`).
     #[serde(default)]
     pub variables: Value,
+    /// Names of variables whose values are Keychain-backed.
+    #[serde(default)]
+    pub secret_keys: Vec<String>,
+    /// WRITE-ONLY: new/changed secret values, keyed by variable name. Absent
+    /// keys keep their previously stored value; values are never echoed back.
+    #[serde(default)]
+    pub secret_values: std::collections::BTreeMap<String, String>,
 }
 
 /// `POST /workspaces/{wid}/api-client/execute` — run a request through the

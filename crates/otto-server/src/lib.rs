@@ -6,6 +6,8 @@
 pub mod agent_run;
 pub mod agent_session;
 pub mod api_helpers;
+pub mod api_scripts;
+pub mod api_secrets;
 pub mod auth;
 pub mod cadence;
 pub mod canvas_assist;

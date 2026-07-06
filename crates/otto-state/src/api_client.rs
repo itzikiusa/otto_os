@@ -33,6 +33,11 @@ pub struct NewApiCollection {
 
 /// Input for [`ApiClientRepo::create_request`] / `update_request`.
 pub struct NewApiRequest {
+    /// Pre-generated id for create (None = repo generates one). The route
+    /// layer pre-generates ids so Keychain secret refs (`otto.api.request.<id>`)
+    /// can be written BEFORE the row exists — a plaintext secret never
+    /// transits SQLite, not even transiently. Ignored by `update_request`.
+    pub id: Option<Id>,
     pub workspace_id: Id,
     pub collection_id: Option<Id>,
     pub name: String,
@@ -45,6 +50,8 @@ pub struct NewApiRequest {
     pub auth: serde_json::Value,
     /// Optional `ssh`-kind connection id to tunnel executions through.
     pub ssh_connection_id: Option<Id>,
+    /// Versioned extension object (scripts/docs/settings/…); None = unset.
+    pub extras: Option<serde_json::Value>,
     pub position: i64,
 }
 
@@ -53,6 +60,8 @@ pub struct NewApiEnvironment {
     pub workspace_id: Id,
     pub name: String,
     pub variables: serde_json::Value,
+    /// Names of variables whose values live in the Keychain (empty = none).
+    pub secret_keys: Vec<String>,
 }
 
 /// Input for [`ApiClientRepo::create_automation`] / `update_automation`.
@@ -100,6 +109,10 @@ fn row_to_request(r: &sqlx::sqlite::SqliteRow) -> Result<ApiRequest> {
         body: r.get("body"),
         auth: json(&r.get::<String, _>("auth_json"))?,
         ssh_connection_id: r.get("ssh_connection_id"),
+        extras: match r.get::<Option<String>, _>("extras_json") {
+            Some(s) => Some(json(&s)?),
+            None => None,
+        },
         position: r.get("position"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
@@ -112,6 +125,10 @@ fn row_to_environment(r: &sqlx::sqlite::SqliteRow) -> Result<ApiEnvironment> {
         workspace_id: r.get("workspace_id"),
         name: r.get("name"),
         variables: json(&r.get::<String, _>("variables_json"))?,
+        secret_keys: match r.get::<Option<String>, _>("secret_keys_json") {
+            Some(s) => serde_json::from_str(&s).unwrap_or_default(),
+            None => Vec::new(),
+        },
         is_active: r.get::<i64, _>("is_active") != 0,
         created_at: ts(&r.get::<String, _>("created_at"))?,
     })
@@ -260,13 +277,14 @@ impl ApiClientRepo {
     }
 
     pub async fn create_request(&self, q: NewApiRequest) -> Result<ApiRequest> {
-        let id = new_id();
+        let id = q.id.clone().unwrap_or_else(new_id);
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO api_requests
                 (id, workspace_id, collection_id, name, method, url, headers_json, query_json,
-                 body_mode, body, auth_json, ssh_connection_id, position, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 body_mode, body, auth_json, ssh_connection_id, extras_json, position,
+                 created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&q.workspace_id)
@@ -280,6 +298,7 @@ impl ApiClientRepo {
         .bind(&q.body)
         .bind(q.auth.to_string())
         .bind(&q.ssh_connection_id)
+        .bind(q.extras.as_ref().map(|v| v.to_string()))
         .bind(q.position)
         .bind(&now)
         .bind(&now)
@@ -297,7 +316,7 @@ impl ApiClientRepo {
             "UPDATE api_requests SET
                 collection_id = ?, name = ?, method = ?, url = ?, headers_json = ?,
                 query_json = ?, body_mode = ?, body = ?, auth_json = ?, ssh_connection_id = ?,
-                updated_at = ?
+                extras_json = ?, updated_at = ?
              WHERE id = ?",
         )
         .bind(&q.collection_id)
@@ -310,6 +329,7 @@ impl ApiClientRepo {
         .bind(&q.body)
         .bind(q.auth.to_string())
         .bind(&q.ssh_connection_id)
+        .bind(q.extras.as_ref().map(|v| v.to_string()))
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -368,13 +388,14 @@ impl ApiClientRepo {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
-            "INSERT INTO api_environments (id, workspace_id, name, variables_json, is_active, created_at)
-             VALUES (?, ?, ?, ?, 0, ?)",
+            "INSERT INTO api_environments (id, workspace_id, name, variables_json, secret_keys_json, is_active, created_at)
+             VALUES (?, ?, ?, ?, ?, 0, ?)",
         )
         .bind(&id)
         .bind(&e.workspace_id)
         .bind(&e.name)
         .bind(e.variables.to_string())
+        .bind(serde_json::to_string(&e.secret_keys).unwrap_or_else(|_| "[]".into()))
         .bind(&now)
         .execute(&self.pool)
         .await
@@ -387,6 +408,7 @@ impl ApiClientRepo {
         id: &Id,
         name: Option<&str>,
         variables: Option<&serde_json::Value>,
+        secret_keys: Option<&[String]>,
     ) -> Result<ApiEnvironment> {
         if let Some(v) = name {
             sqlx::query("UPDATE api_environments SET name = ? WHERE id = ?")
@@ -399,6 +421,14 @@ impl ApiClientRepo {
         if let Some(v) = variables {
             sqlx::query("UPDATE api_environments SET variables_json = ? WHERE id = ?")
                 .bind(v.to_string())
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update api environment"))?;
+        }
+        if let Some(v) = secret_keys {
+            sqlx::query("UPDATE api_environments SET secret_keys_json = ? WHERE id = ?")
+                .bind(serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
                 .bind(id)
                 .execute(&self.pool)
                 .await
@@ -633,6 +663,7 @@ mod tests {
 
         let req = repo
             .create_request(NewApiRequest {
+                id: None,
                 workspace_id: ws.clone(),
                 collection_id: Some(col.id.clone()),
                 name: "list users".into(),
@@ -644,6 +675,7 @@ mod tests {
                 body: String::new(),
                 auth: jval!({"type":"none"}),
                 ssh_connection_id: None,
+                extras: None,
                 position: 0,
             })
             .await
@@ -663,6 +695,7 @@ mod tests {
             .update_request(
                 &req.id,
                 NewApiRequest {
+                    id: None,
                     workspace_id: ws.clone(),
                     collection_id: Some(col.id.clone()),
                     name: "list users".into(),
@@ -674,6 +707,7 @@ mod tests {
                     body: "{}".into(),
                     auth: jval!({"type":"none"}),
                     ssh_connection_id: None,
+                    extras: None,
                     position: 0,
                 },
             )
@@ -701,6 +735,7 @@ mod tests {
                 workspace_id: ws.clone(),
                 name: "dev".into(),
                 variables: jval!({"base":"http://localhost"}),
+                secret_keys: Vec::new(),
             })
             .await
             .unwrap();
@@ -709,6 +744,7 @@ mod tests {
                 workspace_id: ws.clone(),
                 name: "prod".into(),
                 variables: jval!({"base":"https://api.test"}),
+                secret_keys: Vec::new(),
             })
             .await
             .unwrap();
@@ -725,7 +761,7 @@ mod tests {
         assert!(!repo.get_environment(&a.id).await.unwrap().is_active);
 
         let updated = repo
-            .update_environment(&b.id, Some("production"), Some(&jval!({"k":"v"})))
+            .update_environment(&b.id, Some("production"), Some(&jval!({"k":"v"})), None)
             .await
             .unwrap();
         assert_eq!(updated.name, "production");
@@ -733,6 +769,102 @@ mod tests {
 
         repo.delete_environment(&a.id).await.unwrap();
         assert_eq!(repo.list_environments(&ws).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn request_extras_round_trip() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool);
+
+        let extras = jval!({
+            "v": 1,
+            "transport": "http",
+            "graphql_variables": "{\"id\": 1}",
+            "docs_md": "# Users\nList them.",
+            "scripts": { "pre": "pm.environment.set('a','1')", "post": "pm.test('ok', () => {})" },
+            "settings": { "timeout_ms": 30000, "follow_redirects": false, "tls_verify": true },
+        });
+        let base = NewApiRequest {
+            id: None,
+            workspace_id: ws.clone(),
+            collection_id: None,
+            name: "with extras".into(),
+            method: "GET".into(),
+            url: "https://api.test/x".into(),
+            headers: jval!([]),
+            query: jval!([]),
+            body_mode: "none".into(),
+            body: String::new(),
+            auth: jval!({"type":"none"}),
+            ssh_connection_id: None,
+            extras: Some(extras.clone()),
+            position: 0,
+        };
+        let req = repo.create_request(base).await.unwrap();
+        assert_eq!(req.extras.as_ref().unwrap(), &extras);
+
+        // list round-trips too
+        let listed = repo.list_requests(&ws, None).await.unwrap();
+        assert_eq!(listed[0].extras.as_ref().unwrap()["docs_md"], "# Users\nList them.");
+
+        // update to None clears the column
+        let cleared = repo
+            .update_request(
+                &req.id,
+                NewApiRequest {
+                    id: None,
+                    workspace_id: ws.clone(),
+                    collection_id: None,
+                    name: "with extras".into(),
+                    method: "GET".into(),
+                    url: "https://api.test/x".into(),
+                    headers: jval!([]),
+                    query: jval!([]),
+                    body_mode: "none".into(),
+                    body: String::new(),
+                    auth: jval!({"type":"none"}),
+                    ssh_connection_id: None,
+                    extras: None,
+                    position: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(cleared.extras.is_none());
+    }
+
+    #[tokio::test]
+    async fn environment_secret_keys_round_trip() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool);
+
+        let env = repo
+            .create_environment(NewApiEnvironment {
+                workspace_id: ws.clone(),
+                name: "prod".into(),
+                variables: jval!({"base":"https://api.test"}),
+                secret_keys: vec!["api_token".into()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(env.secret_keys, vec!["api_token".to_string()]);
+        // Secret values never live in the row.
+        assert!(env.variables.get("api_token").is_none());
+
+        let updated = repo
+            .update_environment(
+                &env.id,
+                None,
+                None,
+                Some(&["api_token".to_string(), "db_pass".to_string()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.secret_keys.len(), 2);
+
+        // name/variables untouched by a secret-keys-only update
+        assert_eq!(updated.name, "prod");
+        assert_eq!(updated.variables["base"], "https://api.test");
     }
 
     #[tokio::test]
