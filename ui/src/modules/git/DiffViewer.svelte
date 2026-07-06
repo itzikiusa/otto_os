@@ -48,7 +48,7 @@
     mq.addEventListener('change', sync);
     return () => mq.removeEventListener('change', sync);
   });
-  const effMode = $derived(isMobile ? 'unified' : mode);
+  const effMode: 'unified' | 'split' = $derived(isMobile ? 'unified' : mode);
 
   // Nav sidebar state
   let navCollapsed = $state(false);
@@ -95,13 +95,32 @@
     return { add, del };
   }
 
+  // Per-file changed-line stats, computed once per diff. The nav sidebar, file
+  // headers, totals and collapse init all consume this — without the memo each
+  // re-render walked every hunk of every file several times over.
+  const fileStats = $derived.by(() => {
+    const m = new Map<string, { add: number; del: number }>();
+    for (const f of diff.files) m.set(f.path, changedLines(f));
+    return m;
+  });
+
+  // Huge-PR guard: past this many files or total changed lines, every file
+  // starts collapsed (not just the >400-line ones). Rendering + highlighting a
+  // 165-file / 30k-line PR fully expanded stalls the webview main thread for
+  // seconds; collapsed headers are near-free and scrollToFile auto-expands.
+  const COLLAPSE_ALL_FILES = 40;
+  const COLLAPSE_ALL_LINES = 4000;
+
   $effect(() => {
     if (initializedFor === diff) return;
     initializedFor = diff;
+    let total = 0;
+    for (const c of fileStats.values()) total += c.add + c.del;
+    const collapseAll = diff.files.length > COLLAPSE_ALL_FILES || total > COLLAPSE_ALL_LINES;
     const next: Record<string, boolean> = {};
     for (const f of diff.files) {
-      const c = changedLines(f);
-      next[f.path] = c.add + c.del > 400;
+      const c = fileStats.get(f.path) ?? { add: 0, del: 0 };
+      next[f.path] = collapseAll || c.add + c.del > 400;
     }
     collapsed = next;
     composer = null;
@@ -111,8 +130,7 @@
   const totals = $derived.by(() => {
     let add = 0;
     let del = 0;
-    for (const f of diff.files) {
-      const c = changedLines(f);
+    for (const c of fileStats.values()) {
       add += c.add;
       del += c.del;
     }
@@ -167,10 +185,21 @@
     return [];
   }
 
+  // Per-file comment counts in one pass — the nav loop and the file loop both
+  // read this per file, which used to re-filter the whole comment list each
+  // time (O(files × comments) per render).
+  const commentCounts = $derived.by(() => {
+    const m = new Map<string, number>();
+    if (!prMode) return m;
+    for (const c of comments) {
+      if (c.path !== null) m.set(c.path, (m.get(c.path) ?? 0) + 1);
+    }
+    return m;
+  });
+
   // Count total inline comments for a file
   function commentCountForFile(path: string): number {
-    if (!prMode) return 0;
-    return comments.filter((c) => c.path === path).length;
+    return commentCounts.get(path) ?? 0;
   }
 
   function gutterClick(path: string, line: DiffLine): void {
@@ -226,10 +255,16 @@
   }
 
   // Memoised side-by-side rows: keyed `{filePath}::{hunkIndex}` so the pairing
-  // is only recomputed when the underlying diff data actually changes.
+  // is only recomputed when the underlying diff data actually changes. Only
+  // computed in split mode and only for expanded files — unified mode never
+  // reads these, and precomputing all hunks of a huge PR allocated tens of
+  // thousands of row objects up front. splitRows() falls back to a direct
+  // computeSplitRows for any missing key, so gaps are safe.
   const splitRowsCache = $derived.by(() => {
     const m = new Map<string, SplitRow[]>();
+    if (effMode === 'unified') return m;
     for (const f of diff.files) {
+      if (collapsed[f.path]) continue;
       for (let hi = 0; hi < f.hunks.length; hi++) {
         m.set(`${f.path}::${hi}`, computeSplitRows(f.hunks[hi].lines));
       }
@@ -292,6 +327,14 @@
       const el = find();
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
+  }
+
+  const allCollapsed = $derived(diff.files.every((f) => collapsed[f.path] === true));
+
+  function setAllCollapsed(v: boolean): void {
+    const next: Record<string, boolean> = {};
+    for (const f of diff.files) next[f.path] = v;
+    collapsed = next;
   }
 
   function toggleViewed(path: string): void {
@@ -410,7 +453,7 @@
 
         <div class="nav-files">
           {#each diff.files as file (file.path)}
-            {@const stats = changedLines(file)}
+            {@const stats = fileStats.get(file.path) ?? { add: 0, del: 0 }}
             {@const cCount = commentCountForFile(file.path)}
             {@const isViewed = viewed.has(file.path)}
             {@const matches = fileMatchesSearch(file)}
@@ -484,6 +527,13 @@
           {/if}
         </div>
       {/if}
+      {#if diff.files.length > 1}
+        <button
+          class="btn small ghost"
+          onclick={() => setAllCollapsed(!allCollapsed)}
+          title={allCollapsed ? 'Expand every file (a very large PR may take a moment to render)' : 'Collapse every file'}
+        >{allCollapsed ? 'Expand all' : 'Collapse all'}</button>
+      {/if}
       {#if !isMobile}
         <!-- Side-by-side is desktop-only; ≤1024 always renders unified. -->
         <div class="segmented">
@@ -494,7 +544,7 @@
     </div>
 
     {#each filteredFiles as file (file.path)}
-      {@const stats = changedLines(file)}
+      {@const stats = fileStats.get(file.path) ?? { add: 0, del: 0 }}
       {@const lang = hlReady ? langFromPath(file.path) : null}
       {@const fc = fileComments(file.path)}
       {@const cCount = commentCountForFile(file.path)}

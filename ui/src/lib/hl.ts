@@ -63,12 +63,27 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Memoized highlight results. Diff lines are re-rendered wholesale on every
+// reactive flush (view-mode toggle, hljs arrival, comment updates), and large
+// PRs repeat many identical lines (imports, braces, blank context) — without a
+// cache each flush re-runs the tokenizer over every visible line and stalls
+// the main thread. Bounded so a huge PR can't hold the whole diff in memory.
+const hlCache = new Map<string, string>();
+const HL_CACHE_MAX = 20_000;
+
 /** Highlight a single line; returns trusted HTML (escaped on fallback). */
 export function highlightLine(content: string, lang: string | null): string {
   if (!lang || !hljs || !hljs.getLanguage(lang)) return escapeHtml(content);
+  const key = `${lang} ${content}`;
+  const hit = hlCache.get(key);
+  if (hit !== undefined) return hit;
+  let out: string;
   try {
-    return hljs.highlight(content, { language: lang, ignoreIllegals: true }).value;
+    out = hljs.highlight(content, { language: lang, ignoreIllegals: true }).value;
   } catch {
-    return escapeHtml(content);
+    out = escapeHtml(content);
   }
+  if (hlCache.size >= HL_CACHE_MAX) hlCache.clear();
+  hlCache.set(key, out);
+  return out;
 }
