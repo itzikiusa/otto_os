@@ -4,7 +4,7 @@
   // is pushed automatically (with --set-upstream) right before the PR is opened.
   import Modal from '../../lib/components/Modal.svelte';
   import { api } from '../../lib/api/client';
-  import type { BranchInfo, DraftPrResp, PrSummary } from '../../lib/api/types';
+  import type { BranchInfo, Collaborator, DraftPrResp, PrSummary } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
@@ -27,6 +27,60 @@
   let drafting = $state(false);
   // What the Create button is doing, for the label.
   let phase: '' | 'pushing' | 'creating' = $state('');
+
+  // "Open as draft" — persisted per repo (teams that always draft shouldn't
+  // have to re-tick it on every PR).
+  const draftKey = $derived(`otto_pr_draft:${repoId}`);
+  let openAsDraft = $state(false);
+  $effect(() => {
+    openAsDraft = localStorage.getItem(draftKey) === '1';
+  });
+  function toggleDraft(): void {
+    openAsDraft = !openAsDraft;
+    if (openAsDraft) localStorage.setItem(draftKey, '1');
+    else localStorage.removeItem(draftKey);
+  }
+
+  // Reviewers (optional): chips + provider-backed typeahead. When the
+  // collaborator lookup fails (no account, unsupported plan, network), the
+  // input degrades to free text — names are passed through verbatim.
+  let reviewers: string[] = $state([]);
+  let revQuery = $state('');
+  let revSuggestions: Collaborator[] = $state([]);
+  let revLookupFailed = $state(false);
+  let revTimer: ReturnType<typeof setTimeout> | undefined;
+  function queryCollaborators(q: string): void {
+    clearTimeout(revTimer);
+    if (revLookupFailed) return; // degraded to free text — stop hitting the API
+    revTimer = setTimeout(() => {
+      void api
+        .get<Collaborator[]>(`/repos/${repoId}/collaborators?q=${encodeURIComponent(q)}`)
+        .then((list) => {
+          revSuggestions = list.filter((c) => !reviewers.includes(c.name)).slice(0, 8);
+        })
+        .catch(() => {
+          revLookupFailed = true;
+          revSuggestions = [];
+        });
+    }, 200);
+  }
+  function addReviewer(name: string): void {
+    const n = name.trim();
+    if (n !== '' && !reviewers.includes(n)) reviewers = [...reviewers, n];
+    revQuery = '';
+    revSuggestions = [];
+  }
+  function removeReviewer(name: string): void {
+    reviewers = reviewers.filter((r) => r !== name);
+  }
+  function onReviewerKey(e: KeyboardEvent): void {
+    if (e.key === 'Enter' && revQuery.trim() !== '') {
+      e.preventDefault();
+      addReviewer(revSuggestions[0]?.name ?? revQuery);
+    } else if (e.key === 'Backspace' && revQuery === '' && reviewers.length > 0) {
+      reviewers = reviewers.slice(0, -1);
+    }
+  }
 
   $effect(() => {
     void api
@@ -91,8 +145,13 @@
         description,
         source_branch: source,
         target_branch: target,
+        ...(openAsDraft ? { draft: true } : {}),
+        ...(reviewers.length > 0 ? { reviewers } : {}),
       });
       toasts.success('Pull request created', `#${pr.number} ${pr.title}`);
+      if (pr.reviewer_warnings?.length) {
+        toasts.warn('PR opened with warnings', pr.reviewer_warnings.join('; '));
+      }
       oncreated(pr);
     } catch (e) {
       toasts.error('Create failed', e instanceof Error ? e.message : String(e));
@@ -121,6 +180,38 @@
     </div>
   </div>
 
+  <div class="field">
+    <label for="pr-reviewers">Reviewers <span class="dim">(optional)</span></label>
+    <div class="chips-input input" data-testid="pr-reviewers">
+      {#each reviewers as r (r)}
+        <span class="rev-chip chip">
+          {r}
+          <button class="rev-chip-x" title="Remove {r}" aria-label="Remove reviewer {r}" onclick={() => removeReviewer(r)}>×</button>
+        </span>
+      {/each}
+      <input
+        id="pr-reviewers"
+        class="chips-text"
+        placeholder={reviewers.length === 0 ? (revLookupFailed ? 'username, Enter to add' : 'Type to search…') : ''}
+        bind:value={revQuery}
+        oninput={() => queryCollaborators(revQuery)}
+        onkeydown={onReviewerKey}
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </div>
+    {#if revSuggestions.length > 0 && revQuery.trim() !== ''}
+      <div class="rev-suggest card">
+        {#each revSuggestions as c (c.name)}
+          <button class="rev-suggest-item" onclick={() => addReviewer(c.name)}>
+            <span class="mono">{c.name}</span>
+            {#if c.display_name && c.display_name !== c.name}<span class="dim">{c.display_name}</span>{/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </div>
+
   <div class="draft-row">
     <button class="btn small ghost" disabled={drafting || busy || target === ''} onclick={draftWithAgent}>
       {#if drafting}
@@ -144,6 +235,10 @@
   </div>
 
   {#snippet footer()}
+    <label class="draft-toggle" title="GitHub: draft PR · GitLab: 'Draft:' title prefix · Bitbucket: draft flag">
+      <input type="checkbox" checked={openAsDraft} onchange={toggleDraft} />
+      Open as draft
+    </label>
     <button class="btn" onclick={onclose}>Cancel</button>
     <button
       class="btn primary"
@@ -175,6 +270,75 @@
     gap: 10px;
     margin-bottom: 12px;
     flex-wrap: wrap;
+  }
+  /* Reviewer chips share the .input frame; the inner text field is chrome-less. */
+  .chips-input {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    height: auto;
+    min-height: 30px;
+    padding: 3px 6px;
+  }
+  .chips-text {
+    flex: 1;
+    min-width: 120px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    outline: none;
+    padding: 2px;
+  }
+  .rev-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .rev-chip-x {
+    border: none;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .rev-suggest {
+    margin-top: 4px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  .rev-suggest-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    text-align: start;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .rev-suggest-item:hover {
+    background: var(--surface-2);
+  }
+  /* Draft toggle sits at the start of the footer, before the buttons. */
+  .draft-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    margin-inline-end: auto;
+    user-select: none;
   }
   .draft-hint {
     font-size: 11px;
