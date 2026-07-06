@@ -21,8 +21,13 @@
       }
       const w = menuEl.offsetWidth;
       const h = menuEl.offsetHeight;
-      cx = ctxMenu.x + w > window.innerWidth ? ctxMenu.x - w : ctxMenu.x;
-      cy = ctxMenu.y + h > window.innerHeight ? ctxMenu.y - h : ctxMenu.y;
+      // Clamp INSIDE the viewport rather than flipping to the other side of
+      // the cursor: a menu taller than the window would flip to a negative
+      // top and render entirely off-screen (unreachable). CSS caps the menu
+      // at the viewport height, so after clamping every item is scrollable.
+      const pad = 8;
+      cx = Math.max(pad, Math.min(ctxMenu.x, window.innerWidth - w - pad));
+      cy = Math.max(pad, Math.min(ctxMenu.y, window.innerHeight - h - pad));
     });
     cx = ctxMenu.x;
     cy = ctxMenu.y;
@@ -101,6 +106,11 @@
     padding: 4px;
     display: flex;
     flex-direction: column;
+    /* Long menus (e.g. the git "+" picker listing every registered repo) must
+       scroll internally, never grow past the window. */
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     /* slightly translucent backdrop effect */
     backdrop-filter: blur(12px) saturate(1.3);
     -webkit-backdrop-filter: blur(12px) saturate(1.3);
