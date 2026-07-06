@@ -391,6 +391,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/workspaces/{wid}/api-client/automations/{id}/run",
             post(api_client::run_automation),
         )
+        .route(
+            "/workspaces/{wid}/api-client/postman/sync",
+            post(api_client::postman_sync),
+        )
         .route("/api-client/import-curl", post(api_client::import_curl))
         // --- Share-link: session-level mint + list (mobile plan Task 1.9) --
         .route("/sessions/{id}/share", post(share::mint_share))

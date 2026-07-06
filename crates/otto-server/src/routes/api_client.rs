@@ -704,6 +704,184 @@ pub async fn import_curl(
     Ok(Json(parse_curl(&req.curl)?))
 }
 
+// ===========================================================================
+// Postman account sync
+// ===========================================================================
+
+/// Keychain ref holding the user's Postman API key (blob key `api_key`) when
+/// they opt into "remember" — resyncs then need no key re-entry.
+const POSTMAN_SECRET_REF: &str = "apiclient-postman";
+
+/// Hard cap on fetched collections/environments per sync — the Postman API is
+/// rate-limited (~60 req/min on free plans; one call per item), so an
+/// unbounded account would stall the request and burn the quota.
+const POSTMAN_SYNC_MAX: usize = 200;
+
+#[derive(Debug, Deserialize)]
+pub struct PostmanSyncReq {
+    /// Postman API key (postman.co → Settings → API keys). Optional when a
+    /// previous sync stored one with `remember`.
+    pub api_key: Option<String>,
+    /// Persist the key in the macOS Keychain for future one-click resyncs.
+    #[serde(default)]
+    pub remember: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PostmanSyncFailure {
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PostmanSyncResult {
+    /// Full Postman v2.1 collection documents, importable as-is.
+    pub collections: Vec<Value>,
+    /// Postman environment exports (`{name, values: […]}`).
+    pub environments: Vec<Value>,
+    /// Items the Postman API listed but failed to deliver (rate limits, perms).
+    pub failed: Vec<PostmanSyncFailure>,
+    /// Whether a remembered key exists after this call.
+    pub remembered: bool,
+}
+
+/// One authenticated GET against the Postman API, JSON-decoded. Errors carry
+/// the Postman error message when the body has one (their 4xx bodies do).
+async fn postman_get(client: &reqwest::Client, key: &str, url: &str) -> Result<Value, String> {
+    let resp = client
+        .get(url)
+        .header("x-api-key", key)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        let msg = body
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return Err(if msg.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            format!("HTTP {status}: {msg}")
+        });
+    }
+    Ok(body)
+}
+
+/// `POST /workspaces/{wid}/api-client/postman/sync` — fetch EVERY collection
+/// and environment from the user's Postman ACCOUNT (api.getpostman.com) in one
+/// shot, so nothing has to be exported file-by-file. Returns the raw Postman
+/// documents; the UI funnels them through its existing import pipeline (same
+/// mapping as file import — one parser, no drift). The fixed public host is
+/// daemon-chosen (never user input), so the SSRF guard does not apply.
+pub async fn postman_sync(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<PostmanSyncReq>,
+) -> ApiResult<Json<PostmanSyncResult>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+
+    // Resolve the key: explicit in the request, else the remembered one.
+    let stored = api_secrets::load_blob(ctx.secrets.as_ref(), POSTMAN_SECRET_REF);
+    let key = match req.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        Some(k) => k.to_string(),
+        None => stored.get("api_key").cloned().ok_or_else(|| {
+            ApiError(Error::Invalid(
+                "no Postman API key — provide one (postman.co → Settings → API keys)".into(),
+            ))
+        })?,
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| ApiError(Error::Internal(format!("http client: {e}"))))?;
+
+    // Listing first — an invalid key fails fast here with Postman's message.
+    let listing = postman_get(&client, &key, "https://api.getpostman.com/collections")
+        .await
+        .map_err(|e| ApiError(Error::Upstream(format!("Postman API: {e}"))))?;
+
+    let mut collections = Vec::new();
+    let mut environments = Vec::new();
+    let mut failed = Vec::new();
+
+    let listed = listing["collections"].as_array().cloned().unwrap_or_default();
+    if listed.len() > POSTMAN_SYNC_MAX {
+        failed.push(PostmanSyncFailure {
+            name: format!("(cap) {} more collections", listed.len() - POSTMAN_SYNC_MAX),
+            error: format!("sync fetches at most {POSTMAN_SYNC_MAX} per run"),
+        });
+    }
+    for item in listed.iter().take(POSTMAN_SYNC_MAX) {
+        let uid = item["uid"].as_str().unwrap_or_default();
+        let name = item["name"].as_str().unwrap_or(uid).to_string();
+        match postman_get(&client, &key, &format!("https://api.getpostman.com/collections/{uid}"))
+            .await
+        {
+            Ok(mut v) => match v.get_mut("collection") {
+                Some(c) => collections.push(c.take()),
+                None => failed.push(PostmanSyncFailure {
+                    name,
+                    error: "response had no 'collection'".into(),
+                }),
+            },
+            Err(error) => failed.push(PostmanSyncFailure { name, error }),
+        }
+    }
+
+    // Environments are optional extras — a failure to LIST them shouldn't sink
+    // the collections that already fetched fine.
+    match postman_get(&client, &key, "https://api.getpostman.com/environments").await {
+        Ok(listing) => {
+            let listed = listing["environments"].as_array().cloned().unwrap_or_default();
+            for item in listed.iter().take(POSTMAN_SYNC_MAX) {
+                let uid = item["uid"].as_str().unwrap_or_default();
+                let name = item["name"].as_str().unwrap_or(uid).to_string();
+                match postman_get(
+                    &client,
+                    &key,
+                    &format!("https://api.getpostman.com/environments/{uid}"),
+                )
+                .await
+                {
+                    Ok(mut v) => match v.get_mut("environment") {
+                        Some(e) => environments.push(e.take()),
+                        None => failed.push(PostmanSyncFailure {
+                            name,
+                            error: "response had no 'environment'".into(),
+                        }),
+                    },
+                    Err(error) => failed.push(PostmanSyncFailure { name, error }),
+                }
+            }
+        }
+        Err(error) => failed.push(PostmanSyncFailure {
+            name: "(environments)".into(),
+            error,
+        }),
+    }
+
+    // Remember the key only after it proved valid (the listing succeeded).
+    let mut remembered = stored.contains_key("api_key");
+    if req.remember && req.api_key.is_some() {
+        let mut blob = BTreeMap::new();
+        blob.insert("api_key".to_string(), key);
+        api_secrets::store_blob(ctx.secrets.as_ref(), POSTMAN_SECRET_REF, &blob)?;
+        remembered = true;
+    }
+
+    Ok(Json(PostmanSyncResult {
+        collections,
+        environments,
+        failed,
+        remembered,
+    }))
+}
+
 /// `GET /workspaces/{wid}/api-client/cookies` — list this workspace's jar.
 pub async fn list_cookies(
     Path(wid): Path<Id>,

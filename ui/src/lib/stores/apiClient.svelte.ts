@@ -30,7 +30,13 @@ import { isSecretRef } from '../api/types';
 import { ws } from './workspace.svelte';
 import { toasts } from '../toast.svelte';
 import { runPreRequest, runPostResponse, type PreRequestReq, type TestResult } from '../api/scripts';
-import { detectAndParse, collectionToPostman, type ImportedCollection } from '../api/importers';
+import {
+  detectAndParse,
+  collectionToPostman,
+  isImportedEnvironment,
+  type ImportedDoc,
+  type ImportedEnvironment,
+} from '../api/importers';
 
 /** Request transport: classic HTTP, server-sent events, WebSocket, or gRPC. */
 export type ApiRequestKind = 'http' | 'sse' | 'websocket' | 'grpc';
@@ -545,10 +551,16 @@ class ApiClientStore {
     }
   }
 
-  /** Create a collection (+ nested folders + requests) from an imported doc. */
-  async importParsed(parsed: ImportedCollection): Promise<void> {
+  /** Create a collection (+ nested folders + requests) from an imported doc.
+   *  A Postman ENVIRONMENT export routes to {@link importEnvironment} instead.
+   *  `quiet` suppresses the per-item success toast (bulk account sync). */
+  async importParsed(parsed: ImportedDoc, quiet = false): Promise<void> {
     if (ws.myRole === 'viewer') {
       toasts.error('Read-only', 'You have viewer access to this workspace');
+      return;
+    }
+    if (isImportedEnvironment(parsed)) {
+      await this.importEnvironment(parsed, quiet);
       return;
     }
     const root = await this.saveCollection({ name: parsed.name, parent_id: null });
@@ -572,7 +584,81 @@ class ApiClientStore {
       });
     }
     await this.loadRequests();
-    toasts.success('Imported', `${parsed.name} · ${parsed.requests.length} request(s) (${parsed.format})`);
+    if (!quiet) {
+      toasts.success('Imported', `${parsed.name} · ${parsed.requests.length} request(s) (${parsed.format})`);
+    }
+  }
+
+  /** Import a Postman environment export as a new API environment. */
+  async importEnvironment(env: ImportedEnvironment, quiet = false): Promise<void> {
+    const saved = await this.saveEnvironment({
+      name: env.name,
+      variables: env.variables,
+    });
+    if (saved && !quiet) {
+      toasts.success(
+        'Environment imported',
+        `${env.name} · ${Object.keys(env.variables).length} variable(s)`,
+      );
+    }
+  }
+
+  /** One-shot Postman ACCOUNT sync: the daemon fetches every collection +
+   *  environment via the Postman API (api.getpostman.com) and this imports
+   *  them all through the normal import pipeline — no per-collection manual
+   *  export. Returns true when the sync call itself succeeded. */
+  async postmanSync(apiKey: string, remember: boolean): Promise<boolean> {
+    const base = this.base();
+    if (!base) return false;
+    let res: {
+      collections: unknown[];
+      environments: { name?: string }[];
+      failed: { name: string; error: string }[];
+    };
+    try {
+      res = await api.post(`${base}/postman/sync`, {
+        api_key: apiKey || null,
+        remember,
+      });
+    } catch (e) {
+      toasts.error('Postman sync failed', errMsg(e));
+      return false;
+    }
+    let cols = 0;
+    let envs = 0;
+    const failed = [...res.failed];
+    for (const doc of res.collections) {
+      const name =
+        (doc as { info?: { name?: string } }).info?.name ?? 'collection';
+      try {
+        await this.importParsed(detectAndParse(JSON.stringify(doc), 'postman.json'), true);
+        cols++;
+      } catch (e) {
+        failed.push({ name, error: errMsg(e) });
+      }
+    }
+    for (const env of res.environments) {
+      try {
+        await this.importParsed(
+          detectAndParse(JSON.stringify(env), 'postman_environment.json'),
+          true,
+        );
+        envs++;
+      } catch (e) {
+        failed.push({ name: env.name ?? 'environment', error: errMsg(e) });
+      }
+    }
+    toasts.success(
+      'Postman sync complete',
+      `${cols} collection(s), ${envs} environment(s) imported`,
+    );
+    for (const f of failed.slice(0, 3)) {
+      toasts.error(`Skipped: ${f.name}`, f.error);
+    }
+    if (failed.length > 3) {
+      toasts.error('More items skipped', `${failed.length - 3} further item(s) failed`);
+    }
+    return true;
   }
 
   /** Pull Postman collection files from a connected git repo and import them. */

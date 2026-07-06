@@ -4,6 +4,7 @@
   // collection to an OpenAPI 3 document.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { api } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -16,11 +17,34 @@
     const file = input.files?.[0];
     input.value = '';
     if (!file) return;
+    // Close the dialog as soon as a file is picked — the import itself can
+    // take a moment (folders + requests are created one by one) and progress
+    // is reported via toasts, not the dialog.
+    postmanOpen = false;
     try {
       const parsed = detectAndParse(await file.text(), file.name);
       await apiClient.importParsed(parsed);
     } catch (e) {
       toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // ── Postman account sync (fetch ALL collections via the Postman API) ───────
+  let postmanOpen = $state(false);
+  let pmKey = $state('');
+  let pmRemember = $state(true);
+  let pmBusy = $state(false);
+
+  async function runPostmanSync(): Promise<void> {
+    pmBusy = true;
+    try {
+      const ok = await apiClient.postmanSync(pmKey.trim(), pmRemember);
+      if (ok) {
+        postmanOpen = false;
+        pmKey = '';
+      }
+    } finally {
+      pmBusy = false;
     }
   }
 
@@ -162,10 +186,9 @@
         <button class="icon-btn" title="New collection" aria-label="New collection" onclick={() => newCollection(null)}>
           <Icon name="folder" size={13} />
         </button>
-        <label class="icon-btn" title="Import (Postman / OpenAPI / HAR)" aria-label="Import collection">
+        <button class="icon-btn" title="Import from Postman account or a file" aria-label="Import collections" onclick={() => (postmanOpen = true)}>
           <Icon name="external" size={13} />
-          <input type="file" accept=".json,.har,.yaml,.yml" hidden onchange={(e) => importFile(e.currentTarget as HTMLInputElement)} />
-        </label>
+        </button>
         <button class="icon-btn" class:active={gitOpen} title="Sync with Git" aria-label="Sync collections with Git" onclick={toggleGit}>
           <Icon name="branch" size={13} />
         </button>
@@ -205,7 +228,13 @@
       body="Save the current request from the builder, or create a collection to organize them."
       actionLabel={canEdit ? 'New collection' : undefined}
       onaction={canEdit ? () => newCollection(null) : undefined}
-    />
+    >
+      {#if canEdit}
+        <button class="btn ghost empty-import" onclick={() => (postmanOpen = true)}>
+          <Icon name="external" size={12} />Import from Postman…
+        </button>
+      {/if}
+    </EmptyState>
   {:else}
     <div class="tree">
       {#each tree as node (node.col.id)}
@@ -271,7 +300,80 @@
   </div>
 {/snippet}
 
+{#if postmanOpen}
+  <Modal title="Import from Postman" width={480} onclose={() => (postmanOpen = false)}>
+    <div class="pm-body">
+      <p class="pm-hint">
+        Sync your whole Postman account in one shot — Otto fetches <strong>every
+        collection and environment</strong> via the Postman API. Create a key at
+        <em>postman.co → Settings → API keys</em>.
+      </p>
+      <input
+        class="input"
+        type="password"
+        placeholder="Postman API key (PMAK-…) — blank to reuse a remembered key"
+        bind:value={pmKey}
+        aria-label="Postman API key"
+      />
+      <label class="pm-remember">
+        <input type="checkbox" bind:checked={pmRemember} />
+        Remember this key in the macOS Keychain
+      </label>
+      <div class="pm-or">…or import a single exported file (Postman / OpenAPI / HAR):</div>
+      <label class="btn ghost pm-file">
+        <Icon name="external" size={12} />Choose file…
+        <input type="file" accept=".json,.har,.yaml,.yml" hidden onchange={(e) => importFile(e.currentTarget as HTMLInputElement)} />
+      </label>
+    </div>
+    {#snippet footer()}
+      <button class="btn" onclick={() => (postmanOpen = false)}>Cancel</button>
+      <button class="btn primary" onclick={runPostmanSync} disabled={pmBusy}>
+        {pmBusy ? 'Syncing…' : 'Fetch & import all'}
+      </button>
+    {/snippet}
+  </Modal>
+{/if}
+
 <style>
+  .empty-import {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    cursor: pointer;
+  }
+  /* ── Postman import dialog ─────────────────────────────────────────────── */
+  .pm-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .pm-hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+  .pm-remember {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .pm-or {
+    margin-top: 4px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+  }
+  /* File-input label styled as a button (a real <button> can't host an input). */
+  .pm-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
+    cursor: pointer;
+  }
   .git-sync {
     display: flex;
     flex-direction: column;

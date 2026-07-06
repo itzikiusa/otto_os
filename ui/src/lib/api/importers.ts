@@ -25,9 +25,24 @@ export interface ImportedCollection {
   requests: ImportedRequest[];
 }
 
+/** A Postman environment export (`*.postman_environment.json`) — becomes an
+ * Otto API environment. Secret-typed values import as plain variables (Postman
+ * exports don't carry secret values); the user can mark them secret after. */
+export interface ImportedEnvironment {
+  format: 'postman-env';
+  name: string;
+  variables: Record<string, string>;
+}
+
+export type ImportedDoc = ImportedCollection | ImportedEnvironment;
+
+export function isImportedEnvironment(d: ImportedDoc): d is ImportedEnvironment {
+  return d.format === 'postman-env';
+}
+
 const kv = (key: string, value: string): ApiKeyVal => ({ key, value, enabled: true });
 
-export function detectAndParse(text: string, filename: string): ImportedCollection {
+export function detectAndParse(text: string, filename: string): ImportedDoc {
   let json: Record<string, unknown>;
   try {
     json = JSON.parse(text);
@@ -37,7 +52,28 @@ export function detectAndParse(text: string, filename: string): ImportedCollecti
   if (json.info && Array.isArray(json.item)) return parsePostman(json);
   if (json.openapi || json.swagger) return parseOpenApi(json);
   if (json.log && (json.log as { entries?: unknown }).entries) return parseHar(json, filename);
-  throw new Error('Unrecognized format — expected Postman, OpenAPI, or HAR');
+  if (Array.isArray(json.values) && (json.name || json._postman_variable_scope)) {
+    return parsePostmanEnvironment(json);
+  }
+  throw new Error(
+    'Unrecognized format — expected Postman (collection or environment), OpenAPI, or HAR',
+  );
+}
+
+/** Postman environment export: `{ name, values: [{key, value, enabled}] }`.
+ * Disabled entries are skipped; values are coerced to strings. */
+function parsePostmanEnvironment(doc: Record<string, unknown>): ImportedEnvironment {
+  const variables: Record<string, string> = {};
+  for (const raw of doc.values as unknown[]) {
+    const v = raw as { key?: string; value?: unknown; enabled?: boolean };
+    if (!v.key || v.enabled === false) continue;
+    variables[v.key] = v.value == null ? '' : String(v.value);
+  }
+  return {
+    format: 'postman-env',
+    name: String(doc.name ?? 'Imported Environment'),
+    variables,
+  };
 }
 
 // ── Postman v2.1 ────────────────────────────────────────────────────────────
