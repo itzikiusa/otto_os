@@ -312,20 +312,30 @@ pub async fn claude_ingest(
 
     // Blocked / needs-attention: Claude fires a Notification hook when it is
     // waiting on the user (input or a permission it couldn't auto-accept).
-    if event_name == "Notification" {
+    // Background sessions (insights, workflow steps, reviews …) run unattended —
+    // their hooks must not nag the notification center / needs-you badge.
+    if event_name == "Notification" && !crate::monitor::is_background(&session) {
         let msg = payload
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("Agent is waiting");
-        notify(
-            &ctx,
-            &session,
-            NoticeSeverity::Warn,
-            "Agent needs attention",
-            format!("{} · {}", session.title, clip(msg, 160)),
-            "waiting",
-        )
-        .await;
+        // Claude's generic 60s-idle variant ("Claude is waiting for your
+        // input") duplicates Otto's own idle detection — which is debounced
+        // AND suppressed while the session's process tree is still running a
+        // command. The hook variant has neither guard (it fired mid-deploy),
+        // so drop it and let the monitor path own "idle". Permission prompts
+        // and other messages are genuine blocks → still immediate.
+        if !msg.to_ascii_lowercase().contains("waiting for your input") {
+            notify(
+                &ctx,
+                &session,
+                NoticeSeverity::Warn,
+                "Agent needs attention",
+                format!("{} · {}", session.title, clip(msg, 160)),
+                "waiting",
+            )
+            .await;
+        }
     }
 
     StatusCode::NO_CONTENT

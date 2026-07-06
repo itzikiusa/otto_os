@@ -535,6 +535,55 @@ pub fn spawn_session_event_listener(ctx: ServerCtx) {
     });
 }
 
+/// Session `meta.source` values that mark BACKGROUND sessions — spawned by a
+/// scheduler / runner, not driven by the user. They idle and end constantly by
+/// design, so "awaiting input"/"ended" notices for them are pure noise (a
+/// scheduled Insights run nagging "Claude is waiting for your input" was the
+/// canonical false alarm). Mirrors the UI's sidebar blacklist.
+const BACKGROUND_SOURCES: &[&str] = &[
+    "channel",
+    "insights",
+    "workflow",
+    "review",
+    "skilleval",
+    "skillreview",
+    "product-analysis",
+    "swarm",
+    "canvas_assist",
+    "mockup_assist",
+    "db_assist",
+];
+
+/// True when the session was spawned by a background runner (see
+/// [`BACKGROUND_SOURCES`]) — such sessions never produce session notices.
+/// Shared with the activity ingest (Claude's Notification hook), which fires
+/// "Agent needs attention" and must stay quiet for background runs too.
+pub(crate) fn is_background(s: &otto_core::domain::Session) -> bool {
+    s.meta
+        .get("source")
+        .and_then(|v| v.as_str())
+        .is_some_and(|src| BACKGROUND_SOURCES.contains(&src))
+}
+
+/// How long a session must STAY idle before the "awaiting input" notice fires.
+/// The raw status flips to Idle after only ~5s of PTY silence — an agent
+/// mid-thought or inside a quiet tool call trips that constantly, so the idle
+/// transition alone is far too sensitive a "needs you" signal. The notice is
+/// emitted only after the session is re-checked and found still idle AND its
+/// process tree is not actively burning CPU (a running build/test/deploy).
+/// Tunable via the `idle_notice_confirm_secs` setting.
+const IDLE_CONFIRM: Duration = Duration::from_secs(45);
+
+/// Read the confirm window from settings (`idle_notice_confirm_secs`), falling
+/// back to [`IDLE_CONFIRM`]. Read per event so changes apply live.
+async fn idle_confirm(ctx: &ServerCtx) -> Duration {
+    let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
+    match repo.get("idle_notice_confirm_secs").await {
+        Ok(Some(v)) => v.as_u64().map(Duration::from_secs).unwrap_or(IDLE_CONFIRM),
+        _ => IDLE_CONFIRM,
+    }
+}
+
 async fn handle_session_transition(
     ctx: &ServerCtx,
     session_id: &Id,
@@ -547,26 +596,56 @@ async fn handle_session_transition(
         Some(SessionStatus::Working) | Some(SessionStatus::Running)
     );
 
-    let kind = match status {
+    match status {
         SessionStatus::Idle if was_active => {
-            Some((NoticeSeverity::Info, "Session awaiting input", "idle"))
+            // Debounce: confirm the idle sticks before telling the user their
+            // agent is waiting. A session that resumes working (or exits) within
+            // the window fires nothing — the exit path has its own notice.
+            let ctx = ctx.clone();
+            let id = session_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(idle_confirm(&ctx).await).await;
+                let Ok(s) = ctx.manager.get(&id).await else {
+                    return;
+                };
+                if s.status != SessionStatus::Idle {
+                    return; // resumed / exited meanwhile — false alarm avoided
+                }
+                // Quiet PTY but a busy process tree = a command is still
+                // running under the agent (build / tests / deploy) — it does
+                // NOT need the user yet. The eventual resume produces a fresh
+                // Working→Idle transition, so the notice isn't lost, just late.
+                if ctx.manager.tree_active(&id).await {
+                    return;
+                }
+                emit_session_notice(&ctx, &id, s, SessionStatus::Idle).await;
+            });
         }
-        SessionStatus::Exited => Some((NoticeSeverity::Info, "Session ended", "exited")),
-        _ => None,
-    };
-    let Some((severity, title, suffix)) = kind else {
-        return;
+        SessionStatus::Exited => {
+            let Ok(s) = ctx.manager.get(session_id).await else {
+                return;
+            };
+            emit_session_notice(ctx, session_id, s, SessionStatus::Exited).await;
+        }
+        _ => {}
+    }
+}
+
+/// Build + create the idle/exited notice for a (already re-validated) session.
+async fn emit_session_notice(
+    ctx: &ServerCtx,
+    session_id: &Id,
+    s: otto_core::domain::Session,
+    status: SessionStatus,
+) {
+    let (severity, title, suffix) = match status {
+        SessionStatus::Idle => (NoticeSeverity::Info, "Session awaiting input", "idle"),
+        _ => (NoticeSeverity::Info, "Session ended", "exited"),
     };
 
-    // Load the session so the notice can name it (title + provider + what it was
-    // doing) instead of a bare "an agent session". Bail if it's gone.
-    let Ok(s) = ctx.manager.get(session_id).await else {
-        return;
-    };
-
-    // Background channel (Slack/Telegram) sessions end after every reply — they
-    // would flood the notification center, so never notify for them.
-    if s.meta.get("source").and_then(|v| v.as_str()) == Some("channel") {
+    // Background sessions (channels, insights, workflow steps, reviews …) idle
+    // and end by design — never notify for them.
+    if is_background(&s) {
         return;
     }
 

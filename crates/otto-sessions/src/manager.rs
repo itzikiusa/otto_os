@@ -1634,6 +1634,24 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Best-effort "still working" probe: true when the session's DESCENDANT
+    /// process tree accrued meaningful CPU across a short sample — i.e. a
+    /// command (build, tests, deploy) is running under the agent even though
+    /// the PTY is quiet and the status shows Idle. Same descendants-only rule
+    /// as the idle-suspend sweep (the agent TUI's own redraws don't count).
+    /// Used to suppress the "awaiting input" notice while work is in flight.
+    /// A dead/unknown session (or an empty `ps`) reads as inactive.
+    pub async fn tree_active(&self, id: &Id) -> bool {
+        let Some(pid) = self.live.get(id).and_then(|e| e.value().pid()) else {
+            return false;
+        };
+        let before = descendant_cpu_ms(pid, &process_table());
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        let after = descendant_cpu_ms(pid, &process_table());
+        // ≥30ms over 750ms ≈ a real job burning CPU; idle MCP helpers accrue ~0.
+        after > before.saturating_add(30)
+    }
+
     /// One sweep of the idle-suspend policy: suspend every LIVE session that is
     /// resumable, idle (no output for ≥ [`SUSPEND_GRACE`]) and has no attached
     /// WS viewer. Working sessions, attached sessions and non-resumable
