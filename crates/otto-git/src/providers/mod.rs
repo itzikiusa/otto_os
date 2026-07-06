@@ -14,8 +14,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use otto_core::api::{
-    CreatePrReq, DiffResp, MergeStrategy, NewPrCommentReq, PrComment, PrCommit, PrDetail, PrState,
-    PrSummary, UpdatePrReq,
+    Collaborator, CreatePrReq, DiffResp, MergeStrategy, NewPrCommentReq, PrComment, PrCommit,
+    PrDetail, PrState, PrSummary, UpdatePrReq,
 };
 use otto_core::domain::{GitAccount, GitProviderKind};
 use otto_core::Result;
@@ -47,6 +47,15 @@ pub struct RemoteRepoSummary {
     pub private: bool,
     /// ISO-8601 last-updated timestamp (empty string when unknown).
     pub updated_at: String,
+}
+
+/// Result of an authenticated token probe (`GitProvider::verify_token`).
+/// `scopes` is best-effort: echoed from response headers where the provider
+/// exposes them (`X-OAuth-Scopes`), empty otherwise.
+#[derive(Debug, Clone)]
+pub struct TokenCheck {
+    pub login: String,
+    pub scopes: Vec<String>,
 }
 
 /// Common operations on a hosted provider's pull/merge requests.
@@ -83,6 +92,23 @@ pub trait GitProvider: Send + Sync {
         namespace: &str,
         query: Option<&str>,
     ) -> Result<Vec<RemoteRepoSummary>>;
+
+    /// People the bound account can request as PR reviewers on this repo,
+    /// filtered by the case-insensitive `q` prefix/substring. Backs the
+    /// create-PR reviewer typeahead. Default: empty (the UI degrades to a
+    /// free-text input).
+    async fn list_collaborators(&self, _r: &RemoteRef, _q: &str) -> Result<Vec<Collaborator>> {
+        Ok(Vec::new())
+    }
+
+    /// Cheapest authenticated call that proves the stored token works, returning
+    /// who we authenticated as (+ scopes where the provider exposes them).
+    /// Backs the git-account "Test connection" button.
+    async fn verify_token(&self) -> Result<TokenCheck> {
+        Err(otto_core::Error::Invalid(
+            "connection test is not supported for this provider".into(),
+        ))
+    }
 
     /// Best-effort probe for the bound token's expiry, where the provider
     /// exposes it (GitHub response header, GitLab PAT introspection). Returns

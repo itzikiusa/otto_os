@@ -11,11 +11,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
-    AddRepoReq, BranchInfo, CheckoutReq, CommitInfo, CommitReq, ConflictFile, CreateGitAccountReq,
-    CreatePrReq, DiffResp, MergeBranchReq, MergeCommitReq, MergeConflictStatus, MergePrReq,
-    MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq, PrComment, PrCommit, PrDetail,
-    PrState, PrSummary, Problem,
-    RefsResp, RepoStatusResp, RequestChangesReq, ResolveConflictReq, StagePathsReq, StashInfo,
+    AddRepoReq, BranchInfo, CheckoutReq, Collaborator, CommitInfo, CommitReq, ConflictFile,
+    CreateGitAccountReq, CreatePrReq, DiffResp, GitAccountTestResp, MergeBranchReq, MergeCommitReq,
+    MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq,
+    PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp, RepoStatusResp,
+    RequestChangesReq, ResolveConflictReq, StagePathsReq, StashInfo, TestGitAccountReq,
     UpdateGitAccountReq, UpdatePrReq,
 };
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
@@ -77,6 +77,9 @@ pub fn router<S: GitCtx>() -> Router<S> {
             axum::routing::patch(update_account::<S>).delete(delete_account::<S>),
         )
         .route("/git/accounts/{id}/remote-repos", get(remote_repos::<S>))
+        // connection test: stored-token (id) + draft-form variants
+        .route("/git/accounts/{id}/test", post(test_account::<S>))
+        .route("/git/accounts/test", post(test_account_draft::<S>))
         // global repo list (workspace-independent Git page)
         .route("/git/repos", get(list_all_repos::<S>))
         // repos (#34–36)
@@ -125,6 +128,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
             post(repo_conflict_resolve::<S>),
         )
         // PRs (#48–56)
+        .route("/repos/{id}/collaborators", get(repo_collaborators::<S>))
         .route("/repos/{id}/prs", get(pr_list::<S>).post(pr_create::<S>))
         .route(
             "/repos/{id}/prs/{number}",
@@ -181,6 +185,16 @@ type ApiResult<T> = std::result::Result<T, ApiError>;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Populate `Repo::forge` live from the remote URL (otto-state leaves it None
+/// — it has no detection logic). "unrecognized" drives the UI's honest
+/// unsupported-forge empty state; None = repo has no remote at all.
+fn fill_forge(repo: &mut Repo) {
+    repo.forge = repo
+        .remote_url
+        .as_deref()
+        .map(|u| crate::providers::detect::forge(u).to_string());
+}
 
 /// Load a repo, check the caller's workspace role, return a LocalGit handle.
 async fn repo_ctx<S: GitCtx>(
@@ -408,6 +422,141 @@ async fn delete_account<S: GitCtx>(
 }
 
 // ---------------------------------------------------------------------------
+// Connection test (Test button on the git-account form)
+// ---------------------------------------------------------------------------
+
+/// Map a `verify_token` outcome to the wire response. Auth/provider failures
+/// come back `ok: false` + error text under HTTP 200 so the form renders them
+/// inline instead of tripping generic error toasts.
+fn test_resp(r: Result<crate::providers::TokenCheck>) -> GitAccountTestResp {
+    match r {
+        Ok(t) => GitAccountTestResp {
+            ok: true,
+            login: Some(t.login),
+            scopes: t.scopes,
+            error: None,
+        },
+        Err(e) => GitAccountTestResp {
+            ok: false,
+            login: None,
+            scopes: Vec::new(),
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// `POST /git/accounts/{id}/test` — exercise the **stored** token with the
+/// provider's cheapest authenticated call. Owner-or-root only (S4: a member
+/// must not probe another user's token). The token itself never leaves the
+/// daemon.
+async fn test_account<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<GitAccountTestResp>> {
+    let account = s.store().get_account(&id).await?;
+    authorize_owner(&account, &user.0)?;
+    let token = account_token(&s, &account)?;
+    let provider = make_provider(&account, token);
+    Ok(Json(test_resp(provider.verify_token().await)))
+}
+
+/// `POST /git/accounts/test` — verify a not-yet-saved account form. The draft
+/// token travels in the body exactly once and is neither persisted nor logged.
+async fn test_account_draft<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Json(req): Json<TestGitAccountReq>,
+) -> ApiResult<Json<GitAccountTestResp>> {
+    let _ = (&s, &user); // auth is the route policy (Git Edit); no stored state involved.
+    let provider_kind = req
+        .provider
+        .ok_or_else(|| Error::Invalid("provider is required".into()))?;
+    let token = req
+        .token
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| Error::Invalid("token is required".into()))?;
+    let account = GitAccount {
+        id: String::new(),
+        user_id: user.0.id.clone(),
+        provider: provider_kind,
+        label: String::new(),
+        username: req.username.clone().unwrap_or_default(),
+        token_ref: String::new(),
+        api_base_url: req.api_base_url.clone().filter(|u| !u.trim().is_empty()),
+        namespace: None,
+        token_expires_at: None,
+        created_at: chrono::Utc::now(),
+    };
+    let provider = make_provider(&account, token.to_string());
+    Ok(Json(test_resp(provider.verify_token().await)))
+}
+
+// ---------------------------------------------------------------------------
+// Collaborators (create-PR reviewer typeahead)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CollaboratorsQuery {
+    q: Option<String>,
+}
+
+/// Process-wide 30 s cache of the UNFILTERED collaborator list per repo id —
+/// the typeahead fires per keystroke and the provider list is stable; `q`
+/// filtering happens after the cache.
+fn collaborators_cache(
+) -> &'static StdMutex<HashMap<String, (std::time::Instant, Vec<Collaborator>)>> {
+    static CACHE: OnceLock<StdMutex<HashMap<String, (std::time::Instant, Vec<Collaborator>)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+const COLLABORATORS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `GET /repos/{id}/collaborators?q=` — provider-backed reviewer typeahead.
+/// ws viewer + S4 (the call uses the bound account's token via provider_ctx).
+/// Provider errors surface as-is; the UI degrades to a free-text input.
+async fn repo_collaborators<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<CollaboratorsQuery>,
+) -> ApiResult<Json<Vec<Collaborator>>> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let query = q.q.unwrap_or_default();
+    let cached = collaborators_cache()
+        .lock()
+        .expect("collaborators cache poisoned")
+        .get(id.as_str())
+        .filter(|(at, _)| at.elapsed() < COLLABORATORS_TTL)
+        .map(|(_, list)| list.clone());
+    let all = match cached {
+        Some(list) => list,
+        None => {
+            let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+            // Fetch unfiltered so one provider call serves every keystroke.
+            let list = provider.list_collaborators(&remote, "").await?;
+            collaborators_cache()
+                .lock()
+                .expect("collaborators cache poisoned")
+                .insert(id.to_string(), (std::time::Instant::now(), list.clone()));
+            list
+        }
+    };
+    let needle = query.to_ascii_lowercase();
+    Ok(Json(
+        all.into_iter()
+            .filter(|c| {
+                needle.is_empty()
+                    || c.name.to_ascii_lowercase().contains(&needle)
+                    || c.display_name.to_ascii_lowercase().contains(&needle)
+            })
+            .collect(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Remote repo listing
 // ---------------------------------------------------------------------------
 
@@ -451,7 +600,8 @@ async fn list_all_repos<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<Repo>>> {
-    let all = s.store().list_all_repos().await?;
+    let mut all = s.store().list_all_repos().await?;
+    all.iter_mut().for_each(fill_forge);
     if user.0.is_root {
         return Ok(Json(all));
     }
@@ -478,7 +628,9 @@ async fn list_repos<S: GitCtx>(
     s.roles()
         .check(&user.0, &ws_id, WorkspaceRole::Viewer)
         .await?;
-    Ok(Json(s.store().list_repos(&ws_id).await?))
+    let mut repos = s.store().list_repos(&ws_id).await?;
+    repos.iter_mut().for_each(fill_forge);
+    Ok(Json(repos))
 }
 
 async fn add_repo<S: GitCtx>(
@@ -490,13 +642,13 @@ async fn add_repo<S: GitCtx>(
     s.roles()
         .check(&user.0, &ws_id, WorkspaceRole::Editor)
         .await?;
-    match (&req.path, &req.clone_url) {
-        (Some(path), None) => Ok(Json(register_repo(&s, &user, &ws_id, path, &req).await?)),
-        (None, Some(url)) => Ok(Json(
-            clone_into_workspace(&s, &user, &ws_id, url, &req).await?,
-        )),
-        _ => Err(Error::Invalid("provide exactly one of path | clone_url".into()).into()),
-    }
+    let mut repo = match (&req.path, &req.clone_url) {
+        (Some(path), None) => register_repo(&s, &user, &ws_id, path, &req).await?,
+        (None, Some(url)) => clone_into_workspace(&s, &user, &ws_id, url, &req).await?,
+        _ => return Err(Error::Invalid("provide exactly one of path | clone_url".into()).into()),
+    };
+    fill_forge(&mut repo);
+    Ok(Json(repo))
 }
 
 #[derive(Deserialize)]
@@ -524,7 +676,8 @@ async fn detect_repo<S: GitCtx>(
     let top = LocalGit::new(&req.path).toplevel().await?;
     // Already registered at this root? Return it.
     let existing = s.store().list_repos(&ws_id).await?;
-    if let Some(found) = existing.into_iter().find(|r| r.path == top) {
+    if let Some(mut found) = existing.into_iter().find(|r| r.path == top) {
+        fill_forge(&mut found);
         return Ok(Json(found));
     }
     let add = AddRepoReq {
@@ -534,7 +687,9 @@ async fn detect_repo<S: GitCtx>(
         git_account_id: None,
         clone_dir: None,
     };
-    Ok(Json(register_repo(&s, &user, &ws_id, &top, &add).await?))
+    let mut repo = register_repo(&s, &user, &ws_id, &top, &add).await?;
+    fill_forge(&mut repo);
+    Ok(Json(repo))
 }
 
 async fn register_repo<S: GitCtx>(

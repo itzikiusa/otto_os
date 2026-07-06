@@ -72,6 +72,39 @@ impl Gitlab {
         format!("/projects/{}/merge_requests{tail}", Self::project_id(r))
     }
 
+    /// Resolve a GitLab username to its numeric user id (`GET /users?username=`
+    /// is an exact-match filter). Cached process-wide per (base, username) for
+    /// 10 minutes — usernames are stable and PR creation may resolve several.
+    async fn resolve_user_id(&self, username: &str) -> Result<Option<u64>> {
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+        type Cache = Mutex<std::collections::HashMap<(String, String), (Instant, u64)>>;
+        static CACHE: OnceLock<Cache> = OnceLock::new();
+        const TTL: Duration = Duration::from_secs(600);
+        let key = (self.base.clone(), username.to_string());
+        if let Some((at, id)) = CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .expect("gitlab user cache poisoned")
+            .get(&key)
+        {
+            if at.elapsed() < TTL {
+                return Ok(Some(*id));
+            }
+        }
+        let path = format!("/users?username={}", percent_encode_query(username));
+        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let id = varr(&v, &[]).first().map(|u| vu64(u, &["id"])).filter(|id| *id > 0);
+        if let Some(id) = id {
+            CACHE
+                .get_or_init(Default::default)
+                .lock()
+                .expect("gitlab user cache poisoned")
+                .insert(key, (Instant::now(), id));
+        }
+        Ok(id)
+    }
+
     /// Fetch the MR pipeline (latest) for `number` and map it to [`CiStatus`].
     /// GitLab exposes `GET /projects/:id/merge_requests/:iid/pipelines`.
     /// Falls back to `CiStatus::none()` on any error.
@@ -108,10 +141,25 @@ impl Gitlab {
     }
 }
 
+/// GitLab has no native draft flag on create — the convention is a `Draft: `
+/// title prefix. Strip it (and legacy `WIP: `) when rendering our own titles so
+/// they stay clean; the draft flag is computed from the prefix *before* the
+/// strip.
+fn strip_draft_prefix(title: &str) -> &str {
+    for p in ["Draft:", "WIP:"] {
+        if let Some(rest) = title.strip_prefix(p) {
+            return rest.trim_start();
+        }
+    }
+    title
+}
+
 fn summary_from(v: &Value) -> PrSummary {
+    let raw_title = vstr(v, &["title"]);
+    let draft = raw_title.starts_with("Draft:") || raw_title.starts_with("WIP:");
     PrSummary {
         number: vu64(v, &["iid"]),
-        title: vstr(v, &["title"]),
+        title: strip_draft_prefix(&raw_title).to_string(),
         author: {
             let name = vstr(v, &["author", "name"]);
             if name.is_empty() {
@@ -124,13 +172,34 @@ fn summary_from(v: &Value) -> PrSummary {
         source_branch: vstr(v, &["source_branch"]),
         target_branch: vstr(v, &["target_branch"]),
         updated_at: ts(&vstr(v, &["updated_at"])),
-        draft: Some(vstr(v, &["title"]).starts_with("Draft:") || vstr(v, &["title"]).starts_with("WIP:")),
+        reviewer_warnings: Vec::new(),
+        draft: Some(draft),
         ci_status: None,
         labels: v.get("labels").and_then(|l| l.as_array())
             .map(|arr| arr.iter().filter_map(|l| l.as_str().map(str::to_string)).collect())
             .unwrap_or_default(),
         url: vstr(v, &["web_url"]),
     }
+}
+
+/// Create-MR request body. Draft = `Draft: ` title prefix (idempotent when the
+/// caller already typed one); `reviewer_ids` only when non-empty.
+fn create_mr_body(req: &CreatePrReq, reviewer_ids: &[u64]) -> Value {
+    let title = if req.draft == Some(true) && !req.title.starts_with("Draft:") {
+        format!("Draft: {}", req.title)
+    } else {
+        req.title.clone()
+    };
+    let mut body = json!({
+        "title": title,
+        "description": req.description,
+        "source_branch": req.source_branch,
+        "target_branch": req.target_branch,
+    });
+    if !reviewer_ids.is_empty() {
+        body["reviewer_ids"] = json!(reviewer_ids);
+    }
+    body
 }
 
 fn note_to_comment(note: &Value, id_override: Option<String>) -> PrComment {
@@ -299,19 +368,28 @@ impl super::GitProvider for Gitlab {
     }
 
     async fn create_pr(&self, r: &RemoteRef, req: &CreatePrReq) -> Result<PrSummary> {
+        // GitLab takes reviewers as ids on the create call — resolve each
+        // username first (cached); names that don't resolve become warnings on
+        // the response, they never block the MR.
+        let mut reviewer_ids: Vec<u64> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        for name in req.reviewers.as_deref().unwrap_or_default() {
+            match self.resolve_user_id(name).await {
+                Ok(Some(id)) => reviewer_ids.push(id),
+                Ok(None) => warnings.push(format!("could not request reviewer {name}: no such user")),
+                Err(e) => warnings.push(format!("could not request reviewer {name}: {e}")),
+            }
+        }
         let v = self
             .http
             .json(
                 self.req(reqwest::Method::POST, &Self::mr_path(r, ""))
-                    .json(&json!({
-                        "title": req.title,
-                        "description": req.description,
-                        "source_branch": req.source_branch,
-                        "target_branch": req.target_branch,
-                    })),
+                    .json(&create_mr_body(req, &reviewer_ids)),
             )
             .await?;
-        Ok(summary_from(&v))
+        let mut summary = summary_from(&v);
+        summary.reviewer_warnings = warnings;
+        Ok(summary)
     }
 
     async fn update_pr(&self, r: &RemoteRef, number: u64, req: &UpdatePrReq) -> Result<()> {
@@ -483,6 +561,32 @@ impl super::GitProvider for Gitlab {
         Ok(commits)
     }
 
+    /// Project members (direct + inherited) — the set GitLab accepts as MR
+    /// reviewers. `query` filters server-side; we filter again locally for the
+    /// cached/empty-query path.
+    async fn list_collaborators(
+        &self,
+        r: &RemoteRef,
+        q: &str,
+    ) -> Result<Vec<otto_core::api::Collaborator>> {
+        let mut path = format!("/projects/{}/members/all?per_page=100", Self::project_id(r));
+        if !q.is_empty() {
+            path.push_str(&format!("&query={}", percent_encode_query(q)));
+        }
+        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        Ok(varr(&v, &[]).iter().map(member_to_collaborator).collect())
+    }
+
+    /// `GET /user` with the bound token: proves authentication. GitLab exposes
+    /// no scopes header on this call — scopes stay empty.
+    async fn verify_token(&self) -> Result<super::TokenCheck> {
+        let v = self.http.json(self.req(reqwest::Method::GET, "/user")).await?;
+        Ok(super::TokenCheck {
+            login: vstr(&v, &["username"]),
+            scopes: Vec::new(),
+        })
+    }
+
     async fn list_repos(
         &self,
         namespace: &str,
@@ -555,6 +659,16 @@ impl super::GitProvider for Gitlab {
     }
 }
 
+/// One project-member row → common DTO (`username` is the requestable handle).
+fn member_to_collaborator(v: &Value) -> otto_core::api::Collaborator {
+    let username = vstr(v, &["username"]);
+    let name = vstr(v, &["name"]);
+    otto_core::api::Collaborator {
+        display_name: if name.is_empty() { username.clone() } else { name },
+        name: username,
+    }
+}
+
 /// Parse GitLab's `expires_at` (`YYYY-MM-DD` date, occasionally full RFC3339).
 /// A bare date is interpreted as 23:59:59 UTC on that day so we don't warn a
 /// day early.
@@ -597,8 +711,63 @@ fn parse_pipeline_fixture(json_str: &str) -> crate::types::CiStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_gitlab_expiry, parse_pipeline_fixture};
+    use super::{
+        create_mr_body, member_to_collaborator, parse_gitlab_expiry, parse_pipeline_fixture,
+        strip_draft_prefix, summary_from,
+    };
     use chrono::{Datelike, Timelike};
+    use otto_core::api::CreatePrReq;
+    use serde_json::json;
+
+    fn req(draft: Option<bool>) -> CreatePrReq {
+        CreatePrReq {
+            title: "t".into(),
+            description: "d".into(),
+            source_branch: "feat/x".into(),
+            target_branch: "main".into(),
+            proof_pack_id: None,
+            allow_unproven: None,
+            draft,
+            reviewers: None,
+        }
+    }
+
+    #[test]
+    fn draft_becomes_title_prefix() {
+        assert_eq!(create_mr_body(&req(Some(true)), &[])["title"], json!("Draft: t"));
+        assert_eq!(create_mr_body(&req(None), &[])["title"], json!("t"));
+        assert_eq!(create_mr_body(&req(Some(false)), &[])["title"], json!("t"));
+        // Idempotent when the caller already typed the prefix.
+        let mut r = req(Some(true));
+        r.title = "Draft: t".into();
+        assert_eq!(create_mr_body(&r, &[])["title"], json!("Draft: t"));
+    }
+
+    #[test]
+    fn reviewer_ids_only_when_non_empty() {
+        assert!(create_mr_body(&req(None), &[]).get("reviewer_ids").is_none());
+        assert_eq!(create_mr_body(&req(None), &[5, 7])["reviewer_ids"], json!([5, 7]));
+    }
+
+    #[test]
+    fn draft_prefix_is_stripped_on_read() {
+        assert_eq!(strip_draft_prefix("Draft: hello"), "hello");
+        assert_eq!(strip_draft_prefix("WIP: hello"), "hello");
+        assert_eq!(strip_draft_prefix("plain"), "plain");
+        let s = summary_from(&json!({"iid": 3, "title": "Draft: clean me", "state": "opened"}));
+        assert_eq!(s.draft, Some(true));
+        assert_eq!(s.title, "clean me");
+        let s2 = summary_from(&json!({"iid": 4, "title": "regular", "state": "opened"}));
+        assert_eq!(s2.draft, Some(false));
+        assert_eq!(s2.title, "regular");
+    }
+
+    #[test]
+    fn member_mapping() {
+        let c = member_to_collaborator(&json!({"username": "ada", "name": "Ada L"}));
+        assert_eq!(c.name, "ada");
+        assert_eq!(c.display_name, "Ada L");
+    }
 
     #[test]
     fn bare_date_is_end_of_day_utc() {

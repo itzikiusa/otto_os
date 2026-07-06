@@ -774,6 +774,13 @@ pub struct Repo {
     pub provider: Option<GitProviderKind>,
     pub git_account_id: Option<Id>,
     pub created_at: DateTime<Utc>,
+    /// Forge discriminator computed live from `remote_url` by the git API
+    /// layer (otto-state leaves it None): `"github" | "bitbucket" | "gitlab"`
+    /// for supported hosts, `"unrecognized"` when a remote exists but no
+    /// supported forge matches (e.g. Bitbucket Server/DC), and `null` when the
+    /// repo has no remote at all.
+    #[serde(default)]
+    pub forge: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

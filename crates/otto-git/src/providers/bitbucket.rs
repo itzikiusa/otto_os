@@ -126,6 +126,36 @@ impl Bitbucket {
             .map_err(|e| Error::Upstream(format!("bitbucket read: {e}")))
     }
 
+    /// Workspace members — Bitbucket's reviewer pool. Cached process-wide per
+    /// workspace for 10 minutes (membership changes rarely; PR creation may
+    /// resolve several names against the same list).
+    async fn workspace_members(&self, workspace: &str) -> Result<Vec<Member>> {
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+        type Cache = Mutex<std::collections::HashMap<String, (Instant, Vec<Member>)>>;
+        static CACHE: OnceLock<Cache> = OnceLock::new();
+        const TTL: Duration = Duration::from_secs(600);
+        if let Some((at, members)) = CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .expect("bitbucket member cache poisoned")
+            .get(workspace)
+        {
+            if at.elapsed() < TTL {
+                return Ok(members.clone());
+            }
+        }
+        let path = format!("/workspaces/{workspace}/members?pagelen=100");
+        let v = self.send_json(reqwest::Method::GET, &path, None).await?;
+        let members: Vec<Member> = varr(&v, &["values"]).iter().map(member_from).collect();
+        CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .expect("bitbucket member cache poisoned")
+            .insert(workspace.to_string(), (Instant::now(), members.clone()));
+        Ok(members)
+    }
+
     /// Fetch Bitbucket Cloud commit build statuses for the source-branch HEAD
     /// commit of PR `number`. Aggregates all statuses into a [`CiStatus`].
     /// `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{id}/statuses`
@@ -189,9 +219,48 @@ fn summary_from(v: &Value) -> PrSummary {
         target_branch: vstr(v, &["destination", "branch", "name"]),
         updated_at: ts(&vstr(v, &["updated_on"])),
         url: vstr(v, &["links", "html", "href"]),
-        draft: None,
+        // Bitbucket Cloud exposes a real `draft` boolean on the PR object.
+        draft: Some(vbool(v, &["draft"]).unwrap_or(false)),
         ci_status: None,
         labels: vec![],
+        reviewer_warnings: Vec::new(),
+    }
+}
+
+/// Create-PR request body. `draft` is included only when explicitly requested
+/// (a workspace plan that rejects it surfaces the provider error verbatim);
+/// reviewers are `{uuid}` entries resolved from workspace members.
+fn create_pr_body(req: &CreatePrReq, reviewer_uuids: &[String]) -> Value {
+    let mut body = json!({
+        "title": req.title,
+        "description": req.description,
+        "source": { "branch": { "name": req.source_branch } },
+        "destination": { "branch": { "name": req.target_branch } },
+    });
+    if let Some(draft) = req.draft {
+        body["draft"] = json!(draft);
+    }
+    if !reviewer_uuids.is_empty() {
+        body["reviewers"] =
+            json!(reviewer_uuids.iter().map(|u| json!({ "uuid": u })).collect::<Vec<_>>());
+    }
+    body
+}
+
+/// One workspace member (from `/2.0/workspaces/{ws}/members`) as the fields
+/// reviewer resolution + the collaborator typeahead need.
+#[derive(Debug, Clone)]
+struct Member {
+    uuid: String,
+    nickname: String,
+    display_name: String,
+}
+
+fn member_from(v: &Value) -> Member {
+    Member {
+        uuid: vstr(v, &["user", "uuid"]),
+        nickname: vstr(v, &["user", "nickname"]),
+        display_name: vstr(v, &["user", "display_name"]),
     }
 }
 
@@ -330,16 +399,42 @@ impl super::GitProvider for Bitbucket {
     }
 
     async fn create_pr(&self, r: &RemoteRef, req: &CreatePrReq) -> Result<PrSummary> {
-        let body = json!({
-            "title": req.title,
-            "description": req.description,
-            "source": { "branch": { "name": req.source_branch } },
-            "destination": { "branch": { "name": req.target_branch } },
-        });
+        // Resolve reviewer names (nickname or display name, case-insensitive)
+        // to workspace-member uuids. Names that don't resolve become warnings
+        // on the response — they never block the PR.
+        let mut uuids: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        if let Some(reviewers) = req.reviewers.as_ref().filter(|l| !l.is_empty()) {
+            match self.workspace_members(&r.owner).await {
+                Ok(members) => {
+                    for name in reviewers {
+                        let needle = name.to_ascii_lowercase();
+                        match members.iter().find(|m| {
+                            m.nickname.to_ascii_lowercase() == needle
+                                || m.display_name.to_ascii_lowercase() == needle
+                                || m.uuid == *name
+                        }) {
+                            Some(m) => uuids.push(m.uuid.clone()),
+                            None => warnings.push(format!(
+                                "could not request reviewer {name}: not a member of {}",
+                                r.owner
+                            )),
+                        }
+                    }
+                }
+                Err(e) => warnings.push(format!(
+                    "could not request reviewer(s) {}: {e}",
+                    reviewers.join(", ")
+                )),
+            }
+        }
+        let body = create_pr_body(req, &uuids);
         let v = self
             .send_json(reqwest::Method::POST, &Self::pr_path(r, ""), Some(&body))
             .await?;
-        Ok(summary_from(&v))
+        let mut summary = summary_from(&v);
+        summary.reviewer_warnings = warnings;
+        Ok(summary)
     }
 
     async fn update_pr(&self, r: &RemoteRef, number: u64, req: &UpdatePrReq) -> Result<()> {
@@ -469,6 +564,45 @@ impl super::GitProvider for Bitbucket {
         Ok(commits)
     }
 
+    /// Workspace members as collaborators (Bitbucket's reviewer pool is the
+    /// workspace), filtered by `q` on nickname/display name.
+    async fn list_collaborators(
+        &self,
+        r: &RemoteRef,
+        q: &str,
+    ) -> Result<Vec<otto_core::api::Collaborator>> {
+        let members = self.workspace_members(&r.owner).await?;
+        let needle = q.to_ascii_lowercase();
+        Ok(members
+            .into_iter()
+            .filter(|m| {
+                needle.is_empty()
+                    || m.nickname.to_ascii_lowercase().contains(&needle)
+                    || m.display_name.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|m| otto_core::api::Collaborator {
+                name: if m.nickname.is_empty() { m.uuid } else { m.nickname },
+                display_name: m.display_name,
+            })
+            .collect())
+    }
+
+    /// `GET /2.0/user` with the bound credentials: proves authentication and
+    /// echoes app-password scopes from the `x-oauth-scopes` header when present.
+    async fn verify_token(&self) -> Result<super::TokenCheck> {
+        let resp = self.send(reqwest::Method::GET, "/user", None).await?;
+        let scopes = super::github::scopes_header(resp.headers());
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("bitbucket decode: {e}")))?;
+        let login = {
+            let u = vstr(&v, &["username"]);
+            if u.is_empty() { vstr(&v, &["display_name"]) } else { u }
+        };
+        Ok(super::TokenCheck { login, scopes })
+    }
+
     async fn list_repos(
         &self,
         namespace: &str,
@@ -558,7 +692,51 @@ fn parse_statuses_fixture(json_str: &str) -> CiStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_statuses_fixture;
+    use super::{create_pr_body, member_from, parse_statuses_fixture, summary_from};
+    use otto_core::api::CreatePrReq;
+    use serde_json::json;
+
+    fn req(draft: Option<bool>) -> CreatePrReq {
+        CreatePrReq {
+            title: "t".into(),
+            description: "d".into(),
+            source_branch: "feat/x".into(),
+            target_branch: "main".into(),
+            proof_pack_id: None,
+            allow_unproven: None,
+            draft,
+            reviewers: None,
+        }
+    }
+
+    #[test]
+    fn create_body_draft_and_reviewers() {
+        let b = create_pr_body(&req(Some(true)), &["{u-1}".to_string()]);
+        assert_eq!(b["draft"], json!(true));
+        assert_eq!(b["reviewers"], json!([{ "uuid": "{u-1}" }]));
+        assert_eq!(b["source"]["branch"]["name"], json!("feat/x"));
+        // Absent draft / empty reviewers → keys omitted (today's payload).
+        let plain = create_pr_body(&req(None), &[]);
+        assert!(plain.get("draft").is_none());
+        assert!(plain.get("reviewers").is_none());
+    }
+
+    #[test]
+    fn summary_parses_draft_flag() {
+        let s = summary_from(&json!({"id": 9, "title": "x", "state": "OPEN", "draft": true}));
+        assert_eq!(s.draft, Some(true));
+        // Absent flag → Some(false), not None (the old hardcoded read bug).
+        let s2 = summary_from(&json!({"id": 10, "title": "y", "state": "OPEN"}));
+        assert_eq!(s2.draft, Some(false));
+    }
+
+    #[test]
+    fn member_mapping() {
+        let m = member_from(&json!({"user": {"uuid": "{u-2}", "nickname": "kay", "display_name": "Kay B"}}));
+        assert_eq!(m.uuid, "{u-2}");
+        assert_eq!(m.nickname, "kay");
+        assert_eq!(m.display_name, "Kay B");
+    }
 
     #[test]
     fn bb_ci_status_successful() {
