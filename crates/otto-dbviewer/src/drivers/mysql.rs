@@ -1561,9 +1561,19 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
     // Postgres driver and shape to an ISO-ish string. The compatibility gate means
     // these only fire for real temporal columns; a VARCHAR holding a date-like
     // string still falls through to the String branch below.
-    use sqlx::types::chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
     if let Ok(v) = row.try_get::<Option<NaiveDateTime>, _>(idx) {
         return temporal_to_json(v);
+    }
+    // TIMESTAMP specifically: sqlx's `NaiveDateTime` impl has no custom
+    // `compatible()` — the default only accepts DATETIME — so TIMESTAMP columns
+    // rejected every attempt above and fell into the raw fallback, rendering
+    // the binary wire payload as base64 ("B+oHBwYQOQA="). Only `DateTime<Utc>`
+    // (and Local) accepts ColumnType::Timestamp. Render the naive part: it is
+    // byte-for-byte what the server sent in the session time zone, so the text
+    // matches the server's own display regardless of the profile's tz param.
+    if let Ok(v) = row.try_get::<Option<DateTime<Utc>>, _>(idx) {
+        return temporal_to_json(v.map(|d| d.naive_utc()));
     }
     if let Ok(v) = row.try_get::<Option<NaiveDate>, _>(idx) {
         return temporal_to_json(v);

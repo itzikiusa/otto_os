@@ -323,6 +323,73 @@ async fn mysql_completion_qualified() {
     );
 }
 
+/// TIMESTAMP columns decode to their `YYYY-MM-DD HH:MM:SS` text, not base64
+/// gibberish. sqlx's `NaiveDateTime` is only `compatible()` with DATETIME —
+/// TIMESTAMP needs a `DateTime<Utc>` attempt or the cell falls through to the
+/// raw-bytes fallback and renders the binary wire payload base64'd
+/// (`B+oHBwYQOQA=`-style). Uses a TEMPORARY table inside one batch so the
+/// column is a true TIMESTAMP (literals/NOW() come back as DATETIME).
+#[tokio::test]
+#[ignore]
+async fn mysql_timestamp_column_decodes_as_text() {
+    if std::env::var("OTTO_DBV_E2E").is_err() {
+        return;
+    }
+
+    let d = MysqlDriver::default();
+    let res = d
+        .run(
+            &cfg(),
+            &query(
+                "CREATE TEMPORARY TABLE ts_probe (\
+                     ts TIMESTAMP NULL, dt DATETIME NULL, \
+                     ts3 TIMESTAMP(3) NULL, dt6 DATETIME(6) NULL); \
+                 INSERT INTO ts_probe VALUES \
+                     ('2026-07-06 16:57:00', '2026-07-06 16:57:00', \
+                      '2026-07-06 16:57:00.123', '2026-07-06 16:57:00.123456'), \
+                     (NULL, NULL, NULL, NULL); \
+                 SELECT ts, dt, ts3, dt6 FROM ts_probe ORDER BY ts IS NULL",
+            ),
+        )
+        .await
+        .expect("run(timestamp batch)");
+    let select = res
+        .more_results
+        .last()
+        .expect("SELECT result should be the last batch entry");
+    assert_eq!(
+        select.rows[0][0].as_str(),
+        Some("2026-07-06 16:57:00"),
+        "TIMESTAMP cell should decode to its text form; got: {:?}",
+        select.rows[0][0]
+    );
+    assert_eq!(
+        select.rows[0][1].as_str(),
+        Some("2026-07-06 16:57:00"),
+        "DATETIME cell should decode to its text form; got: {:?}",
+        select.rows[0][1]
+    );
+    // Fractional-seconds precision (fsp 1..=6 — MySQL tops out at microseconds)
+    // must survive: chrono's Display renders the trimmed `%.f` part.
+    assert_eq!(
+        select.rows[0][2].as_str(),
+        Some("2026-07-06 16:57:00.123"),
+        "TIMESTAMP(3) keeps milliseconds; got: {:?}",
+        select.rows[0][2]
+    );
+    assert_eq!(
+        select.rows[0][3].as_str(),
+        Some("2026-07-06 16:57:00.123456"),
+        "DATETIME(6) keeps microseconds; got: {:?}",
+        select.rows[0][3]
+    );
+    assert!(
+        select.rows[1].iter().all(|c| c.is_null()),
+        "NULL temporals stay null; got: {:?}",
+        select.rows[1]
+    );
+}
+
 /// The session time zone is applied on connect: a `+03:00` profile yields
 /// `@@session.time_zone == +03:00`, and the default (no param) yields `+00:00`.
 #[tokio::test]
