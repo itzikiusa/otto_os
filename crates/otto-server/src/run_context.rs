@@ -80,6 +80,7 @@ mod tests {
             provider: None,
             git_account_id: None,
             created_at: Utc::now(),
+            forge: None,
         }
     }
 

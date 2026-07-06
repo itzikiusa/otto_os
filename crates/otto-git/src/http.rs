@@ -502,13 +502,14 @@ struct CollaboratorsQuery {
     q: Option<String>,
 }
 
+/// Per-repo cache slot: fetch time + the unfiltered collaborator list.
+type CollaboratorsCache = StdMutex<HashMap<String, (std::time::Instant, Vec<Collaborator>)>>;
+
 /// Process-wide 30 s cache of the UNFILTERED collaborator list per repo id —
 /// the typeahead fires per keystroke and the provider list is stable; `q`
 /// filtering happens after the cache.
-fn collaborators_cache(
-) -> &'static StdMutex<HashMap<String, (std::time::Instant, Vec<Collaborator>)>> {
-    static CACHE: OnceLock<StdMutex<HashMap<String, (std::time::Instant, Vec<Collaborator>)>>> =
-        OnceLock::new();
+fn collaborators_cache() -> &'static CollaboratorsCache {
+    static CACHE: OnceLock<CollaboratorsCache> = OnceLock::new();
     CACHE.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
