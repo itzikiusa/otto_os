@@ -464,13 +464,6 @@ class DatabaseStore {
    * of navigating away.
    */
   activePane: { kind: 'kafka' | 'ssh'; id: Id } | null = $state(null);
-  /**
-   * The workspace whose connections currently populate `connections`. Used to
-   * distinguish a genuine workspace SWITCH (drop open tabs) from a same-workspace
-   * connection-list refresh (keep them) — see `loadConnections`. Also gates
-   * `restoreWorkbench` to run once per workspace.
-   */
-  private loadedWorkspaceId: Id | null = null;
   /** True while `restoreWorkbench` is re-opening persisted tabs, so the
    *  per-open-change persistence calls don't thrash localStorage mid-restore. */
   private restoring = false;
@@ -865,15 +858,19 @@ class DatabaseStore {
   }
 
   // ── Tab persistence (survive reload / a cut-off session) ──────────────────
-  // Open query tabs (statement + name, NOT results) are saved per
-  // (workspace, connection) so reopening a connection restores in-progress work.
-  private tabsKey(connId: Id): string | null {
+  // Open query tabs (statement + name, NOT results) are saved per CONNECTION —
+  // the library (and the workbench) is global, so in-progress work follows the
+  // connection across workspaces. Legacy per-(workspace, connection) entries
+  // are still read as a fallback so nothing is lost on upgrade.
+  private tabsKey(connId: Id): string {
+    return `otto_db_tabs:${connId}`;
+  }
+  private legacyTabsKey(connId: Id): string | null {
     return ws.currentId ? `otto_db_tabs:${ws.currentId}:${connId}` : null;
   }
   private persistTabs(): void {
     if (typeof localStorage === 'undefined' || !this.selectedConnId) return;
     const key = this.tabsKey(this.selectedConnId);
-    if (!key) return;
     try {
       localStorage.setItem(
         key,
@@ -896,9 +893,10 @@ class DatabaseStore {
     connId: Id,
   ): { tabs: QueryTab[]; activeTab: number; activeDb: string | null } | null {
     if (typeof localStorage === 'undefined') return null;
-    const key = this.tabsKey(connId);
-    if (!key) return null;
-    const raw = localStorage.getItem(key);
+    // Global key first; fall back to the legacy per-workspace entry (upgrade).
+    const legacy = this.legacyTabsKey(connId);
+    const raw =
+      localStorage.getItem(this.tabsKey(connId)) ?? (legacy ? localStorage.getItem(legacy) : null);
     if (!raw) return null;
     try {
       const p = JSON.parse(raw) as {
@@ -955,24 +953,30 @@ class DatabaseStore {
 
   // ── Workbench persistence (which connections are open + their view) ────────
   // Survives a reload: which connection tabs were open, which was focused, and
-  // each connection's main/side view. Keyed by workspace so switching workspaces
-  // restores that workspace's own workbench. Query-tab TEXT is persisted
-  // separately (persistTabs); RESULTS are intentionally not persisted.
-  private openKey(): string | null {
+  // each connection's main/side view. GLOBAL (not per workspace) — the open
+  // workbench follows the user across workspace switches, like the connection
+  // library itself. Legacy per-workspace entries are read as an upgrade
+  // fallback. Query-tab TEXT is persisted separately (persistTabs); RESULTS
+  // are intentionally not persisted.
+  private openKey(): string {
+    return 'otto_db_open';
+  }
+  private legacyOpenKey(): string | null {
     return ws.currentId ? `otto_db_open:${ws.currentId}` : null;
   }
-  private viewKey(connId: Id): string | null {
+  private viewKey(connId: Id): string {
+    return `otto_db_view:${connId}`;
+  }
+  private legacyViewKey(connId: Id): string | null {
     return ws.currentId ? `otto_db_view:${ws.currentId}:${connId}` : null;
   }
 
   /** Persist the open-connection set + selection. No-op during a restore. */
   private persistWorkbench(): void {
     if (typeof localStorage === 'undefined' || this.restoring) return;
-    const key = this.openKey();
-    if (!key) return;
     try {
       localStorage.setItem(
-        key,
+        this.openKey(),
         JSON.stringify({ open: this.openConnIds, selected: this.selectedConnId }),
       );
     } catch {
@@ -984,7 +988,6 @@ class DatabaseStore {
   private persistView(): void {
     if (typeof localStorage === 'undefined' || this.restoring || !this.selectedConnId) return;
     const key = this.viewKey(this.selectedConnId);
-    if (!key) return;
     try {
       // 'connections' is the global picker, never a per-connection view — store
       // 'schema' instead so a restore lands on the connection's own schema.
@@ -999,9 +1002,9 @@ class DatabaseStore {
    *  ids. Returns null when absent/invalid so the caller falls back to defaults. */
   private restoreView(connId: Id): { main: DbMainTab; side: DbSideTab } | null {
     if (typeof localStorage === 'undefined') return null;
-    const key = this.viewKey(connId);
-    if (!key) return null;
-    const raw = localStorage.getItem(key);
+    const legacy = this.legacyViewKey(connId);
+    const raw =
+      localStorage.getItem(this.viewKey(connId)) ?? (legacy ? localStorage.getItem(legacy) : null);
     if (!raw) return null;
     try {
       const p = JSON.parse(raw) as { main?: string; side?: string };
@@ -1016,18 +1019,19 @@ class DatabaseStore {
   }
 
   /**
-   * Re-open the workspace's persisted workbench (open connections + focused tab).
-   * MUST run only AFTER `loadConnections` resolves — `loadConnections` clears the
-   * open set on a workspace switch, so restoring earlier would be wiped. No-op
-   * when tabs are already open (a same-workspace refresh mustn't re-open closed
-   * tabs) or when nothing was persisted. Each connection's main/side view is
-   * restored by `loadConnectionFresh` from its own `otto_db_view:` entry.
+   * Re-open the persisted global workbench (open connections + focused tab).
+   * MUST run only AFTER `loadConnections` resolves — the restore filters against
+   * the loaded connection list, so running earlier would re-open nothing. No-op
+   * when tabs are already open (a refresh or workspace switch mustn't re-open
+   * closed tabs) or when nothing was persisted. Each connection's main/side view
+   * is restored by `loadConnectionFresh` from its own `otto_db_view:` entry.
    */
   async restoreWorkbench(): Promise<void> {
     if (typeof localStorage === 'undefined') return;
-    const key = this.openKey();
-    if (!key || this.openConnIds.length > 0) return;
-    const raw = localStorage.getItem(key);
+    if (this.openConnIds.length > 0) return;
+    const legacy = this.legacyOpenKey();
+    const raw =
+      localStorage.getItem(this.openKey()) ?? (legacy ? localStorage.getItem(legacy) : null);
     if (!raw) return;
     let parsed: { open?: string[]; selected?: string | null };
     try {
@@ -1035,7 +1039,7 @@ class DatabaseStore {
     } catch {
       return;
     }
-    // Only re-open connections that still exist in this workspace.
+    // Only re-open connections that still exist in the library.
     const open = (parsed.open ?? []).filter((id) => this.connections.some((c) => c.id === id));
     if (open.length === 0) return;
 
@@ -1078,36 +1082,18 @@ class DatabaseStore {
       const all = await api.get<Connection[]>(`/workspaces/${wid}/connections`);
       const next = all.filter((c) => isDbKind(c.kind));
       this.otherConnections = all.filter((c) => !isDbKind(c.kind));
-      // Distinguish a genuine WORKSPACE SWITCH from a same-workspace refresh
-      // (e.g. after adding/deleting a connection). Keying on the workspace id —
-      // not the connection-id set — is what lets a restored/open set survive a
-      // list refresh (adding one connection no longer wipes every open tab), and
-      // still wipe cleanly when the user actually switches workspaces. On the
-      // very first load `loadedWorkspaceId` is null, so we take the same
-      // non-destructive path and `restoreWorkbench` re-opens the persisted tabs.
-      const workspaceChanged = this.loadedWorkspaceId !== null && this.loadedWorkspaceId !== wid;
       this.connections = next;
-      this.loadedWorkspaceId = wid;
-      if (workspaceChanged) {
-        this.openConnIds = [];
-        this.snapshots.clear();
+      // The connection library is GLOBAL (profiles are created workspace-
+      // independent), so the open workbench is global too: a workspace switch
+      // no longer wipes the open tabs/snapshots — open connections stay open
+      // no matter which workspace is active. Every load just prunes tabs /
+      // snapshots / selection whose connection no longer exists (deleted).
+      this.openConnIds = this.openConnIds.filter((id) => next.some((c) => c.id === id));
+      for (const id of [...this.snapshots.keys()]) {
+        if (!next.some((c) => c.id === id)) this.snapshots.delete(id);
+      }
+      if (this.selectedConnId && !next.some((c) => c.id === this.selectedConnId)) {
         this.selectedConnId = null;
-        this.capabilities = null;
-        this.schemaRoot = [];
-        // Drop non-DB workbench panes too — their sessions/clusters belong to the
-        // workspace we just left (the brokers store prunes its own cluster tabs).
-        this.sshTabs = [];
-        this.activePane = null;
-      } else {
-        // Same workspace (or first load): prune any open tab/snapshot/selection
-        // whose connection no longer exists, but keep everything still valid.
-        this.openConnIds = this.openConnIds.filter((id) => next.some((c) => c.id === id));
-        for (const id of [...this.snapshots.keys()]) {
-          if (!next.some((c) => c.id === id)) this.snapshots.delete(id);
-        }
-        if (this.selectedConnId && !next.some((c) => c.id === this.selectedConnId)) {
-          this.selectedConnId = null;
-        }
       }
       // Start fresh — do NOT auto-open a connection; the user picks one from the
       // sidebar. Only clear active state when no connections remain.

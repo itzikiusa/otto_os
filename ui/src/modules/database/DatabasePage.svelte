@@ -544,9 +544,9 @@
   }
 
   // Load connections + workspace-scoped saved/dashboards when the workspace changes.
-  // Restore the persisted workbench (open connection tabs + focus) ONLY after
-  // loadConnections resolves — it clears the open set on a workspace switch, so
-  // restoring earlier would be wiped.
+  // The workbench itself is GLOBAL — open connection tabs survive workspace
+  // switches. Restore the persisted workbench (open tabs + focus) ONLY after
+  // loadConnections resolves — the restore filters against the loaded list.
   $effect(() => {
     if (ws.currentId) {
       void (async () => {
