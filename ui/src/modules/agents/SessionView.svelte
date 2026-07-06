@@ -13,6 +13,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { now } from '../../lib/stores/now.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { router } from '../../lib/router.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
 
@@ -357,6 +358,24 @@
     {/if}
     {#if session?.cwd}<span class="pane-cwd mono" title={session.cwd}>{session.cwd}</span>{/if}
     <span class="grow"></span>
+    {#if !viewport.isPhone && ui.termToolbar}
+      <!-- Terminal font zoom + copy-on-select, surfaced in the header bar so the
+           controls never float over (and hide) terminal content. The embedded
+           <Terminal> gets showToolbar={false} to drop its overlay counterpart. -->
+      <div class="term-ctl" role="toolbar" tabindex="-1" aria-label="Terminal controls" onmousedown={(e) => e.stopPropagation()}>
+        <button class="icon-btn" onclick={() => ui.termZoomOut()} title="Terminal font smaller (Ctrl+−)" aria-label="Zoom out">−</button>
+        <span class="term-ctl-size" title="Terminal font size">{ui.termFontSize}px</span>
+        <button class="icon-btn" onclick={() => ui.termZoomIn()} title="Terminal font larger (Ctrl+=)" aria-label="Zoom in">+</button>
+        <button
+          class="icon-btn term-ctl-copy"
+          class:on={ui.termCopyOnSelect}
+          onclick={() => ui.setTermCopyOnSelect(!ui.termCopyOnSelect)}
+          title={ui.termCopyOnSelect ? 'Copy-on-select: on — click to disable' : 'Copy-on-select: off — click to enable'}
+          aria-pressed={ui.termCopyOnSelect}
+          aria-label="Copy on select"
+        >copy</button>
+      </div>
+    {/if}
     {#if showZoom}
       <button
         class="icon-btn"
@@ -383,7 +402,7 @@
     {/if}
   </header>
   <div class="pane-term">
-    <Terminal {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} />
+    <Terminal {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} showToolbar={false} />
   </div>
 </section>
 
@@ -607,6 +626,25 @@
     padding: 1px 6px;
     max-width: 200px;
     outline: none;
+  }
+  /* Terminal zoom/copy controls, inline in the header bar. */
+  .term-ctl {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .term-ctl-size {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+    min-width: 30px;
+    text-align: center;
+  }
+  .term-ctl-copy {
+    font-size: 10px;
+  }
+  .term-ctl-copy.on {
+    color: var(--accent);
   }
   /* Additional directories editor (mirrors New Session). */
   .dir-list {

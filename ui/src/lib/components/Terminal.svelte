@@ -53,8 +53,12 @@
     /** Called when the server returns a ring-buffer search result frame.
      *  The parent can surface results in a search-result panel. */
     onsearchresult?: (frame: WsSearchResultFrame) => void;
+    /** When false, the floating zoom/copy toolbar overlay is suppressed —
+     *  used by hosts that surface the same controls in their own header bar
+     *  (SessionView panes) so the overlay never covers terminal content. */
+    showToolbar?: boolean;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, shareToken, onstatus, onsearchresult }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, shareToken, onstatus, onsearchresult, showToolbar = true }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -983,7 +987,7 @@
          desktop when ui.termToolbar is on; phone controls live in phone-controls
          below (unchanged). The toolbar sits flush bottom-left so it doesn't
          overlap the find-bar (top-right) or the overlay badges (also top-right). -->
-    {#if !viewport.isPhone && ui.termToolbar}
+    {#if !viewport.isPhone && ui.termToolbar && showToolbar}
       <div class="desk-toolbar" role="toolbar" aria-label="Terminal controls">
         <button
           class="tb-btn"
