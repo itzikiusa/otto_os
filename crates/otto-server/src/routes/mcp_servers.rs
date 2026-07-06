@@ -425,7 +425,7 @@ mod tests {
         // The row (list_enabled) carries no secret value…
         let rows = repo.list_enabled(&ws).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].env.get("TOKEN").is_none());
+        assert!(!rows[0].env.contains_key("TOKEN"));
         assert_eq!(rows[0].secret_env_keys, vec!["TOKEN".to_string()]);
 
         // …and the merge (what the provider renders into .mcp.json) does.

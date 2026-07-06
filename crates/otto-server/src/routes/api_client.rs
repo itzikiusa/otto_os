@@ -1684,7 +1684,7 @@ async fn run_step(
     if let Err(msg) = api_secrets::resolve_auth_markers(
         ctx.secrets.as_ref(),
         &mut exec.auth,
-        &[request.id.clone()],
+        std::slice::from_ref(&request.id),
     ) {
         return ApiRunStepResult {
             request_id,

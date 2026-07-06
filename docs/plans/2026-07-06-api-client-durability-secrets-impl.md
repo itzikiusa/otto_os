@@ -20,11 +20,11 @@
    server-side. We add `boa_engine` (pure Rust, no native build deps) to
    `otto-server` and define the `pm` object in a JS prelude ported from
    `scripts.ts`, so semantics match the interactive runner.
-3. **Next free migration is `0100`** (0099 = skill_reviews).
+3. **Next free migration was `0100` at implementation time** (0099 = skill_reviews) — renumbered to `0101` at merge because another feature landed `0100_review_agent_prompts.sql` on main first.
 
 ## A. Persist the draft-only request fields (`extras`)
 
-- Migration `0100_api_client_durability_secrets.sql`:
+- Migration `0101_api_client_durability_secrets.sql`:
   - `ALTER TABLE api_requests ADD COLUMN extras_json TEXT;` (NULL = never set)
   - `ALTER TABLE api_environments ADD COLUMN secret_keys_json TEXT;` (for B)
 - `otto-core::domain::ApiRequest` gains `#[serde(default)] pub extras: Option<Value>`;
@@ -183,6 +183,6 @@
 | create/update accept secret_env → keychain, never row; GET names only | D |
 | .mcp.json writer resolves at merge; residual documented | D |
 | contracts + types.ts lockstep | Contracts section |
-| migrations append-only, next-free number verified (=0100) | A |
+| migrations append-only, next-free number verified (=0101 at merge) | A |
 | tests per spec Testing section | Testing section |
 | Out of scope untouched (OAuth2 auth-code, persistent cookies, SQLite encryption, binary body, bidi gRPC) | not implemented |

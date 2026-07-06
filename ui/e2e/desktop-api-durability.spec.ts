@@ -68,9 +68,9 @@ test('scripts/docs/settings persist with the saved request (server-side)', async
 
   // Save (name prompt; no collections exist → no collection prompt).
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  const dialogInput = page.locator('input[type=text]:visible').last();
-  await dialogInput.fill(name);
-  await page.getByRole('button', { name: 'Save', exact: true }).last().click();
+  const dlg = page.getByRole('dialog');
+  await dlg.getByRole('textbox').fill(name);
+  await dlg.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByText('Request saved')).toBeVisible();
 
   // The stored ROW carries the extras (this is the durability guarantee —
@@ -122,9 +122,9 @@ test('saved bearer token is Keychain-migrated and rendered masked', async ({ pag
   await page.locator('#auth-token').fill('super-secret-token');
 
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  const dialogInput = page.locator('input[type=text]:visible').last();
-  await dialogInput.fill(name);
-  await page.getByRole('button', { name: 'Save', exact: true }).last().click();
+  const dlg = page.getByRole('dialog');
+  await dlg.getByRole('textbox').fill(name);
+  await dlg.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByText('Request saved')).toBeVisible();
 
   // The row holds a marker, not the token.
@@ -152,9 +152,9 @@ test('environment secret lock: value is write-only', async ({ page }) => {
   // Create an environment via the Env sidebar tab.
   await page.getByRole('tab', { name: 'Env' }).click();
   await page.getByRole('button', { name: 'New environment' }).click();
-  const nameInput = page.locator('input[type=text]:visible').last();
-  await nameInput.fill('e2e-secrets');
-  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  const dlg = page.getByRole('dialog');
+  await dlg.getByRole('textbox').fill('e2e-secrets');
+  await dlg.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(page.getByText('e2e-secrets')).toBeVisible();
 
   // Edit variables: one plain, one locked secret.
@@ -186,8 +186,8 @@ test('environment secret lock: value is write-only', async ({ page }) => {
   ).toEqual({ keys: ['api_token'], hasValue: false, base: 'https://x' });
 
   // Re-opening the editor renders the secret masked (empty value + lock on).
-  await page.getByRole('button', { name: 'Edit variables' }).click(); // close
-  await page.getByRole('button', { name: 'Edit variables' }).click(); // reopen
+  // (Saving already closed it, so one click reopens.)
+  await page.getByRole('button', { name: 'Edit variables' }).click();
   const secretRow = page.locator('.var-row').filter({ has: page.locator('.var-key') }).last();
   await expect(secretRow.locator('.var-val')).toHaveValue('');
   await expect(secretRow.locator('.var-val')).toHaveAttribute('placeholder', /stored in Keychain/);
