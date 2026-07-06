@@ -1012,7 +1012,13 @@ class ApiClientStore {
       ssh_connection_id: r.ssh_connection_id ?? null,
       pre_request_script: r.pre_request_script ?? undefined,
       post_response_script: r.post_response_script ?? undefined,
-      settings: r.settings ?? undefined,
+      settings: r.settings
+        ? {
+            timeout_ms: r.settings.timeout_ms ?? null,
+            follow_redirects: r.settings.follow_redirects ?? true,
+            verify_ssl: r.settings.verify_ssl ?? true,
+          }
+        : undefined,
       docs: r.docs ?? undefined,
       graphql_variables: r.graphql_variables ?? undefined,
       proto: '',

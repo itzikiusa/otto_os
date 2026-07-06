@@ -3373,7 +3373,7 @@ export interface ApiRequest {
   /** Persisted request extras (scripts/settings/docs/GraphQL vars). */
   pre_request_script?: string | null;
   post_response_script?: string | null;
-  settings?: { timeout_ms?: number; follow_redirects?: boolean; verify_ssl?: boolean } | null;
+  settings?: { timeout_ms?: number | null; follow_redirects?: boolean; verify_ssl?: boolean } | null;
   docs?: string | null;
   graphql_variables?: string | null;
   position: number;
@@ -3422,7 +3422,7 @@ export interface UpsertApiRequestReq {
   /** Persisted request extras (scripts/settings/docs/GraphQL vars). */
   pre_request_script?: string | null;
   post_response_script?: string | null;
-  settings?: { timeout_ms?: number; follow_redirects?: boolean; verify_ssl?: boolean } | null;
+  settings?: { timeout_ms?: number | null; follow_redirects?: boolean; verify_ssl?: boolean } | null;
   docs?: string | null;
   graphql_variables?: string | null;
 }
