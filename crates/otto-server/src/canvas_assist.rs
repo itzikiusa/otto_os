@@ -165,28 +165,65 @@ pub async fn assist_scene(
     let new_source = resolve_source(&file_path, &current, &format, &parsed).await;
 
     // Commit it as the scene's document + broadcast the final result.
-    let new_doc = build_doc(&format, &new_source);
-    let _ = ctx
+    // Guarded by the PRE-TURN `updated_at`: an agent turn can run for minutes,
+    // and a bare update would silently clobber anything the user saved while
+    // it ran. On conflict, overwrite only when the user's save left the source
+    // identical to the pre-turn snapshot (title/section-only edit); otherwise
+    // KEEP the user's version and say so instead of losing their work.
+    let mut committed_doc = build_doc(&format, &new_source);
+    let mut note = parsed.note;
+    let commit = ctx
         .canvas_repo
         .update(
             &scene.id,
             otto_state::SceneUpdate {
-                title: None,
-                doc_json: Some(new_doc.to_string()),
-                thumbnail: None,
-                provider: None,
-                section: None,
-                story_id: None,
+                doc_json: Some(committed_doc.to_string()),
+                expect_updated_at: Some(scene.updated_at),
+                ..Default::default()
             },
         )
         .await;
+    if let Err(Error::Conflict(_)) = commit {
+        if let Ok(Some(fresh)) = ctx.canvas_repo.get(&scene.id).await {
+            let fresh_doc: Value = serde_json::from_str(&fresh.doc_json).unwrap_or(Value::Null);
+            let fresh_src = current_source(&fresh_doc, &doc_format(&fresh_doc));
+            if fresh_src == current {
+                // Source untouched by the user — apply the agent's result
+                // against the fresh stamp (preserves their title edit).
+                let _ = ctx
+                    .canvas_repo
+                    .update(
+                        &scene.id,
+                        otto_state::SceneUpdate {
+                            doc_json: Some(committed_doc.to_string()),
+                            expect_updated_at: Some(fresh.updated_at),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+            } else {
+                // The user edited the diagram during the turn: their version
+                // wins; converge the UI back to the persisted truth.
+                committed_doc = fresh_doc;
+                let kept = "Kept your manual edits saved during the turn; the agent's \
+                            version was NOT applied. Re-run Ask AI to regenerate on \
+                            top of your changes.";
+                note = if note.is_empty() {
+                    kept.to_string()
+                } else {
+                    format!("{kept}\n\n{note}")
+                };
+            }
+        }
+    }
+    let final_source = current_source(&committed_doc, &doc_format(&committed_doc));
     let _ = ctx.events.send(Event::CanvasUpdated {
         workspace_id: scene.workspace_id.clone(),
         scene_id: scene.id.clone(),
-        doc: new_doc,
+        doc: committed_doc,
     });
 
-    Ok(Json(result_for(&format, &new_source, parsed.note)))
+    Ok(Json(result_for(&format, &final_source, note)))
 }
 
 /// `POST /canvas/assist/preview` — generate blocks with no scene (the Discovery-

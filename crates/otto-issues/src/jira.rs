@@ -371,47 +371,95 @@ impl JiraClient {
     /// Run a raw, caller-built JQL query (e.g. `project = X AND issuetype = Story
     /// AND assignee = "..."`) and return brief issue summaries. Used by analytics
     /// plugins that need precise JQL control beyond `search`'s text/key builder.
+    ///
+    /// The newer `/rest/api/3/search/jql` endpoint is TOKEN-paginated — it
+    /// silently IGNORES `startAt`, so offset paging against it re-fetched page 1
+    /// forever ("Load more" appended duplicates). We keep the offset-based
+    /// signature for callers and walk `nextPageToken` internally until the
+    /// requested window is covered. The classic `/rest/api/3/search` fallback
+    /// (only reached when the new endpoint 4xx/5xxes) honors `startAt` directly.
     pub async fn search_jql(&self, jql: &str, start_at: u32) -> Result<Vec<IssueSummary>> {
+        const PAGE: u32 = 25;
+        // Hard cap on the token walk (40 pages = 1000 issues deep) — a runaway
+        // "load more" can't turn into an unbounded crawl.
+        const MAX_PAGES: u32 = 40;
         let fields = "summary,status,issuetype";
-        let max_results = "25";
-        let start_at_s = start_at.to_string();
-
-        // Try the newer endpoint first.
         let new_url = format!("{}/rest/api/3/search/jql", self.base_url);
+
+        let mut collected: Vec<IssueSummary> = Vec::new();
+        let mut token: Option<String> = None;
+        for page in 0..MAX_PAGES {
+            let mut req = self
+                .http
+                .get(&new_url)
+                .header("Authorization", &self.auth_header)
+                .header("Accept", "application/json")
+                .query(&[("jql", jql), ("maxResults", "25"), ("fields", fields)]);
+            if let Some(t) = &token {
+                req = req.query(&[("nextPageToken", t.as_str())]);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| Error::Upstream(format!("jira search request: {e}")))?;
+
+            if !resp.status().is_success() {
+                // New endpoint unavailable: classic fallback (startAt works there).
+                // Only sensible on the first page — a mid-walk failure surfaces.
+                if page == 0 {
+                    return self.search_jql_classic(jql, start_at, fields).await;
+                }
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(Error::Upstream(format!(
+                    "jira search failed ({status}): {body}"
+                )));
+            }
+
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| Error::Upstream(format!("jira search parse: {e}")))?;
+            collected.extend(self.parse_issue_summaries(&body));
+            token = body
+                .get("nextPageToken")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+
+            let have_window = collected.len() as u32 >= start_at.saturating_add(PAGE);
+            if have_window || token.is_none() {
+                break;
+            }
+        }
+
+        let from = (start_at as usize).min(collected.len());
+        let to = (start_at.saturating_add(PAGE) as usize).min(collected.len());
+        Ok(collected[from..to].to_vec())
+    }
+
+    /// Classic `/rest/api/3/search` offset-paginated fallback.
+    async fn search_jql_classic(
+        &self,
+        jql: &str,
+        start_at: u32,
+        fields: &str,
+    ) -> Result<Vec<IssueSummary>> {
+        let fallback_url = format!("{}/rest/api/3/search", self.base_url);
+        let start_at_s = start_at.to_string();
         let resp = self
             .http
-            .get(&new_url)
+            .get(&fallback_url)
             .header("Authorization", &self.auth_header)
             .header("Accept", "application/json")
             .query(&[
                 ("jql", jql),
-                ("maxResults", max_results),
+                ("maxResults", "25"),
                 ("startAt", start_at_s.as_str()),
                 ("fields", fields),
             ])
             .send()
             .await
-            .map_err(|e| Error::Upstream(format!("jira search request: {e}")))?;
-
-        let resp = if resp.status().is_success() {
-            resp
-        } else {
-            // Fall back to the classic endpoint.
-            let fallback_url = format!("{}/rest/api/3/search", self.base_url);
-            self.http
-                .get(&fallback_url)
-                .header("Authorization", &self.auth_header)
-                .header("Accept", "application/json")
-                .query(&[
-                    ("jql", jql),
-                    ("maxResults", max_results),
-                    ("startAt", start_at_s.as_str()),
-                    ("fields", fields),
-                ])
-                .send()
-                .await
-                .map_err(|e| Error::Upstream(format!("jira search fallback request: {e}")))?
-        };
+            .map_err(|e| Error::Upstream(format!("jira search fallback request: {e}")))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -425,13 +473,16 @@ impl JiraClient {
             .json()
             .await
             .map_err(|e| Error::Upstream(format!("jira search parse: {e}")))?;
+        Ok(self.parse_issue_summaries(&body))
+    }
 
+    /// Shape a search response's `issues` array into [`IssueSummary`]s.
+    fn parse_issue_summaries(&self, body: &serde_json::Value) -> Vec<IssueSummary> {
         let issues = body
             .get("issues")
             .and_then(|v| v.as_array())
             .map(|a| a.as_slice())
             .unwrap_or(&[]);
-
         let mut results = Vec::with_capacity(issues.len());
         for issue in issues {
             let key = issue
@@ -466,7 +517,7 @@ impl JiraClient {
                 url,
             });
         }
-        Ok(results)
+        results
     }
 
     /// Fetch a single issue by key (e.g. "PROJ-123").
@@ -592,34 +643,58 @@ impl JiraClient {
     pub async fn list_comments(&self, key: &str) -> Result<Vec<IssueComment>> {
         let url = format!("{}/rest/api/3/issue/{}/comment", self.base_url, key);
 
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .query(&[("orderBy", "created")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira list_comments request: {e}")))?;
+        // Paginate to the LAST page: the endpoint returns one default-sized
+        // page ordered oldest-first, so on a busy issue the NEWEST comments —
+        // exactly what the story watcher needs — fell off the end and were
+        // never seen. Capped at 20 pages of 100 (2000 comments).
+        const PAGE: u64 = 100;
+        const MAX_PAGES: u64 = 20;
+        let mut all: Vec<serde_json::Value> = Vec::new();
+        let mut start_at: u64 = 0;
+        for _ in 0..MAX_PAGES {
+            let start_s = start_at.to_string();
+            let max_s = PAGE.to_string();
+            let resp = self
+                .http
+                .get(&url)
+                .header("Authorization", &self.auth_header)
+                .header("Accept", "application/json")
+                .query(&[
+                    ("orderBy", "created"),
+                    ("startAt", start_s.as_str()),
+                    ("maxResults", max_s.as_str()),
+                ])
+                .send()
+                .await
+                .map_err(|e| Error::Upstream(format!("jira list_comments request: {e}")))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "jira list_comments {key} failed ({status}): {body}"
-            )));
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(Error::Upstream(format!(
+                    "jira list_comments {key} failed ({status}): {body}"
+                )));
+            }
+
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| Error::Upstream(format!("jira list_comments parse: {e}")))?;
+            let page: Vec<serde_json::Value> = body
+                .get("comments")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let got = page.len() as u64;
+            all.extend(page);
+            let total = body.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+            start_at += got;
+            if got == 0 || start_at >= total {
+                break;
+            }
         }
 
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::Upstream(format!("jira list_comments parse: {e}")))?;
-
-        let comments = body
-            .get("comments")
-            .and_then(|v| v.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or(&[]);
+        let comments = all.as_slice();
 
         let mut results = Vec::with_capacity(comments.len());
         for c in comments {

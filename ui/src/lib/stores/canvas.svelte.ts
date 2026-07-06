@@ -172,9 +172,14 @@ class CanvasStore {
 
   /** Apply a canvas doc pushed from the server (a live agent edit or the final
    *  commit). Updates `source`/`format`/`rawDoc` (all PURE writes — safe to call
-   *  from a render `$effect`). Ignores docs without a `source` (hand-drawn). */
+   *  from a render `$effect`). Ignores docs without a `source` (hand-drawn).
+   *  Skipped while the user has UNSAVED edits in flight (`dirty`) — the agent's
+   *  ~1s live poll would otherwise reset the source pane mid-keystroke; once
+   *  the debounced save lands (dirty clears) live pushes apply again, and the
+   *  server-side `expect_updated_at` guard arbitrates the final commit. */
   ingestDoc(doc: CanvasDoc): void {
     if (typeof doc.source !== 'string') return;
+    if (this.dirty) return;
     this.source = doc.source;
     if (doc.format) this.format = doc.format;
     this.rawDoc = doc;

@@ -287,6 +287,22 @@ impl WorkflowsRepo {
         rows.iter().map(row_to_run).collect()
     }
 
+    /// True when the workflow already has a pending/running run. The trigger
+    /// schedulers use this as an overlap guard: a schedule tick or event storm
+    /// must not stack concurrent runs of the same workflow (each provisioning
+    /// its own worktrees).
+    pub async fn has_active_run(&self, workflow_id: &Id) -> Result<bool> {
+        let row: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM workflow_runs
+             WHERE workflow_id = ? AND status IN ('pending','running') LIMIT 1",
+        )
+        .bind(workflow_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("has active run"))?;
+        Ok(row.is_some())
+    }
+
     /// In-flight runs (pending|running) across a workspace, newest first, joined
     /// with their workflow name and with per-run step progress pre-computed.
     /// Backs the "Running" sidebar list (`GET /workspaces/{wid}/workflow-runs/active`).

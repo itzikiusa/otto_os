@@ -347,6 +347,79 @@ impl DbViewerService {
         r.driver.test(&r.config).await
     }
 
+    /// Probe an UNSAVED connection config — kind + params + optional plaintext
+    /// secret — without persisting anything (no DB row, no Keychain write). This
+    /// backs the connection form's "Test" button so bad host/creds are caught
+    /// BEFORE the profile (and its password) are stored. An SSH tunnel, when
+    /// configured, opens ephemerally (never cached) and drops when the probe
+    /// returns.
+    pub async fn test_config(
+        &self,
+        kind: otto_core::domain::ConnectionKind,
+        params: Value,
+        secret: Option<String>,
+    ) -> Result<TestResult> {
+        use otto_core::domain::Connection;
+        // Synthetic profile: config::parse only reads `kind` + `params` (+ the
+        // secret we pass directly); everything else is inert placeholder.
+        let conn = Connection {
+            id: "unsaved-test".to_string(),
+            workspace_id: None,
+            name: "unsaved-test".to_string(),
+            kind,
+            params,
+            secret_ref: None,
+            first_command: None,
+            section_id: None,
+            environment: Default::default(),
+            read_only: false,
+            created_by: "unsaved-test".to_string(),
+            created_at: chrono::Utc::now(),
+            last_opened_at: None,
+            pinned: false,
+        };
+        let parsed = config::parse(&conn, secret)?;
+        let engine = parsed.config.engine;
+        let driver = self.registry.get(engine);
+        let mut config = parsed.config;
+        // Ephemeral tunnel — mirrors `resolve()`'s host/port rewrite, but is
+        // held only for this probe (dropping it kills the ssh child).
+        let _tunnel = match parsed.ssh {
+            Some(ssh) => {
+                let tunnel = if engine == Engine::Mongodb {
+                    SshTunnel::open_socks(&ssh).await?
+                } else {
+                    SshTunnel::open(&ssh, &config.host, config.port).await?
+                };
+                if engine == Engine::Mongodb {
+                    let socks_port = tunnel.local_port();
+                    if let Value::Object(map) = &mut config.params {
+                        map.insert("__socks_port".into(), Value::from(socks_port));
+                    } else {
+                        config.params = serde_json::json!({ "__socks_port": socks_port });
+                    }
+                } else {
+                    let real_host = config.host.clone();
+                    let real_port = config.port;
+                    config.host = tunnel.local_host().to_string();
+                    config.port = tunnel.local_port();
+                    if let Value::Object(map) = &mut config.params {
+                        map.insert("__tunnel_host".into(), Value::from(real_host));
+                        map.insert("__tunnel_port".into(), Value::from(real_port));
+                    } else {
+                        config.params = serde_json::json!({
+                            "__tunnel_host": real_host,
+                            "__tunnel_port": real_port,
+                        });
+                    }
+                }
+                Some(tunnel)
+            }
+            None => None,
+        };
+        driver.test(&config).await
+    }
+
     pub async fn schema_root(&self, conn_id: &Id) -> Result<Vec<SchemaNode>> {
         let r = self.resolve(conn_id).await?;
         r.driver.schema_root(&r.config).await

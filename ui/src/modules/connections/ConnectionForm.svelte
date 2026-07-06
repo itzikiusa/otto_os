@@ -299,6 +299,42 @@
     showDsnInput = false;
   }
 
+  // ── Test-before-save ────────────────────────────────────────────────────
+  // Probes the CURRENT form values (unsaved) via /connections/unsaved/db/test —
+  // nothing is written to the DB or Keychain until Save. DB kinds only.
+  const testableKinds = new Set<ConnectionKind>(['mysql', 'postgres', 'clickhouse', 'redis', 'mongodb']);
+  let testing = $state(false);
+  let testResult = $state<{ ok: boolean; detail: string } | null>(null);
+
+  async function testUnsaved(): Promise<void> {
+    if (testing) return;
+    testing = true;
+    testResult = null;
+    try {
+      const body: Record<string, unknown> = {
+        workspace_id: ws.currentId,
+        kind,
+        params: buildParams(),
+      };
+      // For an existing profile with an unchanged (blank) password the probe
+      // has no secret to use — the saved secret is intentionally never read
+      // back into the form. The user re-enters it to test credentials.
+      if (secret !== '') body.secret = secret;
+      const res = await api.post<{ ok: boolean; latency_ms?: number; message: string; server_version?: string }>(
+        '/connections/unsaved/db/test',
+        body,
+      );
+      const bits = [res.server_version, res.latency_ms != null ? `${res.latency_ms}ms` : null]
+        .filter(Boolean)
+        .join(' · ');
+      testResult = { ok: res.ok, detail: bits ? `${res.message} (${bits})` : res.message };
+    } catch (e) {
+      testResult = { ok: false, detail: e instanceof Error ? e.message : String(e) };
+    } finally {
+      testing = false;
+    }
+  }
+
   async function save(): Promise<void> {
     if (busy) return;
     busy = true;
@@ -707,7 +743,17 @@
   </div>
 
   {#snippet footer()}
+    {#if testResult}
+      <span class="test-result {testResult.ok ? 'ok' : 'err'}" title={testResult.detail}>
+        {testResult.ok ? '✓' : '✗'} {testResult.detail}
+      </span>
+    {/if}
     <button class="btn" onclick={onclose}>Cancel</button>
+    {#if testableKinds.has(kind)}
+      <button class="btn" disabled={testing || busy} onclick={testUnsaved}>
+        {testing ? 'Testing…' : 'Test'}
+      </button>
+    {/if}
     <button class="btn primary" disabled={busy || name.trim() === ''} onclick={save}>
       {busy ? 'Saving…' : existing ? 'Save Changes' : 'Create Connection'}
     </button>
@@ -874,5 +920,20 @@
   .dsn-row .input {
     flex: 1;
     min-width: 0;
+  }
+  /* Inline unsaved-config test outcome (footer, before the buttons). */
+  .test-result {
+    font-size: 11.5px;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-right: auto;
+  }
+  .test-result.ok {
+    color: var(--ok, #34c759);
+  }
+  .test-result.err {
+    color: var(--danger, #ff453a);
   }
 </style>

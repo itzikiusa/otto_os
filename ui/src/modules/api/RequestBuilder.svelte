@@ -754,6 +754,18 @@
       <Icon name="gear" size={11} />Vars{#if varCount}<span class="cookie-count">{varCount}</span>{/if}
     </button>
     <span class="grow"></span>
+    <!-- Per-workspace SSRF-guard opt-out for local/private targets (localhost
+         dev servers are the #1 API-client use case). PATCHes workspace
+         settings — admin-gated server-side; off by default. -->
+    <button
+      class="btn small ghost {ws.apiAllowLocal ? 'local-on' : ''}"
+      onclick={() => void ws.setApiAllowLocal(!ws.apiAllowLocal).catch(() => {})}
+      title={ws.apiAllowLocal
+        ? 'Requests to localhost/private networks are ALLOWED for this workspace. Click to re-enable the guard.'
+        : 'Allow requests to localhost/private networks from this workspace (admin only; off by default)'}
+    >
+      <Icon name="lock" size={11} />{ws.apiAllowLocal ? 'Local: on' : 'Local: off'}
+    </button>
     {#if apiClient.activeEnv}
       <span class="chip accent" title="Active environment">{apiClient.activeEnv.name}</span>
     {/if}
@@ -1620,6 +1632,10 @@
     color: var(--accent);
     border-radius: 999px;
     padding: 0 5px;
+  }
+  /* Guard opt-out active: make the loosened state visibly "warm". */
+  .local-on {
+    color: var(--warning, #ff9f0a);
   }
   .cookie-table {
     width: 100%;

@@ -1031,14 +1031,26 @@ async fn repo_commit<S: GitCtx>(
     Ok(Json(serde_json::json!({ "sha": sha })))
 }
 
+/// Optional push body: `branch` pushes THAT branch explicitly (Create-PR
+/// pushes the selected source branch, not whatever happens to be checked out).
+/// Absent/empty body keeps the current-branch behavior.
+#[derive(Debug, Default, serde::Deserialize)]
+struct PushReq {
+    #[serde(default)]
+    branch: Option<String>,
+}
+
 async fn repo_push<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
+    body: Option<Json<PushReq>>,
 ) -> ApiResult<Json<RepoStatusResp>> {
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
-    git.push(token).await?;
+    let branch = body.as_ref().and_then(|b| b.branch.clone());
+    let branch = branch.as_deref().map(str::trim).filter(|b| !b.is_empty());
+    git.push_branch(token, branch).await?;
     // Return the FRESH status so the UI's ahead/behind chip updates after push.
     Ok(Json(git.status().await?))
 }

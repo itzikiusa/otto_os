@@ -1301,7 +1301,11 @@ async fn exec_read_conn(
     let take = rows.len().min(max_rows);
     let mut out_rows: Vec<Vec<Value>> = Vec::with_capacity(take);
     for row in rows.iter().take(take) {
-        let cells = (0..columns.len()).map(|i| pg_value_to_json(row, i)).collect();
+        // Cap oversized cells (text/bytea/JSON) like ClickHouse does — an
+        // uncapped multi-MB cell freezes the grid and bloats the WS frame.
+        let cells = (0..columns.len())
+            .map(|i| types::cap_cell(pg_value_to_json(row, i)))
+            .collect();
         out_rows.push(cells);
     }
 
@@ -1377,13 +1381,111 @@ fn pg_value_to_json(row: &PgRow, idx: usize) -> Value {
     if let Ok(v) = row.try_get::<Option<Uuid>, _>(idx) {
         return v.map(|u| Value::String(u.to_string())).unwrap_or(Value::Null);
     }
+    // Arrays — Postgres uses these everywhere (int[]/text[]/uuid[]/…). Without
+    // explicit branches they fell through to Null like the DECIMAL/DATETIME bugs.
+    if let Ok(v) = row.try_get::<Option<Vec<String>>, _>(idx) {
+        return v.map(|a| Value::Array(a.into_iter().map(Value::String).collect()))
+            .unwrap_or(Value::Null);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<i64>>, _>(idx) {
+        return v.map(|a| Value::Array(a.into_iter().map(Value::from).collect()))
+            .unwrap_or(Value::Null);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<i32>>, _>(idx) {
+        return v.map(|a| Value::Array(a.into_iter().map(Value::from).collect()))
+            .unwrap_or(Value::Null);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<f64>>, _>(idx) {
+        return v
+            .map(|a| Value::Array(a.into_iter().map(|n| float_to_json(Some(n))).collect()))
+            .unwrap_or(Value::Null);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<bool>>, _>(idx) {
+        return v.map(|a| Value::Array(a.into_iter().map(Value::Bool).collect()))
+            .unwrap_or(Value::Null);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<Uuid>>, _>(idx) {
+        return v
+            .map(|a| Value::Array(a.into_iter().map(|u| Value::String(u.to_string())).collect()))
+            .unwrap_or(Value::Null);
+    }
+    // INTERVAL / MONEY — structured binary encodings with no String decode.
+    if let Ok(v) = row.try_get::<Option<sqlx::postgres::types::PgInterval>, _>(idx) {
+        return v.map(|i| Value::String(interval_to_string(&i))).unwrap_or(Value::Null);
+    }
+    if let Ok(v) = row.try_get::<Option<sqlx::postgres::types::PgMoney>, _>(idx) {
+        return v.map(|m| Value::String(money_to_string(m.0))).unwrap_or(Value::Null);
+    }
+    // INET / CIDR / MACADDR — network types (need the ipnetwork/mac_address features).
+    if let Ok(v) = row.try_get::<Option<sqlx::types::ipnetwork::IpNetwork>, _>(idx) {
+        return v.map(|n| Value::String(n.to_string())).unwrap_or(Value::Null);
+    }
+    if let Ok(v) = row.try_get::<Option<sqlx::types::mac_address::MacAddress>, _>(idx) {
+        return v.map(|m| Value::String(m.to_string())).unwrap_or(Value::Null);
+    }
     if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
         return match v {
             Some(bytes) => Value::String(B64.encode(bytes)),
             None => Value::Null,
         };
     }
-    Value::Null
+    // Last resort — NEVER silently render a non-NULL cell as Null. User-defined
+    // enums (binary encoding = the label text), citext, and future types render
+    // as text when UTF-8, else base64. Only a true SQL NULL stays Null.
+    raw_cell_fallback(row.try_get_raw(idx))
+}
+
+/// Decode-of-last-resort for a raw Postgres value: SQL NULL → Null, UTF-8
+/// payload → its text, binary payload → base64. Uses `try_decode_unchecked` —
+/// the checked decode would re-reject through the very `compatible()` gates
+/// that routed us here. Errors (no such column) → Null.
+fn raw_cell_fallback(
+    raw: std::result::Result<sqlx::postgres::PgValueRef<'_>, sqlx::Error>,
+) -> Value {
+    use sqlx::{Value as _, ValueRef as _};
+    let Ok(raw) = raw else { return Value::Null };
+    if raw.is_null() {
+        return Value::Null;
+    }
+    let owned = sqlx::ValueRef::to_owned(&raw);
+    match owned.try_decode_unchecked::<String>() {
+        Ok(s) => Value::String(s),
+        Err(_) => match owned.try_decode_unchecked::<Vec<u8>>() {
+            Ok(b) => Value::String(B64.encode(b)),
+            Err(_) => Value::Null,
+        },
+    }
+}
+
+/// Render a `PgInterval` as a compact ISO-8601-ish duration (`P1M2DT3.5S`
+/// shape; `PT0S` when zero). Months/days stay separate — Postgres does not
+/// normalize them into each other.
+fn interval_to_string(i: &sqlx::postgres::types::PgInterval) -> String {
+    let mut out = String::from("P");
+    if i.months != 0 {
+        out.push_str(&format!("{}M", i.months));
+    }
+    if i.days != 0 {
+        out.push_str(&format!("{}D", i.days));
+    }
+    if i.microseconds != 0 || (i.months == 0 && i.days == 0) {
+        let secs = i.microseconds as f64 / 1_000_000.0;
+        // Trim trailing zeros for whole-second values (PT90S not PT90.000000S).
+        if (secs - secs.trunc()).abs() < f64::EPSILON {
+            out.push_str(&format!("T{}S", secs as i64));
+        } else {
+            out.push_str(&format!("T{secs}S"));
+        }
+    }
+    out
+}
+
+/// Render a `PgMoney` (int64 cents at the default locale scale of 2) as a
+/// plain decimal string — `1234` → `"12.34"`, `-5` → `"-0.05"`.
+fn money_to_string(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs();
+    format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
 /// Pure shaping of an optional f64 (Null if absent or non-finite).
@@ -1500,6 +1602,25 @@ const FUNCTIONS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interval_renders_iso_ish() {
+        use sqlx::postgres::types::PgInterval;
+        let i = PgInterval { months: 1, days: 2, microseconds: 3_500_000 };
+        assert_eq!(interval_to_string(&i), "P1M2DT3.5S");
+        let whole = PgInterval { months: 0, days: 0, microseconds: 90_000_000 };
+        assert_eq!(interval_to_string(&whole), "PT90S");
+        let zero = PgInterval { months: 0, days: 0, microseconds: 0 };
+        assert_eq!(interval_to_string(&zero), "PT0S");
+    }
+
+    #[test]
+    fn money_renders_two_decimals() {
+        assert_eq!(money_to_string(1234), "12.34");
+        assert_eq!(money_to_string(-5), "-0.05");
+        assert_eq!(money_to_string(0), "0.00");
+        assert_eq!(money_to_string(100), "1.00");
+    }
 
     #[test]
     fn capabilities_are_honest() {

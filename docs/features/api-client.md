@@ -30,7 +30,7 @@ under [Capabilities & limitations](#10-capabilities--limitations) and
 | **Where requests run** | Inside `ottod` (the daemon), via a shared `reqwest` client — *not* the webview. |
 | **Persistence** | Workspace-scoped SQLite (collections, requests, environments, history, automations). |
 | **Scoping & auth** | All data is per-workspace. Reads need workspace **Viewer**; mutations + execution need **Editor**. |
-| **Hard limit** | SSRF guard blocks loopback, private, link-local (incl. `169.254.169.254`), CGNAT, etc. — you **cannot** call internal/localhost hosts. |
+| **Guarded by default** | SSRF guard blocks loopback, private, link-local (incl. `169.254.169.254`), CGNAT, etc. Two sanctioned ways through: an SSH-tunnelled request (the bastion resolves + dials, so the local check is skipped) and the per-workspace **"Local: on"** toggle in the request toolbar (admin-only; `settings.api_client.allow_local`) for localhost/private dev servers. All other daemon egress keeps the full guard. |
 | **Secrets** | Keychain-backed: secret auth members + secret environment variables live in the macOS **Keychain**; the DB stores opaque `$secret` markers (lazy-migrated on save, or in one pass via **Secure secrets**). History snapshots redact them to `***`. |
 
 ---

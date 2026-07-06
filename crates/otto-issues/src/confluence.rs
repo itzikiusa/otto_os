@@ -470,34 +470,56 @@ impl ConfluenceClient {
     pub async fn list_comments(&self, page_id: &str) -> Result<Vec<PageComment>> {
         let url = self.api(&format!("/content/{page_id}/child/comment"));
 
-        let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .query(&[("expand", "body.storage,version,history")])
-            .send()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence list_comments request: {e}")))?;
+        // Paginate with start/limit to the last page: the endpoint returns one
+        // default-sized page, so newer comments past it were silently invisible
+        // to the story watcher. Capped at 20 pages of 100 (2000 comments).
+        const PAGE: u64 = 100;
+        const MAX_PAGES: u64 = 20;
+        let mut all: Vec<serde_json::Value> = Vec::new();
+        let mut start: u64 = 0;
+        for _ in 0..MAX_PAGES {
+            let start_s = start.to_string();
+            let limit_s = PAGE.to_string();
+            let resp = self
+                .http
+                .get(&url)
+                .header("Authorization", &self.auth_header)
+                .header("Accept", "application/json")
+                .query(&[
+                    ("expand", "body.storage,version,history"),
+                    ("start", start_s.as_str()),
+                    ("limit", limit_s.as_str()),
+                ])
+                .send()
+                .await
+                .map_err(|e| Error::Upstream(format!("confluence list_comments request: {e}")))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "confluence list_comments page {page_id} failed ({status}): {body}"
-            )));
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(Error::Upstream(format!(
+                    "confluence list_comments page {page_id} failed ({status}): {body}"
+                )));
+            }
+
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| Error::Upstream(format!("confluence list_comments parse: {e}")))?;
+            let page: Vec<serde_json::Value> = body
+                .get("results")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let got = page.len() as u64;
+            all.extend(page);
+            start += got;
+            if got < PAGE {
+                break;
+            }
         }
 
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::Upstream(format!("confluence list_comments parse: {e}")))?;
-
-        let results_arr = body
-            .get("results")
-            .and_then(|v| v.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or(&[]);
+        let results_arr = all.as_slice();
 
         let mut comments = Vec::with_capacity(results_arr.len());
         for c in results_arr {

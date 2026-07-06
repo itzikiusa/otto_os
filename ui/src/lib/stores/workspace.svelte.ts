@@ -817,6 +817,25 @@ class WorkspaceStore {
     );
   }
 
+  /** API-client opt-in: allow requests to localhost/private networks from this
+   *  workspace. Reads `settings.api_client.allow_local` (off by default). */
+  get apiAllowLocal(): boolean {
+    const api = this.current?.settings?.api_client as { allow_local?: boolean } | undefined;
+    return api?.allow_local === true;
+  }
+
+  /** Toggle the API client's local/private-target opt-in (admin-gated by the
+   *  workspaces PATCH route). Shallow-merges into the settings JSON. */
+  async setApiAllowLocal(allow: boolean): Promise<void> {
+    if (!this.currentId || !this.current) return;
+    const prev = (this.current.settings?.api_client as Record<string, unknown>) ?? {};
+    const settings = { ...this.current.settings, api_client: { ...prev, allow_local: allow } };
+    const updated = await api.patch<Workspace>(`/workspaces/${this.currentId}`, { settings });
+    this.workspaces = this.workspaces.map((w) =>
+      w.id === updated.id ? { ...w, ...updated } : w,
+    );
+  }
+
   /** Set this workspace's default agent CLI. '' clears it (use the global
    *  default). Shallow-merges into the workspace settings JSON. */
   async saveDefaultAgent(provider: string): Promise<void> {

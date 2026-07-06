@@ -1172,32 +1172,10 @@ fn is_system_db(name: &str) -> bool {
     matches!(name, "system" | "INFORMATION_SCHEMA" | "information_schema")
 }
 
-/// Max characters kept for a single result cell. Set high (~1 MiB) so normal
-/// text/DDL/JSON cells pass through untouched — full values reach the grid and
-/// Copy/CSV/JSON exports. The cap only exists as a safety valve against a single
-/// pathological multi-MB binary blob (e.g. a ClickHouse `AggregateFunction` /
-/// `*State` column from AggregatingMergeTree) that could choke the grid or OOM
-/// us; such a cell is truncated with a marker while the query still succeeds.
-const MAX_CELL_CHARS: usize = 1_048_576;
-
-/// Recursively cap oversized string values in a result cell (covers nested
-/// Array/Tuple/Map columns too). Non-strings pass through unchanged.
-fn cap_cell(v: Value) -> Value {
-    match v {
-        Value::String(s) => {
-            let len = s.chars().count();
-            if len > MAX_CELL_CHARS {
-                let kept: String = s.chars().take(MAX_CELL_CHARS).collect();
-                Value::String(format!("{kept}…[truncated {} chars]", len - MAX_CELL_CHARS))
-            } else {
-                Value::String(s)
-            }
-        }
-        Value::Array(a) => Value::Array(a.into_iter().map(cap_cell).collect()),
-        Value::Object(o) => Value::Object(o.into_iter().map(|(k, val)| (k, cap_cell(val))).collect()),
-        other => other,
-    }
-}
+// Per-cell size capping (≈1 MiB, truncation marker) now lives in
+// [`crate::types::cap_cell`], shared by the MySQL and Postgres drivers too so
+// oversized cells behave identically across engines.
+use crate::types::cap_cell;
 
 #[async_trait]
 impl Driver for ClickhouseDriver {

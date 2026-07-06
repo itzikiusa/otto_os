@@ -125,6 +125,11 @@ Notices & notifications:
   `user_id` is optional (`None` is omitted from the JSON via `skip_serializing_if`): when
   present the notification targets a single user and is delivered only to that user;
   when absent it is delivered per the standard workspace/broadcast scoping.
+  A notice whose `source_key` ends in `:waiting` with an `open_session` action marks the
+  session as "needs you" in the SPA (sticky flag, cleared on open/input). Two producers:
+  claude's native Notification hook, and — for every AGENT provider — the daemon's
+  Working→Idle turn-finish transition (`session:{id}:waiting`). Shell sessions keep the
+  plain `session:{id}:idle` key and never raise the flag.
 
 Activity trail & tasks (session-family — owner/admin/root, viewer-gated):
 

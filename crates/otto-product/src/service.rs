@@ -408,9 +408,18 @@ impl ProductService {
             }
         };
 
-        // Filter to those strictly after `since` (RFC3339 strings sort lexicographically).
+        // Filter to those after the cursor. The cursor is `<ts>` (legacy) or
+        // `<ts>|<id1>,<id2>` (ids already seen AT that timestamp): a strict
+        // `created > ts` alone permanently dropped any comment sharing the
+        // cursor's exact timestamp — ties are now included unless their id was
+        // already processed. RFC3339 strings sort lexicographically.
         if let Some(cursor) = since {
-            comments.retain(|c| c.created.as_str() > cursor);
+            let (ts, seen_ids) = parse_watch_cursor(cursor);
+            comments.retain(|c| match c.created.as_str().cmp(ts) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Equal => !seen_ids.contains(c.id.as_str()),
+                std::cmp::Ordering::Less => false,
+            });
         }
 
         // Sort ascending by created.
@@ -1618,6 +1627,32 @@ impl ProductService {
     }
 }
 
+/// Parse a story watch cursor: `<ts>` (legacy) or `<ts>|<id1>,<id2>` where the
+/// ids are the comments already processed AT `ts`. Returned ids let the caller
+/// include later same-timestamp comments exactly once (the legacy strict-`>`
+/// filter dropped them forever).
+pub(crate) fn parse_watch_cursor(cursor: &str) -> (&str, std::collections::HashSet<&str>) {
+    match cursor.split_once('|') {
+        Some((ts, ids)) => (
+            ts,
+            ids.split(',').filter(|s| !s.is_empty()).collect(),
+        ),
+        None => (cursor, std::collections::HashSet::new()),
+    }
+}
+
+/// Build the watch cursor for a processed batch: newest `created` + the ids of
+/// every comment sharing that exact timestamp (see [`parse_watch_cursor`]).
+pub fn build_watch_cursor(comments: &[CommentInfo]) -> Option<String> {
+    let newest = comments.iter().map(|c| c.created.as_str()).max()?;
+    let ids: Vec<&str> = comments
+        .iter()
+        .filter(|c| c.created == newest)
+        .map(|c| c.id.as_str())
+        .collect();
+    Some(format!("{newest}|{}", ids.join(",")))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1637,6 +1672,48 @@ mod tests {
 
     use super::*;
     use crate::types::ImportStoryReq;
+
+    #[test]
+    fn watch_cursor_roundtrip_handles_same_timestamp_ties() {
+        let mk = |id: &str, created: &str| CommentInfo {
+            id: id.into(),
+            author: "a".into(),
+            body_md: "b".into(),
+            created: created.into(),
+        };
+        let batch = vec![
+            mk("c1", "2026-07-01T10:00:00.000+0000"),
+            mk("c2", "2026-07-01T10:00:05.000+0000"),
+            mk("c3", "2026-07-01T10:00:05.000+0000"),
+        ];
+        let cursor = build_watch_cursor(&batch).unwrap();
+        assert_eq!(cursor, "2026-07-01T10:00:05.000+0000|c2,c3");
+
+        let (ts, seen) = parse_watch_cursor(&cursor);
+        assert_eq!(ts, "2026-07-01T10:00:05.000+0000");
+        assert!(seen.contains("c2") && seen.contains("c3"));
+
+        // A NEW comment at the exact cursor timestamp passes the filter …
+        let tie = mk("c4", "2026-07-01T10:00:05.000+0000");
+        assert!(match tie.created.as_str().cmp(ts) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => !seen.contains(tie.id.as_str()),
+            std::cmp::Ordering::Less => false,
+        });
+        // … while an already-seen one does not.
+        let dup = mk("c3", "2026-07-01T10:00:05.000+0000");
+        assert!(!match dup.created.as_str().cmp(ts) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => !seen.contains(dup.id.as_str()),
+            std::cmp::Ordering::Less => false,
+        });
+
+        // Legacy bare-timestamp cursors still parse (no ids → strict behavior).
+        let (ts2, seen2) = parse_watch_cursor("2026-06-01T00:00:00.000+0000");
+        assert_eq!(ts2, "2026-06-01T00:00:00.000+0000");
+        assert!(seen2.is_empty());
+        assert!(build_watch_cursor(&[]).is_none());
+    }
 
     // -----------------------------------------------------------------------
     // In-memory pool + schema

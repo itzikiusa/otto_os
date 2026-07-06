@@ -105,6 +105,71 @@ fn write_codex_creds(
     Ok(path)
 }
 
+/// One row of the live process table: (pid, ppid, cumulative CPU ms).
+type ProcRow = (u32, u32, u64);
+
+/// Snapshot the OS process table via one `ps -axo pid=,ppid=,time=` pass.
+/// Used by the idle-suspend sweep; a failed/absent `ps` yields an empty table
+/// (the sweep then behaves exactly as before the guard existed).
+fn process_table() -> Vec<ProcRow> {
+    let out = match std::process::Command::new("ps").args(["-axo", "pid=,ppid=,time="]).output() {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&out)
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
+            let cpu = parse_ps_time_ms(it.next()?)?;
+            Some((pid, ppid, cpu))
+        })
+        .collect()
+}
+
+/// Parse `ps` cumulative CPU time (`MM:SS.ss`, `HH:MM:SS`, or `D-HH:MM:SS`)
+/// into milliseconds.
+fn parse_ps_time_ms(s: &str) -> Option<u64> {
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, s),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    let (h, m, sec) = match parts.as_slice() {
+        [h, m, s] => (h.parse::<u64>().ok()?, m.parse::<u64>().ok()?, s.parse::<f64>().ok()?),
+        [m, s] => (0, m.parse::<u64>().ok()?, s.parse::<f64>().ok()?),
+        _ => return None,
+    };
+    Some((days * 86_400_000) + (h * 3_600_000) + (m * 60_000) + (sec * 1000.0) as u64)
+}
+
+/// Total cumulative CPU (ms) of every DESCENDANT of `root` — children,
+/// grandchildren, … — excluding `root` itself (an idle agent TUI accrues CPU
+/// redrawing; its tool subprocesses are what indicate in-flight work).
+fn descendant_cpu_ms(root: u32, table: &[ProcRow]) -> u64 {
+    use std::collections::{HashMap, HashSet};
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut cpu: HashMap<u32, u64> = HashMap::new();
+    for (pid, ppid, ms) in table {
+        children.entry(*ppid).or_default().push(*pid);
+        cpu.insert(*pid, *ms);
+    }
+    let mut total = 0u64;
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut stack: Vec<u32> = children.get(&root).cloned().unwrap_or_default();
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue; // defensive: a malformed table must not loop forever
+        }
+        total += cpu.get(&pid).copied().unwrap_or(0);
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    total
+}
+
 /// Root directory codex writes session rollouts to: `$CODEX_HOME/sessions`,
 /// else `~/.codex/sessions`.
 fn codex_sessions_root() -> std::path::PathBuf {
@@ -418,6 +483,11 @@ pub struct SessionManager {
     /// branch so it marks the session `Reconnectable` (still resumable) instead
     /// of `Exited`, winning the kill→exit race deterministically.
     suspending: Arc<DashMap<Id, ()>>,
+    /// Last observed cumulative CPU (ms) of each live session's DESCENDANT
+    /// process tree (excluding the direct child), sampled by the idle-suspend
+    /// sweep. A tree that accrued CPU since the previous sweep is running a
+    /// quiet long command (build/test) — not idle — and is skipped.
+    suspend_cpu: Arc<DashMap<Id, u64>>,
     repo: SessionsRepo,
     events: broadcast::Sender<Event>,
     providers: ProviderRegistry,
@@ -486,6 +556,7 @@ impl SessionManager {
             live: Arc::new(DashMap::new()),
             attached: Arc::new(DashMap::new()),
             suspending: Arc::new(DashMap::new()),
+            suspend_cpu: Arc::new(DashMap::new()),
             repo,
             events,
             providers,
@@ -1262,7 +1333,13 @@ impl SessionManager {
         let repo = self.repo.clone();
         let lock = Arc::clone(&self.codex_capture_lock);
         let id = session.id.clone();
-        let cwd = session.cwd.clone();
+        // codex/agy record a symlink-RESOLVED cwd (macOS `/var` → `/private/var`,
+        // `/tmp` → `/private/tmp`) in their session files; the scans below compare
+        // by exact string, so match the canonical form or a session launched from
+        // a symlinked path never captures its id and silently stays non-resumable.
+        let cwd = std::fs::canonicalize(&session.cwd)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| session.cwd.clone());
         let provider = session.provider.clone();
         // Captured at the spawn moment so we match THIS launch's session, not a
         // later concurrent same-cwd spawn's (whose file mtime is newer).
@@ -1453,19 +1530,15 @@ impl SessionManager {
             .ok_or_else(|| Error::Conflict("session is not live".into()))?;
         handle.resize(cols, rows)?;
         // Persist the last known grid size so resume/reconnect can restore it
-        // (prevents reflow flash on reconnect). Best-effort — no await.
+        // (prevents reflow flash on reconnect). Best-effort — no await. Uses the
+        // atomic merge (single UPDATE): the old read-modify-write raced
+        // update_meta and could revert a concurrent keep-alive/issue toggle
+        // with its stale snapshot.
         let repo = self.repo.clone();
         let sid = id.clone();
         tokio::spawn(async move {
-            if let Ok(session) = repo.get(&sid).await {
-                let mut base = match session.meta {
-                    serde_json::Value::Object(m) => m,
-                    _ => serde_json::Map::new(),
-                };
-                base.insert("pty_cols".to_string(), serde_json::Value::from(cols));
-                base.insert("pty_rows".to_string(), serde_json::Value::from(rows));
-                let _ = repo.set_meta(&sid, &serde_json::Value::Object(base)).await;
-            }
+            let patch = serde_json::json!({ "pty_cols": cols, "pty_rows": rows });
+            let _ = repo.merge_meta(&sid, &patch).await;
         });
         Ok(())
     }
@@ -1479,23 +1552,26 @@ impl SessionManager {
     /// Shallow-merge `patch` (a JSON object) into the session's existing meta.
     /// Top-level null values in the patch remove that key. Non-object existing
     /// meta is replaced by an empty object before merging.
+    ///
+    /// Uses the repo's atomic `merge_meta` (single UPDATE via `json_patch`) so a
+    /// concurrent writer (e.g. the resize persister) can never be overwritten by
+    /// a stale snapshot. `json_patch` deep-merges OBJECT values, but this API's
+    /// contract is shallow-replace — so object-valued keys are nulled first,
+    /// then set (two atomic merges; the key is briefly absent, never stale).
     pub async fn update_meta(&self, id: &Id, patch: serde_json::Value) -> Result<Session> {
-        let session = self.repo.get(id).await?;
-        let mut base = match session.meta {
-            serde_json::Value::Object(m) => m,
-            _ => serde_json::Map::new(),
-        };
-        if let serde_json::Value::Object(patch_map) = patch {
-            for (k, v) in patch_map {
-                if v.is_null() {
-                    base.remove(&k);
-                } else {
-                    base.insert(k, v);
-                }
+        // Verify the session exists up-front (preserves the NotFound error path).
+        let _ = self.repo.get(id).await?;
+        if let serde_json::Value::Object(ref patch_map) = patch {
+            let nulls: serde_json::Map<String, serde_json::Value> = patch_map
+                .iter()
+                .filter(|(_, v)| v.is_object())
+                .map(|(k, _)| (k.clone(), serde_json::Value::Null))
+                .collect();
+            if !nulls.is_empty() {
+                self.repo.merge_meta(id, &serde_json::Value::Object(nulls)).await?;
             }
+            self.repo.merge_meta(id, &patch).await?;
         }
-        let merged = serde_json::Value::Object(base);
-        self.repo.set_meta(id, &merged).await?;
         let updated = self.repo.get(id).await?;
         let _ = self.events.send(Event::SessionMetaUpdated {
             session_id: updated.id.clone(),
@@ -1581,14 +1657,24 @@ impl SessionManager {
         };
 
         // Snapshot live ids first (don't hold DashMap refs across awaits).
-        let candidates: Vec<(Id, std::time::Instant)> = self
+        let candidates: Vec<(Id, std::time::Instant, Option<u32>)> = self
             .live
             .iter()
-            .map(|e| (e.key().clone(), e.value().last_output_at()))
+            .map(|e| (e.key().clone(), e.value().last_output_at(), e.value().pid()))
             .collect();
 
+        // One process-table pass per sweep. "No PTY output" alone is NOT
+        // idleness — an agent running a long quiet command (test suite, build)
+        // looks silent while its child process tree is hard at work; killing it
+        // mid-run loses the in-flight command. We compare each candidate's
+        // DESCENDANT-tree cumulative CPU against the previous sweep: accruing
+        // CPU ⇒ active ⇒ skip. Descendants only (not the agent CLI itself, whose
+        // idle TUI redraws accrue CPU forever) — long-lived idle helpers (MCP
+        // servers) accrue ~none, so genuinely idle sessions still suspend.
+        let proc_table = process_table();
+
         let mut suspended = 0;
-        for (id, last_output) in candidates {
+        for (id, last_output, pid) in candidates {
             // Idle: no PTY output for the full grace window.
             if last_output.elapsed() < grace {
                 continue;
@@ -1596,6 +1682,29 @@ impl SessionManager {
             // Unattached: nobody is watching the terminal right now.
             if self.is_attached(&id) {
                 continue;
+            }
+            // Working-but-quiet guard (see the sweep comment above).
+            if let Some(pid) = pid {
+                let cpu = descendant_cpu_ms(pid, &proc_table);
+                let prev = self.suspend_cpu.insert(id.clone(), cpu);
+                match prev {
+                    // Tree accrued >200ms CPU since the last sweep → in-flight work.
+                    Some(prev_cpu) if cpu > prev_cpu.saturating_add(200) => {
+                        tracing::debug!(
+                            session = %id,
+                            "idle-suspend: descendants accrued CPU ({prev_cpu}→{cpu}ms) — skipping"
+                        );
+                        continue;
+                    }
+                    Some(_) => {}
+                    // No baseline yet and descendants exist: measure this sweep,
+                    // decide on the next one (60s later).
+                    None if cpu > 0 => {
+                        tracing::debug!(session = %id, "idle-suspend: baselining descendant CPU — skipping");
+                        continue;
+                    }
+                    None => {}
+                }
             }
             let session = match self.repo.get(&id).await {
                 Ok(s) => s,
@@ -1625,6 +1734,7 @@ impl SessionManager {
             match self.suspend(&id).await {
                 Ok(()) => {
                     suspended += 1;
+                    self.suspend_cpu.remove(&id);
                     tracing::info!(
                         session = %id,
                         provider = %session.provider,
@@ -2093,6 +2203,31 @@ mod tests {
     use super::*;
     use otto_core::domain::{SessionKind, Workspace};
     use otto_state::NewSession;
+
+    #[test]
+    fn ps_time_parses_all_shapes() {
+        assert_eq!(parse_ps_time_ms("0:00.05"), Some(50));
+        assert_eq!(parse_ps_time_ms("1:30.00"), Some(90_000));
+        assert_eq!(parse_ps_time_ms("2:03:04"), Some(2 * 3_600_000 + 3 * 60_000 + 4_000));
+        assert_eq!(parse_ps_time_ms("1-00:00:01"), Some(86_400_000 + 1_000));
+        assert_eq!(parse_ps_time_ms("garbage"), None);
+    }
+
+    #[test]
+    fn descendant_cpu_excludes_the_root_and_walks_depth() {
+        // 100 (root, 9999ms) → 200 (10ms) → 300 (500ms); 400 unrelated.
+        let table = vec![
+            (100, 1, 9_999),
+            (200, 100, 10),
+            (300, 200, 500),
+            (400, 1, 777),
+        ];
+        assert_eq!(descendant_cpu_ms(100, &table), 510);
+        assert_eq!(descendant_cpu_ms(400, &table), 0);
+        // A (bogus) cyclic table must not hang.
+        let cyclic = vec![(2, 1, 5), (1, 2, 7)];
+        assert_eq!(descendant_cpu_ms(1, &cyclic), 12);
+    }
 
     async fn test_manager() -> (Arc<SessionManager>, SessionsRepo, Workspace, Id) {
         // A migrated on-disk sqlite (in a tempdir) via otto-state's opener.

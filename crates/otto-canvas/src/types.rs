@@ -39,13 +39,15 @@ pub struct UpdateSceneReq {
 }
 
 /// The default empty Scene document stored when `CreateSceneReq.doc` is absent.
+/// Uses the file-backed canvas shape (`{type:"otto-canvas", format, source}`) —
+/// the only shape Canvas Studio renders; the legacy Svelte-Flow skeleton this
+/// used to emit left `format`/`source` undefined for fresh scenes.
 pub fn empty_doc(title: &str) -> serde_json::Value {
     serde_json::json!({
-        "schema": 1,
+        "type": "otto-canvas",
+        "version": 1,
+        "format": "mermaid",
         "title": title,
-        "nodes": [],
-        "edges": [],
-        "slides": [],
-        "appState": { "grid": true }
+        "source": "",
     })
 }

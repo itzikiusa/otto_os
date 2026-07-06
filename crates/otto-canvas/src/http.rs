@@ -197,6 +197,7 @@ async fn update_scene<S: CanvasCtx>(
                 provider: req.provider,
                 section: req.section,
                 story_id: req.story_id,
+                ..Default::default()
             },
         )
         .await?;

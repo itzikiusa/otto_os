@@ -7,8 +7,8 @@
 
   interface Props {
     error: string;
-    /** Active engine (mysql/clickhouse/mongodb/redis, and postgres once it lands)
-     *  — used for the label; parsing is pattern-based so it works either way. */
+    /** Active engine (mysql/postgres/clickhouse/mongodb/redis) — used for the
+     *  label; parsing is pattern-based so it works for all of them. */
     engine: string | null;
     statement: string;
     onAskAi: () => void;

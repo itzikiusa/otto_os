@@ -85,24 +85,47 @@ fn cookie_jar(wid: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
         .clone()
 }
 
-/// Shared outbound HTTP client per workspace (built once per wid). Follows
+/// Shared outbound HTTP client per (workspace, allow_local). Follows
 /// redirects, generous body timeout enforced per-request via `.timeout()`.
-fn http_client(wid: &Id) -> reqwest::Client {
-    static CLIENTS: OnceLock<StdMutex<HashMap<Id, reqwest::Client>>> = OnceLock::new();
+/// `allow_local` (the workspace's explicit opt-in) swaps the SSRF-guarded
+/// redirect policy for a plain bounded one — the pre-flight check is skipped
+/// by the caller under the same flag.
+fn http_client(wid: &Id, allow_local: bool) -> reqwest::Client {
+    static CLIENTS: OnceLock<StdMutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
     let clients = CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut map = clients.lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(wid.clone())
+    map.entry(format!("{wid}|{allow_local}"))
         .or_insert_with(|| {
-            reqwest::Client::builder()
+            let builder = reqwest::Client::builder()
                 .user_agent("Otto-ApiClient/1.0")
+                .cookie_provider(cookie_jar(wid));
+            let builder = if allow_local {
+                builder.redirect(reqwest::redirect::Policy::limited(10))
+            } else {
                 // SSRF guard: cap + re-validate each redirect hop's host so an
                 // upstream 30x can't bounce us into a private/loopback address.
-                .redirect(net_guard::redirect_policy())
-                .cookie_provider(cookie_jar(wid))
-                .build()
-                .unwrap_or_default()
+                builder.redirect(net_guard::redirect_policy())
+            };
+            builder.build().unwrap_or_default()
         })
         .clone()
+}
+
+/// Workspace opt-in for local/private targets: reads
+/// `settings.api_client.allow_local` off the workspace row. Off by default;
+/// flipping it is an ADMIN action (workspace settings PATCH). Scope: only the
+/// API client's user-initiated requests — the rest of the daemon's outbound
+/// paths keep the full guard.
+pub(crate) async fn workspace_allows_local(ctx: &ServerCtx, wid: &Id) -> bool {
+    match ctx.workspaces.get(wid).await {
+        Ok(ws) => ws
+            .settings
+            .get("api_client")
+            .and_then(|a| a.get("allow_local"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 /// Build a one-off client when per-request settings deviate from the defaults
@@ -114,6 +137,7 @@ fn build_settings_client(
     wid: &Id,
     req: &ExecuteApiReq,
     proxy: Option<&str>,
+    allow_local: bool,
 ) -> Option<reqwest::Client> {
     let no_redirect = req.follow_redirects == Some(false);
     let no_verify = req.verify_ssl == Some(false);
@@ -125,6 +149,11 @@ fn build_settings_client(
         .cookie_provider(cookie_jar(wid));
     builder = if no_redirect {
         builder.redirect(reqwest::redirect::Policy::none())
+    } else if proxy.is_some() || allow_local {
+        // Tunnelled: redirects traverse the proxy and resolve at the FAR end —
+        // the local resolver check would only false-block bastion-only hosts.
+        // allow_local: the workspace explicitly opted in to private targets.
+        builder.redirect(reqwest::redirect::Policy::limited(10))
     } else {
         // Redirects still follow the SSRF-guarded policy.
         builder.redirect(net_guard::redirect_policy())
@@ -681,7 +710,9 @@ pub async fn list_cookies(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    // Editor-gated: cookie values are live credentials (session tokens), not
+    // something a read-only viewer should be able to exfiltrate.
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let jar = cookie_jar(&wid);
     let store = jar
         .lock()
@@ -788,7 +819,7 @@ pub async fn oauth2_token(
         .await
         .map_err(|m| ApiError(Error::Invalid(m)))?;
 
-    let resp = http_client(&wid)
+    let resp = http_client(&wid, false)
         .post(&req.token_url)
         .header("Accept", "application/json")
         .form(&form)
@@ -908,7 +939,10 @@ pub async fn execute(
     // Resolve the optional SSH tunnel first; a resolution failure flows through
     // the same error/history path as a network failure below.
     let send = match resolve_socks_proxy(&ctx, &wid, req.ssh_connection_id.as_ref()).await {
-        Ok(proxy) => build_and_send(&wid, &exec_req, &vars, proxy.as_deref()).await,
+        Ok(proxy) => {
+            let allow_local = workspace_allows_local(&ctx, &wid).await;
+            build_and_send(&wid, &exec_req, &vars, proxy.as_deref(), allow_local).await
+        }
         Err(msg) => Err(msg),
     };
     match send {
@@ -1110,13 +1144,21 @@ async fn build_and_send(
     req: &ExecuteApiReq,
     vars: &serde_json::Map<String, Value>,
     proxy: Option<&str>,
+    allow_local: bool,
 ) -> Result<ApiResponse, String> {
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 
     // --- method ---
     let url = substitute(&req.url, vars);
     // SSRF guard: resolve + classify the target host before connecting.
-    net_guard::check_url(&url).await?;
+    // Skipped when (a) the request rides an SSH tunnel — the FAR end resolves
+    // and dials, so the local check only false-blocks bastion-only hostnames
+    // and RFC1918 targets the tunnel exists to reach; or (b) the workspace has
+    // explicitly opted in to local/private targets (dev servers on localhost
+    // are the #1 thing an API client is pointed at).
+    if proxy.is_none() && !allow_local {
+        net_guard::check_url(&url).await?;
+    }
     let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
         .map_err(|_| format!("invalid HTTP method '{}'", req.method))?;
 
@@ -1146,8 +1188,8 @@ async fn build_and_send(
 
     // Per-request settings: a custom client when any non-default is set or the
     // request is tunnelled, otherwise the workspace's shared pooled client.
-    let shared_client = http_client(wid);
-    let custom_client = build_settings_client(wid, req, proxy);
+    let shared_client = http_client(wid, allow_local);
+    let custom_client = build_settings_client(wid, req, proxy, allow_local);
     let client = custom_client.as_ref().unwrap_or(&shared_client);
     let timeout = req
         .timeout_ms
@@ -1413,10 +1455,15 @@ fn apply_auth(
                 auth.get("password").and_then(Value::as_str).unwrap_or(""),
                 vars,
             );
-            let encoded = B64.encode(format!("{user}:{pass}"));
-            let hv = HeaderValue::from_str(&format!("Basic {encoded}"))
-                .map_err(|_| "invalid basic auth".to_string())?;
-            headers.insert(AUTHORIZATION, hv);
+            // Both empty → send NO header. `Basic Og==` (base64 of ":") is a
+            // real-but-empty credential some servers treat differently from
+            // an anonymous request.
+            if !user.is_empty() || !pass.is_empty() {
+                let encoded = B64.encode(format!("{user}:{pass}"));
+                let hv = HeaderValue::from_str(&format!("Basic {encoded}"))
+                    .map_err(|_| "invalid basic auth".to_string())?;
+                headers.insert(AUTHORIZATION, hv);
+            }
         }
         "api_key" => {
             let key = substitute(auth.get("key").and_then(Value::as_str).unwrap_or(""), vars);
@@ -1698,7 +1745,8 @@ async fn run_step(
     }
 
     // Send via the shared single-request path (same reqwest logic as /execute).
-    match build_and_send(wid, &exec, vars, proxy.as_deref()).await {
+    let allow_local = workspace_allows_local(ctx, wid).await;
+    match build_and_send(wid, &exec, vars, proxy.as_deref(), allow_local).await {
         Ok(resp) => {
             // Parse the body as JSON once for json_path assertions/extraction;
             // a non-JSON body yields Null (assertions/extracts simply miss).
@@ -2015,7 +2063,28 @@ fn ensure_in_workspace(entity_ws: &Id, wid: &Id) -> Result<(), ApiError> {
 
 /// Replace `{{name}}` occurrences with the corresponding variable value
 /// (string-coerced). Unknown placeholders are left intact.
+/// USER/ENV variables win over the built-in dynamics (`$timestamp` & co) — a
+/// user who defines their own `$timestamp` means theirs. Values that
+/// themselves contain `{{…}}` re-expand for up to 3 bounded passes (nested
+/// vars like `base_url = {{host}}/api` now resolve; the bound keeps
+/// self-referencing definitions from looping).
 fn substitute(input: &str, vars: &serde_json::Map<String, Value>) -> String {
+    let mut cur = substitute_once(input, vars);
+    for _ in 0..2 {
+        if !cur.contains("{{") {
+            break;
+        }
+        let next = substitute_once(&cur, vars);
+        if next == cur {
+            break; // only unknown placeholders remain
+        }
+        cur = next;
+    }
+    cur
+}
+
+/// One substitution pass (see [`substitute`] for ordering + recursion rules).
+fn substitute_once(input: &str, vars: &serde_json::Map<String, Value>) -> String {
     if !input.contains("{{") {
         return input.to_string();
     }
@@ -2026,10 +2095,10 @@ fn substitute(input: &str, vars: &serde_json::Map<String, Value>) -> String {
         if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
             if let Some(end) = input[i + 2..].find("}}") {
                 let name = input[i + 2..i + 2 + end].trim();
-                if let Some(dynamic) = resolve_dynamic_var(name) {
-                    out.push_str(&dynamic);
-                } else if let Some(v) = vars.get(name) {
+                if let Some(v) = vars.get(name) {
                     out.push_str(&value_to_string(v));
+                } else if let Some(dynamic) = resolve_dynamic_var(name) {
+                    out.push_str(&dynamic);
                 } else {
                     // leave placeholder as-is
                     out.push_str(&input[i..i + 2 + end + 2]);

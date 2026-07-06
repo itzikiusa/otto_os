@@ -617,41 +617,73 @@ fn split_actions(raw: &str) -> (String, Option<String>) {
     (markdown, actions_json)
 }
 
-/// Build a minimal Scene doc from a `create_canvas` action (mermaid or nodes).
+/// Build a Scene doc from a `create_canvas` action (mermaid or nodes) in the
+/// FILE-BACKED canvas shape (`{type:"otto-canvas", version:1, format, source}`)
+/// — the only shape Canvas Studio renders. The legacy Svelte-Flow doc
+/// (`{schema:1, nodes:[{kind:"mermaid",…}]}`) this used to emit has no
+/// top-level `source`, so every "Open in Canvas" from Discovery Chat landed on
+/// a permanently blank board.
 fn canvas_doc_from_action(action: &Value, title: &str) -> Value {
-    if let Some(src) = action.get("mermaid").and_then(|m| m.as_str()) {
-        return json!({
-            "schema": 1,
-            "title": title,
-            "nodes": [{
-                "id": "m1",
-                "kind": "mermaid",
-                "x": 80, "y": 80, "w": 520, "h": 360,
-                "mermaid": { "src": src }
-            }],
-            "edges": [],
-            "slides": [],
-            "appState": { "grid": true }
-        });
-    }
-    let nodes = action
-        .get("nodes")
-        .and_then(|n| n.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let edges = action
-        .get("edges")
-        .and_then(|e| e.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let source = match action.get("mermaid").and_then(|m| m.as_str()) {
+        Some(src) => src.to_string(),
+        // Structured nodes/edges → synthesize a mermaid flowchart so the
+        // proposed diagram still lands editable instead of being dropped.
+        None => {
+            let nodes = action
+                .get("nodes")
+                .and_then(|n| n.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let edges = action
+                .get("edges")
+                .and_then(|e| e.as_array())
+                .cloned()
+                .unwrap_or_default();
+            mermaid_from_nodes(&nodes, &edges)
+        }
+    };
     json!({
-        "schema": 1,
+        "type": "otto-canvas",
+        "version": 1,
+        "format": "mermaid",
         "title": title,
-        "nodes": nodes,
-        "edges": edges,
-        "slides": [],
-        "appState": { "grid": true }
+        "source": source,
     })
+}
+
+/// Best-effort mermaid flowchart from a `create_canvas` action's node/edge
+/// lists. Node ids are sanitized to mermaid-safe tokens; labels are quoted.
+fn mermaid_from_nodes(nodes: &[Value], edges: &[Value]) -> String {
+    let sid = |raw: &str| -> String {
+        let s: String = raw
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        if s.is_empty() { "n".to_string() } else { s }
+    };
+    let mut out = String::from("flowchart TD\n");
+    for (i, n) in nodes.iter().enumerate() {
+        let id = n
+            .get("id")
+            .and_then(Value::as_str)
+            .map(sid)
+            .unwrap_or_else(|| format!("n{i}"));
+        let label = n
+            .get("label")
+            .or_else(|| n.get("title"))
+            .or_else(|| n.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or(&id);
+        out.push_str(&format!("  {id}[\"{}\"]\n", label.replace('"', "'")));
+    }
+    for e in edges {
+        let from = e.get("from").or_else(|| e.get("source")).and_then(Value::as_str);
+        let to = e.get("to").or_else(|| e.get("target")).and_then(Value::as_str);
+        if let (Some(f), Some(t)) = (from, to) {
+            out.push_str(&format!("  {} --> {}\n", sid(f), sid(t)));
+        }
+    }
+    out
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -743,12 +775,31 @@ mod tests {
 
     #[test]
     fn canvas_doc_from_mermaid_action() {
+        // Regression: must be the FILE-BACKED shape (format+source) — the
+        // legacy nodes[] shape rendered a permanently blank canvas.
         let action = json!({"type":"create_canvas","title":"Seq","mermaid":"sequenceDiagram\n A->>B: x"});
         let doc = canvas_doc_from_action(&action, "Seq");
-        assert_eq!(doc["nodes"][0]["kind"], "mermaid");
-        assert!(doc["nodes"][0]["mermaid"]["src"]
-            .as_str()
-            .unwrap()
-            .contains("A->>B"));
+        assert_eq!(doc["type"], "otto-canvas");
+        assert_eq!(doc["format"], "mermaid");
+        assert!(doc["source"].as_str().unwrap().contains("A->>B"));
+    }
+
+    #[test]
+    fn canvas_doc_from_nodes_action_synthesizes_mermaid() {
+        let action = json!({
+            "type": "create_canvas",
+            "nodes": [
+                {"id": "a", "label": "Start"},
+                {"id": "b-2", "label": "End \"quoted\""},
+            ],
+            "edges": [{"from": "a", "to": "b-2"}],
+        });
+        let doc = canvas_doc_from_action(&action, "Flow");
+        assert_eq!(doc["format"], "mermaid");
+        let src = doc["source"].as_str().unwrap();
+        assert!(src.starts_with("flowchart TD"));
+        assert!(src.contains("a[\"Start\"]"));
+        assert!(src.contains("b_2[\"End 'quoted'\"]"), "sanitized id + quotes: {src}");
+        assert!(src.contains("a --> b_2"));
     }
 }

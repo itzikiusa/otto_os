@@ -58,7 +58,7 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 41 | POST /api/v1/repos/{id}/stage | ws editor | StagePathsReq | RepoStatusResp |
 | 42 | POST /api/v1/repos/{id}/unstage | ws editor | StagePathsReq | RepoStatusResp |
 | 43 | POST /api/v1/repos/{id}/commit | ws editor | CommitReq | `{"sha":"..."}` |
-| 44 | POST /api/v1/repos/{id}/push | ws editor | — | RepoStatusResp |
+| 44 | POST /api/v1/repos/{id}/push | ws editor | `{branch?}` (optional; pushes THAT branch explicitly — Create-PR passes its source branch; absent = current branch) | RepoStatusResp |
 | 45 | POST /api/v1/repos/{id}/pull | ws editor | — | RepoStatusResp |
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | CheckoutReq | RepoStatusResp |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
@@ -555,6 +555,7 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
+| POST /connections/unsaved/db/test | ws editor (on `workspace_id`) | `{workspace_id, kind, params, secret?}` | connectivity probe of an UNSAVED config (form "Test" button) — nothing is persisted; DB kinds only; SSH tunnels open ephemerally |
 | POST /connections/{id}/db/test | ws editor | — | connectivity probe result |
 | GET /connections/{id}/db/capabilities | ws viewer | — | engine capability flags: `sql`, `joins`, `transactions`, `multi_statement`, `cancel`, `explain`, `default_port`, `schema_levels`, `query_language` (see the honesty notes below) |
 | GET /connections/{id}/db/schema | ws viewer | — | top-level schema tree (roots) |
@@ -1495,7 +1496,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
 | POST /workspaces/{wid}/api-client/requests | ws editor | CreateRequestReq | Request |
 | GET /workspaces/{wid}/api-client/requests/{id} | ws viewer | — | Request |
-| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request |
+| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, verify_ssl?}`), `docs?`, `graphql_variables?` |
 | DELETE /workspaces/{wid}/api-client/requests/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/environments | ws viewer | — | `Environment[]` |
 | POST /workspaces/{wid}/api-client/environments | ws editor | CreateEnvironmentReq | Environment |
@@ -1510,8 +1511,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
 | POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token |
-| GET /workspaces/{wid}/api-client/cookies | ws viewer | — | this workspace's cookie jar |
-| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear this workspace's cookies |
+| GET /workspaces/{wid}/api-client/cookies | ws editor | — | THIS workspace's cookie jar (jars are per-workspace, never shared; values are live credentials — editor-gated) |
+| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear THIS workspace's jar |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
 | POST /workspaces/{wid}/api-client/automations | ws editor | CreateAutomationReq | Automation |
 | PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | UpdateAutomationReq | Automation |

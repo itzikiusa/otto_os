@@ -292,10 +292,14 @@ pub async fn invoke(
         level: "info".into(),
     }];
 
-    // SSRF guard: resolve + classify the target host before dialing.
-    crate::routes::api_client::net_guard::check_url(&req.url)
-        .await
-        .map_err(invalid)?;
+    // SSRF guard: resolve + classify the target host before dialing — unless
+    // the workspace explicitly opted in to local/private targets (grpc against
+    // a dev server on localhost is a first-class API-client use case).
+    if !crate::routes::api_client::workspace_allows_local(&ctx, &wid).await {
+        crate::routes::api_client::net_guard::check_url(&req.url)
+            .await
+            .map_err(invalid)?;
+    }
 
     // Build the channel (TLS for https/grpcs).
     let uri = axum::http::Uri::from_str(&req.url).map_err(|e| invalid(format!("bad url: {e}")))?;

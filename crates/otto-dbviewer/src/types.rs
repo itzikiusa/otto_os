@@ -1141,9 +1141,49 @@ fn mongo_is_write(statement: &str) -> bool {
 /// Re-export for drivers.
 pub type DbResult<T> = Result<T>;
 
+/// Hard per-cell size cap. A single LONGTEXT/bytea/JSON cell larger than this
+/// would freeze the webview grid and bloat the WS payload; such a cell is
+/// truncated with a marker while the query still succeeds. Shared by every SQL
+/// driver (MySQL, Postgres, ClickHouse) so oversized cells behave identically.
+pub const MAX_CELL_CHARS: usize = 1_048_576;
+
+/// Recursively cap oversized string values in a result cell (covers nested
+/// Array/Tuple/Map columns too). Non-strings pass through unchanged.
+pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => {
+            let len = s.chars().count();
+            if len > MAX_CELL_CHARS {
+                let kept: String = s.chars().take(MAX_CELL_CHARS).collect();
+                Value::String(format!("{kept}…[truncated {} chars]", len - MAX_CELL_CHARS))
+            } else {
+                Value::String(s)
+            }
+        }
+        Value::Array(a) => Value::Array(a.into_iter().map(cap_cell).collect()),
+        Value::Object(o) => Value::Object(o.into_iter().map(|(k, val)| (k, cap_cell(val))).collect()),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_cell_truncates_only_oversized_strings() {
+        use serde_json::json;
+        let small = cap_cell(json!("hello"));
+        assert_eq!(small, json!("hello"));
+        let big: String = "x".repeat(MAX_CELL_CHARS + 10);
+        let capped = cap_cell(serde_json::Value::String(big));
+        let s = capped.as_str().unwrap();
+        assert!(s.ends_with("…[truncated 10 chars]"));
+        // Recurses into arrays/objects; non-strings pass through.
+        let nested = cap_cell(json!({ "a": [1, "y"], "n": 5 }));
+        assert_eq!(nested, json!({ "a": [1, "y"], "n": 5 }));
+    }
 
     #[test]
     fn tls_mode_canonical_spellings_parse() {

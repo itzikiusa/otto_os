@@ -128,11 +128,12 @@
   async function create(): Promise<void> {
     busy = true;
     try {
-      // Push the source branch first (sets upstream for a fresh branch) so the
-      // provider can find it; non-fatal if it's already up to date.
+      // Push the SELECTED source branch first (sets upstream for a fresh
+      // branch) so the provider can find it — a bare push would push whatever
+      // branch happens to be checked out, which may not be the PR's source.
       phase = 'pushing';
       try {
-        await api.post(`/repos/${repoId}/push`);
+        await api.post(`/repos/${repoId}/push`, { branch: source });
       } catch (e) {
         // "Everything up-to-date" surfaces as a normal push; a real failure
         // (e.g. auth) should stop us before trying to open the PR.

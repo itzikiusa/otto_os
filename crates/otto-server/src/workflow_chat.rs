@@ -517,10 +517,18 @@ impl WorkflowChatTriggerImpl {
 
     /// A NON-INTRUSIVE status summary built purely from the run's persisted node
     /// states — never prompts a running agent. Overall status, a per-step line,
-    /// and the running step's latest log line.
-    fn run_status_summary(&self, run: &WorkflowRun) -> String {
+    /// and the running step's latest log line. `wf_name` is the looked-up
+    /// workflow name — only the legacy `Action: Workflow` path stamps `name`
+    /// into the run input, so without the fallback every `run <name>:` /
+    /// channel-binding run read as a generic "*workflow*".
+    fn run_status_summary(&self, run: &WorkflowRun, wf_name: Option<&str>) -> String {
         let short = short_id(&run.id);
-        let name = run.input.get("name").and_then(Value::as_str).unwrap_or("workflow");
+        let name = run
+            .input
+            .get("name")
+            .and_then(Value::as_str)
+            .or(wf_name)
+            .unwrap_or("workflow");
         let mut lines = vec![format!("📊 *{name}* — run `{short}` · {}", run.status.as_str())];
         for n in &run.nodes {
             let icon = match n.status {
@@ -740,7 +748,10 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
             .await?;
         let short = short_id(&run.id);
         match control {
-            WfControl::Status => Some(WorkflowChatAck { reply: self.run_status_summary(&run) }),
+            WfControl::Status => {
+                let wf_name = repo.get(&run.workflow_id).await.ok().map(|w| w.name);
+                Some(WorkflowChatAck { reply: self.run_status_summary(&run, wf_name.as_deref()) })
+            }
             WfControl::Skip => {
                 if let Ok(mut s) = self.ctx.wf_skip_current.lock() {
                     s.insert(run.id.clone());

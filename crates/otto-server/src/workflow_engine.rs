@@ -378,8 +378,38 @@ fn param_str_list(params: &Value, key: &str) -> Vec<String> {
     }
 }
 
-/// Per-node turn budget for agent/LLM nodes.
-const NODE_AGENT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Node kinds that must NEVER be served from (or write to) the node-result
+/// cache. Two families:
+/// - GATES whose decision belongs to the run being executed: a replayed
+///   `human_approval` would auto-approve with no operator; a replayed
+///   `budget_gate` would wave through a now-exceeded budget.
+/// - SIDE-EFFECTING nodes: replaying `git_pr`/`channel_notify`/`swarm_task`/
+///   `http_request`/`api_run`/`self_improve`/`product_*`/`canvas`/`review_run`
+///   reports "done" while the PR/message/task/request/review never happened;
+///   `prepare_context` writes step files a replay can't recreate.
+///
+/// Pure-compute kinds (transform/condition/agent_prompt/…) stay cacheable for
+/// the "run from here" flow.
+fn cache_exempt_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "prepare_context"
+            | "human_approval"
+            | "budget_gate"
+            | "channel_notify"
+            | "git_pr"
+            | "swarm_task"
+            | "http_request"
+            | "api_run"
+            | "self_improve"
+            | "product_publish"
+            | "product_analyze"
+            | "product_rewrite"
+            | "product_plan"
+            | "canvas"
+            | "review_run"
+    )
+}
 
 /// Global wall-clock budget for a whole run. A run can't execute forever: once
 /// the cumulative time across all nodes exceeds this, the run is failed at the
@@ -998,16 +1028,24 @@ pub async fn run_workflow(
         };
 
         // --- node-result cache check ----------------------------------------
-        // Cache is keyed by (workflow_id, node_id, params_hash, input_hash).
-        // Agent nodes are expensive but their outputs are LLM-non-deterministic;
-        // we still cache them so a user can opt-in to "run from here" and skip
-        // earlier unchanged nodes. All node kinds participate in the cache.
+        // Cache is keyed by (workflow_id, node_id, params_hash, input_hash) —
+        // GLOBAL across runs. Agent nodes are expensive but their outputs are
+        // LLM-non-deterministic; we still cache them so a user can opt-in to
+        // "run from here" and skip earlier unchanged nodes. Kinds whose
+        // execution must belong to THIS run are exempt (see cache_exempt_kind):
+        // replaying a cached human_approval would auto-approve a gate no human
+        // saw; a cached budget_gate would wave through a now-exceeded budget;
+        // cached git_pr/channel_notify/… would report side effects that never
+        // happened. A node can also opt out via `params.no_cache: true`.
         let params_hash = hash_value(&node.params);
         let input_hash = hash_value(&node_input);
-        // prepare_context writes a side-effect file (jira-<KEY>.md) into the run's
-        // context dir — a cache replay can't recreate that, so it never reads from
-        // (or writes to, see below) the node-result cache.
-        let cached_out = if node.kind != "prepare_context" {
+        let no_cache = cache_exempt_kind(&node.kind)
+            || node
+                .params
+                .get("no_cache")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        let cached_out = if !no_cache {
             repo.get_cached_output(&workflow.id, &node_id, &params_hash, &input_hash)
                 .await
         } else {
@@ -1271,10 +1309,10 @@ pub async fn run_workflow(
                 if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
                     progress.post_step_file(&files, &step_file_base);
                 }
-                // Persist to the node cache for future re-runs — except prepare_context,
-                // whose jira-<KEY>.md side effect a cache replay cannot recreate (see the
-                // matching read-side guard above).
-                if node.kind != "prepare_context" {
+                // Persist to the node cache for future re-runs — except the
+                // gating/side-effecting kinds (see the matching read-side
+                // guard above and `cache_exempt_kind`).
+                if !no_cache {
                     let _ = repo
                         .set_cached_output(&workflow.id, &node_id, &params_hash, &input_hash, &out)
                         .await;
@@ -1351,6 +1389,7 @@ pub async fn run_workflow(
             .unwrap_or(0);
         deliver_run_result(&ctx, &workflow, &states, RunStatus::Canceled, None, &input, None).await;
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "canceled", None, rev, None, &states, false);
+        reap_run_worktrees(&ctx, &run_id).await;
         return;
     }
 
@@ -1371,6 +1410,7 @@ pub async fn run_workflow(
             .unwrap_or(0);
         deliver_run_result(&ctx, &workflow, &states, RunStatus::Error, None, &input, None).await;
         emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "error", None, rev, None, &states, false);
+        reap_run_worktrees(&ctx, &run_id).await;
         return;
     }
 
@@ -1405,6 +1445,9 @@ pub async fn run_workflow(
     deliver_run_result(&ctx, &workflow, &states, final_status, pack_id.as_deref(), &input, final_output.as_deref()).await;
     // Final event: run complete.
     emit_run_updated(&ctx, &workflow.workspace_id, &run_id, final_status.as_str(), None, rev, None, &states, false);
+    // Free the run's provisioned worktrees (+ safe branch cleanup) — repeat
+    // automations must not accumulate one worktree/branch per run.
+    reap_run_worktrees(&ctx, &run_id).await;
 }
 
 /// Assemble the proof pack for a completed workflow run: each node's output is a
@@ -1944,8 +1987,15 @@ async fn execute_node(
                 .get("url")
                 .and_then(Value::as_str)
                 .ok_or_else(|| otto_core::Error::Invalid("http node: missing url".into()))?;
+            // SSRF guard + guarded redirects — every other outbound path in the
+            // daemon checks; workflow nodes must not be the loophole to
+            // loopback/private/metadata addresses.
+            otto_netguard::check_url(url)
+                .await
+                .map_err(otto_core::Error::Upstream)?;
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
+                .redirect(otto_netguard::redirect_policy())
                 .build()
                 .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
             let mut rb = client.request(
@@ -2329,9 +2379,10 @@ async fn execute_node(
         // Pauses the run until an operator calls
         // `POST /workflow-runs/{id}/approve` with `{"node_id": ..., "approved": true}`.
         // The engine sets `waiting_approval = 1` on the run row and then polls
-        // (with a 30-second back-off, up to NODE_AGENT_TIMEOUT) for the row to
-        // be cleared. If the operator rejects (`approved: false`) the node errors.
-        // If the timeout expires the node errors with "approval timed out".
+        // every 2s, up to `params.timeout_s` (default 24h, min 60s), for the
+        // row to be cleared. If the operator rejects (`approved: false`) the
+        // node errors. If the deadline expires the node errors with
+        // "approval timed out".
         "human_approval" => {
             let prompt = p
                 .get("prompt")
@@ -2356,8 +2407,16 @@ async fn execute_node(
             .map_err(|e| otto_core::Error::Internal(format!("human_approval mark: {e}")))?;
             emit_run_updated(ctx, &ws.id, run_id, "running", Some(&node.id), rev, None, &[], true);
 
-            // Poll for the operator's decision.
-            let deadline = Instant::now() + NODE_AGENT_TIMEOUT;
+            // Poll for the operator's decision. Operators are HUMANS: the
+            // deadline defaults to 24h and is node-tunable via
+            // `params.timeout_s` (min 60s) — this arm previously reused the
+            // 120-second agent-turn budget, which no PO can meet.
+            let timeout_s = p
+                .get("timeout_s")
+                .and_then(Value::as_u64)
+                .unwrap_or(86_400)
+                .max(60);
+            let deadline = Instant::now() + Duration::from_secs(timeout_s);
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if Instant::now() >= deadline {
@@ -2521,8 +2580,13 @@ async fn execute_node(
             // endpoint directly via reqwest to keep coupling clean.
             // This is the same approach as the http_request node but uses the
             // api_run semantic (so the UI shows it distinctly).
+            // Same SSRF guard + guarded redirects as http_request.
+            otto_netguard::check_url(&url)
+                .await
+                .map_err(otto_core::Error::Upstream)?;
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
+                .redirect(otto_netguard::redirect_policy())
                 .build()
                 .map_err(|e| otto_core::Error::Internal(e.to_string()))?;
             let mut rb = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
@@ -4339,6 +4403,92 @@ async fn provision_wf_worktrees(
         }
     }
     primary
+}
+
+/// Reap the worktrees a run provisioned under
+/// `<data_dir>/workflow-runs/<run_id>/` and, when safe, the matching
+/// `otto-wf/<run_id>` branch in each owning repo. Without this, every
+/// scheduled/chat run left a permanent linked worktree + branch in the user's
+/// real repository (24/day for an hourly workflow).
+///
+/// Branch policy — never discard commits: the branch is deleted only when its
+/// commits are reachable elsewhere (merged into HEAD) or pushed to origin;
+/// otherwise the branch stays (cheap) and only the worktree directory goes
+/// (`worktree_add_if_absent` re-attaches a surviving branch on a later run).
+async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
+    let dir = ctx.data_dir.join("workflow-runs").join(run_id);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return, // nothing provisioned
+    };
+    let branch = format!("otto-wf/{run_id}");
+    for entry in entries.flatten() {
+        let wt = entry.path();
+        if !wt.is_dir() {
+            continue;
+        }
+        let wt_str = wt.to_string_lossy().to_string();
+        // Owning repo root: the worktree's git-common-dir is `<root>/.git`.
+        let wt_git = otto_git::LocalGit::new(&wt_str);
+        let Ok(common) = wt_git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"]).await else {
+            continue;
+        };
+        let common = common.trim();
+        let Some(root) = std::path::Path::new(common).parent() else {
+            continue;
+        };
+        let repo_git = otto_git::LocalGit::new(root);
+        let _ = repo_git.worktree_remove(&wt_str).await;
+        // Safe-delete the run branch: merged into HEAD OR pushed to origin.
+        let merged = repo_git
+            .run(&["branch", "--merged", "HEAD", "--list", &branch])
+            .await
+            .map(|out| !out.trim().is_empty())
+            .unwrap_or(false);
+        let pushed = repo_git
+            .run(&["rev-parse", "--verify", &format!("refs/remotes/origin/{branch}")])
+            .await
+            .is_ok();
+        if merged || pushed {
+            let _ = repo_git.run(&["branch", "-D", &branch]).await;
+        } else {
+            tracing::debug!(
+                "wf reap: keeping branch {branch} in {} (unmerged, unpushed commits)",
+                root.display()
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Startup sweep: reap worktree leftovers of every run directory whose run is
+/// no longer pending/running (crashed daemon, pre-reap versions). Called once
+/// from ottod startup after [`reap_orphaned_runs`].
+pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
+    let base = ctx.data_dir.join("workflow-runs");
+    let entries = match std::fs::read_dir(&base) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let run_id = entry.file_name().to_string_lossy().to_string();
+        if run_id.is_empty() {
+            continue;
+        }
+        // Active runs keep their worktrees.
+        let active: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM workflow_runs WHERE id = ? AND status IN ('pending','running')",
+        )
+        .bind(&run_id)
+        .fetch_optional(&ctx.pool)
+        .await
+        .ok()
+        .flatten();
+        if active.is_some() {
+            continue;
+        }
+        reap_run_worktrees(ctx, &run_id).await;
+    }
 }
 
 async fn resolve_repo_entries(

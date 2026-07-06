@@ -223,15 +223,11 @@ async fn poll_story(
         }
     }
 
-    // Step 4: advance cursor to the newest comment's created timestamp.
-    let newest_created = comments
-        .iter()
-        .map(|c| c.created.as_str())
-        .max()
-        .unwrap_or("")
-        .to_string();
-    if !newest_created.is_empty() {
-        if let Err(e) = product_repo.set_watch_cursor(&story_id, &newest_created).await {
+    // Step 4: advance the cursor — newest created timestamp PLUS the ids seen
+    // at that exact timestamp, so a later comment sharing the same millisecond
+    // is picked up next poll instead of being dropped forever.
+    if let Some(cursor) = otto_product::build_watch_cursor(&comments) {
+        if let Err(e) = product_repo.set_watch_cursor(&story_id, &cursor).await {
             warn!("story watcher: set_watch_cursor {story_id}: {e}");
         }
     }
