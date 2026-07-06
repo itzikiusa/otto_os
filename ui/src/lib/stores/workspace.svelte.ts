@@ -23,6 +23,33 @@ import { winKey } from '../win';
 // The main window keeps the legacy unprefixed keys.
 const LS_CURRENT = 'otto_workspace';
 const LS_TABS = 'otto_tabs_'; // + workspace id
+// App-wide (deliberately NOT winKey-namespaced): whether the sidebar lists
+// sessions from every workspace, grouped by workspace, instead of only the
+// current one. Default ON — a session shouldn't vanish on a workspace switch.
+const LS_ALL_WS = 'otto_nav_all_ws';
+
+/** Background-spawned session sources that never surface in the sidebar's flat
+ *  session lists (they live in their own panels/views). Mirrors the inline
+ *  blacklists in `mainSessions`/`plainAgentSessions`. */
+const BACKGROUND_SOURCES = new Set([
+  'channel',
+  'review',
+  'skilleval',
+  'skillreview',
+  'product-analysis',
+  'swarm',
+  'canvas_assist',
+  'mockup_assist',
+  'db_assist',
+  'workflow',
+  'insights',
+]);
+
+/** A user-facing foreground session (sidebar-listable). */
+function isForeground(s: Session): boolean {
+  const src = (s.meta as { source?: string } | null)?.source;
+  return src == null || !BACKGROUND_SOURCES.has(src);
+}
 
 /** Sentinel tab/pane id for the docked DB Explorer (not a real session). Lets
  *  the DB Explorer live as a pane in the Agents split, beside an agent. */
@@ -147,6 +174,67 @@ class WorkspaceStore {
   connectionSessions: Session[] = $derived(
     this.sessions.filter((s) => !s.archived && s.kind === 'connection'),
   );
+
+  // ── All-workspaces sidebar view ────────────────────────────────────────────
+
+  /** Sidebar toggle: also list sessions from every OTHER workspace, grouped by
+   *  workspace name. Persisted app-wide; default ON. */
+  allWorkspaces = $state(localStorage.getItem(LS_ALL_WS) !== '0');
+
+  setAllWorkspaces(on: boolean): void {
+    this.allWorkspaces = on;
+    localStorage.setItem(LS_ALL_WS, on ? '1' : '0');
+    if (on) void this.refreshOtherSessions();
+  }
+
+  /** Non-archived sessions from workspaces other than the current one, loaded
+   *  by fanning out over the membership list ({@link refreshOtherSessions}).
+   *  RBAC holds — each per-workspace list is the same one the user would see
+   *  after switching there. */
+  otherWsSessions: Session[] = $state([]);
+
+  /** The all-workspaces view, grouped: every OTHER workspace that has at least
+   *  one foreground agent session, with its sessions newest-first. The current
+   *  workspace keeps its normal flat list above these groups. */
+  otherWsGroups: { ws: WorkspaceWithRole; sessions: Session[] }[] = $derived(
+    this.workspaces
+      .filter((w) => w.id !== this.currentId)
+      .map((w) => ({
+        ws: w,
+        sessions: this.otherWsSessions
+          .filter((s) => s.workspace_id === w.id && s.kind === 'agent' && isForeground(s))
+          .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)),
+      }))
+      .filter((g) => g.sessions.length > 0),
+  );
+
+  /** Load sessions of every non-current workspace (for the grouped sidebar
+   *  view). Failures are per-workspace and silent — one revoked membership
+   *  must not blank the rest. */
+  async refreshOtherSessions(): Promise<void> {
+    if (!this.allWorkspaces) return;
+    const others = this.workspaces.filter((w) => w.id !== this.currentId);
+    const lists = await Promise.all(
+      others.map(async (w) => {
+        try {
+          return await api.get<Session[]>(`/workspaces/${w.id}/sessions`);
+        } catch {
+          return [] as Session[];
+        }
+      }),
+    );
+    const flat = lists.flat().filter((s) => !s.archived);
+    this.otherWsSessions = flat;
+    // Seed statuses without clobbering fresher event-fed values.
+    for (const s of flat) if (!(s.id in this.statusMap)) this.statusMap[s.id] = s.status;
+  }
+
+  /** Open a session that lives in another workspace: switch there, then focus
+   *  it (the sidebar's grouped rows route through this). */
+  async openInWorkspace(wsId: Id, sessionId: Id): Promise<void> {
+    if (wsId !== this.currentId) await this.select(wsId);
+    this.navigateToSession(sessionId);
+  }
 
   /** Agent sessions opened from a Telegram chat — sidebar "Telegram" group.
    *  Newest first (RFC3339 last_active_at sorts chronologically) so the
@@ -311,6 +399,7 @@ class WorkspaceStore {
     localStorage.setItem(winKey(LS_CURRENT), id);
     await this.refreshSessions();
     void this.refreshActiveWorkflowRuns();
+    void this.refreshOtherSessions();
     // restore tabs for this workspace
     const raw = localStorage.getItem(winKey(LS_TABS + id));
     const ids: Id[] = raw ? JSON.parse(raw) : [];
@@ -514,6 +603,33 @@ class WorkspaceStore {
     return withRole;
   }
 
+  /** Rename a workspace and/or change its working directory (root path). */
+  async updateWorkspace(
+    id: Id,
+    patch: { name?: string; root_path?: string },
+  ): Promise<void> {
+    const w = await api.patch<Workspace>(`/workspaces/${id}`, patch);
+    this.workspaces = this.workspaces.map((x) => (x.id === id ? { ...x, ...w } : x));
+  }
+
+  /** Archive (soft-delete) a workspace: it leaves the sidebar; its sessions and
+   *  files are untouched. Switches away first when it's the current one. */
+  async archiveWorkspace(id: Id): Promise<void> {
+    await api.del(`/workspaces/${id}`);
+    this.workspaces = this.workspaces.filter((x) => x.id !== id);
+    this.otherWsSessions = this.otherWsSessions.filter((s) => s.workspace_id !== id);
+    if (this.currentId === id) {
+      const next = this.workspaces[0];
+      if (next) await this.select(next.id);
+      else {
+        this.currentId = null;
+        this.sessions = [];
+        this.openTabs = [];
+        this.panes = [];
+      }
+    }
+  }
+
   closeTab(id: Id): void {
     this.openTabs = this.openTabs.filter((t) => t !== id);
     this.persistTabs();
@@ -671,6 +787,7 @@ class WorkspaceStore {
     await api.del(`/sessions/${id}`);
     this.closeTab(id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
+    this.otherWsSessions = this.otherWsSessions.filter((s) => s.id !== id);
     delete this.statusMap[id];
     this.clearNeedsYou(id);
   }
@@ -680,6 +797,8 @@ class WorkspaceStore {
     const s = await api.post<Session>(`/sessions/${id}/archive`);
     this.closeTab(id);
     this.sessions = this.sessions.map((x) => (x.id === id ? s : x));
+    // Archived rows leave the all-workspaces view (it lists non-archived only).
+    this.otherWsSessions = this.otherWsSessions.filter((x) => x.id !== id);
     this.statusMap[id] = s.status;
     toasts.info('Session archived', s.title);
   }
@@ -700,6 +819,7 @@ class WorkspaceStore {
   async renameSession(id: Id, title: string): Promise<void> {
     const s = await api.patch<Session>(`/sessions/${id}`, { title });
     this.sessions = this.sessions.map((x) => (x.id === id ? s : x));
+    this.otherWsSessions = this.otherWsSessions.map((x) => (x.id === id ? s : x));
   }
 
   /** Event-bus feed (WS /ws/events). */
@@ -708,6 +828,9 @@ class WorkspaceStore {
       case 'session_status': {
         this.statusMap[ev.session_id] = ev.status;
         this.sessions = this.sessions.map((s) =>
+          s.id === ev.session_id ? { ...s, status: ev.status } : s,
+        );
+        this.otherWsSessions = this.otherWsSessions.map((s) =>
           s.id === ev.session_id ? { ...s, status: ev.status } : s,
         );
         // The agent resuming work means the operator already responded to
@@ -743,6 +866,12 @@ class WorkspaceStore {
         this.statusMap[s.id] = s.status;
         if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
           this.sessions = [...this.sessions, s];
+        } else if (
+          s.workspace_id !== this.currentId &&
+          this.allWorkspaces &&
+          !this.otherWsSessions.some((x) => x.id === s.id)
+        ) {
+          this.otherWsSessions = [...this.otherWsSessions, s];
         }
         break;
       }
@@ -759,6 +888,8 @@ class WorkspaceStore {
         if (ev.workspace_id === this.currentId) {
           this.sessions = this.sessions.filter((s) => s.id !== ev.session_id);
           if (this.openTabs.includes(ev.session_id)) this.closeTab(ev.session_id);
+        } else {
+          this.otherWsSessions = this.otherWsSessions.filter((s) => s.id !== ev.session_id);
         }
         break;
       }

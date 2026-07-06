@@ -12,6 +12,9 @@
   import { proof } from '../lib/stores/proof.svelte';
   import ProofStatusChip from '../lib/components/ProofStatusChip.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { confirmer } from '../lib/confirm.svelte';
+  import { toasts } from '../lib/toast.svelte';
+  import type { WorkspaceWithRole } from '../lib/api/types';
   import {
     availableModules,
     navIdForModule,
@@ -100,6 +103,51 @@
 
   function openSession(id: string): void {
     ws.navigateToSession(id);
+  }
+
+  // ── Workspace management (context menu on the Workspaces rows) ──────────────
+  async function renameWorkspace(w: WorkspaceWithRole): Promise<void> {
+    const name = await confirmer.promptText('New workspace name', {
+      title: `Rename “${w.name}”`,
+      confirmLabel: 'Rename',
+      initial: w.name,
+    });
+    if (!name || name === w.name) return;
+    try {
+      await ws.updateWorkspace(w.id, { name });
+    } catch (e) {
+      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function changeWorkspaceDir(w: WorkspaceWithRole): Promise<void> {
+    const root = await confirmer.promptText('Working directory (absolute path, ~ ok)', {
+      title: `Change folder of “${w.name}”`,
+      confirmLabel: 'Change',
+      initial: w.root_path,
+      placeholder: '~/projects/my-repo',
+    });
+    if (!root || root === w.root_path) return;
+    try {
+      await ws.updateWorkspace(w.id, { root_path: root });
+      toasts.success('Folder changed', `${w.name} → ${root}`);
+    } catch (e) {
+      toasts.error('Change failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function deleteWorkspace(w: WorkspaceWithRole): Promise<void> {
+    const ok = await confirmer.ask(
+      `Delete workspace “${w.name}”? It is archived (removed from the sidebar) — its folder and files are NOT touched.`,
+      { title: 'Delete workspace', confirmLabel: 'Delete' },
+    );
+    if (!ok) return;
+    try {
+      await ws.archiveWorkspace(w.id);
+      toasts.info('Workspace deleted', w.name);
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+    }
   }
 
   function startRename(id: string, current: string): void {
@@ -342,6 +390,12 @@
           oncontextmenu={(e) => ctxMenu.show(e, [
             { label: 'Switch to this workspace', icon: 'check', action: () => ws.select(w.id) },
             { separator: true },
+            ...(w.my_role === 'admin' ? [
+              { label: 'Rename…', icon: 'edit', action: () => void renameWorkspace(w) },
+              { label: 'Change folder…', icon: 'folder', action: () => void changeWorkspaceDir(w) },
+              { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteWorkspace(w) },
+              { separator: true as const },
+            ] : []),
             { label: 'Add workspace…', icon: 'plus', action: () => (ui.newWorkspaceOpen = true) },
             { label: 'Workspace settings', icon: 'gear', action: () => router.go('settings/appearance') },
           ])}
@@ -478,6 +532,18 @@
       {/if}
     </button>
     <button
+      class="icon-btn twisty all-ws-toggle"
+      class:on={ws.allWorkspaces}
+      onclick={() => ws.setAllWorkspaces(!ws.allWorkspaces)}
+      title={ws.allWorkspaces
+        ? 'Showing sessions from all workspaces — click for current only'
+        : 'Show sessions from all workspaces'}
+      aria-label="Toggle all-workspaces session list"
+      aria-pressed={ws.allWorkspaces}
+    >
+      <Icon name="globe" size={12} />
+    </button>
+    <button
       class="icon-btn twisty"
       onclick={() => (agentsOpen = !agentsOpen)}
       aria-label="Toggle session list"
@@ -494,6 +560,26 @@
         <div class="nested-empty">No sessions — ⌘T to start one</div>
       {/each}
     </div>
+  {/if}
+
+  <!-- All-workspaces view: sessions living in OTHER workspaces, grouped by
+       workspace (the current one keeps its flat list above). Clicking a row
+       switches to that workspace and focuses the session. -->
+  {#if ws.allWorkspaces && (agentsOpen || q)}
+    {#each ws.otherWsGroups as g (g.ws.id)}
+      {@const rows = g.sessions.filter(matches)}
+      {#if rows.length > 0}
+        <div class="ws-group-label" title="Sessions in workspace “{g.ws.name}”">
+          <Icon name="folder" size={11} />
+          <span class="ellipsis">{g.ws.name}</span>
+        </div>
+        <div class="nested">
+          {#each rows as s (s.id)}
+            {@render sessionRow(s, g.ws.id)}
+          {/each}
+        </div>
+      {/if}
+    {/each}
   {/if}
 
   {#if q ? fTelegram.length > 0 : ws.telegramSessions.length > 0}
@@ -559,7 +645,7 @@
   {/if}
 {/snippet}
 
-{#snippet sessionRow(s: Session)}
+{#snippet sessionRow(s: Session, otherWs?: string)}
   {@const status = ws.statusMap[s.id] ?? s.status}
   {@const resumable = isResumable(s, status)}
   {@const sum = activity.summary(s.id)}
@@ -581,9 +667,9 @@
     {:else}
       <button
         class="nav-item nested-item"
-        class:active={router.module === 'agents' && ws.activeSessionId === s.id}
+        class:active={!otherWs && router.module === 'agents' && ws.activeSessionId === s.id}
         class:resumable
-        onclick={() => openSession(s.id)}
+        onclick={() => (otherWs ? void ws.openInWorkspace(otherWs, s.id) : openSession(s.id))}
         ondblclick={() => startRename(s.id, s.title)}
         oncontextmenu={(e) => ctxMenu.show(e, [
           { label: 'Rename', icon: 'edit', action: () => startRename(s.id, s.title) },
@@ -820,6 +906,29 @@
   .nested {
     margin: 2px 0 6px;
     padding-inline-start: 10px;
+  }
+  /* All-workspaces view: a small workspace-name heading over each group of
+     foreign-workspace session rows. */
+  .ws-group-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px 2px 12px;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    min-width: 0;
+  }
+  .all-ws-toggle.on {
+    color: var(--accent);
+  }
+  .all-ws-toggle:not(.on) {
+    opacity: 0.55;
+  }
+  .all-ws-toggle:not(.on):hover {
+    opacity: 1;
   }
   .nested-row {
     display: flex;
