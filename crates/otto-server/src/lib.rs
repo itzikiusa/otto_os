@@ -47,6 +47,7 @@ pub mod product_refine;
 pub mod product_run;
 pub mod product_swarm;
 pub mod product_watcher;
+pub mod review_fallback;
 pub mod review_session;
 pub mod routes;
 pub mod run_callback;

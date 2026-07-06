@@ -358,6 +358,11 @@
     </div>
   {:else}
     <!-- done -->
+    {#if review.summary_fallback}
+      <p class="lrp-fallback-note dim" title="The claude summarizer was unavailable; these findings were deduped and ranked by the deterministic Rust-side fallback.">
+        ⚠ deterministic fallback (claude unavailable) — findings were deduped and ranked mechanically.
+      </p>
+    {/if}
     <!-- Findings workflow board: persisted Finding rows with the 6-state status,
          the 7 triage actions, and the Proof Pack. -->
     {#if ws.currentId}
@@ -495,6 +500,12 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .lrp-fallback-note {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--status-warn);
   }
 
   /* Findings workflow board section */

@@ -58,6 +58,23 @@
       retrying = { ...retrying, [index]: false };
     }
   }
+
+  // Stop a single running/waiting agent (server marks it error/"stopped by
+  // user" — one click from a Retry) without cancelling the whole review.
+  let stopping: Record<number, boolean> = $state({});
+  async function stopAgent(index: number): Promise<void> {
+    if (stopping[index]) return;
+    stopping = { ...stopping, [index]: true };
+    try {
+      const r = await api.post<Review>(`/reviews/${review.id}/agents/${index}/stop`);
+      onretried?.(r);
+      toasts.info('Agent stopped');
+    } catch (e) {
+      toasts.error('Stop failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      stopping = { ...stopping, [index]: false };
+    }
+  }
 </script>
 
 <div class="rp-agents" class:rp-agents-done={view === 'done'}>
@@ -72,6 +89,16 @@
             {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
           </button>
         {/if}
+        {#if i < lastRetryable && (agent.status === 'running' || agent.status === 'waiting')}
+          <button
+            class="btn small ghost rp-stop-btn"
+            disabled={stopping[i]}
+            onclick={() => stopAgent(i)}
+            title="Stop this agent (it stays retryable)"
+          >
+            {stopping[i] ? 'Stopping…' : 'Stop'}
+          </button>
+        {/if}
         {#if i < lastRetryable}
           <button
             class="btn small ghost"
@@ -81,6 +108,14 @@
           >
             {retrying[i] ? 'Retrying…' : 'Retry'}
           </button>
+        {/if}
+        {#if agent.fallback}
+          <span
+            class="chip rp-fallback-chip"
+            title="The claude summarizer was unavailable; this summary came from the deterministic Rust-side dedupe/rank fallback."
+          >
+            fallback
+          </span>
         {/if}
         {#if agent.findings && agent.findings.length > 0}
           <button class="btn small ghost" onclick={() => toggleAgent(agent.name)}>
@@ -160,6 +195,11 @@
   }
   .rp-agent-chip {
     font-size: 10.5px;
+  }
+  .rp-fallback-chip {
+    font-size: 10px;
+    background: var(--status-warn-soft);
+    color: var(--status-warn);
   }
   .rp-agent-note {
     margin: 4px 0 0;

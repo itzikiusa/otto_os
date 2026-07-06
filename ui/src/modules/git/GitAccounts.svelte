@@ -3,7 +3,7 @@
   // api_base_url for self-hosted GitLab.
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { GitAccount, GitProviderKind } from '../../lib/api/types';
+  import type { GitAccount, GitAccountTestResp, GitProviderKind } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -29,6 +29,52 @@
   let tokenExpiresAt = $state('');
 
   const isEdit = $derived(editing !== null);
+
+  // ── Connection test ────────────────────────────────────────────────────────
+  // Per-row results (keyed by account id) + one slot for the add/edit form.
+  // 'busy' while in flight; the endpoint returns ok:false inline for auth
+  // failures (HTTP 200), so a red row here is the provider's own error text.
+  let testResults: Record<string, GitAccountTestResp | 'busy'> = $state({});
+  let formTest: GitAccountTestResp | 'busy' | null = $state(null);
+
+  function testLabel(r: GitAccountTestResp): string {
+    if (!r.ok) return r.error ?? 'failed';
+    const scopes = r.scopes?.length ? ` (scopes: ${r.scopes.join(', ')})` : '';
+    return `ok — authenticated as ${r.login ?? 'unknown'}${scopes}`;
+  }
+
+  async function testAccount(a: GitAccount): Promise<void> {
+    testResults = { ...testResults, [a.id]: 'busy' };
+    try {
+      const r = await api.post<GitAccountTestResp>(`/git/accounts/${a.id}/test`, {});
+      testResults = { ...testResults, [a.id]: r };
+    } catch (e) {
+      testResults = {
+        ...testResults,
+        [a.id]: { ok: false, error: e instanceof Error ? e.message : String(e) },
+      };
+    }
+  }
+
+  /** Form variant: a typed token tests the DRAFT credentials; an edit form with
+   *  the token left blank tests the stored one. */
+  async function testForm(): Promise<void> {
+    formTest = 'busy';
+    try {
+      formTest =
+        token === '' && editing
+          ? await api.post<GitAccountTestResp>(`/git/accounts/${editing.id}/test`, {})
+          : await api.post<GitAccountTestResp>('/git/accounts/test', {
+              provider,
+              username: username.trim(),
+              token,
+              api_base_url:
+                provider === 'gitlab' && apiBaseUrl.trim() !== '' ? apiBaseUrl.trim() : null,
+            });
+    } catch (e) {
+      formTest = { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
 
   // ── Token-expiry helpers ───────────────────────────────────────────────────
   /** ISO timestamp → yyyy-mm-dd for an <input type="date"> (UTC date part). */
@@ -111,6 +157,7 @@
   function closeModal(): void {
     addOpen = false;
     editing = null;
+    formTest = null;
   }
 
   async function create(): Promise<void> {
@@ -215,7 +262,21 @@
                 · <span class="expiry" class:expired={new Date(a.token_expires_at).getTime() <= Date.now()}>{expiryLabel(a.token_expires_at)}</span>
               {/if}
             </div>
+            {#if testResults[a.id]}
+              {@const r = testResults[a.id]}
+              <div class="test-result" class:ok={r !== 'busy' && r.ok} class:bad={r !== 'busy' && !r.ok}>
+                {r === 'busy' ? 'Testing…' : testLabel(r)}
+              </div>
+            {/if}
           </div>
+          <button
+            class="btn small ghost"
+            title="Verify the stored token against the provider"
+            disabled={testResults[a.id] === 'busy'}
+            onclick={() => testAccount(a)}
+          >
+            Test
+          </button>
           <button class="icon-btn" title="Edit" onclick={() => openEdit(a)}>
             <Icon name="edit" size={13} />
           </button>
@@ -291,7 +352,22 @@
       </span>
     </div>
 
+    {#if formTest}
+      <div class="test-result form-test" class:ok={formTest !== 'busy' && formTest.ok} class:bad={formTest !== 'busy' && !formTest.ok}>
+        {formTest === 'busy' ? 'Testing…' : testLabel(formTest)}
+      </div>
+    {/if}
+
     {#snippet footer()}
+      <button
+        class="btn"
+        style="margin-inline-end: auto"
+        title="Verify the token against the provider without saving"
+        disabled={busy || formTest === 'busy' || (token === '' && !isEdit)}
+        onclick={testForm}
+      >
+        {formTest === 'busy' ? 'Testing…' : 'Test connection'}
+      </button>
       <button class="btn" onclick={closeModal}>Cancel</button>
       {#if isEdit}
         <button
@@ -353,6 +429,22 @@
   .expiry.expired {
     color: var(--status-exited);
     font-weight: 600;
+  }
+  /* Inline connection-test verdict (row + form). Colors only on the verdict —
+     the provider's own error text is rendered verbatim. */
+  .test-result {
+    font-size: 11.5px;
+    margin-top: 3px;
+    word-break: break-word;
+  }
+  .test-result.ok {
+    color: var(--status-running, #3fb950);
+  }
+  .test-result.bad {
+    color: var(--status-exited, #f85149);
+  }
+  .form-test {
+    margin: 4px 0 0;
   }
 
   /* ── Mobile + tablet (≤1024px): full-width account rows + form. Long mono

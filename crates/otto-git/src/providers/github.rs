@@ -194,6 +194,7 @@ fn summary_from(v: &Value) -> PrSummary {
         target_branch: vstr(v, &["base", "ref"]),
         updated_at: ts(&vstr(v, &["updated_at"])),
         url: vstr(v, &["html_url"]),
+        reviewer_warnings: Vec::new(),
         draft: Some(v.get("draft").and_then(|d| d.as_bool()).unwrap_or(false)),
         ci_status: None,
         labels: v.get("labels")
@@ -201,6 +202,23 @@ fn summary_from(v: &Value) -> PrSummary {
             .map(|arr| arr.iter().filter_map(|l| l.get("name").and_then(|n| n.as_str()).map(str::to_string)).collect())
             .unwrap_or_default(),
     }
+}
+
+/// Create-PR request body. `draft` is included only when explicitly requested
+/// (absent = GitHub's default ready-for-review). Reviewers are NOT part of the
+/// create payload — GitHub only accepts them via the two-step
+/// `requested_reviewers` call after creation (see `create_pr`).
+fn create_pr_body(req: &CreatePrReq) -> Value {
+    let mut body = json!({
+        "title": req.title,
+        "body": req.description,
+        "head": req.source_branch,
+        "base": req.target_branch,
+    });
+    if let Some(draft) = req.draft {
+        body["draft"] = json!(draft);
+    }
+    body
 }
 
 fn comment_from(v: &Value, path: Option<String>, line: Option<u32>) -> PrComment {
@@ -389,15 +407,26 @@ impl super::GitProvider for Github {
             .http
             .json(
                 self.req(reqwest::Method::POST, &Self::prs_path(r))
-                    .json(&json!({
-                        "title": req.title,
-                        "body": req.description,
-                        "head": req.source_branch,
-                        "base": req.target_branch,
-                    })),
+                    .json(&create_pr_body(req)),
             )
             .await?;
-        Ok(summary_from(&v))
+        let mut summary = summary_from(&v);
+        // Reviewers: the create endpoint doesn't take them — request them in a
+        // best-effort second call. A failure must not fail the (already open)
+        // PR; it surfaces as a warning on the response instead.
+        if let Some(reviewers) = req.reviewers.as_ref().filter(|l| !l.is_empty()) {
+            let path = format!("{}/{}/requested_reviewers", Self::prs_path(r), summary.number);
+            if let Err(e) = self
+                .http
+                .ok(self
+                    .req(reqwest::Method::POST, &path)
+                    .json(&json!({ "reviewers": reviewers })))
+                .await
+            {
+                summary.reviewer_warnings.push(reviewer_warning(reviewers, &e.to_string()));
+            }
+        }
+        Ok(summary)
     }
 
     async fn update_pr(&self, r: &RemoteRef, number: u64, req: &UpdatePrReq) -> Result<()> {
@@ -559,6 +588,43 @@ impl super::GitProvider for Github {
         Ok(commits)
     }
 
+    /// Repo collaborators (anyone with access — the set GitHub accepts as
+    /// requested reviewers), filtered by `q` on login/display name.
+    async fn list_collaborators(
+        &self,
+        r: &RemoteRef,
+        q: &str,
+    ) -> Result<Vec<otto_core::api::Collaborator>> {
+        let path = format!(
+            "/repos/{}/{}/collaborators?per_page=100",
+            r.owner, r.repo
+        );
+        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let needle = q.to_ascii_lowercase();
+        Ok(varr(&v, &[])
+            .iter()
+            .map(collaborator_from)
+            .filter(|c| {
+                needle.is_empty()
+                    || c.name.to_ascii_lowercase().contains(&needle)
+                    || c.display_name.to_ascii_lowercase().contains(&needle)
+            })
+            .collect())
+    }
+
+    /// `GET /user` with the bound token: proves authentication and echoes the
+    /// classic-PAT scopes from the `x-oauth-scopes` header (absent for
+    /// fine-grained PATs — scopes stay empty).
+    async fn verify_token(&self) -> Result<super::TokenCheck> {
+        let resp = self.http.send(self.req(reqwest::Method::GET, "/user")).await?;
+        let scopes = scopes_header(resp.headers());
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| otto_core::Error::Upstream(format!("github: bad json: {e}")))?;
+        Ok(super::TokenCheck { login: vstr(&v, &["login"]), scopes })
+    }
+
     async fn list_repos(
         &self,
         namespace: &str,
@@ -628,6 +694,38 @@ impl super::GitProvider for Github {
     }
 }
 
+/// Warning attached to a create-PR response when the post-create reviewer
+/// request fails: the PR is open, only the review request was lost.
+fn reviewer_warning(names: &[String], err: &str) -> String {
+    format!("could not request reviewer(s) {}: {err}", names.join(", "))
+}
+
+/// One collaborator row → common DTO (`login` is the requestable handle).
+fn collaborator_from(v: &Value) -> otto_core::api::Collaborator {
+    let login = vstr(v, &["login"]);
+    let name = vstr(v, &["name"]);
+    otto_core::api::Collaborator {
+        display_name: if name.is_empty() { login.clone() } else { name },
+        name: login,
+    }
+}
+
+/// Comma-separated `x-oauth-scopes` response header → scope list (also sent by
+/// Bitbucket Cloud; absent for GitHub fine-grained PATs).
+pub(crate) fn scopes_header(headers: &reqwest::header::HeaderMap) -> Vec<String> {
+    headers
+        .get("x-oauth-scopes")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Parse GitHub's token-expiration header. Observed forms:
 /// `2024-12-31 23:59:59 UTC`, `2024-12-31 23:59:59 +0000`, and plain RFC3339.
 fn parse_github_expiry(s: &str) -> Option<DateTime<Utc>> {
@@ -691,8 +789,72 @@ fn parse_check_runs_fixture(json_str: &str) -> crate::types::CiStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_check_runs_fixture, parse_github_expiry};
+    use super::{
+        collaborator_from, create_pr_body, parse_check_runs_fixture, parse_github_expiry,
+        reviewer_warning, scopes_header, summary_from,
+    };
     use chrono::{Datelike, Timelike};
+    use otto_core::api::CreatePrReq;
+
+    fn req(draft: Option<bool>, reviewers: Option<Vec<String>>) -> CreatePrReq {
+        CreatePrReq {
+            title: "t".into(),
+            description: "d".into(),
+            source_branch: "feat/x".into(),
+            target_branch: "main".into(),
+            proof_pack_id: None,
+            allow_unproven: None,
+            draft,
+            reviewers,
+        }
+    }
+
+    #[test]
+    fn create_body_includes_draft_only_when_set() {
+        let b = create_pr_body(&req(Some(true), None));
+        assert_eq!(b["draft"], serde_json::json!(true));
+        assert_eq!(b["title"], serde_json::json!("t"));
+        assert_eq!(b["head"], serde_json::json!("feat/x"));
+        assert_eq!(b["base"], serde_json::json!("main"));
+        // Absent draft → today's payload, no `draft` key at all.
+        assert!(create_pr_body(&req(None, None)).get("draft").is_none());
+        assert_eq!(create_pr_body(&req(Some(false), None))["draft"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn create_body_never_carries_reviewers() {
+        // GitHub reviewers go through the two-step requested_reviewers call.
+        let b = create_pr_body(&req(None, Some(vec!["alice".into()])));
+        assert!(b.get("reviewers").is_none());
+    }
+
+    #[test]
+    fn reviewer_failure_is_a_warning_not_an_error() {
+        let w = reviewer_warning(&["alice".into(), "bob".into()], "github 422: not a collaborator");
+        assert!(w.contains("alice, bob"));
+        assert!(w.contains("422"));
+        // The create flow attaches this to reviewer_warnings on an Ok summary —
+        // verify the summary type defaults to no warnings.
+        let s = summary_from(&serde_json::json!({"number": 7, "title": "x", "state": "open"}));
+        assert!(s.reviewer_warnings.is_empty());
+    }
+
+    #[test]
+    fn collaborator_mapping_prefers_display_name() {
+        let c = collaborator_from(&serde_json::json!({"login": "octo", "name": "Octo Cat"}));
+        assert_eq!(c.name, "octo");
+        assert_eq!(c.display_name, "Octo Cat");
+        let c2 = collaborator_from(&serde_json::json!({"login": "octo"}));
+        assert_eq!(c2.display_name, "octo");
+    }
+
+    #[test]
+    fn scopes_header_parses_comma_list() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("x-oauth-scopes", "repo, read:org".parse().unwrap());
+        assert_eq!(scopes_header(&h), vec!["repo".to_string(), "read:org".to_string()]);
+        assert!(scopes_header(&reqwest::header::HeaderMap::new()).is_empty());
+    }
 
     #[test]
     fn parses_utc_suffix_form() {

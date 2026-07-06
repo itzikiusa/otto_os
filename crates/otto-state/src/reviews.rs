@@ -40,6 +40,9 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow, comments: Vec<ReviewComment>) -> R
     let pr_number_raw: i64 = r.get("pr_number");
     let agents_raw: String = r.try_get("agents_json").unwrap_or_default();
     let agents: Vec<ReviewAgentState> = serde_json::from_str(&agents_raw).unwrap_or_default();
+    // Derived, not stored: the deterministic-fallback marker rides on the
+    // summarizer's agent row (agents_json), so the reviews table is untouched.
+    let summary_fallback = agents.iter().any(|a| a.fallback).then_some(true);
     Ok(Review {
         id: r.get("id"),
         repo_id: r.get("repo_id"),
@@ -53,6 +56,7 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow, comments: Vec<ReviewComment>) -> R
         verdict: None,
         blocker_count: None,
         summary_md: None,
+        summary_fallback,
     })
 }
 
@@ -268,6 +272,91 @@ impl ReviewsRepo {
         Ok(reviews)
     }
 
+    // -- durable retry artifacts (migration 0100) -------------------------
+    //
+    // The per-agent prompt + the run's unified diff are persisted at dispatch
+    // time so a per-agent Retry survives reboots / temp-dir sweeps / daemon
+    // redeploys. The $TMPDIR copies remain the in-flight/legacy path; these
+    // rows are the durable source a retry reads first.
+
+    /// Upsert the fully-composed prompt for one review agent.
+    pub async fn set_agent_prompt(
+        &self,
+        review_id: &Id,
+        agent_index: usize,
+        prompt: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO review_agent_prompts (review_id, agent_index, prompt)
+             VALUES (?, ?, ?)
+             ON CONFLICT (review_id, agent_index) DO UPDATE SET prompt = excluded.prompt",
+        )
+        .bind(review_id)
+        .bind(agent_index as i64)
+        .bind(prompt)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set agent prompt"))?;
+        Ok(())
+    }
+
+    /// Read back one agent's persisted prompt (None for pre-0100 reviews).
+    pub async fn get_agent_prompt(
+        &self,
+        review_id: &Id,
+        agent_index: usize,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT prompt FROM review_agent_prompts WHERE review_id = ? AND agent_index = ?",
+        )
+        .bind(review_id)
+        .bind(agent_index as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("get agent prompt"))?;
+        Ok(row.map(|r| r.get("prompt")))
+    }
+
+    /// Upsert the run's unified diff (one row per review).
+    pub async fn set_diff(&self, review_id: &Id, diff: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO review_diffs (review_id, diff) VALUES (?, ?)
+             ON CONFLICT (review_id) DO UPDATE SET diff = excluded.diff",
+        )
+        .bind(review_id)
+        .bind(diff)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set review diff"))?;
+        Ok(())
+    }
+
+    /// Read back the run's persisted diff (None for pre-0100 reviews).
+    pub async fn get_diff(&self, review_id: &Id) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT diff FROM review_diffs WHERE review_id = ?")
+            .bind(review_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("get review diff"))?;
+        Ok(row.map(|r| r.get("diff")))
+    }
+
+    /// Drop every durable retry artifact for a review (prompts + diff) — used
+    /// by the cancel cleanup, mirroring its temp-file sweep.
+    pub async fn delete_run_artifacts(&self, review_id: &Id) -> Result<()> {
+        sqlx::query("DELETE FROM review_agent_prompts WHERE review_id = ?")
+            .bind(review_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete agent prompts"))?;
+        sqlx::query("DELETE FROM review_diffs WHERE review_id = ?")
+            .bind(review_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete review diff"))?;
+        Ok(())
+    }
+
     // -- private helpers --------------------------------------------------
 
     async fn comments_for_review(&self, review_id: &Id) -> Result<Vec<ReviewComment>> {
@@ -308,6 +397,7 @@ mod tests {
             comment_count: 0,
             session_id: None,
             findings: Vec::new(),
+            fallback: false,
         }
     }
 
@@ -370,5 +460,63 @@ mod tests {
 
         let after = repo.get_review(&review.id).await.unwrap();
         assert_eq!(after.status, ReviewStatus::Cancelled);
+    }
+
+    /// Durable-retry storage: prompt + diff rows round-trip, upsert in place,
+    /// read back None when absent, and die together via delete_run_artifacts.
+    #[tokio::test]
+    async fn agent_prompts_and_diff_round_trip_and_cleanup() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        let review = repo.create_review(&"r".to_string(), 1).await.unwrap();
+
+        assert_eq!(repo.get_agent_prompt(&review.id, 0).await.unwrap(), None);
+        assert_eq!(repo.get_diff(&review.id).await.unwrap(), None);
+
+        repo.set_agent_prompt(&review.id, 0, "prompt-a").await.unwrap();
+        repo.set_agent_prompt(&review.id, 1, "prompt-b").await.unwrap();
+        repo.set_agent_prompt(&review.id, 0, "prompt-a2").await.unwrap(); // upsert
+        repo.set_diff(&review.id, "diff-1").await.unwrap();
+        repo.set_diff(&review.id, "diff-2").await.unwrap(); // upsert
+
+        assert_eq!(
+            repo.get_agent_prompt(&review.id, 0).await.unwrap().as_deref(),
+            Some("prompt-a2")
+        );
+        assert_eq!(
+            repo.get_agent_prompt(&review.id, 1).await.unwrap().as_deref(),
+            Some("prompt-b")
+        );
+        assert_eq!(repo.get_diff(&review.id).await.unwrap().as_deref(), Some("diff-2"));
+
+        repo.delete_run_artifacts(&review.id).await.unwrap();
+        assert_eq!(repo.get_agent_prompt(&review.id, 0).await.unwrap(), None);
+        assert_eq!(repo.get_agent_prompt(&review.id, 1).await.unwrap(), None);
+        assert_eq!(repo.get_diff(&review.id).await.unwrap(), None);
+    }
+
+    /// The deterministic-fallback marker rides in agents_json: a summarizer row
+    /// with `fallback: true` surfaces as `Review.summary_fallback == Some(true)`
+    /// and its absence keeps the field off the wire entirely (None).
+    #[tokio::test]
+    async fn summary_fallback_derives_from_agents_json() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        let review = repo.create_review(&"r".to_string(), 2).await.unwrap();
+
+        repo.set_agents(&review.id, &[agent("a", "done"), agent("Summarizer", "done")])
+            .await
+            .unwrap();
+        assert_eq!(repo.get_review(&review.id).await.unwrap().summary_fallback, None);
+
+        let mut summarizer = agent("Summarizer", "done");
+        summarizer.fallback = true;
+        repo.set_agents(&review.id, &[agent("a", "done"), summarizer])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_review(&review.id).await.unwrap().summary_fallback,
+            Some(true)
+        );
     }
 }

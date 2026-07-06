@@ -63,7 +63,7 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | CheckoutReq | RepoStatusResp |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
 | 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all | ws viewer | — | `PrSummary[]` |
-| 49 | POST /api/v1/repos/{id}/prs | ws editor | CreatePrReq | PrSummary |
+| 49 | POST /api/v1/repos/{id}/prs | ws editor | CreatePrReq (optional `draft` — GitHub native flag, GitLab `Draft:` title prefix, Bitbucket Cloud draft field; optional `reviewers: string[]` of provider-native handles) | PrSummary (`reviewer_warnings: string[]` — reviewer requests/lookups that failed after the PR opened; never fails the creation) |
 | 50 | GET /api/v1/repos/{id}/prs/{number} | ws viewer | — | PrDetail |
 | 51 | GET /api/v1/repos/{id}/prs/{number}/diff | ws viewer | — | DiffResp |
 | 52 | PATCH /api/v1/repos/{id}/prs/{number} | ws editor | UpdatePrReq | 204 |
@@ -768,7 +768,10 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /git/accounts/{id}/remote-repos | member (owner) | — | remote repos visible to the git account |
-| GET /git/repos | Git:View | — | `Repo[]` across **all** workspaces the caller may view (root → all); workspace-independent list backing the Git page's top-level repo tabs + landing |
+| POST /git/accounts/{id}/test | member (owner) | — | GitAccountTestResp `{ok, login?, scopes: string[], error?}` — exercises the **stored** token with the provider's cheapest authenticated call (`GET /user`); scopes echoed from `X-OAuth-Scopes` where exposed. Auth failures are `200 {ok:false, error}` (inline rendering), the token never leaves the daemon |
+| POST /git/accounts/test | member | TestGitAccountReq `{provider, username, token, api_base_url?}` | GitAccountTestResp — same probe for a **not-yet-saved** form; the draft token travels in the body exactly once and is never persisted or logged |
+| GET /repos/{id}/collaborators?q= | ws viewer (+ bound-account owner, S4) | — | `Collaborator[] {name, display_name}` — provider-backed reviewer typeahead (GitHub repo collaborators / GitLab project members / Bitbucket workspace members), unfiltered list cached in-memory per repo for 30 s, `q` filters case-insensitively |
+| GET /git/repos | Git:View | — | `Repo[]` (each carries `forge`: `github`\|`bitbucket`\|`gitlab`\|`unrecognized`\|null — computed live from `remote_url`; `unrecognized` = remote exists but isn't a supported forge, null = no remote) across **all** workspaces the caller may view (root → all); workspace-independent list backing the Git page's top-level repo tabs + landing |
 | POST /workspaces/{id}/repos/detect | ws editor | DetectRepoReq | detect a local git repo (resolve remote/provider) |
 | GET /repos/{id}/refs | ws viewer | — | branch/tag refs |
 | POST /repos/{id}/fetch | ws editor | — | RepoStatusResp |
@@ -809,7 +812,8 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | POST /pr-review-comments/{cid}/decline | ws editor | — | discard a draft review comment |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
-| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent |
+| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. |
+| POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). `409` if the row is not running/waiting or is the trailing summarizer; broadcasts `review_changed`. |
 | GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
 | POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |
 | GET /reviews/{review_id}/merge-readiness | ws viewer | — | `MergeReadiness` (open/total findings + approvals + ci_status + mergeable + conflicts + branch freshness) |

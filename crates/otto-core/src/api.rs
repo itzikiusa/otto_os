@@ -1373,6 +1373,11 @@ pub struct PrSummary {
     /// Labels on the PR (empty when provider doesn't expose them).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Warnings from PR creation (e.g. a reviewer request that failed after the
+    /// PR was opened). Only ever populated on the create response; empty (and
+    /// omitted from JSON) everywhere else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1435,6 +1440,47 @@ pub struct PrCommit {
     pub subject: String,
 }
 
+/// One entry from `GET /repos/{id}/collaborators?q=` — a person the bound
+/// forge account can request as a reviewer. `name` is the provider-native
+/// handle submitted back in `CreatePrReq::reviewers`; `display_name` is for
+/// the typeahead UI only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Collaborator {
+    pub name: String,
+    pub display_name: String,
+}
+
+/// `POST /git/accounts/test` — verify a not-yet-saved account form. The token
+/// travels in the body exactly once and is never persisted or logged. The
+/// stored-token variant (`POST /git/accounts/{id}/test`) takes no body.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TestGitAccountReq {
+    #[serde(default)]
+    pub provider: Option<crate::domain::GitProviderKind>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub api_base_url: Option<String>,
+}
+
+/// Result of a git-account connection test. Auth/provider failures come back
+/// as `ok: false` + `error` (HTTP 200) so the form can render them inline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitAccountTestResp {
+    pub ok: bool,
+    /// Login the provider authenticated us as (when `ok`).
+    #[serde(default)]
+    pub login: Option<String>,
+    /// Token scopes echoed from response headers where the provider exposes
+    /// them (`X-OAuth-Scopes` on GitHub/Bitbucket); empty otherwise.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// `POST /repos/{id}/prs/{number}/request-changes`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestChangesReq {
@@ -1458,6 +1504,18 @@ pub struct CreatePrReq {
     /// `approval` artifact on the pack ("PR opened over unproven proof").
     #[serde(default)]
     pub allow_unproven: Option<bool>,
+    /// Open the PR as a draft. GitHub: native `draft` flag; GitLab: `Draft: `
+    /// title prefix (the API-blessed convention); Bitbucket Cloud: `draft` on
+    /// the create payload. Absent/None = today's ready-for-review behavior.
+    #[serde(default)]
+    pub draft: Option<bool>,
+    /// Reviewers to request at creation (provider-native usernames). GitHub
+    /// requests them in a best-effort second call after create; GitLab resolves
+    /// usernames to `reviewer_ids`; Bitbucket resolves workspace members to
+    /// `{uuid}` entries. Names that can't be requested/resolved surface in
+    /// `PrSummary::reviewer_warnings` — they never fail the PR creation.
+    #[serde(default)]
+    pub reviewers: Option<Vec<String>>,
 }
 
 /// `POST /repos/{id}/pr/draft` — ask an agent to draft a PR title + description

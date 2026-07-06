@@ -590,6 +590,26 @@ export interface Repo {
   provider: GitProviderKind | null;
   git_account_id: Id | null;
   created_at: string;
+  /** Forge discriminator computed from remote_url: a supported forge,
+   *  'unrecognized' (remote exists but isn't GitHub/Bitbucket Cloud/GitLab —
+   *  e.g. Bitbucket Server), or null when the repo has no remote. */
+  forge?: GitProviderKind | 'unrecognized' | null;
+}
+
+/** One reviewer-typeahead entry from `GET /repos/{id}/collaborators?q=`.
+ *  `name` is the provider-native handle to submit in `CreatePrReq.reviewers`. */
+export interface Collaborator {
+  name: string;
+  display_name: string;
+}
+
+/** `POST /git/accounts/{id}/test` / `POST /git/accounts/test` result. Auth
+ *  failures come back ok:false + error (HTTP 200) for inline rendering. */
+export interface GitAccountTestResp {
+  ok: boolean;
+  login?: string | null;
+  scopes?: string[];
+  error?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2138,6 +2158,9 @@ export interface PrSummary {
   draft?: boolean | null;
   ci_status?: string | null;
   labels?: string[];
+  /** Create-response only: e.g. a reviewer request that failed after the PR
+   *  was opened. Empty/omitted everywhere else. */
+  reviewer_warnings?: string[];
 }
 
 export interface PrComment {
@@ -2172,6 +2195,12 @@ export interface CreatePrReq {
   description: string;
   source_branch: string;
   target_branch: string;
+  /** Open as a draft (GitHub native flag; GitLab `Draft:` title prefix;
+   *  Bitbucket Cloud draft field). Absent = ready for review. */
+  draft?: boolean;
+  /** Provider-native reviewer handles to request at creation. Failures surface
+   *  in `PrSummary.reviewer_warnings`, never as a creation error. */
+  reviewers?: string[];
 }
 
 export interface DraftPrReq {
@@ -2526,6 +2555,9 @@ export interface ReviewAgentState {
   session_id?: string | null;
   /** This agent's own findings (before summarization). */
   findings?: ReviewFinding[];
+  /** True on the summarizer row when its output came from the deterministic
+   *  Rust-side dedupe/rank fallback (claude summarizer unavailable). */
+  fallback?: boolean;
 }
 
 export interface ReviewComment {
@@ -2552,6 +2584,9 @@ export interface Review {
   verdict?: string | null;
   blocker_count?: number | null;
   summary_md?: string | null;
+  /** true when the final comments came from the deterministic summarizer
+   *  fallback (claude unavailable) — derived from the agents' fallback flags. */
+  summary_fallback?: boolean;
 }
 
 export interface ReviewAgentCfg {
