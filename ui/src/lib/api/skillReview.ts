@@ -3,7 +3,7 @@
 // retry one agent, cancel/delete.
 
 import { api } from './client';
-import type { SkillReview, StartSkillReviewReq } from './types';
+import type { ApplySkillFixReq, SkillReview, StartSkillReviewReq } from './types';
 
 export const skillReviewApi = {
   /** Start a review; returns the freshly-created run (status "running"). */
@@ -25,4 +25,8 @@ export const skillReviewApi = {
   /** Re-run one reviewer agent by its index. */
   retryAgent: (id: string, index: number) =>
     api.post<SkillReview>(`/skill-reviews/${id}/agents/${index}/retry`),
+
+  /** Send the findings to a fixer agent that applies them to the real skill dir. */
+  apply: (id: string, body: ApplySkillFixReq) =>
+    api.post<SkillReview>(`/skill-reviews/${id}/apply`, body),
 };

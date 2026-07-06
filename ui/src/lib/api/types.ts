@@ -3115,6 +3115,15 @@ export interface StartSkillReviewReq {
   providers: string[];
   /** "static" | "agents". */
   agent_mode: string;
+  /** Extra reviewer instructions appended to every agent + summarizer prompt. */
+  instructions?: string;
+}
+
+export interface ApplySkillFixReq {
+  /** Provider to run the fixer with. Defaults to "claude". */
+  provider?: string;
+  /** Extra apply-time instructions (on top of the review's own instructions). */
+  instructions?: string;
 }
 
 export interface SkillFinding {
@@ -3170,7 +3179,11 @@ export interface SkillReview {
   status: string;
   /** "static" | "agents". */
   agent_mode: string;
+  /** Extra reviewer instructions this review ran with ("" when none). */
+  instructions: string;
   agents: SkillReviewAgent[];
+  /** The apply-fixes agent (present once "Apply fixes" has been triggered). */
+  fix_agent?: SkillReviewAgent | null;
   static_report: SkillStaticReport | null;
   summary: SkillReviewSummary | null;
   error: string | null;

@@ -13,6 +13,13 @@
 //!
 //! `agent_mode="static"` (or no providers) yields a complete review from the
 //! static pass alone — the deterministic path used by tests/CI.
+//!
+//! Every review runs on a staged temp COPY of the package with local machine
+//! artifacts stripped ([`IGNORED_ENTRIES`] — `.mcp.json`, `.DS_Store`, …), so
+//! secrets in those files are never scanned or quoted. User-supplied
+//! `instructions` ride on the review row and are appended to every reviewer +
+//! summarizer prompt. After a review completes, `POST /skill-reviews/{id}/apply`
+//! hands the findings to a **fixer agent** that edits the REAL skill directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +49,7 @@ use crate::state::ServerCtx;
 // ---------------------------------------------------------------------------
 
 const AGENT_TIMEOUT: Duration = Duration::from_secs(600); // 10 min per reviewer agent
+const FIX_TIMEOUT: Duration = Duration::from_secs(900); // 15 min for the apply-fixes agent
 const SUMMARIZER_TIMEOUT: Duration = Duration::from_secs(120);
 const PASTE_TO_ENTER: Duration = Duration::from_millis(250);
 const OUTPUT_POLL: Duration = Duration::from_millis(1000);
@@ -78,29 +86,96 @@ fn is_cancelled(flag: &Arc<AtomicBool>) -> bool {
 // Target resolution
 // ---------------------------------------------------------------------------
 
-/// A resolved skill package on disk. For bundled skills the temp dir is held so
-/// the extracted tree outlives the review.
-enum Staged {
-    Library(PathBuf),
-    Bundled(#[allow(dead_code)] TempDir, PathBuf),
+/// Local machine artifacts that live inside skill directories but are NOT part
+/// of the published package. They are stripped from the staged review copy so
+/// neither the static pass nor the reviewer agents ever see them — `.mcp.json`
+/// in particular can carry a live API token that would otherwise be flagged
+/// (or worse, quoted) in every review.
+const IGNORED_ENTRIES: &[&str] =
+    &[".git", ".DS_Store", ".mcp.json", ".env", "node_modules", "__pycache__"];
+
+fn is_ignored(name: &str) -> bool {
+    IGNORED_ENTRIES.contains(&name) || name.starts_with(".env.")
 }
+
+/// A skill package staged for review: always a temp-dir copy (held so the tree
+/// outlives the review) with [`IGNORED_ENTRIES`] stripped.
+struct Staged(#[allow(dead_code)] TempDir, PathBuf);
 impl Staged {
     fn path(&self) -> &Path {
-        match self {
-            Staged::Library(p) => p,
-            Staged::Bundled(_, p) => p,
+        &self.1
+    }
+}
+
+/// Recursively copy a skill tree, skipping [`IGNORED_ENTRIES`] (and symlinks —
+/// a symlink could point back outside the package at the very files we strip).
+fn copy_skill_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_ignored(&name.to_string_lossy()) {
+            continue;
+        }
+        let ft = entry.file_type()?;
+        let dst = to.join(&name);
+        if ft.is_dir() {
+            copy_skill_tree(&entry.path(), &dst)?;
+        } else if ft.is_file() {
+            std::fs::copy(entry.path(), &dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove any [`IGNORED_ENTRIES`] from an already-staged tree (bundled skills
+/// are written by the install primitive, so they get pruned instead of copied).
+fn prune_ignored(dir: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let p = entry.path();
+        if is_ignored(&name.to_string_lossy()) {
+            let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        } else if p.is_dir() {
+            prune_ignored(&p);
         }
     }
 }
 
-/// Resolve the skill package to review. Library skills point at their dir;
-/// bundled skills are staged into a temp dir via the tested install primitive
-/// (handles the full multi-file tree, binaries included); provider skills
-/// (`claude`/`codex`/`agy`) are reviewed in place from `~/.<provider>/skills`.
-fn stage_target(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<Staged> {
+/// The real, editable on-disk directory of a skill — where the apply-fixes
+/// agent works. Library skills live in the context library; provider skills
+/// (`claude`/`codex`/`agy`) in `~/.<provider>/skills`. Bundled skills are
+/// embedded in the binary and cannot be edited.
+fn real_skill_dir(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<PathBuf> {
     if source == "bundled" {
-        let tmp = tempfile::tempdir()
-            .map_err(|e| otto_core::Error::Internal(format!("stage bundled skill: {e}")))?;
+        return Err(otto_core::Error::Invalid(
+            "bundled skills are read-only — install the skill to the library first".into(),
+        ));
+    }
+    let dir = if otto_context::provider_skills::PROVIDERS.contains(&source) {
+        otto_context::provider_skills::skill_dir(source, skill_name)
+            .ok_or_else(|| otto_core::Error::Invalid("unsafe skill name".into()))?
+    } else {
+        ctx.context_library
+            .skill_dir(skill_name)
+            .ok_or_else(|| otto_core::Error::Invalid("unsafe skill name".into()))?
+    };
+    if !dir.join("SKILL.md").exists() {
+        return Err(otto_core::Error::NotFound(format!("skill '{source}/{skill_name}'")));
+    }
+    Ok(dir)
+}
+
+/// Stage the skill package to review into a private temp copy. Bundled skills
+/// go through the tested install primitive (handles the full multi-file tree,
+/// binaries included); library/provider skills are copied from their real dir.
+/// Either way the copy excludes [`IGNORED_ENTRIES`], so reviews never scan
+/// local machine files like `.mcp.json`.
+fn stage_target(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<Staged> {
+    let tmp = tempfile::tempdir()
+        .map_err(|e| otto_core::Error::Internal(format!("stage skill: {e}")))?;
+    if source == "bundled" {
         let templib = otto_context::Library::new(tmp.path());
         let ok = otto_skills::install_into(&templib, skill_name)
             .map_err(|e| otto_core::Error::Internal(format!("stage bundled skill: {e}")))?;
@@ -108,25 +183,14 @@ fn stage_target(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<Stage
             return Err(otto_core::Error::NotFound(format!("bundled skill '{skill_name}'")));
         }
         let dir = tmp.path().join("skills").join(skill_name);
-        Ok(Staged::Bundled(tmp, dir))
-    } else if otto_context::provider_skills::PROVIDERS.contains(&source) {
-        let dir = otto_context::provider_skills::skill_dir(source, skill_name)
-            .ok_or_else(|| otto_core::Error::Invalid("unsafe skill name".into()))?;
-        if !dir.join("SKILL.md").exists() {
-            return Err(otto_core::Error::NotFound(format!(
-                "provider skill '{source}/{skill_name}'"
-            )));
-        }
-        Ok(Staged::Library(dir))
+        prune_ignored(&dir);
+        Ok(Staged(tmp, dir))
     } else {
-        let dir = ctx
-            .context_library
-            .skill_dir(skill_name)
-            .ok_or_else(|| otto_core::Error::Invalid("unsafe skill name".into()))?;
-        if !dir.join("SKILL.md").exists() {
-            return Err(otto_core::Error::NotFound(format!("library skill '{skill_name}'")));
-        }
-        Ok(Staged::Library(dir))
+        let src = real_skill_dir(ctx, skill_name, source)?;
+        let dir = tmp.path().join(skill_name);
+        copy_skill_tree(&src, &dir)
+            .map_err(|e| otto_core::Error::Internal(format!("stage skill copy: {e}")))?;
+        Ok(Staged(tmp, dir))
     }
 }
 
@@ -146,6 +210,7 @@ pub fn routes() -> Router<ServerCtx> {
             "/skill-reviews/{id}/agents/{index}/retry",
             post(retry_agent),
         )
+        .route("/skill-reviews/{id}/apply", post(apply_fixes))
 }
 
 async fn start_review(
@@ -175,9 +240,10 @@ async fn start_review(
     let providers: Vec<String> = if want_agents { req.providers.clone() } else { Vec::new() };
 
     let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
+    let instructions = req.instructions.trim().to_string();
     let review = ctx
         .skill_reviews_store
-        .create(&ws_id, &req.skill_name, source, mode, Some(&user.id))
+        .create(&ws_id, &req.skill_name, source, mode, &instructions, Some(&user.id))
         .await
         .map_err(ApiError)?;
 
@@ -187,7 +253,8 @@ async fn start_review(
     let source_s = source.to_string();
     let cancel = register_cancel(&ctx.skill_review_cancels, &review_id);
     tokio::spawn(async move {
-        run_review(ctx_bg, review_id, ws, user, skill_name, source_s, providers, cancel).await;
+        run_review(ctx_bg, review_id, ws, user, skill_name, source_s, providers, instructions, cancel)
+            .await;
     });
 
     Ok(Json(review))
@@ -226,6 +293,9 @@ async fn cancel_review(
             let _ = ctx.manager.archive(sid).await;
         }
     }
+    if let Some(sid) = review.fix_agent.as_ref().and_then(|f| f.session_id.as_ref()) {
+        let _ = ctx.manager.archive(sid).await;
+    }
     let _ = ctx.skill_reviews_store.set_status(&id, "cancelled", Some("Cancelled by user")).await;
     emit(&ctx, &review.workspace_id, &id, "cancelled");
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
@@ -244,6 +314,9 @@ async fn delete_review(
         if let Some(sid) = &a.session_id {
             let _ = ctx.manager.archive(sid).await;
         }
+    }
+    if let Some(sid) = review.fix_agent.as_ref().and_then(|f| f.session_id.as_ref()) {
+        let _ = ctx.manager.archive(sid).await;
     }
     ctx.skill_reviews_store.delete(&id).await.map_err(ApiError)?;
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -267,6 +340,7 @@ async fn retry_agent(
     let ws = ctx.workspaces.get(&review.workspace_id).await.map_err(ApiError)?;
     let skill_name = review.skill_name.clone();
     let source = review.skill_source.clone();
+    let instructions = review.instructions.clone();
     let provider = agent.provider.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     tokio::spawn(async move {
@@ -287,11 +361,72 @@ async fn retry_agent(
         otto_sessions::trust::ensure_trusted(&provider, &staged.path().to_string_lossy());
         run_skill_review_agent(
             &ctx_bg, &ws, &user, &review_id, index, base, &provider, staged.path(), &skill_name,
-            &reviewer, &cancel,
+            &reviewer, &instructions, &cancel,
         )
         .await;
         emit(&ctx_bg, &ws.id, &review_id, "running");
     });
+    let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
+    Ok(Json(review))
+}
+
+/// Send the review's findings to a fixer agent that applies them to the REAL
+/// skill directory (reviews themselves run on a staged copy). One fixer at a
+/// time per review; bundled skills are rejected (read-only).
+async fn apply_fixes(
+    AxPath(id): AxPath<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<otto_core::api::ApplySkillFixReq>,
+) -> ApiResult<Json<SkillReview>> {
+    let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
+    require_ws_role(&ctx, &user, &review.workspace_id, WorkspaceRole::Editor).await?;
+    if review.status == "running" {
+        return Err(ApiError(otto_core::Error::Invalid(
+            "wait for the review to finish before applying fixes".into(),
+        )));
+    }
+    if let Some(fix) = &review.fix_agent {
+        if fix.status == "pending" || fix.status == "running" || fix.status == "waiting" {
+            return Err(ApiError(otto_core::Error::Invalid(
+                "a fix agent is already running for this review".into(),
+            )));
+        }
+    }
+    // The findings to hand over: the summarizer's aggregate when present, else
+    // the deterministic static report.
+    let (findings, patch_plan) = match (&review.summary, &review.static_report) {
+        (Some(s), _) => (s.findings.clone(), s.patch_plan.clone()),
+        (None, Some(st)) => (st.findings.clone(), Vec::new()),
+        (None, None) => (Vec::new(), Vec::new()),
+    };
+    if findings.is_empty() && patch_plan.is_empty() {
+        return Err(ApiError(otto_core::Error::Invalid("this review has no findings to apply".into())));
+    }
+    let dir = real_skill_dir(&ctx, &review.skill_name, &review.skill_source).map_err(ApiError)?;
+
+    let provider = if req.provider.trim().is_empty() { "claude".to_string() } else { req.provider.trim().to_string() };
+    let row = SkillReviewAgent {
+        name: "fixer".into(),
+        provider: provider.clone(),
+        model: String::new(),
+        status: "pending".into(),
+        note: String::new(),
+        session_id: None,
+        findings: vec![],
+    };
+    ctx.skill_reviews_store.set_fix(&id, &row).await.map_err(ApiError)?;
+
+    let ws = ctx.workspaces.get(&review.workspace_id).await.map_err(ApiError)?;
+    let out = fix_result_path(&id);
+    let prompt = fixer_prompt(&review, &findings, &patch_plan, &req.instructions, &dir, &out.to_string_lossy());
+    let ctx_bg = ctx.clone();
+    let review_id = id.clone();
+    otto_sessions::trust::ensure_trusted(&provider, &dir.to_string_lossy());
+    tokio::spawn(async move {
+        run_fix_agent(&ctx_bg, &ws, &user, &review_id, row, &provider, &dir, &prompt).await;
+    });
+
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
     Ok(Json(review))
 }
@@ -309,9 +444,13 @@ async fn run_review(
     skill_name: String,
     source: String,
     providers: Vec<String>,
+    instructions: String,
     cancel: Arc<AtomicBool>,
 ) {
-    let result = run_review_inner(&ctx, &review_id, &ws, &user, &skill_name, &source, &providers, &cancel).await;
+    let result = run_review_inner(
+        &ctx, &review_id, &ws, &user, &skill_name, &source, &providers, &instructions, &cancel,
+    )
+    .await;
     let status = if is_cancelled(&cancel) {
         "cancelled"
     } else if result.is_err() {
@@ -337,6 +476,7 @@ async fn run_review_inner(
     skill_name: &str,
     source: &str,
     providers: &[String],
+    instructions: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
     let staged = stage_target(ctx, skill_name, source)?;
@@ -395,12 +535,13 @@ async fn run_review_inner(
         let dir = dir.to_path_buf();
         let skill_name = skill_name.to_string();
         let reviewer = reviewer.clone();
+        let instructions = instructions.to_string();
         let cancel = Arc::clone(cancel);
         let base = agents[index].clone();
         set.spawn(async move {
             run_skill_review_agent(
                 &ctx, &ws, &user, &review_id, index, base, &provider, &dir, &skill_name,
-                &reviewer, &cancel,
+                &reviewer, &instructions, &cancel,
             )
             .await
         });
@@ -428,7 +569,7 @@ async fn run_review_inner(
     emit(ctx, &ws.id, review_id, "running");
 
     let mut summary = merge_summary(&static_report, &agent_findings);
-    let prompt = summarizer_prompt(skill_name, &static_report, &agent_batches);
+    let prompt = summarizer_prompt(skill_name, &static_report, &agent_batches, instructions);
     match ctx.orchestrator.run_agent(&prompt, &dir.to_string_lossy(), None, SUMMARIZER_TIMEOUT).await {
         Ok(text) => {
             if let Some(parsed) = parse_summary(&text) {
@@ -477,6 +618,11 @@ fn findings_path(review_id: &str, index: usize) -> PathBuf {
     PathBuf::from(dir).join(format!("otto-skillreview-{review_id}-{index}.json"))
 }
 
+fn fix_result_path(review_id: &str) -> PathBuf {
+    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(dir).join(format!("otto-skillreview-{review_id}-fix.json"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_skill_review_agent(
     ctx: &ServerCtx,
@@ -489,6 +635,7 @@ async fn run_skill_review_agent(
     dir: &Path,
     skill_name: &str,
     reviewer: &str,
+    instructions: &str,
     cancel: &Arc<AtomicBool>,
 ) -> Vec<SkillFinding> {
     let out = findings_path(review_id, index);
@@ -502,7 +649,7 @@ async fn run_skill_review_agent(
         return vec![];
     }
 
-    let prompt = agent_prompt(skill_name, dir, reviewer, &out.to_string_lossy());
+    let prompt = agent_prompt(skill_name, dir, reviewer, instructions, &out.to_string_lossy());
     let meta = serde_json::json!({ "source": "skillreview", "review_id": review_id, "agent_index": index });
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
@@ -622,6 +769,142 @@ async fn run_skill_review_agent(
 }
 
 // ---------------------------------------------------------------------------
+// The apply-fixes agent (same visible-PTY pattern; edits the real skill dir)
+// ---------------------------------------------------------------------------
+
+/// Lenient parse of the fixer's result file → a short status note.
+fn parse_fix_note(text: &str) -> String {
+    #[derive(serde::Deserialize, Default)]
+    struct RawFix {
+        #[serde(default)]
+        applied: Vec<String>,
+        #[serde(default)]
+        skipped: Vec<String>,
+        #[serde(default)]
+        notes: String,
+    }
+    let raw: RawFix = slice_json(text, '{', '}')
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let mut parts = vec![format!("{} fix(es) applied", raw.applied.len())];
+    if !raw.skipped.is_empty() {
+        parts.push(format!("{} skipped", raw.skipped.len()));
+    }
+    let mut note = parts.join(", ");
+    if !raw.notes.trim().is_empty() {
+        note.push_str(" — ");
+        note.push_str(raw.notes.trim());
+    }
+    note
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_fix_agent(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    user: &User,
+    review_id: &Id,
+    mut row: SkillReviewAgent,
+    provider: &str,
+    dir: &Path,
+    prompt: &str,
+) {
+    let out = fix_result_path(review_id);
+    let _ = std::fs::remove_file(&out);
+    let repo = &ctx.skill_reviews_store;
+    let cwd = dir.to_string_lossy().into_owned();
+
+    let meta = serde_json::json!({ "source": "skillreview", "review_id": review_id, "role": "fixer" });
+    let req = CreateSessionReq {
+        kind: SessionKind::Agent,
+        provider: Some(provider.to_string()),
+        title: None,
+        cwd: Some(cwd.clone()),
+        connection_id: None,
+        meta: Some(meta),
+    };
+    let session = match ctx.manager.create(ws, &user.id, req, None).await {
+        Ok(s) => s,
+        Err(e) => {
+            row.status = "error".into();
+            row.note = format!("could not start: {e}");
+            let _ = repo.set_fix(review_id, &row).await;
+            emit(ctx, &ws.id, review_id, "done");
+            return;
+        }
+    };
+    let sid = session.id.clone();
+    row.status = "running".into();
+    row.session_id = Some(sid.clone());
+    row.note = String::new();
+    let _ = repo.set_fix(review_id, &row).await;
+    emit(ctx, &ws.id, review_id, "done");
+
+    if wait_for_tui(&ctx.manager, &sid).await {
+        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
+        tokio::time::sleep(PASTE_TO_ENTER).await;
+        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
+        let _ = ctx.manager.input(&sid, b"\r").await;
+        if !dispatched(&ctx.manager, &sid, before).await {
+            let _ = ctx.manager.input(&sid, b"\r").await;
+        }
+    }
+
+    let deadline = Instant::now() + FIX_TIMEOUT;
+    let mut flagged_waiting = false;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&out) {
+            let _ = std::fs::remove_file(&out);
+            row.status = "done".into();
+            row.note = parse_fix_note(&text);
+            let _ = repo.set_fix(review_id, &row).await;
+            emit(ctx, &ws.id, review_id, "done");
+            return;
+        }
+        match ctx.manager.live_handle(&sid) {
+            Some(handle) => {
+                if handle.on_exit().borrow().is_some() {
+                    row.status = "error".into();
+                    row.note = "session exited before writing its result".into();
+                    let _ = repo.set_fix(review_id, &row).await;
+                    emit(ctx, &ws.id, review_id, "done");
+                    return;
+                }
+                let idle = handle.last_output_at().elapsed();
+                if idle >= WAITING_IDLE && !flagged_waiting {
+                    flagged_waiting = true;
+                    row.status = "waiting".into();
+                    row.note = "looks blocked on input — Open it to respond".into();
+                    let _ = repo.set_fix(review_id, &row).await;
+                    emit(ctx, &ws.id, review_id, "done");
+                } else if idle < WAITING_IDLE && flagged_waiting {
+                    flagged_waiting = false;
+                    row.status = "running".into();
+                    row.note = String::new();
+                    let _ = repo.set_fix(review_id, &row).await;
+                    emit(ctx, &ws.id, review_id, "done");
+                }
+            }
+            None => {
+                row.status = "error".into();
+                row.note = "session is no longer live".into();
+                let _ = repo.set_fix(review_id, &row).await;
+                emit(ctx, &ws.id, review_id, "done");
+                return;
+            }
+        }
+        if Instant::now() >= deadline {
+            row.status = "error".into();
+            row.note = "timed out".into();
+            let _ = repo.set_fix(review_id, &row).await;
+            emit(ctx, &ws.id, review_id, "done");
+            return;
+        }
+        tokio::time::sleep(OUTPUT_POLL).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Prompts
 // ---------------------------------------------------------------------------
 
@@ -636,11 +919,27 @@ fn reviewer_method() -> String {
     })
 }
 
-fn agent_prompt(skill_name: &str, dir: &Path, reviewer: &str, out_path: &str) -> String {
+/// Render the user's extra instructions as a prompt block ("" when none).
+fn instructions_block(instructions: &str) -> String {
+    let t = instructions.trim();
+    if t.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nAdditional instructions from the user — honor these on top of the review \
+method (they may add context such as recent commits fixing a previous review round, or known \
+issues from earlier implementations):\n{t}\n"
+        )
+    }
+}
+
+fn agent_prompt(skill_name: &str, dir: &Path, reviewer: &str, instructions: &str, out_path: &str) -> String {
     format!(
         "You are auditing the Agent Skill package `{skill_name}` located at:\n{dir}\n\n\
-Read its SKILL.md and every file under references/, examples/, scripts/, evals/. Apply the \
-following review method:\n\n---\n{reviewer}\n---\n\n\
+Read its SKILL.md and every file under references/, examples/, scripts/, evals/. Local machine \
+files (e.g. `.mcp.json`, `.DS_Store`, `.git/`, `.env*`) are NOT part of the package — ignore \
+them and do not report on them. Apply the following review method:\n\n---\n{reviewer}\n---\
+{extra}\n\
 When finished, write your findings as a JSON array to this absolute path, overwriting any \
 existing content:\n\n{out}\n\n\
 Each element MUST be an object with these string fields: \
@@ -648,21 +947,77 @@ Each element MUST be an object with these string fields: \
 `evidence` (file/quote), `why`, `fix`. Write ONLY the JSON array to that file (no prose, no \
 markdown fence). Writing the file is the last thing you do.",
         dir = dir.display(),
+        extra = instructions_block(instructions),
         out = out_path,
     )
 }
 
-fn summarizer_prompt(skill_name: &str, static_report: &SkillStaticReport, batches: &[String]) -> String {
+fn summarizer_prompt(
+    skill_name: &str,
+    static_report: &SkillStaticReport,
+    batches: &[String],
+    instructions: &str,
+) -> String {
     let static_json = serde_json::to_string(static_report).unwrap_or_default();
     format!(
         "Aggregate these skill-review findings for `{skill_name}` into ONE deduped, \
 severity-ranked report.\n\nStatic analysis:\n{static_json}\n\nReviewer agent findings (JSON \
-arrays):\n{batches}\n\n\
+arrays):\n{batches}\
+{extra}\n\
 Respond with ONLY a JSON object (no prose, no fence) with fields: `verdict` \
 (Ready|Ready with fixes|Do not publish), `average_score` (0-5 number), `scorecard` (array of \
 {{area,score,notes}}), `findings` (array of {{severity,code,title,evidence,why,fix}} — deduped, \
 most severe first), `patch_plan` (array of short, highest-leverage-first fix strings).",
         batches = batches.join("\n"),
+        extra = instructions_block(instructions),
+    )
+}
+
+/// The apply-fixes prompt: the review's verdict, patch plan and findings, plus
+/// the review-time and apply-time user instructions.
+fn fixer_prompt(
+    review: &SkillReview,
+    findings: &[SkillFinding],
+    patch_plan: &[String],
+    apply_instructions: &str,
+    dir: &Path,
+    out_path: &str,
+) -> String {
+    let findings_json = serde_json::to_string_pretty(findings).unwrap_or_default();
+    let plan = if patch_plan.is_empty() {
+        String::new()
+    } else {
+        let steps: String = patch_plan
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("{}. {s}\n", i + 1))
+            .collect();
+        format!("\nPatch plan (highest leverage first):\n{steps}")
+    };
+    let verdict = review
+        .summary
+        .as_ref()
+        .map(|s| s.verdict.clone())
+        .or_else(|| review.static_report.as_ref().map(|s| s.verdict.clone()))
+        .unwrap_or_default();
+    format!(
+        "A multi-agent review of the Agent Skill package `{name}` (verdict: {verdict}) produced \
+the findings below. Apply the fixes directly to the package, which lives at:\n{dir}\n\n\
+Work through the patch plan and findings most-severe first. Edit files in place; add missing \
+files (examples/, evals/evals.json, README…) where a finding calls for them. Skip a finding if \
+it is wrong or does not apply — note why instead of forcing a change. Do NOT touch local \
+machine files (`.mcp.json`, `.DS_Store`, `.git/`, `.env*`).{plan}\n\
+Findings (JSON):\n{findings_json}\
+{review_extra}{apply_extra}\n\
+When finished, write ONLY a JSON object (no prose, no fence) summarizing what you did to this \
+absolute path, overwriting any existing content:\n\n{out}\n\n\
+{{\"applied\": [\"…\"], \"skipped\": [\"…\"], \"notes\": \"…\"}} — writing the file is the last \
+thing you do.",
+        name = review.skill_name,
+        dir = dir.display(),
+        review_extra = instructions_block(&review.instructions),
+        apply_extra = instructions_block(apply_instructions),
+        out = out_path,
     )
 }
 

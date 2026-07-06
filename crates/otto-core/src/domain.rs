@@ -1050,9 +1050,17 @@ pub struct SkillReview {
     pub status: String,
     /// "static" (deterministic only) | "agents" (static + provider agents + summarizer).
     pub agent_mode: String,
+    /// Extra user-supplied reviewer instructions, appended to every agent and
+    /// summarizer prompt (e.g. "recent commits fix the previous review round").
+    #[serde(default)]
+    pub instructions: String,
     /// Live per-agent state (empty in static mode; last row is the summarizer in agents mode).
     #[serde(default)]
     pub agents: Vec<SkillReviewAgent>,
+    /// The apply-fixes agent (spawned on demand after the review completes; it
+    /// edits the real skill directory, unlike reviewers which see a staged copy).
+    #[serde(default)]
+    pub fix_agent: Option<SkillReviewAgent>,
     /// The deterministic static-analysis result (present once the run starts).
     #[serde(default)]
     pub static_report: Option<SkillStaticReport>,

@@ -31,6 +31,11 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow) -> Result<SkillReview> {
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok());
+    let fix_agent: Option<SkillReviewAgent> = r
+        .try_get::<Option<String>, _>("fix_json")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok());
     Ok(SkillReview {
         id: r.get("id"),
         workspace_id: r.get("workspace_id"),
@@ -38,7 +43,9 @@ fn row_to_review(r: &sqlx::sqlite::SqliteRow) -> Result<SkillReview> {
         skill_source: r.get("skill_source"),
         status: r.get("status"),
         agent_mode: r.get("agent_mode"),
+        instructions: r.try_get("instructions").unwrap_or_default(),
         agents,
+        fix_agent,
         static_report,
         summary,
         error: r.get("error"),
@@ -53,12 +60,14 @@ impl SkillReviewsRepo {
     }
 
     /// Create a new review in status "running".
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         workspace_id: &Id,
         skill_name: &str,
         skill_source: &str,
         agent_mode: &str,
+        instructions: &str,
         created_by: Option<&str>,
     ) -> Result<SkillReview> {
         let id = new_id();
@@ -66,14 +75,15 @@ impl SkillReviewsRepo {
         sqlx::query(
             "INSERT INTO skill_reviews
                (id, workspace_id, skill_name, skill_source, status, agent_mode,
-                agents_json, created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, 'running', ?, '[]', ?, ?, ?)",
+                instructions, agents_json, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'running', ?, ?, '[]', ?, ?, ?)",
         )
         .bind(&id)
         .bind(workspace_id)
         .bind(skill_name)
         .bind(skill_source)
         .bind(agent_mode)
+        .bind(instructions)
         .bind(created_by)
         .bind(&now)
         .bind(&now)
@@ -149,6 +159,14 @@ impl SkillReviewsRepo {
         self.touch_json(id, "summary_json", &json, false).await
     }
 
+    /// Store the apply-fixes agent row (whole-row replace; only one fixer runs
+    /// at a time so there is no concurrent-index concern here).
+    pub async fn set_fix(&self, id: &Id, agent: &SkillReviewAgent) -> Result<()> {
+        let json = serde_json::to_string(agent)
+            .map_err(|e| Error::Internal(format!("serialize fix agent: {e}")))?;
+        self.touch_json(id, "fix_json", &json, false).await
+    }
+
     /// Set the terminal status (+ optional error message).
     pub async fn set_status(&self, id: &Id, status: &str, error: Option<&str>) -> Result<()> {
         let now = fmt(Utc::now());
@@ -205,9 +223,14 @@ mod tests {
     async fn round_trip_static_agents_summary() {
         let repo = SkillReviewsRepo::new(pool().await);
         let ws: Id = "ws1".into();
-        let rev = repo.create(&ws, "grill", "bundled", "agents", Some("root")).await.unwrap();
+        let rev = repo
+            .create(&ws, "grill", "bundled", "agents", "focus on trigger precision", Some("root"))
+            .await
+            .unwrap();
         assert_eq!(rev.status, "running");
         assert_eq!(rev.skill_source, "bundled");
+        assert_eq!(rev.instructions, "focus on trigger precision");
+        assert!(rev.fix_agent.is_none());
 
         // Seed two agent rows + summarizer.
         let agents = vec![
@@ -233,8 +256,16 @@ mod tests {
         repo.set_summary(&rev.id, &sum).await.unwrap();
         repo.set_status(&rev.id, "done", None).await.unwrap();
 
+        // Apply-fixes agent round-trip.
+        let fixer = SkillReviewAgent { name: "fixer".into(), provider: "claude".into(), model: "".into(), status: "running".into(), note: "".into(), session_id: Some("sess-fix".into()), findings: vec![] };
+        repo.set_fix(&rev.id, &fixer).await.unwrap();
+
         let got = repo.get(&rev.id).await.unwrap();
         assert_eq!(got.status, "done");
+        assert_eq!(got.instructions, "focus on trigger precision");
+        let fx = got.fix_agent.as_ref().unwrap();
+        assert_eq!(fx.status, "running");
+        assert_eq!(fx.session_id.as_deref(), Some("sess-fix"));
         assert_eq!(got.agents.len(), 2);
         assert_eq!(got.agents[0].status, "done");
         assert_eq!(got.agents[0].session_id.as_deref(), Some("sess-1"));

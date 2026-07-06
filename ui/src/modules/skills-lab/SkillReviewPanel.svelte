@@ -11,6 +11,7 @@
   import { skillReviewBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import SkillReviewAgents from './SkillReviewAgents.svelte';
+  import Terminal from '../../lib/components/Terminal.svelte';
 
   interface Props {
     wsId: string;
@@ -33,9 +34,28 @@
   let fMode = $state<'static' | 'agents'>('agents');
   let fClaude = $state(true);
   let fCodex = $state(false);
+  let fInstructions = $state('');
   let starting = $state(false);
 
-  const activeReview = $derived(selected && selected.status === 'running');
+  // Apply-fixes form.
+  let fixProvider = $state('claude');
+  let fixInstructions = $state('');
+  let fixTermOpen = $state(false);
+  let applying = $state(false);
+
+  const fixRunning = $derived(
+    !!selected?.fix_agent && ['pending', 'running', 'waiting'].includes(selected.fix_agent.status),
+  );
+  // Keep the fallback poll alive while the fixer runs, not just the review.
+  const activeReview = $derived(selected && (selected.status === 'running' || fixRunning));
+  const canApply = $derived(
+    !!selected &&
+      selected.status === 'done' &&
+      !fixRunning &&
+      ((selected.summary?.findings.length ?? 0) > 0 ||
+        (selected.summary?.patch_plan.length ?? 0) > 0 ||
+        (selected.static_report?.findings.length ?? 0) > 0),
+  );
 
   async function loadSkills(): Promise<void> {
     try {
@@ -92,6 +112,7 @@
         skill_source: opt.source,
         providers,
         agent_mode: fMode,
+        instructions: fInstructions.trim(),
       });
       selected = rev;
       await loadList();
@@ -99,6 +120,23 @@
       toasts.error('Start review failed', e instanceof Error ? e.message : String(e));
     } finally {
       starting = false;
+    }
+  }
+
+  async function applyFixes(): Promise<void> {
+    if (!selected || applying) return;
+    applying = true;
+    try {
+      selected = await skillReviewApi.apply(selected.id, {
+        provider: fixProvider,
+        instructions: fixInstructions.trim(),
+      });
+      fixTermOpen = true;
+      toasts.info('Fixer agent starting…');
+    } catch (e) {
+      toasts.error('Apply fixes failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      applying = false;
     }
   }
 
@@ -242,6 +280,16 @@
             <label class="lr-check"><input type="checkbox" bind:checked={fCodex} /> codex</label>
           </fieldset>
         {/if}
+        <label class="lr-field">
+          <span>Additional instructions (optional)</span>
+          <textarea
+            class="lr-textarea"
+            rows="3"
+            bind:value={fInstructions}
+            placeholder="Extra context for the reviewers — e.g. “check recent commits: they fix the previous review round”, known issues from earlier implementations…"
+            data-testid="skill-review-instructions"
+          ></textarea>
+        </label>
         <button class="btn primary" disabled={!fSkill || starting} onclick={start} data-testid="start-skill-review">
           {starting ? 'Starting…' : 'Start review'}
         </button>
@@ -263,6 +311,12 @@
 
         {#if selected.error}
           <p class="lr-error">{selected.error}</p>
+        {/if}
+
+        {#if selected.instructions}
+          <p class="lr-instructions" title="Additional instructions this review ran with">
+            <strong>Instructions:</strong> {selected.instructions}
+          </p>
         {/if}
 
         <!-- Static analysis -->
@@ -332,6 +386,62 @@
             {/if}
           </section>
         {/if}
+
+        <!-- Apply fixes with an agent -->
+        {#if selected.status === 'done' && (canApply || selected.fix_agent)}
+          <section class="card lr-fix" data-testid="apply-fixes">
+            <h4>Apply fixes</h4>
+            {#if selected.fix_agent}
+              {@const fx = selected.fix_agent}
+              <div class="lr-fix-row">
+                <span class="lr-fix-name">fixer</span>
+                <span class="chip">{fx.provider}</span>
+                <span class="grow"></span>
+                {#if fx.session_id}
+                  <button class="btn small ghost" onclick={() => (fixTermOpen = !fixTermOpen)}>
+                    {fixTermOpen ? 'Hide' : 'Open'}
+                  </button>
+                {/if}
+                <span class="rp-status-pill rp-status-{fx.status}">{fx.status}</span>
+              </div>
+              {#if fx.note}
+                <p class="lr-fix-note">{fx.note}</p>
+              {/if}
+              {#if fx.status === 'waiting'}
+                <p class="lr-fix-waiting">⚠ The fixer looks blocked on input. Click <strong>Open</strong> to respond.</p>
+              {/if}
+              {#if fx.session_id && fixTermOpen}
+                <div class="lr-fix-term">
+                  <Terminal sessionId={fx.session_id} />
+                </div>
+              {/if}
+            {/if}
+            {#if canApply}
+              {#if selected.skill_source === 'bundled'}
+                <p class="lr-hint">Bundled skills are read-only — install the skill to the library first, then review and apply fixes there.</p>
+              {:else}
+                <p class="lr-hint">
+                  Send the findings and patch plan to an agent that applies them directly to the skill directory.
+                </p>
+                <div class="lr-fix-form">
+                  <select bind:value={fixProvider} title="Fixer provider">
+                    <option value="claude">claude</option>
+                    <option value="codex">codex</option>
+                  </select>
+                  <input
+                    type="text"
+                    class="lr-fix-input"
+                    bind:value={fixInstructions}
+                    placeholder="Extra instructions for the fixer (optional)…"
+                  />
+                  <button class="btn primary" disabled={applying} onclick={applyFixes} data-testid="apply-fixes-btn">
+                    {applying ? 'Starting…' : selected.fix_agent ? 'Run again' : 'Apply fixes with agent'}
+                  </button>
+                </div>
+              {/if}
+            {/if}
+          </section>
+        {/if}
       </div>
     {/if}
   </main>
@@ -361,6 +471,34 @@
   .lr-field > span { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
   .lr-field select { padding: 8px; border-radius: var(--radius-m); border: 1px solid var(--border); background: var(--surface); color: var(--text); }
   .lr-radio, .lr-check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+  .lr-textarea {
+    padding: 8px; border-radius: var(--radius-m); border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; resize: vertical;
+  }
+  .lr-instructions {
+    margin: 0; font-size: 12px; color: var(--text-dim); line-height: 1.5;
+    border-inline-start: 2px solid var(--border); padding: 2px 10px;
+  }
+
+  .lr-fix { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .lr-fix h4 { margin: 0; }
+  .lr-fix-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .lr-fix-name { font-size: 12.5px; font-weight: 600; }
+  .lr-fix-note { margin: 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.4; }
+  .lr-fix-waiting { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--status-warn); }
+  .lr-fix-term {
+    height: min(360px, 65vh); border: 1px solid var(--border);
+    border-radius: var(--radius-m); overflow: hidden; overscroll-behavior: contain; background: var(--term-bg);
+  }
+  .lr-fix-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .lr-fix-form select {
+    padding: 7px 8px; border-radius: var(--radius-m); border: 1px solid var(--border);
+    background: var(--surface); color: var(--text);
+  }
+  .lr-fix-input {
+    flex: 1; min-width: 180px; padding: 7px 9px; border-radius: var(--radius-m);
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 12.5px;
+  }
 
   .lr-detail { display: flex; flex-direction: column; gap: 12px; }
   .lr-detail-head { display: flex; align-items: center; gap: 8px; }

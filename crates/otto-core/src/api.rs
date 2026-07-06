@@ -2048,6 +2048,22 @@ pub struct StartSkillReviewReq {
     /// providers are given, else "static".
     #[serde(default)]
     pub agent_mode: String,
+    /// Extra reviewer instructions appended to every agent + summarizer prompt
+    /// (e.g. "check recent commits — they fix the previous review round").
+    #[serde(default)]
+    pub instructions: String,
+}
+
+/// `POST /skill-reviews/{id}/apply` — send the findings to an agent that
+/// applies the fixes to the real skill directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplySkillFixReq {
+    /// Provider to run the fixer with. Defaults to "claude".
+    #[serde(default)]
+    pub provider: String,
+    /// Extra apply-time instructions (on top of the review's own instructions).
+    #[serde(default)]
+    pub instructions: String,
 }
 
 /// `PUT /library/default-soul`

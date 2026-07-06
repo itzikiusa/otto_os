@@ -1168,14 +1168,22 @@ provider agents running the bundled `skills-reviewer` method, folded together by
 Reviewer/summarizer sessions are tagged `meta.source="skillreview"` and hidden from the Agents
 grid — they embed live in the Review panel. See the `skill_review_updated` WS event.
 
+Every review runs on a staged temp copy of the package with local machine artifacts stripped
+(`.mcp.json`, `.DS_Store`, `.git/`, `.env*`, `node_modules`, `__pycache__`) so secrets in those
+files are never scanned or quoted. Optional `instructions` ride on the review and are appended
+to every reviewer + summarizer prompt. After a review completes, `apply` hands the findings to a
+fixer agent (`SkillReview.fix_agent`, same session pattern) that edits the REAL skill directory
+— rejected for bundled skills (read-only; install to the library first).
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{id}/skill-reviews | ws editor | StartSkillReviewReq (`skill_name`, `skill_source` library\|bundled, `providers[]`, `agent_mode` static\|agents) | SkillReview (status=running; static pass fills in, agents fan out) |
+| POST /workspaces/{id}/skill-reviews | ws editor | StartSkillReviewReq (`skill_name`, `skill_source` library\|bundled, `providers[]`, `agent_mode` static\|agents, `instructions?`) | SkillReview (status=running; static pass fills in, agents fan out) |
 | GET /workspaces/{id}/skill-reviews | ws viewer | — | `SkillReview[]` |
-| GET /skill-reviews/{id} | ws viewer | — | SkillReview (static report + live agents + summary) |
-| DELETE /skill-reviews/{id} | ws editor | — | 204 (cancels + archives sessions) |
+| GET /skill-reviews/{id} | ws viewer | — | SkillReview (static report + live agents + summary + fix_agent) |
+| DELETE /skill-reviews/{id} | ws editor | — | 204 (cancels + archives sessions, fixer included) |
 | POST /skill-reviews/{id}/cancel | ws editor | — | cancel a running review |
 | POST /skill-reviews/{id}/agents/{index}/retry | ws editor | — | re-run one reviewer agent |
+| POST /skill-reviews/{id}/apply | ws editor | ApplySkillFixReq (`provider?` default claude, `instructions?`) | SkillReview (fix_agent spawns; 400 while review/fixer running, for bundled skills, or with no findings) |
 
 ## Context library (skills / souls / context)
 
