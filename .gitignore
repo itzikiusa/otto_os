@@ -48,3 +48,6 @@ apps/desktop/src-tauri/binaries/
 **/__pycache__/
 mobile-proof/
 apps/desktop/src-tauri/binaries/ottod-*-apple-darwin
+
+# Otto-generated per-session MCP registration (contains a bearer token)
+.mcp.json
