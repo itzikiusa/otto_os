@@ -1,4 +1,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
+import { writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
 
 // Review-engine reliability (design 2026-07-04) — per-agent stop + durable
@@ -8,6 +11,7 @@ import { apiCtx, seedWorkspace, seedGitRepo } from './seed';
 //   - stop guards: done row → 409, summarizer row → 409, out-of-bounds → 4xx
 //   - retry without a durable prompt (and no temp file) → 400
 //   - retry WITH the DB prompt+diff → accepted, row flips to pending
+//   - legacy pre-0100 path: temp prompt file only (no DB row) still retries
 //   - UI: Stop button on a running row; after stop the row shows error + Retry
 // Daemon state is global → pin the whole file to one device project (the
 // desktop browser — the Stop/Retry row is a pointer-first affordance).
@@ -123,6 +127,24 @@ test('retry without a durable prompt fails; with the DB prompt+diff it re-runs',
   // The handler resets the row to pending/"retrying…" before spawning.
   expect(after.agents[0].status).toBe('pending');
   expect(after.agents[0].note).toContain('retrying');
+});
+
+test('legacy pre-0100 retry: temp prompt file only (no DB row) still works', async ({}) => {
+  // The daemon inherits this process's TMPDIR (global-setup spawns it with
+  // process.env), so planting the legacy `otto-review-<id>-<index>.prompt`
+  // file here exercises the DB-miss → temp-file fallback ordering for real.
+  const legacy = await seedReview({
+    agents: [
+      agentRow('Correctness', 'error', { note: 'stuck', provider: 'e2e-no-such-cli' }),
+      agentRow('Summarizer', 'pending'),
+    ],
+  });
+  writeFileSync(join(tmpdir(), `otto-review-${legacy.id}-0.prompt`), 'legacy prompt text');
+
+  const retry = await ctx.post(api(`/reviews/${legacy.id}/agents/0/retry`));
+  expect(retry.ok()).toBeTruthy();
+  const after = await retry.json();
+  expect(after.agents[0].status).toBe('pending');
 });
 
 test('UI: Stop on a running agent row; after stop the row shows error + Retry', async ({ page }) => {
