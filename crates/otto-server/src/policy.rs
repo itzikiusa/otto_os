@@ -285,6 +285,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // ---- Database (DB Explorer over a connection + saved queries/dashboards) --
     // Note: `/connections/{id}/db/...` is the *Database* feature, distinct from
     // *Connections* profile management below. Check the db sub-prefix first.
+    // Unsaved-config connectivity probe (form "Test" button): no `{id}` — the
+    // profile doesn't exist yet. Edit tier: it dials the target (and may open
+    // an ephemeral SSH tunnel), same trust level as saving the profile.
+    if p == "/connections/unsaved/db/test" {
+        return Require(Database, Edit);
+    }
     if p.starts_with("/connections/{id}/db/") {
         // Reads: capabilities / schema / history (GET). Schema browse via POST
         // (schema/children, object, schema-graph) is still a read. Mutating SQL,

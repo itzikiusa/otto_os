@@ -181,6 +181,10 @@ struct UpdateWidgetReq {
 /// REST routes; the server nests this under `/api/v1` and supplies the state.
 pub fn api_router<S: DbViewerCtx>() -> Router<S> {
     Router::new()
+        // Unsaved-config probe (no `{id}` — nothing persisted yet). Named
+        // `…/db/test` so the existing policy class (connectivity probe,
+        // non-mutating) covers it.
+        .route("/connections/unsaved/db/test", post(test_unsaved::<S>))
         // Connection-scoped operations.
         .route("/connections/{id}/db/test", post(test::<S>))
         .route("/connections/{id}/db/capabilities", get(capabilities::<S>))
@@ -291,6 +295,30 @@ async fn test<S: DbViewerCtx>(
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
     Ok(Json(ctx.db().test(&id).await?).into_response())
+}
+
+/// Probe an UNSAVED connection config (form "Test" button). Nothing is
+/// persisted — no profile row, no Keychain write. Editor on the target
+/// workspace, mirroring what saving the profile would require.
+#[derive(Debug, Deserialize)]
+struct TestUnsavedReq {
+    workspace_id: Id,
+    kind: otto_core::domain::ConnectionKind,
+    params: Value,
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+async fn test_unsaved<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<TestUnsavedReq>,
+) -> ApiResult<Response> {
+    ctx.roles()
+        .check(&user, &req.workspace_id, WorkspaceRole::Editor)
+        .await
+        .map_err(|_| otto_core::Error::Forbidden("editor role required".into()))?;
+    Ok(Json(ctx.db().test_config(req.kind, req.params, req.secret).await?).into_response())
 }
 
 async fn capabilities<S: DbViewerCtx>(

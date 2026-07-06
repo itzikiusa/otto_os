@@ -548,6 +548,7 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
+| POST /connections/unsaved/db/test | ws editor (on `workspace_id`) | `{workspace_id, kind, params, secret?}` | connectivity probe of an UNSAVED config (form "Test" button) — nothing is persisted; DB kinds only; SSH tunnels open ephemerally |
 | POST /connections/{id}/db/test | ws editor | — | connectivity probe result |
 | GET /connections/{id}/db/capabilities | ws viewer | — | engine capability flags: `sql`, `joins`, `transactions`, `multi_statement`, `cancel`, `explain`, `default_port`, `schema_levels`, `query_language` (see the honesty notes below) |
 | GET /connections/{id}/db/schema | ws viewer | — | top-level schema tree (roots) |

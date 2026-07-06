@@ -1726,7 +1726,7 @@ fn bson_to_json(b: &Bson) -> Value {
         }
         Bson::JavaScriptCode(code) => Value::String(code.clone()),
         Bson::JavaScriptCodeWithScope(c) => Value::String(c.code.clone()),
-        Bson::Binary(bin) => Value::String(base64_encode(&bin.bytes)),
+        Bson::Binary(bin) => Value::String(binary_to_string(bin)),
         Bson::MaxKey => Value::String("$maxKey".into()),
         Bson::MinKey => Value::String("$minKey".into()),
         Bson::DbPointer(_) => Value::String("$dbPointer".into()),
@@ -1762,6 +1762,19 @@ fn bson_to_json_typed(b: &Bson) -> Value {
 fn base64_encode(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Render a BSON binary value: UUID subtypes (4 = standard, 3 = legacy) show as
+/// the hyphenated UUID the way Compass/DataGrip do — base64 gibberish for what
+/// is semantically an id is useless to the user. Everything else stays base64.
+fn binary_to_string(bin: &mongodb::bson::Binary) -> String {
+    use mongodb::bson::spec::BinarySubtype;
+    if matches!(bin.subtype, BinarySubtype::Uuid | BinarySubtype::UuidOld) {
+        if let Ok(bytes) = <[u8; 16]>::try_from(bin.bytes.as_slice()) {
+            return BsonUuid::from_bytes(bytes).to_string();
+        }
+    }
+    base64_encode(&bin.bytes)
 }
 
 /// A short human label for a BSON type (used for field detail / completion).
@@ -2214,6 +2227,29 @@ const MONGO_OPERATORS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_uuid_subtype_renders_uuid_string() {
+        use mongodb::bson::spec::BinarySubtype;
+        let uuid = BsonUuid::new();
+        let bin = mongodb::bson::Binary {
+            subtype: BinarySubtype::Uuid,
+            bytes: uuid.bytes().to_vec(),
+        };
+        assert_eq!(binary_to_string(&bin), uuid.to_string());
+        // Non-UUID subtypes stay base64.
+        let raw = mongodb::bson::Binary {
+            subtype: BinarySubtype::Generic,
+            bytes: vec![1, 2, 3],
+        };
+        assert_eq!(binary_to_string(&raw), base64_encode(&[1, 2, 3]));
+        // A malformed 15-byte "uuid" must not panic — falls back to base64.
+        let bad = mongodb::bson::Binary {
+            subtype: BinarySubtype::Uuid,
+            bytes: vec![0; 15],
+        };
+        assert_eq!(binary_to_string(&bad), base64_encode(&[0; 15]));
+    }
 
     // --- SQL-dialect completion routing + collection resolution ----------------
 

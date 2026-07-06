@@ -770,11 +770,18 @@ fn value_to_json(value: RedisValue) -> JsonValue {
     }
 }
 
-/// Bulk-string bytes → JSON string (UTF-8) or, when binary, a base64-ish escape.
+/// Bulk-string bytes → JSON string (UTF-8) or, when binary, base64 of the
+/// payload (matching the MySQL/Postgres blob rendering) — the old `<N bytes>`
+/// placeholder discarded the value entirely, making binary-serialized cache
+/// entries impossible to inspect.
 fn bytes_to_json(bytes: Vec<u8>) -> JsonValue {
     match String::from_utf8(bytes) {
         Ok(s) => JsonValue::String(s),
-        Err(e) => JsonValue::String(format!("<{} bytes>", e.into_bytes().len())),
+        Err(e) => {
+            use base64::Engine as _;
+            let raw = e.into_bytes();
+            JsonValue::String(base64::engine::general_purpose::STANDARD.encode(raw))
+        }
     }
 }
 
@@ -935,6 +942,15 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_bulk_string_renders_base64_not_placeholder() {
+        // Non-UTF-8 payloads must stay inspectable (base64), never "<N bytes>".
+        let v = bytes_to_json(vec![0xff, 0xfe, 0x00, 0x01]);
+        assert_eq!(v, JsonValue::String("//4AAQ==".to_string()));
+        // UTF-8 stays plain text.
+        assert_eq!(bytes_to_json(b"hello".to_vec()), JsonValue::String("hello".into()));
+    }
 
     #[test]
     fn capabilities_are_honest() {

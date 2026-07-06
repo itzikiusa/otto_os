@@ -1491,7 +1491,9 @@ async fn exec_read_conn(
     for row in rows.iter().take(take) {
         let mut cells = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
-            cells.push(mysql_value_to_json(row, i));
+            // Cap oversized cells (LONGTEXT/blob/JSON) like ClickHouse does —
+            // an uncapped multi-MB cell freezes the grid and bloats the WS frame.
+            cells.push(types::cap_cell(mysql_value_to_json(row, i)));
         }
         out_rows.push(cells);
     }
@@ -1543,6 +1545,14 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
     if let Ok(Some(val)) = row.try_get::<Option<Value>, _>(idx) {
         return val;
     }
+    // NUMERIC / DECIMAL → exact string (never lossy f64). sqlx's f64 branch
+    // explicitly EXCLUDES Decimal columns (`real_compatible` matches only
+    // Float|Double) and its String/Vec<u8> gates lack Decimal|NewDecimal, so
+    // without this branch a DECIMAL cell — i.e. every money/balance column —
+    // fell through to Null. Same class as the DATETIME fix above.
+    if let Ok(v) = row.try_get::<Option<sqlx::types::BigDecimal>, _>(idx) {
+        return v.map(|n| Value::String(n.to_string())).unwrap_or(Value::Null);
+    }
     // Temporal types (DATETIME / TIMESTAMP / DATE / TIME). sqlx's MySQL driver
     // does NOT decode these as String or Vec<u8> — their `Type::compatible` check
     // rejects the temporal SQL types — so without an explicit chrono attempt they
@@ -1572,7 +1582,32 @@ fn mysql_value_to_json(row: &MySqlRow, idx: usize) -> Value {
             None => Value::Null,
         };
     }
-    Value::Null
+    // Last resort — NEVER silently render a non-NULL cell as Null. Any column
+    // type every typed attempt above rejected (future/unknown types) renders as
+    // its raw text when UTF-8, else base64. Only a true SQL NULL stays Null.
+    raw_cell_fallback(row.try_get_raw(idx))
+}
+
+/// Decode-of-last-resort for a raw MySQL value: SQL NULL → Null, UTF-8 payload
+/// → its text, binary payload → base64. Uses `try_decode_unchecked` — the
+/// checked decode would re-reject through the very `compatible()` gates that
+/// routed us here. Errors (no such column) → Null.
+fn raw_cell_fallback(
+    raw: std::result::Result<sqlx::mysql::MySqlValueRef<'_>, sqlx::Error>,
+) -> Value {
+    use sqlx::{Value as _, ValueRef as _};
+    let Ok(raw) = raw else { return Value::Null };
+    if raw.is_null() {
+        return Value::Null;
+    }
+    let owned = sqlx::ValueRef::to_owned(&raw);
+    match owned.try_decode_unchecked::<String>() {
+        Ok(s) => Value::String(s),
+        Err(_) => match owned.try_decode_unchecked::<Vec<u8>>() {
+            Ok(b) => Value::String(B64.encode(b)),
+            Err(_) => Value::Null,
+        },
+    }
 }
 
 /// Pure shaping of an optional integer into a JSON value (Null if absent).

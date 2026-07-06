@@ -1734,6 +1734,23 @@ export interface TestConnectionResp {
   warn_key_perms?: string | null;
 }
 
+/** POST /connections/unsaved/db/test — probe an UNSAVED connection config
+ *  (form "Test" button). Nothing is persisted; DB kinds only. */
+export interface TestUnsavedConnectionReq {
+  workspace_id: string;
+  kind: ConnectionKind;
+  params: Record<string, unknown>;
+  secret?: string;
+}
+
+/** Response of the unsaved-config probe (the DB Explorer's TestResult). */
+export interface TestUnsavedConnectionResp {
+  ok: boolean;
+  latency_ms?: number | null;
+  message: string;
+  server_version?: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Import connections from other DB tools
 // ---------------------------------------------------------------------------
