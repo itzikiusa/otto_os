@@ -2547,6 +2547,9 @@ export interface ReviewAgentState {
   session_id?: string | null;
   /** This agent's own findings (before summarization). */
   findings?: ReviewFinding[];
+  /** True on the summarizer row when its output came from the deterministic
+   *  Rust-side dedupe/rank fallback (claude summarizer unavailable). */
+  fallback?: boolean;
 }
 
 export interface ReviewComment {
@@ -2573,6 +2576,9 @@ export interface Review {
   verdict?: string | null;
   blocker_count?: number | null;
   summary_md?: string | null;
+  /** true when the final comments came from the deterministic summarizer
+   *  fallback (claude unavailable) — derived from the agents' fallback flags. */
+  summary_fallback?: boolean;
 }
 
 export interface ReviewAgentCfg {

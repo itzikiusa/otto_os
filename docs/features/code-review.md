@@ -290,15 +290,26 @@ read its output and type into it (e.g. approve a folder-access prompt that the
 prompt-guard couldn't auto-accept) to unblock a `waiting` agent. See
 [`./agent-sessions.md`](./agent-sessions.md).
 
-### 6.3 Retry a failed/stuck agent
+### 6.3 Stop or retry a single agent
 
-Each reviewer (not the summarizer) has a **Retry** button →
-`POST /reviews/{review_id}/agents/{index}/retry`. It kills the agent's old
-(likely stuck) session, marks the row `pending` ("retrying…"), and re-runs
-**exactly that agent** in the background using the prompt persisted when the run
-started (`otto-review-<id>-<index>.prompt`). If that prompt file is gone (e.g.
-old run) the retry returns an error asking you to re-run the whole review. After
-retry the panel resumes tracking the re-run.
+Each reviewer row (not the summarizer) offers:
+
+- **Stop** (shown only while the row is `running`/`waiting`) →
+  `POST /reviews/{review_id}/agents/{index}/stop`. Trips that agent's cancel
+  flag (so the kill is not auto-retried), kills its session, and marks the row
+  `error` / "stopped by user" — deliberately not a new status, so the row is
+  immediately one click from a **Retry**. The rest of the run continues; the
+  summarizer proceeds with the remaining findings. `409` if the row isn't
+  running/waiting.
+- **Retry** → `POST /reviews/{review_id}/agents/{index}/retry`. Kills the
+  agent's old (likely stuck) session, marks the row `pending` ("retrying…"),
+  and re-runs **exactly that agent** in the background using the prompt
+  persisted when the run started. The prompt (and the run's diff) are stored in
+  SQLite at dispatch, so retry survives reboots, temp-dir sweeps and daemon
+  redeploys; the `otto-review-<id>-<index>.prompt` temp file remains the legacy
+  fallback for pre-0100 reviews. Only when neither source exists does retry ask
+  you to re-run the whole review. After retry the panel resumes tracking the
+  re-run.
 
 This is **on top of** automatic recovery: each agent already auto-retries up to
 `max_attempts` (default **3**) total attempts with a short backoff, killing the
@@ -426,7 +437,8 @@ under `/api/v1`.
 | `POST /pr-review-comments/{cid}/approve` | ws editor | — | `ReviewComment` (posts to PR + appends to `.otto/…`) |
 | `POST /pr-review-comments/{cid}/decline` | ws editor | — | `ReviewComment` (discarded) |
 | `POST /reviews/{review_id}/handoff` | ws editor | `HandoffReq` `{ provider, comment_ids? }` | `Session` (new "Fix review findings" agent) |
-| `POST /reviews/{review_id}/agents/{index}/retry` | ws editor | — | `Review` (re-run one agent) |
+| `POST /reviews/{review_id}/agents/{index}/retry` | ws editor | — | `Review` (re-run one agent; prompt+diff read DB-first, temp file fallback) |
+| `POST /reviews/{review_id}/agents/{index}/stop` | ws editor | — | `202` + `Review` (stop one running/waiting agent → `error`/"stopped by user", retryable; `409` otherwise / for the summarizer) |
 | `GET /reviews/{review_id}/findings` | ws viewer | — | `ReviewFindingRow[]` (fingerprinted, with state) |
 | `POST /reviews/{review_id}/findings/{fingerprint}/state` | ws editor | `{ state, fix_session_id? }` | updated `ReviewFindingRow` |
 | `GET /reviews/{review_id}/merge-readiness` | ws viewer | — | merge-readiness object (findings + CI + approvals + mergeable) |
@@ -449,19 +461,23 @@ instead of waiting for the fallback poll:
 }
 ```
 
-(`session_id` is `null` for these review runs; the contract lists the broader
-`queued|running|done|error|cancelled` set, but `ReviewStatus` in code is
-`running|done|error`.) The UI matches `review_id` and short-cuts its back-off.
+(`session_id` is `null` for these review runs; `ReviewStatus` in code is
+`running|done|error|cancelled` — `cancelled` is emitted by
+`POST /reviews/{review_id}/cancel`. Per-agent stop broadcasts the same event
+with `status: "running"` so open panels refresh the agent rows.) The UI matches
+`review_id` and short-cuts its back-off.
 
 ### Key DTOs (TS in `ui/src/lib/api/types.ts`)
 
 - **`Review`** — `id, repo_id, pr_number, status, error?, comments[],
   agents[] (live ReviewAgentState), created_at, verdict?, blocker_count?,
-  summary_md?`.
+  summary_md?, summary_fallback?` (`summary_fallback` = the final comments came
+  from the deterministic fallback, not the claude summarizer).
 - **`ReviewComment`** — `severity: info|warn|bug`, `state: draft|approved|
   declined`, `posted`, `path?`, `line?`.
 - **`ReviewAgentState`** — `name, provider, model, status, note, comment_count,
-  session_id?, findings[]`.
+  session_id?, findings[], fallback?` (`fallback` marks the summarizer row when
+  the deterministic fallback produced the summary).
 - **`ReviewFindingRow`** — `fingerprint, path?, line?, severity, category?, body,
   state, fix_session_id?, updated_at`.
 - **`StartReviewReq`** — `issue_account_id?, issue_key?, context?` (all optional;
@@ -476,8 +492,11 @@ instead of waiting for the fallback poll:
 
 - Review a PR or the local working tree with multiple concurrent lens agents.
 - Drive lenses from installed skills (one agent per lens × provider).
-- Show each agent as an openable live session with per-agent findings, retry,
-  and a `waiting`-on-input flag.
+- Show each agent as an openable live session with per-agent findings, stop
+  (running/waiting rows), retry, and a `waiting`-on-input flag.
+- Cancel a whole running review (`POST /reviews/{review_id}/cancel` → terminal
+  `cancelled` + session teardown), or stop a single agent without losing the
+  other agents' in-flight work.
 - Dedupe/prioritise into ≤20 ranked draft comments; post approved PR comments and
   log them to `.otto/pr-<n>-review.md`.
 - Attach a Jira story and free-text guidance as review context (PR mode).
@@ -491,21 +510,26 @@ instead of waiting for the fallback poll:
   flagged `too_large` and not reviewed. Diffs fed to the *commit/PR drafting*
   helpers (a separate feature) are capped at 40 KB.
 - **Summarizer is claude-bound.** The summarizer/drafting runner is the claude
-  PTY driver; choosing a different summarizer provider isn't the supported path,
-  and if claude is missing the summarizer degrades to concatenating per-agent
-  findings.
+  PTY driver; choosing a different summarizer provider isn't the supported path.
+  If claude can't run, a deterministic Rust-side pass dedupes (normalized
+  path + line-bucket + body), ranks (severity → cross-agent agreement →
+  location) and caps the per-agent findings at the same ≤20 — the run is badged
+  "deterministic fallback (claude unavailable)" (`Review.summary_fallback`).
+  It's a floor under the old raw concatenation, not a claude replacement.
 - **LLM output, not ground truth.** Findings can include false positives;
   they're **drafts** you approve/decline. Severity is whatever the agent
   assigns.
-- **No cancel button.** A running review has no manual stop; it ends when agents
-  finish, error, or hit the grace period (auto-retries first). The
-  `cancelled` status in the contract is reserved/unused by the PR-review runner.
 - **Local reviews aren't posted anywhere** (no PR) — act on them via handoff.
-- **Retry needs the persisted prompt** (`otto-review-<id>-<index>.prompt`); if
-  it's gone you must re-run the whole review.
+- **Retry needs the persisted prompt.** Prompts (and the diff) are DB-persisted
+  at dispatch (migration 0100), so this survives reboots/temp sweeps for all new
+  reviews; only pre-0100 runs still depend on the
+  `otto-review-<id>-<index>.prompt` temp file. Cancelling a review deletes its
+  persisted prompts/diff — cancelled runs are not retryable.
 - **`custom_presets` are stored, not executed** — they only populate the
   "+ Add preset" menu.
-- **Diff/prompt files live in the OS temp dir** (`otto-review-<id>*`) for the run.
+- **Diff/prompt temp files live in the OS temp dir** (`otto-review-<id>*`) for
+  the in-flight run (agents read the diff from there); the durable copies live
+  in SQLite.
 
 ---
 

@@ -215,5 +215,11 @@ where
         }
         last = res;
     }
+    // A Stop that lands during the FINAL attempt has no next iteration to
+    // catch it — without this, the kill surfaces as SessionGone/Exited and the
+    // caller persists the wrong terminal note.
+    if cancelled(cancel) {
+        last.reason = Some(FailReason::Stopped);
+    }
     last
 }

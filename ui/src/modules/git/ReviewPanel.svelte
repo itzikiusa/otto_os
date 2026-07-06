@@ -824,6 +824,14 @@
     <div class="rp-header">
       <span class="rp-stats">
         <span class="rp-stat">{totalCount} comment{totalCount === 1 ? '' : 's'}</span>
+        {#if review.summary_fallback}
+          <span
+            class="chip warn rp-fallback-badge"
+            title="The claude summarizer was unavailable; these comments were deduped and ranked by the deterministic Rust-side fallback."
+          >
+            deterministic fallback (claude unavailable)
+          </span>
+        {/if}
         {#if approvedCount > 0}
           <span class="chip ok">{approvedCount} approved</span>
         {/if}
