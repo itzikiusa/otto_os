@@ -66,16 +66,55 @@ fn repo(ctx: &ServerCtx) -> ApiClientRepo {
 /// timeout enforced per-request via `.timeout()`.
 /// Daemon-global cookie jar shared by the API client (captures Set-Cookie and
 /// resends on matching requests, so login/session flows just work).
-fn cookie_jar() -> std::sync::Arc<reqwest_cookie_store::CookieStoreMutex> {
-    static JAR: OnceLock<std::sync::Arc<reqwest_cookie_store::CookieStoreMutex>> = OnceLock::new();
-    JAR.get_or_init(|| {
-        std::sync::Arc::new(reqwest_cookie_store::CookieStoreMutex::new(
-            reqwest_cookie_store::CookieStore::default(),
-        ))
-    })
-    .clone()
+fn cookie_jar_for(wid: &Id) -> std::sync::Arc<reqwest_cookie_store::CookieStoreMutex> {
+    // PER-WORKSPACE jars. A single process-global jar leaked credentials across
+    // tenants: a Set-Cookie captured by one user/workspace was silently resent
+    // on another's requests to the same domain (and staging/prod workspaces
+    // shared one login state). Keyed lazily; workspaces are few, so the map
+    // never grows meaningfully.
+    static JARS: OnceLock<
+        std::sync::Mutex<HashMap<String, std::sync::Arc<reqwest_cookie_store::CookieStoreMutex>>>,
+    > = OnceLock::new();
+    let map = JARS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(wid.to_string())
+        .or_insert_with(|| {
+            std::sync::Arc::new(reqwest_cookie_store::CookieStoreMutex::new(
+                reqwest_cookie_store::CookieStore::default(),
+            ))
+        })
+        .clone()
 }
 
+/// Per-(workspace, allow_local) outbound client. The jar is workspace-scoped
+/// (see [`cookie_jar_for`]); `allow_local` swaps the SSRF-guarded redirect
+/// policy for a plain bounded one (the pre-flight check is skipped by the
+/// caller under the same flag).
+fn client_for(wid: &Id, allow_local: bool) -> reqwest::Client {
+    static CLIENTS: OnceLock<std::sync::Mutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
+    let map = CLIENTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let key = format!("{wid}|{allow_local}");
+    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(key)
+        .or_insert_with(|| {
+            let builder = reqwest::Client::builder()
+                .user_agent("Otto-ApiClient/1.0")
+                .cookie_provider(cookie_jar_for(wid));
+            let builder = if allow_local {
+                builder.redirect(reqwest::redirect::Policy::limited(10))
+            } else {
+                // SSRF guard: cap + re-validate each redirect hop's host so an
+                // upstream 30x can't bounce us into a private/loopback address.
+                builder.redirect(net_guard::redirect_policy())
+            };
+            builder.build().unwrap_or_default()
+        })
+        .clone()
+}
+
+/// Shared cookie-less client for internal plumbing (OAuth2 token fetches).
+/// User-facing requests go through [`client_for`] so cookies stay
+/// workspace-scoped.
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -84,7 +123,6 @@ fn http_client() -> &'static reqwest::Client {
             // SSRF guard: cap + re-validate each redirect hop's host so an
             // upstream 30x can't bounce us into a private/loopback address.
             .redirect(net_guard::redirect_policy())
-            .cookie_provider(cookie_jar())
             .build()
             .unwrap_or_default()
     })
@@ -92,10 +130,15 @@ fn http_client() -> &'static reqwest::Client {
 
 /// Build a one-off client when per-request settings deviate from the defaults
 /// (disable redirects, skip TLS verification) or the request is tunnelled
-/// through a SOCKS5 proxy. `None` → use the shared client. TLS verification is
-/// only ever skipped when the request explicitly sets `verify_ssl=false` (never
-/// the default).
-fn build_settings_client(req: &ExecuteApiReq, proxy: Option<&str>) -> Option<reqwest::Client> {
+/// through a SOCKS5 proxy. `None` → use the workspace's shared client. TLS
+/// verification is only ever skipped when the request explicitly sets
+/// `verify_ssl=false` (never the default).
+fn build_settings_client(
+    req: &ExecuteApiReq,
+    proxy: Option<&str>,
+    wid: &Id,
+    allow_local: bool,
+) -> Option<reqwest::Client> {
     let no_redirect = req.follow_redirects == Some(false);
     let no_verify = req.verify_ssl == Some(false);
     if !no_redirect && !no_verify && proxy.is_none() {
@@ -103,9 +146,14 @@ fn build_settings_client(req: &ExecuteApiReq, proxy: Option<&str>) -> Option<req
     }
     let mut builder = reqwest::Client::builder()
         .user_agent("Otto-ApiClient/1.0")
-        .cookie_provider(cookie_jar());
+        .cookie_provider(cookie_jar_for(wid));
     builder = if no_redirect {
         builder.redirect(reqwest::redirect::Policy::none())
+    } else if proxy.is_some() || allow_local {
+        // Tunnelled: redirects traverse the proxy and resolve at the FAR end —
+        // the local resolver check would only false-block bastion-only hosts.
+        // allow_local: the workspace explicitly opted in to private targets.
+        builder.redirect(reqwest::redirect::Policy::limited(10))
     } else {
         // Redirects still follow the SSRF-guarded policy.
         builder.redirect(net_guard::redirect_policy())
@@ -121,6 +169,23 @@ fn build_settings_client(req: &ExecuteApiReq, proxy: Option<&str>) -> Option<req
         }
     }
     builder.build().ok()
+}
+
+/// Workspace opt-in for local/private targets: reads
+/// `settings.api_client.allow_local` off the workspace row. Off by default;
+/// flipping it is an ADMIN action (workspace settings PATCH). Scope: only the
+/// API client's user-initiated requests — the rest of the daemon's outbound
+/// paths keep the full guard.
+pub(crate) async fn workspace_allows_local(ctx: &ServerCtx, wid: &Id) -> bool {
+    match ctx.workspaces.get(wid).await {
+        Ok(ws) => ws
+            .settings
+            .get("api_client")
+            .and_then(|a| a.get("allow_local"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 // ===========================================================================
@@ -428,6 +493,11 @@ fn req_to_new(wid: &Id, req: UpsertApiRequestReq, position: i64) -> NewApiReques
         body: req.body,
         auth: normalize_json_object(req.auth),
         ssh_connection_id: req.ssh_connection_id,
+        pre_request_script: req.pre_request_script.filter(|s| !s.trim().is_empty()),
+        post_response_script: req.post_response_script.filter(|s| !s.trim().is_empty()),
+        settings: req.settings.filter(|v| v.is_object()),
+        docs: req.docs.filter(|s| !s.trim().is_empty()),
+        graphql_variables: req.graphql_variables.filter(|s| !s.trim().is_empty()),
         position,
     }
 }
@@ -575,14 +645,16 @@ pub async fn import_curl(
     Ok(Json(parse_curl(&req.curl)?))
 }
 
-/// `GET /workspaces/{wid}/api-client/cookies` — list the shared cookie jar.
+/// `GET /workspaces/{wid}/api-client/cookies` — list THIS workspace's cookie
+/// jar. Editor-gated: cookie values are live credentials (session tokens), not
+/// something a read-only viewer should be able to exfiltrate.
 pub async fn list_cookies(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
-    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    let jar = cookie_jar();
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    let jar = cookie_jar_for(&wid);
     let store = jar
         .lock()
         .map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?;
@@ -600,14 +672,14 @@ pub async fn list_cookies(
     Ok(Json(Value::Array(cookies)))
 }
 
-/// `DELETE /workspaces/{wid}/api-client/cookies` — clear the shared cookie jar.
+/// `DELETE /workspaces/{wid}/api-client/cookies` — clear THIS workspace's jar.
 pub async fn clear_cookies(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let jar = cookie_jar();
+    let jar = cookie_jar_for(&wid);
     jar.lock()
         .map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?
         .clear();
@@ -727,23 +799,29 @@ pub async fn execute(
         }
     }
 
-    // Snapshot of the request as executed (post-substitution view recorded too).
+    // Snapshot of the request as executed (post-substitution view recorded
+    // too). REDACTED before it hits history: `auth` carries bearer tokens /
+    // passwords / api keys and history is a plaintext, viewer-readable SQLite
+    // table — the DB must hold no live credentials (AGENTS.md rule).
     let request_snapshot = json!({
         "method": req.method,
         "url": req.url,
-        "headers": req.headers,
+        "headers": redact_header_pairs(&req.headers),
         "query": req.query,
         "body_mode": req.body_mode,
         "body": req.body,
-        "auth": req.auth,
+        "auth": redact_auth(&req.auth),
         "environment_id": req.environment_id,
         "ssh_connection_id": req.ssh_connection_id,
     });
 
+    // The workspace's explicit local/private-target opt-in (API-client scoped).
+    let allow_local = workspace_allows_local(&ctx, &wid).await;
+
     // Resolve the optional SSH tunnel first; a resolution failure flows through
     // the same error/history path as a network failure below.
     let send = match resolve_socks_proxy(&ctx, &wid, req.ssh_connection_id.as_ref()).await {
-        Ok(proxy) => build_and_send(&req, &vars, proxy.as_deref()).await,
+        Ok(proxy) => build_and_send(&req, &vars, proxy.as_deref(), &wid, allow_local).await,
         Err(msg) => Err(msg),
     };
     match send {
@@ -757,7 +835,7 @@ pub async fn execute(
                     status: Some(resp.status as i64),
                     duration_ms: Some(resp.duration_ms),
                     request: request_snapshot,
-                    response: serde_json::to_value(&resp).unwrap_or(Value::Null),
+                    response: redacted_history_response(&resp),
                 })
                 .await;
             Ok(Json(resp))
@@ -778,6 +856,66 @@ pub async fn execute(
             Err(ApiError(Error::Upstream(err)))
         }
     }
+}
+
+/// Redact an auth config for history storage: keep only its `type` — every
+/// other field (token, username/password, api-key value, oauth secrets) is a
+/// live credential.
+fn redact_auth(auth: &Value) -> Value {
+    match auth.get("type").and_then(Value::as_str) {
+        Some(t) => json!({ "type": t, "redacted": true }),
+        None => json!({ "type": "none" }),
+    }
+}
+
+/// Header names whose VALUES never belong in plaintext history.
+fn is_sensitive_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
+    )
+}
+
+/// Redact sensitive values in a `[{key,value,enabled}]` header-pair list
+/// (the request-template shape) for history storage.
+fn redact_header_pairs(headers: &Value) -> Value {
+    let Some(arr) = headers.as_array() else {
+        return headers.clone();
+    };
+    Value::Array(
+        arr.iter()
+            .map(|h| {
+                let name = h.get("key").and_then(Value::as_str).unwrap_or("");
+                if is_sensitive_header(name) {
+                    let mut o = h.clone();
+                    if let Some(m) = o.as_object_mut() {
+                        m.insert("value".into(), json!("•••"));
+                    }
+                    o
+                } else {
+                    h.clone()
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Serialize a response for history with credential-bearing headers
+/// (`Set-Cookie`, `WWW-Authenticate`) redacted. The LIVE response returned to
+/// the caller is untouched — only the persisted copy is scrubbed.
+fn redacted_history_response(resp: &ApiResponse) -> Value {
+    let mut v = serde_json::to_value(resp).unwrap_or(Value::Null);
+    if let Some(headers) = v.get_mut("headers").and_then(Value::as_array_mut) {
+        for h in headers {
+            let name = h.get("key").and_then(Value::as_str).unwrap_or("");
+            if matches!(name.to_ascii_lowercase().as_str(), "set-cookie" | "www-authenticate") {
+                if let Some(m) = h.as_object_mut() {
+                    m.insert("value".into(), json!("•••"));
+                }
+            }
+        }
+    }
+    v
 }
 
 /// Resolve the variable map: explicit `environment_id`, else the workspace's
@@ -890,13 +1028,22 @@ async fn build_and_send(
     req: &ExecuteApiReq,
     vars: &serde_json::Map<String, Value>,
     proxy: Option<&str>,
+    wid: &Id,
+    allow_local: bool,
 ) -> Result<ApiResponse, String> {
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 
     // --- method ---
     let url = substitute(&req.url, vars);
     // SSRF guard: resolve + classify the target host before connecting.
-    net_guard::check_url(&url).await?;
+    // Skipped when (a) the request rides an SSH tunnel — the FAR end resolves
+    // and dials, so the local check only false-blocks bastion-only hostnames
+    // and RFC1918 targets the tunnel exists to reach; or (b) the workspace has
+    // explicitly opted in to local/private targets (dev servers on localhost
+    // are the #1 thing an API client is pointed at).
+    if proxy.is_none() && !allow_local {
+        net_guard::check_url(&url).await?;
+    }
     let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
         .map_err(|_| format!("invalid HTTP method '{}'", req.method))?;
 
@@ -926,8 +1073,9 @@ async fn build_and_send(
 
     // Per-request settings: a custom client when any non-default is set or the
     // request is tunnelled, otherwise the shared pooled client.
-    let custom_client = build_settings_client(req, proxy);
-    let client = custom_client.as_ref().unwrap_or_else(|| http_client());
+    let custom_client = build_settings_client(req, proxy, wid, allow_local);
+    let shared_client = client_for(wid, allow_local);
+    let client = custom_client.as_ref().unwrap_or(&shared_client);
     let timeout = req
         .timeout_ms
         .map(Duration::from_millis)
@@ -1192,10 +1340,15 @@ fn apply_auth(
                 auth.get("password").and_then(Value::as_str).unwrap_or(""),
                 vars,
             );
-            let encoded = B64.encode(format!("{user}:{pass}"));
-            let hv = HeaderValue::from_str(&format!("Basic {encoded}"))
-                .map_err(|_| "invalid basic auth".to_string())?;
-            headers.insert(AUTHORIZATION, hv);
+            // Both empty → send NO header. `Basic Og==` (base64 of ":") is a
+            // real-but-empty credential some servers treat differently from
+            // an anonymous request.
+            if !user.is_empty() || !pass.is_empty() {
+                let encoded = B64.encode(format!("{user}:{pass}"));
+                let hv = HeaderValue::from_str(&format!("Basic {encoded}"))
+                    .map_err(|_| "invalid basic auth".to_string())?;
+                headers.insert(AUTHORIZATION, hv);
+            }
         }
         "api_key" => {
             let key = substitute(auth.get("key").and_then(Value::as_str).unwrap_or(""), vars);
@@ -1389,7 +1542,8 @@ async fn run_step(
     let exec = request_to_execute(&request);
 
     // Send via the shared single-request path (same reqwest logic as /execute).
-    match build_and_send(&exec, vars, proxy.as_deref()).await {
+    let allow_local = workspace_allows_local(ctx, wid).await;
+    match build_and_send(&exec, vars, proxy.as_deref(), wid, allow_local).await {
         Ok(resp) => {
             // Parse the body as JSON once for json_path assertions/extraction;
             // a non-JSON body yields Null (assertions/extracts simply miss).
@@ -1525,7 +1679,29 @@ fn ensure_in_workspace(entity_ws: &Id, wid: &Id) -> Result<(), ApiError> {
 
 /// Replace `{{name}}` occurrences with the corresponding variable value
 /// (string-coerced). Unknown placeholders are left intact.
+///
+/// USER/ENV variables win over the built-in dynamics (`$timestamp` & co) — a
+/// user who defines their own `$timestamp` means theirs. Values that
+/// themselves contain `{{…}}` re-expand for up to 3 bounded passes (nested
+/// vars like `base_url = {{host}}/api` now resolve; the bound keeps
+/// self-referencing definitions from looping).
 fn substitute(input: &str, vars: &serde_json::Map<String, Value>) -> String {
+    let mut cur = substitute_once(input, vars);
+    for _ in 0..2 {
+        if !cur.contains("{{") {
+            break;
+        }
+        let next = substitute_once(&cur, vars);
+        if next == cur {
+            break; // only unknown placeholders remain
+        }
+        cur = next;
+    }
+    cur
+}
+
+/// One substitution pass (see [`substitute`] for ordering + recursion rules).
+fn substitute_once(input: &str, vars: &serde_json::Map<String, Value>) -> String {
     if !input.contains("{{") {
         return input.to_string();
     }
@@ -1536,10 +1712,10 @@ fn substitute(input: &str, vars: &serde_json::Map<String, Value>) -> String {
         if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
             if let Some(end) = input[i + 2..].find("}}") {
                 let name = input[i + 2..i + 2 + end].trim();
-                if let Some(dynamic) = resolve_dynamic_var(name) {
-                    out.push_str(&dynamic);
-                } else if let Some(v) = vars.get(name) {
+                if let Some(v) = vars.get(name) {
                     out.push_str(&value_to_string(v));
+                } else if let Some(dynamic) = resolve_dynamic_var(name) {
+                    out.push_str(&dynamic);
                 } else {
                     // leave placeholder as-is
                     out.push_str(&input[i..i + 2 + end + 2]);

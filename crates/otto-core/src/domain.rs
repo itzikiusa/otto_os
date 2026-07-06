@@ -2086,6 +2086,22 @@ pub struct ApiRequest {
     /// directly.
     #[serde(default)]
     pub ssh_connection_id: Option<Id>,
+    /// Pre-request script, persisted with the request — previously lived only
+    /// in the localStorage tab draft and was silently dropped on Save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_request_script: Option<String>,
+    /// Post-response script (assertions / variable chaining).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_response_script: Option<String>,
+    /// Per-request settings: `{ "timeout_ms"?, "follow_redirects"?, "verify_ssl"? }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Value>,
+    /// Free-form request documentation (markdown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs: Option<String>,
+    /// GraphQL variables JSON (meaningful for `body_mode == "graphql"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphql_variables: Option<String>,
     pub position: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

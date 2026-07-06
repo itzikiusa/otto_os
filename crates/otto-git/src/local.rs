@@ -106,8 +106,10 @@ impl LocalGit {
     }
 
     /// Run git with args; non-zero exit → `Error::Upstream(first stderr line)`.
-    /// Returns stdout.
-    async fn run(&self, args: &[&str]) -> Result<String> {
+    /// Returns stdout. Public for callers with plumbing needs the typed API
+    /// doesn't cover (e.g. the workflow engine's worktree reaper resolving
+    /// `--git-common-dir` / branch reachability).
+    pub async fn run(&self, args: &[&str]) -> Result<String> {
         self.run_env(args, &[]).await.map(|(out, _)| out)
     }
 

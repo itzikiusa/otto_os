@@ -74,6 +74,21 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             Err(_) => continue,
         };
 
+        // Overlap guard: a run longer than the cadence must not stack a second
+        // concurrent copy (each provisions its own worktrees). The cursor is
+        // NOT advanced, so the missed tick fires once the run finishes.
+        match workflows_repo.has_active_run(&wf.id).await {
+            Ok(true) => {
+                info!(workflow_id = %wf.id, "workflow scheduler: previous run still active — skipping tick");
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!(workflow_id = %wf.id, "workflow scheduler: active-run check: {e}");
+                continue;
+            }
+        }
+
         // Advance the cursor first (idempotency: a slow/failing run can't
         // double-fire on the next tick).
         let mut spec2 = trigger.spec.clone();
@@ -98,6 +113,11 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         {
             input.insert("prompt".into(), json!(p));
         }
+        // Result delivery: thread the trigger's result_* destinations into the
+        // run input — `deliver_run_result` reads exactly these keys, so a
+        // scheduled run can report to a chat/webhook instead of finishing
+        // silently with no notification.
+        copy_result_destinations(&trigger.spec, &mut input);
         let input = Value::Object(input);
 
         // Create the run row, then execute in a background task.
@@ -130,6 +150,20 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         });
     }
     Ok(())
+}
+
+/// Copy a trigger spec's result-delivery destinations into a run input map.
+/// `deliver_run_result` reads these exact keys from the input; without them a
+/// scheduled/event/webhook run completes with no notification anywhere.
+pub(crate) fn copy_result_destinations(
+    spec: &Value,
+    input: &mut serde_json::Map<String, Value>,
+) {
+    for key in ["result_channel", "result_chat", "result_thread", "result_webhook"] {
+        if let Some(v) = spec.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+            input.insert(key.into(), json!(v));
+        }
+    }
 }
 
 /// True when a schedule-trigger spec is due to fire at `now`.
@@ -179,12 +213,43 @@ fn event_to_kind(event: &Event) -> Option<&'static str> {
         Event::SwarmStatus { .. }           => Some("swarm_status"),
         Event::ImprovementRunFinished { .. } => Some("improvement_run_finished"),
         Event::InsightReady { .. }          => Some("insight_ready"),
-        Event::WorkflowRunUpdated { .. }    => Some("workflow_run_updated"),
+        // `WorkflowRunUpdated` is deliberately NOT triggerable: the engine
+        // emits it on EVERY node transition of EVERY run, so a trigger on it
+        // recursively spawns runs that emit more of it — an unbounded run
+        // explosion. Trigger create/update rejects the kind too; this guard
+        // also silences any pre-existing rows.
+        //
         // Session, metric, notice, trail, task, swarm-run, improvement-edit,
         // skill-eval, swarm-message, swarm-task, meta-updated events are
         // deliberately excluded — too noisy or not useful as macro triggers.
         _ => None,
     }
+}
+
+/// The workspace an event belongs to, for scoping event triggers: a trigger
+/// must only fire for events in ITS workflow's workspace, not every workspace
+/// on the daemon. `None` (e.g. `InsightReady`, which is daemon-global) matches
+/// any workspace.
+fn event_workspace(event: &Event) -> Option<&otto_core::Id> {
+    match event {
+        Event::ReviewChanged { workspace_id, .. }
+        | Event::BudgetExceeded { workspace_id, .. }
+        | Event::ProductChanged { workspace_id, .. }
+        | Event::SwarmStatus { workspace_id, .. }
+        | Event::ImprovementRunFinished { workspace_id, .. } => Some(workspace_id),
+        _ => None,
+    }
+}
+
+/// Apply a trigger's optional `filter_json` (a FLAT object of
+/// `field: expected` equality checks) against the event's serialized payload.
+/// Absent/empty/non-object filters match everything; a field missing from the
+/// payload fails the match.
+fn filter_matches(filter: Option<&Value>, event_payload: &Value) -> bool {
+    let Some(Value::Object(map)) = filter else {
+        return true;
+    };
+    map.iter().all(|(k, expected)| event_payload.get(k) == Some(expected))
 }
 
 /// Start the event-trigger listener task. Returns a cancel flag; set to `true`
@@ -213,6 +278,8 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
             let Some(kind_str) = event_to_kind(&event) else {
                 continue;
             };
+            // Serialized once for `filter_json` matching against payload fields.
+            let event_payload = serde_json::to_value(&event).unwrap_or(Value::Null);
 
             // Load enabled event triggers whose spec declares this kind.
             let triggers_repo = TriggersRepo::new(ctx.pool.clone());
@@ -231,6 +298,7 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
                         .get("event_kind")
                         .and_then(Value::as_str)
                         == Some(kind_str)
+                        && filter_matches(t.spec.get("filter_json"), &event_payload)
                 })
                 .collect();
 
@@ -245,17 +313,49 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
                     Ok(w) => w,
                     Err(_) => continue,
                 };
+                // Workspace scoping: the event must belong to THIS workflow's
+                // workspace (a review in workspace A must not fire workspace
+                // B's triggers). Workspace-less events match anywhere.
+                if let Some(ev_ws) = event_workspace(&event) {
+                    if ev_ws != &wf.workspace_id {
+                        continue;
+                    }
+                }
+                // In-flight cap: one live run per workflow — an event storm
+                // queues nothing and cannot stack concurrent runs.
+                match workflows_repo.has_active_run(&wf.id).await {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        info!(workflow_id = %wf.id, event_kind = kind_str,
+                              "workflow event-trigger listener: run already active — skipping");
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(workflow_id = %wf.id, "workflow event-trigger listener: active-run check: {e}");
+                        continue;
+                    }
+                }
                 let ws = match ctx.workspaces.get(&wf.workspace_id).await {
                     Ok(w) => w,
                     Err(_) => continue,
                 };
 
                 // Build the run input: include the trigger kind so the workflow
-                // graph can branch or log on it.
-                let input = json!({
-                    "trigger": "event",
-                    "event_kind": kind_str,
-                });
+                // graph can branch or log on it, plus the trigger's result_*
+                // destinations so the run's outcome is delivered somewhere.
+                let mut input_map = serde_json::Map::new();
+                input_map.insert("trigger".into(), json!("event"));
+                input_map.insert("event_kind".into(), json!(kind_str));
+                if let Some(p) = trigger
+                    .spec
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    input_map.insert("prompt".into(), json!(p));
+                }
+                copy_result_destinations(&trigger.spec, &mut input_map);
+                let input = Value::Object(input_map);
 
                 let run = match workflows_repo
                     .create_run(&wf.id, &wf.workspace_id, &input)
@@ -298,6 +398,53 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_run_updated_is_not_a_fireable_event_kind() {
+        // Regression: triggering on the engine's own per-node event recursively
+        // spawns runs (N² explosion). The mapping must never expose it.
+        let ev = Event::WorkflowRunUpdated {
+            workspace_id: "w1".into(),
+            run_id: "r1".into(),
+            status: "running".into(),
+            node_id: None,
+            rev: 1,
+            node: None,
+            nodes_done: 0,
+            nodes_total: 0,
+            waiting_approval: false,
+        };
+        assert_eq!(event_to_kind(&ev), None);
+    }
+
+    #[test]
+    fn filter_json_matches_flat_fields() {
+        let payload = json!({"status": "done", "workspace_id": "w1", "n": 3});
+        assert!(filter_matches(None, &payload));
+        assert!(filter_matches(Some(&json!({})), &payload));
+        assert!(filter_matches(Some(&json!({"status": "done"})), &payload));
+        assert!(filter_matches(Some(&json!({"status": "done", "n": 3})), &payload));
+        assert!(!filter_matches(Some(&json!({"status": "failed"})), &payload));
+        assert!(!filter_matches(Some(&json!({"missing": "x"})), &payload));
+        // Non-object filters are treated as match-all (defensive).
+        assert!(filter_matches(Some(&json!("garbage")), &payload));
+    }
+
+    #[test]
+    fn result_destinations_copy_only_nonempty_strings() {
+        let spec = json!({
+            "result_channel": "slack",
+            "result_chat": "C123",
+            "result_thread": "",
+            "prompt": "irrelevant",
+        });
+        let mut input = serde_json::Map::new();
+        copy_result_destinations(&spec, &mut input);
+        assert_eq!(input.get("result_channel"), Some(&json!("slack")));
+        assert_eq!(input.get("result_chat"), Some(&json!("C123")));
+        assert!(input.get("result_thread").is_none(), "empty string skipped");
+        assert!(input.get("prompt").is_none(), "unrelated keys not copied");
+    }
 
     #[test]
     fn interval_due_when_never_run() {

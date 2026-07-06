@@ -516,6 +516,10 @@ async fn run(cfg: Config) -> Result<(), String> {
         Ok(_) => {}
         Err(e) => tracing::warn!("workflow recovery: {e}"),
     }
+    // And their leftover run worktrees (+ safe otto-wf/<id> branch cleanup) —
+    // finalize-time reaping can't run for a crashed daemon, and pre-reap
+    // versions left one worktree per run in the user's real repos.
+    otto_server::workflow_engine::sweep_stale_run_worktrees(&ctx).await;
 
     // Goal loops: each loop's controller dies with the process, so a row left
     // running/paused/blocked is orphaned. Fail them, then remove their isolated

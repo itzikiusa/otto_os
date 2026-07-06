@@ -45,6 +45,13 @@ pub struct NewApiRequest {
     pub auth: serde_json::Value,
     /// Optional `ssh`-kind connection id to tunnel executions through.
     pub ssh_connection_id: Option<Id>,
+    /// Persisted request extras (previously localStorage-only, lost on Save).
+    pub pre_request_script: Option<String>,
+    pub post_response_script: Option<String>,
+    /// JSON `{ timeout_ms?, follow_redirects?, verify_ssl? }`.
+    pub settings: Option<serde_json::Value>,
+    pub docs: Option<String>,
+    pub graphql_variables: Option<String>,
     pub position: i64,
 }
 
@@ -100,6 +107,13 @@ fn row_to_request(r: &sqlx::sqlite::SqliteRow) -> Result<ApiRequest> {
         body: r.get("body"),
         auth: json(&r.get::<String, _>("auth_json"))?,
         ssh_connection_id: r.get("ssh_connection_id"),
+        pre_request_script: r.get("pre_request_script"),
+        post_response_script: r.get("post_response_script"),
+        settings: r
+            .get::<Option<String>, _>("settings_json")
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        docs: r.get("docs"),
+        graphql_variables: r.get("graphql_variables"),
         position: r.get("position"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
@@ -265,8 +279,10 @@ impl ApiClientRepo {
         sqlx::query(
             "INSERT INTO api_requests
                 (id, workspace_id, collection_id, name, method, url, headers_json, query_json,
-                 body_mode, body, auth_json, ssh_connection_id, position, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 body_mode, body, auth_json, ssh_connection_id, pre_request_script,
+                 post_response_script, settings_json, docs, graphql_variables, position,
+                 created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&q.workspace_id)
@@ -280,6 +296,11 @@ impl ApiClientRepo {
         .bind(&q.body)
         .bind(q.auth.to_string())
         .bind(&q.ssh_connection_id)
+        .bind(&q.pre_request_script)
+        .bind(&q.post_response_script)
+        .bind(q.settings.as_ref().map(|v| v.to_string()))
+        .bind(&q.docs)
+        .bind(&q.graphql_variables)
         .bind(q.position)
         .bind(&now)
         .bind(&now)
@@ -297,7 +318,8 @@ impl ApiClientRepo {
             "UPDATE api_requests SET
                 collection_id = ?, name = ?, method = ?, url = ?, headers_json = ?,
                 query_json = ?, body_mode = ?, body = ?, auth_json = ?, ssh_connection_id = ?,
-                updated_at = ?
+                pre_request_script = ?, post_response_script = ?, settings_json = ?, docs = ?,
+                graphql_variables = ?, updated_at = ?
              WHERE id = ?",
         )
         .bind(&q.collection_id)
@@ -310,6 +332,11 @@ impl ApiClientRepo {
         .bind(&q.body)
         .bind(q.auth.to_string())
         .bind(&q.ssh_connection_id)
+        .bind(&q.pre_request_script)
+        .bind(&q.post_response_script)
+        .bind(q.settings.as_ref().map(|v| v.to_string()))
+        .bind(&q.docs)
+        .bind(&q.graphql_variables)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
@@ -644,12 +671,21 @@ mod tests {
                 body: String::new(),
                 auth: jval!({"type":"none"}),
                 ssh_connection_id: None,
+                pre_request_script: Some("console.log('pre')".into()),
+                post_response_script: None,
+                settings: Some(jval!({"verify_ssl": false})),
+                docs: Some("List users".into()),
+                graphql_variables: None,
                 position: 0,
             })
             .await
             .unwrap();
         assert_eq!(req.method, "GET");
         assert_eq!(req.headers[0]["key"], "Accept");
+        // Extras round-trip (regression: these were draft-only and lost on save).
+        assert_eq!(req.pre_request_script.as_deref(), Some("console.log('pre')"));
+        assert_eq!(req.settings, Some(jval!({"verify_ssl": false})));
+        assert_eq!(req.docs.as_deref(), Some("List users"));
 
         // filter by collection
         let in_col = repo
@@ -674,6 +710,11 @@ mod tests {
                     body: "{}".into(),
                     auth: jval!({"type":"none"}),
                     ssh_connection_id: None,
+                    pre_request_script: None,
+                    post_response_script: Some("assert(status == 200)".into()),
+                    settings: None,
+                    docs: None,
+                    graphql_variables: None,
                     position: 0,
                 },
             )
@@ -681,6 +722,8 @@ mod tests {
             .unwrap();
         assert_eq!(updated.method, "POST");
         assert_eq!(updated.body_mode, "json");
+        assert_eq!(updated.post_response_script.as_deref(), Some("assert(status == 200)"));
+        assert!(updated.pre_request_script.is_none(), "overwritten to None");
 
         // deleting the collection nulls the request's collection_id (SET NULL)
         repo.delete_collection(&col.id).await.unwrap();

@@ -2201,6 +2201,19 @@ pub struct UpsertApiRequestReq {
     /// Optional `ssh`-kind connection id to tunnel this request through.
     #[serde(default)]
     pub ssh_connection_id: Option<Id>,
+    /// Persisted request extras — scripts, per-request settings
+    /// (`{timeout_ms?, follow_redirects?, verify_ssl?}`), docs, GraphQL vars.
+    /// Previously draft-only and silently dropped on Save.
+    #[serde(default)]
+    pub pre_request_script: Option<String>,
+    #[serde(default)]
+    pub post_response_script: Option<String>,
+    #[serde(default)]
+    pub settings: Option<Value>,
+    #[serde(default)]
+    pub docs: Option<String>,
+    #[serde(default)]
+    pub graphql_variables: Option<String>,
 }
 
 /// `POST/PATCH /workspaces/{wid}/api-client/environments[/{id}]`

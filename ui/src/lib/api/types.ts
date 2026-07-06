@@ -3370,6 +3370,12 @@ export interface ApiRequest {
   auth: ApiAuth;
   /** Optional `ssh`-kind connection id to tunnel executions through (null = direct). */
   ssh_connection_id?: Id | null;
+  /** Persisted request extras (scripts/settings/docs/GraphQL vars). */
+  pre_request_script?: string | null;
+  post_response_script?: string | null;
+  settings?: { timeout_ms?: number; follow_redirects?: boolean; verify_ssl?: boolean } | null;
+  docs?: string | null;
+  graphql_variables?: string | null;
   position: number;
   created_at: string;
   updated_at: string;
@@ -3413,6 +3419,12 @@ export interface UpsertApiRequestReq {
   auth?: ApiAuth;
   /** Optional `ssh`-kind connection id to tunnel executions through. */
   ssh_connection_id?: Id | null;
+  /** Persisted request extras (scripts/settings/docs/GraphQL vars). */
+  pre_request_script?: string | null;
+  post_response_script?: string | null;
+  settings?: { timeout_ms?: number; follow_redirects?: boolean; verify_ssl?: boolean } | null;
+  docs?: string | null;
+  graphql_variables?: string | null;
 }
 
 export interface UpsertApiEnvironmentReq {

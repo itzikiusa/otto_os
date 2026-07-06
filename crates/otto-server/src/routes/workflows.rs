@@ -1044,6 +1044,7 @@ pub async fn create_trigger(
             obj.insert("token".into(), Value::String(token));
         }
     }
+    validate_trigger_spec(&req.kind, &spec)?;
     let t = triggers(&ctx)
         .create(NewWorkflowTrigger {
             workflow_id: id.clone(),
@@ -1083,11 +1084,61 @@ pub async fn update_trigger(
     let t = triggers(&ctx).get(&id).await.map_err(ApiError)?;
     let wf = repo(&ctx).get(&t.workflow_id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
+    if let Some(spec) = &req.spec {
+        validate_trigger_spec(&t.kind, spec)?;
+    }
     let updated = triggers(&ctx)
         .update(&id, req.spec, req.enabled)
         .await
         .map_err(ApiError)?;
     Ok(Json(updated))
+}
+
+/// Validate a trigger spec at WRITE time so misconfigurations fail loudly
+/// instead of silently never firing:
+/// - `schedule`: cadence/at/weekday/cron validated by the shared cadence
+///   engine (an unknown cadence like "monthly" previously saved fine and then
+///   `is_due` returned false forever, with no error anywhere).
+/// - `event`: `event_kind` must be a kind the listener actually fires, and
+///   never `workflow_run_updated` (the engine emits it per node transition —
+///   triggering on it is a recursive run explosion).
+fn validate_trigger_spec(kind: &str, spec: &Value) -> Result<(), ApiError> {
+    match kind {
+        "schedule" => crate::cadence::validate(spec).map_err(ApiError),
+        "event" => {
+            const FIREABLE: &[&str] = &[
+                "review_changed",
+                "budget_exceeded",
+                "product_changed",
+                "swarm_status",
+                "improvement_run_finished",
+                "insight_ready",
+            ];
+            let ek = spec.get("event_kind").and_then(Value::as_str).unwrap_or("");
+            if ek == "workflow_run_updated" {
+                return Err(ApiError(Error::Invalid(
+                    "event_kind 'workflow_run_updated' is not allowed: the engine emits it on \
+                     every node transition, so triggering on it would recursively spawn runs"
+                        .into(),
+                )));
+            }
+            if !FIREABLE.contains(&ek) {
+                return Err(ApiError(Error::Invalid(format!(
+                    "event_kind must be one of {} (got '{ek}')",
+                    FIREABLE.join("|")
+                ))));
+            }
+            if let Some(f) = spec.get("filter_json") {
+                if !f.is_object() && !f.is_null() {
+                    return Err(ApiError(Error::Invalid(
+                        "filter_json must be a flat object of field: expected-value pairs".into(),
+                    )));
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `DELETE /workflow-triggers/{id}`
@@ -1119,7 +1170,7 @@ pub async fn webhook_trigger(
     body: axum::body::Bytes,
 ) -> ApiResult<Json<WorkflowRun>> {
     // Verify the token belongs to an enabled webhook trigger on this workflow.
-    let _trigger = triggers(&ctx)
+    let trigger = triggers(&ctx)
         .find_webhook(&wf_id, &token)
         .await
         .map_err(|_| ApiError(Error::Unauthorized))?;
@@ -1128,11 +1179,34 @@ pub async fn webhook_trigger(
     let ws = ctx.workspaces.get(&wf.workspace_id).await.map_err(ApiError)?;
 
     // Parse the body as JSON input; fall back to null if empty/invalid.
-    let input: Value = if body.is_empty() {
+    let mut input: Value = if body.is_empty() {
         Value::Null
     } else {
         serde_json::from_slice(&body).unwrap_or(Value::Null)
     };
+    // Thread the trigger's default result destinations into the input (the
+    // caller's own body keys win) so a webhook-fired run reports somewhere by
+    // default instead of finishing silently.
+    if let Value::Object(spec_defaults) = &trigger.spec {
+        let map = match &mut input {
+            Value::Object(m) => m,
+            other => {
+                *other = Value::Object(Default::default());
+                match other {
+                    Value::Object(m) => m,
+                    _ => unreachable!(),
+                }
+            }
+        };
+        for key in ["result_channel", "result_chat", "result_thread", "result_webhook"] {
+            if map.contains_key(key) {
+                continue;
+            }
+            if let Some(v) = spec_defaults.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                map.insert(key.into(), Value::String(v.to_string()));
+            }
+        }
+    }
 
     let run = repo(&ctx)
         .create_run(&wf.id, &wf.workspace_id, &input)

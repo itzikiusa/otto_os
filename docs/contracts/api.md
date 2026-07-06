@@ -1485,7 +1485,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
 | POST /workspaces/{wid}/api-client/requests | ws editor | CreateRequestReq | Request |
 | GET /workspaces/{wid}/api-client/requests/{id} | ws viewer | — | Request |
-| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request |
+| PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, verify_ssl?}`), `docs?`, `graphql_variables?` |
 | DELETE /workspaces/{wid}/api-client/requests/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/environments | ws viewer | — | `Environment[]` |
 | POST /workspaces/{wid}/api-client/environments | ws editor | CreateEnvironmentReq | Environment |
@@ -1499,8 +1499,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
 | POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token |
-| GET /workspaces/{wid}/api-client/cookies | ws viewer | — | cookie jar |
-| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear cookies |
+| GET /workspaces/{wid}/api-client/cookies | ws editor | — | THIS workspace's cookie jar (jars are per-workspace, never shared; values are live credentials — editor-gated) |
+| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear THIS workspace's jar |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
 | POST /workspaces/{wid}/api-client/automations | ws editor | CreateAutomationReq | Automation |
 | PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | UpdateAutomationReq | Automation |

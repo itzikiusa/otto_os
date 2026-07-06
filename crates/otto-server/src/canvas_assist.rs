@@ -208,10 +208,11 @@ pub async fn assist_scene(
                 let kept = "Kept your manual edits saved during the turn; the agent's \
                             version was NOT applied. Re-run Ask AI to regenerate on \
                             top of your changes.";
-                note = Some(match note {
-                    Some(n) => format!("{kept}\n\n{n}"),
-                    None => kept.to_string(),
-                });
+                note = if note.is_empty() {
+                    kept.to_string()
+                } else {
+                    format!("{kept}\n\n{note}")
+                };
             }
         }
     }

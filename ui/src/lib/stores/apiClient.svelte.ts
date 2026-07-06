@@ -594,6 +594,13 @@ class ApiClientStore {
       body: d.body,
       auth: d.auth,
       ssh_connection_id: d.ssh_connection_id ?? null,
+      // Extras now persist server-side (they were draft-only and silently
+      // lost on save/reload before).
+      pre_request_script: d.pre_request_script || null,
+      post_response_script: d.post_response_script || null,
+      settings: d.settings ?? null,
+      docs: d.docs || null,
+      graphql_variables: d.graphql_variables || null,
     };
     const saved = await this.saveRequest(body, d.requestId ?? undefined);
     if (saved) {
@@ -1003,6 +1010,11 @@ class ApiClientStore {
       body: r.body,
       auth: { ...r.auth },
       ssh_connection_id: r.ssh_connection_id ?? null,
+      pre_request_script: r.pre_request_script ?? undefined,
+      post_response_script: r.post_response_script ?? undefined,
+      settings: r.settings ?? undefined,
+      docs: r.docs ?? undefined,
+      graphql_variables: r.graphql_variables ?? undefined,
       proto: '',
       grpc_method: '',
     };
