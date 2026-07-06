@@ -55,6 +55,23 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     const mod = e.metaKey || e.ctrlKey;
     const term = keyContext.terminalFocused;
 
+    // Bare Backspace outside an editable element: WKWebView's legacy default
+    // is "navigate back", which silently loses page state when the user just
+    // missed a text field (or a grid/canvas owns the key). Kill the default;
+    // component handlers (canvas node delete, chip removal…) still run.
+    if (e.key === 'Backspace' && !mod && !e.altKey && !term) {
+      const el = document.activeElement as HTMLElement | null;
+      const editable =
+        !!el &&
+        (el.tagName === 'INPUT' ||
+          el.tagName === 'TEXTAREA' ||
+          el.tagName === 'SELECT' ||
+          el.isContentEditable ||
+          !!el.closest('.cm-editor, .xterm'));
+      if (!editable) e.preventDefault();
+      return;
+    }
+
     // ⌃Tab cycling (ctrl specifically, also when meta absent; shift = previous).
     if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Tab') {
       e.preventDefault();
