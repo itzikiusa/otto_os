@@ -80,6 +80,21 @@ pub trait GitProvider: Send + Sync {
     async fn create_pr(&self, r: &RemoteRef, req: &CreatePrReq) -> Result<PrSummary>;
     async fn update_pr(&self, r: &RemoteRef, number: u64, req: &UpdatePrReq) -> Result<()>;
     async fn comment(&self, r: &RemoteRef, number: u64, c: &NewPrCommentReq) -> Result<PrComment>;
+    /// Resolve (`resolved: true`) or reopen (`false`) a review thread.
+    /// `thread_id` is the `PrComment.thread_id` surfaced by `get_pr` —
+    /// provider-specific (Bitbucket comment id, GitLab discussion id, GitHub
+    /// GraphQL thread node id). Default: unsupported.
+    async fn resolve_pr_thread(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+        _thread_id: &str,
+        _resolved: bool,
+    ) -> Result<()> {
+        Err(otto_core::Error::Invalid(
+            "resolving review threads is not supported for this provider".into(),
+        ))
+    }
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()>;
     async fn merge(&self, r: &RemoteRef, number: u64, strategy: MergeStrategy) -> Result<()>;
     async fn decline(&self, r: &RemoteRef, number: u64) -> Result<()>;

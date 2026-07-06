@@ -77,6 +77,41 @@ impl Github {
             .await
     }
 
+    /// POST /graphql with the bound token. GraphQL failures come back as 200 +
+    /// an `errors` array — surface those as `Upstream` like REST errors.
+    async fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
+        let v = self
+            .http
+            .json(
+                self.http
+                    .client()
+                    .post(format!("{BASE}/graphql"))
+                    .bearer_auth(&self.token)
+                    .json(&json!({ "query": query, "variables": variables })),
+            )
+            .await?;
+        if let Some(msg) = varr(&v, &["errors"])
+            .first()
+            .map(|e| vstr(e, &["message"]))
+        {
+            return Err(Error::Upstream(format!("github graphql: {msg}")));
+        }
+        Ok(v)
+    }
+
+    /// Review threads with resolution state — REST doesn't expose `isResolved`,
+    /// so this is the one GraphQL read. Returns the `reviewThreads.nodes` array.
+    async fn fetch_review_threads(&self, r: &RemoteRef, number: u64) -> Result<Vec<Value>> {
+        const Q: &str = "query($owner:String!,$name:String!,$number:Int!){\
+            repository(owner:$owner,name:$name){pullRequest(number:$number){\
+            reviewThreads(first:100){nodes{id isResolved \
+            comments(first:50){nodes{databaseId}}}}}}}";
+        let v = self
+            .graphql(Q, json!({ "owner": r.owner, "name": r.repo, "number": number }))
+            .await?;
+        Ok(varr(&v, &["data", "repository", "pullRequest", "reviewThreads", "nodes"]).to_vec())
+    }
+
     /// Fetch GitHub check-run status for the HEAD commit of `number` and
     /// aggregate it into a [`CiStatus`]. Returns `CiStatus::none()` on any
     /// provider error so a CI probe never fails the whole PR fetch.
@@ -230,6 +265,35 @@ fn comment_from(v: &Value, path: Option<String>, line: Option<u32>) -> PrComment
         line,
         created_at: ts(&vstr(v, &["created_at"])),
         replies: Vec::new(),
+        resolved: false,
+        thread_id: None, // stamped from GraphQL reviewThreads in get_pr
+    }
+}
+
+/// Stamp GraphQL review-thread resolution onto the REST-built threads.
+/// `thread_nodes` is `reviewThreads.nodes`: each node maps its comments'
+/// `databaseId`s (== REST comment ids) to the thread node `id` + `isResolved`.
+fn apply_thread_resolution(top: &mut [PrComment], thread_nodes: &[Value]) {
+    let mut by_comment: std::collections::HashMap<String, (String, bool)> =
+        std::collections::HashMap::new();
+    for t in thread_nodes {
+        let tid = vstr(t, &["id"]);
+        if tid.is_empty() {
+            continue;
+        }
+        let resolved = vbool(t, &["isResolved"]).unwrap_or(false);
+        for c in varr(t, &["comments", "nodes"]) {
+            let db_id = super::vu64(c, &["databaseId"]);
+            if db_id > 0 {
+                by_comment.insert(db_id.to_string(), (tid.clone(), resolved));
+            }
+        }
+    }
+    for c in top.iter_mut() {
+        if let Some((tid, resolved)) = by_comment.get(&c.id) {
+            c.thread_id = Some(tid.clone());
+            c.resolved = *resolved;
+        }
     }
 }
 
@@ -322,6 +386,16 @@ impl super::GitProvider for Github {
                 t.replies.push(reply);
             } else {
                 top.push(reply); // orphan — surface as top-level
+            }
+        }
+        // Best-effort resolution state (GraphQL only) — a missing scope or a
+        // network hiccup must never fail the PR fetch.
+        if !top.is_empty() {
+            match self.fetch_review_threads(r, number).await {
+                Ok(nodes) => apply_thread_resolution(&mut top, &nodes),
+                Err(e) => {
+                    tracing::debug!("github review-thread resolution unavailable: {e}")
+                }
             }
         }
         comments.append(&mut top);
@@ -504,6 +578,23 @@ impl super::GitProvider for Github {
             )
             .await?;
         Ok(comment_from(&v, None, None))
+    }
+
+    /// GraphQL `resolveReviewThread` / `unresolveReviewThread` — `thread_id`
+    /// is the reviewThread node id from `get_pr` (not a REST comment id).
+    async fn resolve_pr_thread(
+        &self,
+        _r: &RemoteRef,
+        _number: u64,
+        thread_id: &str,
+        resolved: bool,
+    ) -> Result<()> {
+        let m = if resolved {
+            "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id}}}"
+        } else {
+            "mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{id}}}"
+        };
+        self.graphql(m, json!({ "id": thread_id })).await.map(|_| ())
     }
 
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()> {
@@ -790,11 +881,40 @@ fn parse_check_runs_fixture(json_str: &str) -> crate::types::CiStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        collaborator_from, create_pr_body, parse_check_runs_fixture, parse_github_expiry,
-        reviewer_warning, scopes_header, summary_from,
+        apply_thread_resolution, collaborator_from, comment_from, create_pr_body,
+        parse_check_runs_fixture, parse_github_expiry, reviewer_warning, scopes_header,
+        summary_from,
     };
     use chrono::{Datelike, Timelike};
     use otto_core::api::CreatePrReq;
+
+    #[test]
+    fn thread_resolution_joins_by_database_id() {
+        let mut top = vec![
+            comment_from(
+                &serde_json::json!({"id": 101, "user": {"login": "a"}, "body": "x",
+                                    "created_at": "2026-01-01T00:00:00Z"}),
+                Some("f.rs".into()),
+                Some(3),
+            ),
+            comment_from(
+                &serde_json::json!({"id": 202, "user": {"login": "b"}, "body": "y",
+                                    "created_at": "2026-01-01T00:00:00Z"}),
+                Some("g.rs".into()),
+                Some(9),
+            ),
+        ];
+        let nodes = vec![serde_json::json!({
+            "id": "PRRT_abc", "isResolved": true,
+            "comments": {"nodes": [{"databaseId": 101}]}
+        })];
+        apply_thread_resolution(&mut top, &nodes);
+        assert!(top[0].resolved);
+        assert_eq!(top[0].thread_id.as_deref(), Some("PRRT_abc"));
+        // Comment 202 has no thread node → untouched defaults.
+        assert!(!top[1].resolved);
+        assert!(top[1].thread_id.is_none());
+    }
 
     fn req(draft: Option<bool>, reviewers: Option<Vec<String>>) -> CreatePrReq {
         CreatePrReq {

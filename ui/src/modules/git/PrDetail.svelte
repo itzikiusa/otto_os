@@ -165,6 +165,17 @@
     await load(repoId, number);
   }
 
+  /** Resolve or reopen a review thread on the provider, then refresh statuses. */
+  async function resolveThread(threadId: string, resolved: boolean): Promise<void> {
+    try {
+      await api.post(`/repos/${repoId}/prs/${number}/comments/${encodeURIComponent(threadId)}/resolve`, { resolved });
+      toasts.success(resolved ? 'Thread resolved' : 'Thread reopened');
+      await load(repoId, number);
+    } catch (e) {
+      toasts.error(resolved ? 'Resolve failed' : 'Reopen failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   // On a phone the on-screen keyboard can cover the comment box (it's at the
   // bottom of the Summary tab). Scroll it into view once focus lands; deferred so
   // it runs after the keyboard starts animating up.
@@ -416,7 +427,7 @@
         </div>
         {#each generalComments as c (c.id)}
           <div class="card" style="padding: 4px 14px 8px; margin-bottom: 8px">
-            <CommentThread comment={c} onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} />
+            <CommentThread comment={c} onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} onresolve={resolveThread} />
           </div>
         {:else}
           <p class="dim" style="font-size: 12px">No comments yet.</p>
@@ -453,6 +464,8 @@
             showNav={true}
             comments={inlineComments}
             onAddComment={(path, line, body) => postComment(body, path, line)}
+            onReplyComment={(parentId, body) => postComment(body, undefined, undefined, parentId)}
+            onResolveComment={resolveThread}
           />
         {/if}
       </section>

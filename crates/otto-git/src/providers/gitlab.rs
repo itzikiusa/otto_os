@@ -210,6 +210,9 @@ fn note_to_comment(note: &Value, id_override: Option<String>) -> PrComment {
         .and_then(|p| p.get("new_line"))
         .and_then(Value::as_u64)
         .map(|l| l as u32);
+    // Notes carry `resolvable` + `resolved` booleans; the head note's state is
+    // the thread's state.
+    let resolved = note.get("resolved").and_then(Value::as_bool).unwrap_or(false);
     PrComment {
         id: id_override.unwrap_or_else(|| vu64(note, &["id"]).to_string()),
         author: vstr(note, &["author", "name"]),
@@ -218,6 +221,8 @@ fn note_to_comment(note: &Value, id_override: Option<String>) -> PrComment {
         line,
         created_at: ts(&vstr(note, &["created_at"])),
         replies: Vec::new(),
+        resolved,
+        thread_id: None, // stamped on resolvable thread heads in get_pr
     }
 }
 
@@ -267,7 +272,11 @@ impl super::GitProvider for Gitlab {
                 .filter(|n| !n.get("system").and_then(Value::as_bool).unwrap_or(false))
                 .collect();
             let Some(first) = notes.first() else { continue };
-            let mut head = note_to_comment(first, Some(disc_id));
+            let mut head = note_to_comment(first, Some(disc_id.clone()));
+            // Resolve targets the discussion; only resolvable threads get one.
+            if first.get("resolvable").and_then(Value::as_bool).unwrap_or(false) {
+                head.thread_id = Some(disc_id);
+            }
             for reply in &notes[1..] {
                 head.replies.push(note_to_comment(reply, None));
             }
@@ -473,6 +482,25 @@ impl super::GitProvider for Gitlab {
             )
             .await?;
         Ok(note_to_comment(&v, None))
+    }
+
+    /// `PUT .../discussions/{disc_id}?resolved=` toggles the whole thread.
+    /// `thread_id` is the discussion id (the head comment's exposed id).
+    async fn resolve_pr_thread(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        thread_id: &str,
+        resolved: bool,
+    ) -> Result<()> {
+        self.http
+            .ok(self
+                .req(
+                    reqwest::Method::PUT,
+                    &Self::mr_path(r, &format!("/{number}/discussions/{thread_id}")),
+                )
+                .query(&[("resolved", if resolved { "true" } else { "false" })]))
+            .await
     }
 
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()> {
@@ -712,9 +740,27 @@ fn parse_pipeline_fixture(json_str: &str) -> crate::types::CiStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_mr_body, member_to_collaborator, parse_gitlab_expiry, parse_pipeline_fixture,
-        strip_draft_prefix, summary_from,
+        create_mr_body, member_to_collaborator, note_to_comment, parse_gitlab_expiry,
+        parse_pipeline_fixture, strip_draft_prefix, summary_from,
     };
+
+    #[test]
+    fn note_resolved_flag_maps() {
+        let n = note_to_comment(
+            &json!({"id": 5, "author": {"name": "Ada"}, "body": "b",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "resolvable": true, "resolved": true}),
+            Some("disc-1".into()),
+        );
+        assert!(n.resolved);
+        assert_eq!(n.id, "disc-1");
+        let open = note_to_comment(
+            &json!({"id": 6, "author": {"name": "Ada"}, "body": "b",
+                    "created_at": "2026-01-01T00:00:00Z", "resolvable": true}),
+            None,
+        );
+        assert!(!open.resolved);
+    }
     use chrono::{Datelike, Timelike};
     use otto_core::api::CreatePrReq;
     use serde_json::json;

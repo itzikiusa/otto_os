@@ -7,13 +7,21 @@
   interface Props {
     comment: PrComment;
     onreply?: (parentId: string, body: string) => Promise<void>;
+    /** Resolve/reopen the thread on the provider. Only offered on thread heads
+     *  that carry a provider thread_id. */
+    onresolve?: (threadId: string, resolved: boolean) => Promise<void>;
     depth?: number;
   }
-  let { comment, onreply, depth = 0 }: Props = $props();
+  let { comment, onreply, onresolve, depth = 0 }: Props = $props();
 
   let replying = $state(false);
   let replyText = $state('');
   let busy = $state(false);
+  let resolveBusy = $state(false);
+
+  // Thread status lives on the head comment; replies inherit the container.
+  const isHead = $derived(depth === 0);
+  const canResolve = $derived(isHead && onresolve != null && comment.thread_id != null);
 
   // On a phone the desktop 18px-per-level indent quickly eats the narrow width
   // for deep reply chains; halve it under ≤1024 so nested threads stay readable
@@ -47,6 +55,16 @@
       busy = false;
     }
   }
+
+  async function toggleResolved(): Promise<void> {
+    if (!onresolve || comment.thread_id == null) return;
+    resolveBusy = true;
+    try {
+      await onresolve(comment.thread_id, !comment.resolved);
+    } finally {
+      resolveBusy = false;
+    }
+  }
 </script>
 
 <div class="cmt" style="margin-inline-start: {indent}px">
@@ -56,13 +74,16 @@
     {#if comment.path && comment.line !== null && depth === 0}
       <span class="chip mono cmt-loc">{comment.path}:{comment.line}</span>
     {/if}
+    {#if isHead && comment.resolved}
+      <span class="chip ok cmt-status" title="This thread is resolved on the provider">Resolved</span>
+    {/if}
     <span class="cmt-date dim">{fmtDate(comment.created_at)}</span>
   </div>
   <div class="cmt-body md-body">
     <!-- renderMarkdown escapes HTML before transforming -->
     {@html renderMarkdown(comment.body)}
   </div>
-  {#if onreply}
+  {#if onreply || canResolve}
     <div class="cmt-actions">
       {#if replying}
         <textarea class="input" rows="2" bind:value={replyText} placeholder="Reply…"></textarea>
@@ -73,7 +94,19 @@
           </button>
         </div>
       {:else}
-        <button class="btn small ghost" onclick={() => (replying = true)}>Reply</button>
+        <div class="row cmt-action-row">
+          {#if onreply}
+            <button class="btn small ghost" onclick={() => (replying = true)}>Reply</button>
+          {/if}
+          {#if canResolve}
+            <button
+              class="btn small ghost"
+              disabled={resolveBusy}
+              title={comment.resolved ? 'Reopen this thread on the provider' : 'Mark this thread resolved on the provider'}
+              onclick={toggleResolved}
+            >{resolveBusy ? '…' : comment.resolved ? 'Reopen' : 'Resolve'}</button>
+          {/if}
+        </div>
       {/if}
     </div>
   {/if}

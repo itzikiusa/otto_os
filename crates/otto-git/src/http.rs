@@ -15,8 +15,8 @@ use otto_core::api::{
     CreateGitAccountReq, CreatePrReq, DiffResp, GitAccountTestResp, MergeBranchReq, MergeCommitReq,
     MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq,
     PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp, RepoStatusResp,
-    RequestChangesReq, ResolveConflictReq, StagePathsReq, StashInfo, TestGitAccountReq,
-    UpdateGitAccountReq, UpdatePrReq,
+    RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, StagePathsReq, StashInfo,
+    TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq,
 };
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
@@ -136,6 +136,10 @@ pub fn router<S: GitCtx>() -> Router<S> {
         )
         .route("/repos/{id}/prs/{number}/diff", get(pr_diff::<S>))
         .route("/repos/{id}/prs/{number}/comments", post(pr_comment::<S>))
+        .route(
+            "/repos/{id}/prs/{number}/comments/{cid}/resolve",
+            post(pr_resolve_thread::<S>),
+        )
         .route("/repos/{id}/prs/{number}/approve", post(pr_approve::<S>))
         .route("/repos/{id}/prs/{number}/merge", post(pr_merge::<S>))
         .route("/repos/{id}/prs/{number}/decline", post(pr_decline::<S>))
@@ -1643,6 +1647,22 @@ async fn pr_comment<S: GitCtx>(
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
     Ok(Json(provider.comment(&remote, number, &req).await?))
+}
+
+/// Resolve (`{"resolved":true}`) or reopen (`false`) a review thread. `{cid}`
+/// is the provider thread id surfaced as `PrComment.thread_id`.
+async fn pr_resolve_thread<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, number, cid)): Path<(Id, u64, String)>,
+    Json(req): Json<ResolvePrThreadReq>,
+) -> ApiResult<StatusCode> {
+    let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+    provider
+        .resolve_pr_thread(&remote, number, &cid, req.resolved)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn pr_approve<S: GitCtx>(

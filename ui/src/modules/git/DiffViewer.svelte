@@ -16,8 +16,20 @@
     showNav?: boolean;
     comments?: PrComment[];
     onAddComment?: (path: string, line: number, body: string) => Promise<void>;
+    /** Reply to an existing thread (works on resolved threads too). */
+    onReplyComment?: (parentId: string, body: string) => Promise<void>;
+    /** Resolve/reopen a thread on the provider. */
+    onResolveComment?: (threadId: string, resolved: boolean) => Promise<void>;
   }
-  let { diff, prMode = false, showNav = false, comments = [], onAddComment }: Props = $props();
+  let {
+    diff,
+    prMode = false,
+    showNav = false,
+    comments = [],
+    onAddComment,
+    onReplyComment,
+    onResolveComment,
+  }: Props = $props();
 
   let mode: 'unified' | 'split' = $state('unified');
   let collapsed: Record<string, boolean> = $state({});
@@ -516,7 +528,7 @@
               <div class="file-comments-block">
                 <div class="file-comments-label dim">File comments</div>
                 {#each fc.unanchored as c (c.id)}
-                  <CommentThread comment={c} />
+                  <CommentThread comment={c} onreply={onReplyComment} onresolve={onResolveComment} />
                 {/each}
               </div>
             {/if}
@@ -576,7 +588,7 @@
                         </tr>
                         {#each inlineCommentsForLine(fc.anchored, line) as c (c.id)}
                           <tr class="comment-row">
-                            <td colspan="4"><CommentThread comment={c} /></td>
+                            <td colspan="4"><CommentThread comment={c} onreply={onReplyComment} onresolve={onResolveComment} /></td>
                           </tr>
                         {/each}
                         {#if composer && composer.path === file.path && composer.oldLine === line.old_line && composer.newLine === line.new_line}
@@ -679,7 +691,7 @@
                           <tr class="comment-row">
                             <td colspan="4">
                               {#each rowComments as c (c.id)}
-                                <CommentThread comment={c} />
+                                <CommentThread comment={c} onreply={onReplyComment} onresolve={onResolveComment} />
                               {/each}
                             </td>
                           </tr>

@@ -2171,6 +2171,11 @@ export interface PrComment {
   line: number | null;
   created_at: string;
   replies: PrComment[];
+  /** Thread resolution status (thread heads only; replies stay false). */
+  resolved: boolean;
+  /** Id for the resolve/unresolve endpoint (thread heads only) — Bitbucket
+   *  comment id, GitLab discussion id, GitHub GraphQL reviewThread node id. */
+  thread_id?: string | null;
 }
 
 /** A PR reviewer with approval state; avatar/timestamp are best-effort. */
@@ -2230,6 +2235,12 @@ export interface NewPrCommentReq {
   path?: string | null;
   line?: number | null;
   in_reply_to?: string | null;
+}
+
+/** Body for POST /repos/{id}/prs/{number}/comments/{cid}/resolve — `{cid}` is
+ *  `PrComment.thread_id`; `resolved: false` reopens the thread. */
+export interface ResolvePrThreadReq {
+  resolved: boolean;
 }
 
 export type MergeStrategy = 'merge' | 'squash' | 'rebase';

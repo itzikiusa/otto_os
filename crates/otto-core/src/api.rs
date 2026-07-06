@@ -1390,6 +1390,16 @@ pub struct PrComment {
     pub line: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub replies: Vec<PrComment>,
+    /// Thread resolution status (meaningful on thread heads only; replies
+    /// inherit the head's state and default to `false`).
+    #[serde(default)]
+    pub resolved: bool,
+    /// Provider id to pass to the resolve/unresolve endpoint. Bitbucket: the
+    /// top-level comment id; GitLab: the discussion id; GitHub: the GraphQL
+    /// review-thread node id (NOT the REST comment id). None on replies and
+    /// on non-resolvable comments.
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1560,6 +1570,13 @@ pub struct NewPrCommentReq {
     pub line: Option<u32>,
     /// Reply to an existing comment id, if any.
     pub in_reply_to: Option<String>,
+}
+
+/// Body for `POST /repos/{id}/prs/{number}/comments/{cid}/resolve` — `{cid}`
+/// is the thread's `PrComment.thread_id`. `resolved: false` reopens.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ResolvePrThreadReq {
+    pub resolved: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

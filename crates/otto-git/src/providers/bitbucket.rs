@@ -271,6 +271,9 @@ fn comment_from(v: &Value) -> PrComment {
         .and_then(|i| i.get("to"))
         .and_then(Value::as_u64)
         .map(|l| l as u32);
+    // Bitbucket marks a resolved comment with a non-null `resolution` object
+    // ({user, date}); absent/null ⇒ open.
+    let resolved = v.get("resolution").is_some_and(|r| !r.is_null());
     PrComment {
         id: vu64(v, &["id"]).to_string(),
         author: vstr(v, &["user", "display_name"]),
@@ -279,6 +282,8 @@ fn comment_from(v: &Value) -> PrComment {
         line,
         created_at: ts(&vstr(v, &["created_on"])),
         replies: Vec::new(),
+        resolved,
+        thread_id: None, // stamped on thread heads in get_pr
     }
 }
 
@@ -344,6 +349,11 @@ impl super::GitProvider for Bitbucket {
             } else {
                 top.push(reply);
             }
+        }
+        // Thread heads are the resolve target — Bitbucket resolves by the
+        // top-level comment id.
+        for t in &mut top {
+            t.thread_id = Some(t.id.clone());
         }
 
         let approved_by: Vec<String> = varr(&pr, &["participants"])
@@ -484,6 +494,23 @@ impl super::GitProvider for Bitbucket {
             )
             .await?;
         Ok(comment_from(&v))
+    }
+
+    /// `POST .../comments/{id}/resolve` resolves; `DELETE` on the same URL
+    /// reopens. `thread_id` is the top-level comment id.
+    async fn resolve_pr_thread(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        thread_id: &str,
+        resolved: bool,
+    ) -> Result<()> {
+        let id: u64 = thread_id
+            .parse()
+            .map_err(|_| Error::Invalid(format!("bad comment id: {thread_id}")))?;
+        let path = Self::pr_path(r, &format!("/{number}/comments/{id}/resolve"));
+        let method = if resolved { reqwest::Method::POST } else { reqwest::Method::DELETE };
+        self.send(method, &path, None).await.map(|_| ())
     }
 
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()> {
@@ -692,9 +719,30 @@ fn parse_statuses_fixture(json_str: &str) -> CiStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_pr_body, member_from, parse_statuses_fixture, summary_from};
+    use super::{comment_from, create_pr_body, member_from, parse_statuses_fixture, summary_from};
     use otto_core::api::CreatePrReq;
     use serde_json::json;
+
+    #[test]
+    fn comment_resolution_object_maps_to_resolved() {
+        let resolved = comment_from(&json!({
+            "id": 7, "user": {"display_name": "Kay"}, "content": {"raw": "fix this"},
+            "created_on": "2026-01-01T00:00:00Z",
+            "resolution": {"user": {"display_name": "Kay"}, "date": "2026-01-02T00:00:00Z"}
+        }));
+        assert!(resolved.resolved);
+        // Absent or null resolution ⇒ open.
+        let open = comment_from(&json!({
+            "id": 8, "user": {"display_name": "Kay"}, "content": {"raw": "ok"},
+            "created_on": "2026-01-01T00:00:00Z"
+        }));
+        assert!(!open.resolved);
+        let null_res = comment_from(&json!({
+            "id": 9, "user": {"display_name": "Kay"}, "content": {"raw": "ok"},
+            "created_on": "2026-01-01T00:00:00Z", "resolution": null
+        }));
+        assert!(!null_res.resolved);
+    }
 
     fn req(draft: Option<bool>) -> CreatePrReq {
         CreatePrReq {

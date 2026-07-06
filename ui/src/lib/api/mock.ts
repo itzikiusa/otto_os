@@ -485,8 +485,12 @@ const prs: MockPr[] = [
             line: null,
             created_at: ago(150),
             replies: [],
+            resolved: false,
           },
         ],
+        // Resolved thread — exercises the status chip + reopen affordance.
+        resolved: true,
+        thread_id: 'cmt_1',
       },
       {
         id: 'cmt_3',
@@ -496,6 +500,8 @@ const prs: MockPr[] = [
         line: 45,
         created_at: ago(120),
         replies: [],
+        resolved: false,
+        thread_id: 'cmt_3',
       },
     ],
     approved_by: [],
@@ -1351,6 +1357,7 @@ const routes: Route[] = [
         line: body.line ?? null,
         created_at: new Date().toISOString(),
         replies: [],
+        resolved: false,
       };
       if (body.in_reply_to) {
         const find = (list: PrComment[]): PrComment | undefined => {
@@ -1365,9 +1372,22 @@ const routes: Route[] = [
         if (parent) parent.replies.push(c);
         else pr.comments.push(c);
       } else {
+        c.thread_id = c.id; // new top-level comment starts its own thread
         pr.comments.push(c);
       }
       return { json: c };
+    },
+  },
+  {
+    method: 'POST',
+    re: /^\/repos\/([^/]+)\/prs\/(\d+)\/comments\/([^/]+)\/resolve$/,
+    handle: (m, body) => {
+      const pr = prs.find((p) => p.repo_id === m[1] && p.summary.number === Number(m[2]));
+      if (!pr) return problem(404, 'not_found', 'pr');
+      const head = pr.comments.find((c) => c.thread_id === m[3]);
+      if (!head) return problem(404, 'not_found', 'thread');
+      head.resolved = body.resolved === true;
+      return { status: 204 };
     },
   },
   {

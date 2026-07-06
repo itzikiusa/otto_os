@@ -67,7 +67,8 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 50 | GET /api/v1/repos/{id}/prs/{number} | ws viewer | — | PrDetail |
 | 51 | GET /api/v1/repos/{id}/prs/{number}/diff | ws viewer | — | DiffResp |
 | 52 | PATCH /api/v1/repos/{id}/prs/{number} | ws editor | UpdatePrReq | 204 |
-| 53 | POST /api/v1/repos/{id}/prs/{number}/comments | ws editor | NewPrCommentReq | PrComment |
+| 53 | POST /api/v1/repos/{id}/prs/{number}/comments | ws editor | NewPrCommentReq | PrComment (carries `resolved: bool` + `thread_id?: string` on thread heads — Bitbucket comment id, GitLab discussion id, GitHub GraphQL reviewThread node id) |
+| 53b | POST /api/v1/repos/{id}/prs/{number}/comments/{cid}/resolve | ws editor | ResolvePrThreadReq `{"resolved": bool}` — `{cid}` is `PrComment.thread_id`; `false` reopens | 204 |
 | 54 | POST /api/v1/repos/{id}/prs/{number}/approve | ws editor | — | 204 |
 | 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq | 204 |
 | 56 | POST /api/v1/repos/{id}/prs/{number}/decline | ws editor | — | 204 |
