@@ -57,8 +57,13 @@
      *  used by hosts that surface the same controls in their own header bar
      *  (SessionView panes) so the overlay never covers terminal content. */
     showToolbar?: boolean;
+    /** Grab keyboard focus as soon as the terminal is created, so a freshly
+     *  opened session is typeable without a click. Read once at init (mount-time
+     *  value); later pane-focus changes go through the exported focus(). Skipped
+     *  on phones — the soft keyboard may only be raised by a user gesture. */
+    autoFocus?: boolean;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, shareToken, onstatus, onsearchresult, showToolbar = true }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, shareToken, onstatus, onsearchresult, showToolbar = true, autoFocus = false }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -636,6 +641,9 @@
     term.loadAddon(fit);
     term.loadAddon(search);
     term.open(container);
+    // Mount-time focus (untracked: autoFocus/readOnly must not re-run this
+    // effect — a rebuild here tears down the whole GPU canvas + WS).
+    if (untrack(() => autoFocus && !readOnly) && !viewport.isPhone) term.focus();
     // ── Renderer selection: WebGL (GPU) on desktop, DOM everywhere it's risky ──
     // xterm draws to a WebGL canvas when WebglAddon is loaded; with no addon it
     // falls back to its DOM renderer (per-cell <span>s in `.xterm-rows`). The DOM

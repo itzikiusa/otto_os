@@ -81,6 +81,19 @@
   // Bumped after a successful restart so the embedded <Terminal> drops its
   // exited overlay and reconnects to the freshly respawned/resumed PTY.
   let restartNonce = $state(0);
+
+  // Keyboard follows the active pane: when this pane becomes the target one
+  // (new session, tab/tile switch, sidebar navigation) move focus into its
+  // terminal so typing works without a click. `focused` alone won't do — it is
+  // the visual ring, and Splits suppresses it for a lone pane — so also key off
+  // being the active session. Mount-time focus is covered by <Terminal
+  // autoFocus> (the xterm textarea doesn't exist yet on the first run of this
+  // effect). Phones keep tap-to-focus (soft-keyboard gesture rule).
+  const kbFocused = $derived(focused || ws.activeSessionId === sessionId);
+  let termRef = $state<Terminal | null>(null);
+  $effect(() => {
+    if (kbFocused && !readOnly && !viewport.isPhone) termRef?.focus();
+  });
   let draftTitle = $state('');
   let attachIssueOpen = $state(false);
   let attachProductOpen = $state(false);
@@ -408,7 +421,7 @@
     {/if}
   </header>
   <div class="pane-term">
-    <Terminal {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} showToolbar={false} />
+    <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} />
   </div>
 </section>
 

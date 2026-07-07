@@ -55,6 +55,31 @@
   // tabindex, so Tab moves to the next FIELD (Title) while Left/Right (and
   // Up/Down) move the selection between providers — like a native radio group.
   let cardEls = $state<HTMLButtonElement[]>([]);
+  let gridEl = $state<HTMLDivElement | null>(null);
+
+  // On open, pull keyboard focus into the selected card. Without this, focus
+  // stays wherever it was before ⌘T — usually the xterm textarea, so arrows
+  // (and everything else) kept going to the terminal instead of this sheet.
+  let didAutofocus = false;
+  $effect(() => {
+    if (didAutofocus || provider === '') return;
+    didAutofocus = true;
+    queueMicrotask(() => cardEls[providers.indexOf(provider)]?.focus());
+  });
+
+  // Sheet-level keys: ⌘/Ctrl+Enter starts the session from anywhere in the
+  // modal; arrows switch provider unless they belong to a text field (caret
+  // movement) or to the grid itself (its radiogroup handler already ran).
+  function onGlobalKeydown(e: KeyboardEvent): void {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      if (!busy && provider !== '') void create();
+      return;
+    }
+    const t = e.target as HTMLElement | null;
+    if (t && (t.closest('input, textarea, [contenteditable="true"]') || gridEl?.contains(t))) return;
+    onProviderKeydown(e);
+  }
 
   function selectProvider(p: string, focus = false): void {
     provider = p;
@@ -141,10 +166,13 @@
   }
 </script>
 
+<svelte:window onkeydown={onGlobalKeydown} />
+
 <Modal title="New Session" {onclose}>
   <div class="field">
     <div id="ns-provider-label" class="provider-label">Provider <span class="dim">(← → to switch)</span></div>
     <div
+      bind:this={gridEl}
       class="provider-grid"
       role="radiogroup"
       tabindex="-1"
