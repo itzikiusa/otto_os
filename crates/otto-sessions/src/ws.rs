@@ -485,9 +485,12 @@ async fn serve_terminal<S: SessionsCtx>(
                             out_rx = Some(fresh.subscribe());
                             exit_rx = Some(fresh.on_exit());
                             let data = fresh.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES);
+                            // `epoch` = PTY spawn counter: the client resets its
+                            // local buffer when it changes (see the Scrollback arm).
                             let frame = format!(
-                                r#"{{"type":"scrollback","data":"{}"}}"#,
-                                B64.encode(&data)
+                                r#"{{"type":"scrollback","data":"{}","epoch":{}}}"#,
+                                B64.encode(&data),
+                                fresh.spawn_seq()
                             );
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 return;
@@ -552,9 +555,17 @@ async fn serve_terminal<S: SessionsCtx>(
                             .as_ref()
                             .map(|h| h.snapshot_with_history(want))
                             .unwrap_or_default();
+                        // `epoch` = PTY spawn counter. When the process was
+                        // respawned since the client's last attach (suspend →
+                        // resume, restart, daemon restart) the client's local
+                        // scrollback belongs to the DEAD process — it resets and
+                        // rebuilds from this snapshot instead of appending the
+                        // fresh screen under stale (possibly narrow-painted)
+                        // history. Omitted (0) when no live handle exists.
                         let frame = format!(
-                            r#"{{"type":"scrollback","data":"{}"}}"#,
-                            B64.encode(&data)
+                            r#"{{"type":"scrollback","data":"{}","epoch":{}}}"#,
+                            B64.encode(&data),
+                            handle.as_ref().map(|h| h.spawn_seq()).unwrap_or(0)
                         );
                         // Sent inline, i.e. before any subsequent live bytes.
                         if socket.send(Message::Text(frame.into())).await.is_err() {

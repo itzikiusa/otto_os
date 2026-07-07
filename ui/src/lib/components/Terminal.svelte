@@ -330,9 +330,20 @@
       try {
         const msg = JSON.parse(ev.data);
         switch (msg.type) {
-          case 'scrollback':
+          case 'scrollback': {
+            // `epoch` is the PTY spawn counter. A change since our last attach
+            // means the process was RESPAWNED (idle suspend→resume, ⟳ restart,
+            // daemon restart) — our local scrollback belongs to the dead
+            // process, possibly painted at a stale width. Rebuild from the
+            // server snapshot instead of appending under stale history. Same
+            // epoch (plain WS drop/reconnect) keeps local scrollback, which is
+            // deeper than the server's 1000-line buffer.
+            const epoch = typeof msg.epoch === 'number' && msg.epoch > 0 ? msg.epoch : null;
+            if (epoch !== null && srvEpoch !== null && epoch !== srvEpoch) term?.reset();
+            if (epoch !== null) srvEpoch = epoch;
             if (msg.data) term?.write(base64ToBytes(msg.data));
             break;
+          }
           case 'status':
             onstatus?.(msg.status as SessionStatus);
             break;
@@ -377,6 +388,10 @@
   // SIGWINCH on every fit() call makes claude/codex repaint and flicker.
   let lastCols = 0;
   let lastRows = 0;
+
+  // Last seen PTY spawn epoch (see the 'scrollback' frame handler). null until
+  // the first epoch-carrying frame; reset on session switch.
+  let srvEpoch: number | null = null;
 
   function sendResize(force = false): void {
     if (!term) return;
@@ -850,6 +865,7 @@
     exitCode = null;
     reconnectAttempts = 0;
     lastInjN = 0;
+    srvEpoch = null;
     // 4. Clear the xterm viewport and scrollback so old session output is gone
     //    before the new scrollback arrives. term.reset() resets the terminal state
     //    (cursor, attrs, etc.) and clears scrollback while keeping the DOM/WebGL

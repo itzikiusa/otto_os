@@ -41,7 +41,13 @@ Input frames from viewers are silently dropped server-side (and a single JSON
 - **JSON text frames**:
 
 ```json
-{"type":"scrollback","data":"<base64 bytes>"}      // response to scrollback request; send BEFORE live bytes resume
+{"type":"scrollback","data":"<base64 bytes>","epoch":3}  // response to scrollback request; send BEFORE live bytes resume.
+                                                    // `epoch` = PTY spawn counter (0/absent when no live handle): when it
+                                                    // CHANGED since the client's last attach the process was respawned
+                                                    // (suspend→resume, restart, daemon restart) — the client resets its
+                                                    // local buffer and rebuilds from this snapshot instead of appending
+                                                    // under stale (dead-process) history. Same epoch → append/keep local
+                                                    // scrollback (deeper than the server's 1000-line emulator buffer).
 {"type":"status","status":"working"}                // running|working|idle|exited|reconnectable
 {"type":"exit","code":0}                            // child exited; socket stays open
 {"type":"terminated"}                               // session force-terminated (admin terminate / share-link revoke); socket closes immediately after

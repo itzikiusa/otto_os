@@ -67,6 +67,11 @@ pub struct PtyHandle {
     exit_rx: watch::Receiver<Option<i32>>,
     /// Instant the handle was created; `last_output_ms` is relative to it.
     epoch: Instant,
+    /// Daemon-unique spawn counter. A client that sees this change between
+    /// attaches knows the process was respawned (resume/restart) and its local
+    /// scrollback belongs to a dead process — rebuild from the snapshot instead
+    /// of appending to stale content.
+    spawn_seq: u64,
     last_output_ms: Arc<AtomicU64>,
     /// OS pid of the direct child, captured at spawn (None if the OS didn't
     /// report one). Used by the idle-suspend sweep to check for live descendant
@@ -155,6 +160,8 @@ impl PtyHandle {
         // client echoes back the same dimensions we already reported.
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
         let epoch = Instant::now();
+        static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
+        let spawn_seq = SPAWN_SEQ.fetch_add(1, Ordering::Relaxed);
         let last_output_ms = Arc::new(AtomicU64::new(0));
 
         // Blocking reader thread: PTY output -> screen emulator + ring + broadcast.
@@ -201,6 +208,7 @@ impl PtyHandle {
             tx,
             exit_rx,
             epoch,
+            spawn_seq,
             last_output_ms,
             child_pid,
         })
@@ -287,6 +295,11 @@ impl PtyHandle {
     /// history. `lines == 0` is equivalent to [`screen_snapshot`].
     ///
     /// [`screen_snapshot`]: Self::screen_snapshot
+    /// Daemon-unique spawn counter for THIS process incarnation (see field doc).
+    pub fn spawn_seq(&self) -> u64 {
+        self.spawn_seq
+    }
+
     pub fn snapshot_with_history(&self, lines: usize) -> Vec<u8> {
         let mut parser = lock_unpoisoned(&self.parser);
         if lines == 0 {
