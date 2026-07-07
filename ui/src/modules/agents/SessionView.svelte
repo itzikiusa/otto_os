@@ -3,6 +3,7 @@
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import AttachIssue from './AttachIssue.svelte';
   import AttachProductStory from './AttachProductStory.svelte';
@@ -323,7 +324,12 @@
     {#if nameFull && nameFull !== session?.title}
       <span class="pane-fullname" title="Themed name — address this session by “{session?.meta?.name_handle ?? session?.title}”">({nameFull})</span>
     {/if}
-    <span class="chip provider-chip">{session?.provider ?? '?'}</span>
+    <span class="chip provider-chip" title={session?.provider}>
+      {#if hasProviderIcon(session?.provider)}
+        <ProviderIcon provider={session?.provider ?? ''} size={13} />
+      {/if}
+      {session?.provider ?? '?'}
+    </span>
     {#if needsYou}
       <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
         <Icon name="bell" size={10} /> Needs you

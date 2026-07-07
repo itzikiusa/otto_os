@@ -3,6 +3,7 @@
   // workspaces section, user/settings at the bottom.
   import Icon from '../lib/components/Icon.svelte';
   import StatusDot from '../lib/components/StatusDot.svelte';
+  import ProviderIcon, { hasProviderIcon } from '../lib/components/ProviderIcon.svelte';
   import { router } from '../lib/router.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -353,7 +354,11 @@
                 >
                   <StatusDot status="exited" />
                   <span class="grow ellipsis">{s.title}</span>
-                  <span class="provider">{s.provider}</span>
+                  {#if hasProviderIcon(s.provider)}
+                    <span class="provider-ico" title={s.provider}><ProviderIcon provider={s.provider} size={13} /></span>
+                  {:else}
+                    <span class="provider">{s.provider}</span>
+                  {/if}
                 </div>
                 {#if ws.myRole !== 'viewer'}
                   <button class="row-action" title="Restore" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
@@ -710,7 +715,11 @@
         {#if resumable}
           <span class="susp-pill" title={SUSPENDED_TIP}>resumable</span>
         {/if}
-        <span class="provider">{s.provider}</span>
+        {#if hasProviderIcon(s.provider)}
+          <span class="provider-ico" title={s.provider}><ProviderIcon provider={s.provider} size={13} /></span>
+        {:else}
+          <span class="provider">{s.provider}</span>
+        {/if}
       </button>
       {#if ws.myRole !== 'viewer'}
         <button
@@ -1067,6 +1076,11 @@
   .provider {
     font-size: 10px;
     color: var(--text-dim);
+  }
+  .provider-ico {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
   }
   /* Per-session task roll-up: "done/total". Accent while a task is in progress,
      green when all complete. */
