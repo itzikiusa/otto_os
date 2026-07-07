@@ -59,16 +59,20 @@
     void load(repoId, number);
   });
 
-  // Lazy-load diff when switching to Files tab
+  // Lazy-load diff when switching to Files tab. `diffFailed` stops the effect
+  // from re-firing after an error — diff stays null on failure, so without the
+  // latch this loop hammered the daemon with retries (and toast spam) forever.
+  let diffFailed = $state(false);
   $effect(() => {
-    if (activeTab === 'files' && diff === null && !diffLoading) {
+    if (activeTab === 'files' && diff === null && !diffLoading && !diffFailed) {
       void loadDiff(repoId, number);
     }
   });
 
-  // Lazy-load commits when switching to Commits tab
+  // Lazy-load commits when switching to Commits tab (same failure latch).
+  let commitsFailed = $state(false);
   $effect(() => {
-    if (activeTab === 'commits' && commits === null && !commitsLoading) {
+    if (activeTab === 'commits' && commits === null && !commitsLoading && !commitsFailed) {
       void loadCommits(repoId, number);
     }
   });
@@ -86,9 +90,11 @@
 
   async function loadDiff(rid: string, num: number): Promise<void> {
     diffLoading = true;
+    diffFailed = false;
     try {
       diff = await api.get<DiffResp>(`/repos/${rid}/prs/${num}/diff`);
     } catch (e) {
+      diffFailed = true;
       toasts.error('Could not load diff', e instanceof Error ? e.message : String(e));
     } finally {
       diffLoading = false;
@@ -97,9 +103,11 @@
 
   async function loadCommits(rid: string, num: number): Promise<void> {
     commitsLoading = true;
+    commitsFailed = false;
     try {
       commits = await api.get<PrCommit[]>(`/repos/${rid}/prs/${num}/commits`);
     } catch (e) {
+      commitsFailed = true;
       toasts.error('Could not load commits', e instanceof Error ? e.message : String(e));
     } finally {
       commitsLoading = false;
@@ -451,7 +459,12 @@
     <!-- Files tab -->
     {#if activeTab === 'files'}
       <section class="prd-diff">
-        {#if diffLoading || (!diff && !diffLoading)}
+        {#if diffFailed}
+          <p class="dim" style="font-size: 12px; padding: 12px 0">
+            Could not load the diff.
+            <button class="btn small ghost" onclick={() => void loadDiff(repoId, number)}>Retry</button>
+          </p>
+        {:else if diffLoading || (!diff && !diffLoading)}
           {#if diffLoading}
             <Skeleton rows={4} height={30} />
           {:else}

@@ -54,6 +54,98 @@
   let navCollapsed = $state(false);
   let viewed = $state(new Set<string>());
 
+  // Drag-resizable nav width (desktop), persisted. The ≤1024 media query still
+  // wins via !important-free specificity because the width is a CSS var the
+  // mobile rules simply ignore.
+  const NAV_W_KEY = 'otto_diffnav_w';
+  let navW = $state(Number(localStorage.getItem(NAV_W_KEY)) || 240);
+  let navResizing = $state(false);
+  function setNavW(w: number): void {
+    navW = Math.max(180, Math.min(520, Math.round(w)));
+    localStorage.setItem(NAV_W_KEY, String(navW));
+  }
+  function startNavResize(e: MouseEvent): void {
+    e.preventDefault();
+    navResizing = true;
+    const startX = e.clientX;
+    const startW = navW;
+    // Physical left-anchored sidebar: dragging right widens it.
+    const onMove = (ev: MouseEvent) => setNavW(startW + (ev.clientX - startX));
+    const onUp = () => {
+      navResizing = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  // ── Nav tree: group files by directory (GitHub-style), compressing
+  // single-child chains ("apps" → "sinatra" → "src" renders once as
+  // "apps/sinatra/src"). Directories are collapsible; files keep the viewed
+  // checkbox / stats / comment badge of the old flat rows.
+  interface NavDir {
+    /** Compressed display label, e.g. "apps/sinatra/src". */
+    label: string;
+    /** Full prefix path (unique key), e.g. "apps/sinatra/src". */
+    path: string;
+    dirs: NavDir[];
+    files: FileDiff[];
+  }
+  const navTree = $derived.by(() => {
+    interface Node {
+      dirs: Map<string, Node>;
+      files: FileDiff[];
+    }
+    const root: Node = { dirs: new Map(), files: [] };
+    for (const f of diff.files) {
+      const parts = f.path.split('/');
+      let cur = root;
+      for (const p of parts.slice(0, -1)) {
+        let next = cur.dirs.get(p);
+        if (!next) {
+          next = { dirs: new Map(), files: [] };
+          cur.dirs.set(p, next);
+        }
+        cur = next;
+      }
+      cur.files.push(f);
+    }
+    // Compress chains + emit sorted (dirs first, then files, both A→Z).
+    const emit = (node: Node, label: string, path: string): NavDir => {
+      let n = node;
+      let lbl = label;
+      let pth = path;
+      while (n.files.length === 0 && n.dirs.size === 1) {
+        const [k, child] = [...n.dirs.entries()][0];
+        lbl = lbl === '' ? k : `${lbl}/${k}`;
+        pth = pth === '' ? k : `${pth}/${k}`;
+        n = child;
+      }
+      const dirs = [...n.dirs.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, child]) => emit(child, k, pth === '' ? k : `${pth}/${k}`));
+      const files = [...n.files].sort((a, b) => a.path.localeCompare(b.path));
+      return { label: lbl, path: pth, dirs, files };
+    };
+    return emit(root, '', '');
+  });
+  let navDirCollapsed: Record<string, boolean> = $state({});
+  function toggleNavDir(path: string): void {
+    navDirCollapsed = { ...navDirCollapsed, [path]: !navDirCollapsed[path] };
+  }
+  /** True when a dir has no search-visible file anywhere beneath it. */
+  function navDirHidden(d: NavDir): boolean {
+    if (!search) return false;
+    const any = (n: NavDir): boolean =>
+      n.files.some(fileMatchesSearch) || n.dirs.some(any);
+    return !any(d);
+  }
+
   // Search state
   let rawSearch = $state('');
   let search = $state('');
@@ -305,14 +397,9 @@
 
   const matchCount = $derived(filteredFiles.length);
 
-  // Nav: basename + directory parts
+  // Nav: basename (the tree rows carry the directory context).
   function baseName(path: string): string {
     return path.split('/').pop() ?? path;
-  }
-  function dirName(path: string): string {
-    const parts = path.split('/');
-    if (parts.length <= 1) return '';
-    return parts.slice(0, -1).join('/') + '/';
   }
 
   function scrollToFile(path: string): void {
@@ -414,8 +501,82 @@
   tabindex="-1"
 >
   <!-- File Navigator Sidebar -->
+  {#snippet navFileRow(file: FileDiff, depth: number)}
+    {@const stats = fileStats.get(file.path) ?? { add: 0, del: 0 }}
+    {@const cCount = commentCountForFile(file.path)}
+    {@const isViewed = viewed.has(file.path)}
+    {@const matches = fileMatchesSearch(file)}
+    <div
+      class="nav-file"
+      class:nav-file-viewed={isViewed}
+      class:nav-file-hidden={!matches}
+      style="padding-inline-start: {8 + depth * 12}px"
+      role="button"
+      tabindex="0"
+      onclick={() => scrollToFile(file.path)}
+      onkeydown={(e) => e.key === 'Enter' && scrollToFile(file.path)}
+      title={file.path}
+    >
+      <span class="nav-viewed-cb">
+        <input
+          type="checkbox"
+          checked={isViewed}
+          title="Mark as viewed"
+          onclick={(e) => e.stopPropagation()}
+          onchange={() => toggleViewed(file.path)}
+          aria-label="Mark {file.path} as viewed"
+        />
+      </span>
+      <span class="nav-file-path">
+        <span class="nav-base">{baseName(file.path)}</span>
+      </span>
+      <span class="nav-file-stats">
+        <span class="add">+{stats.add}</span>
+        <span class="del">−{stats.del}</span>
+      </span>
+      {#if cCount > 0}
+        <span class="nav-comment-badge" title="{cCount} comment{cCount === 1 ? '' : 's'}">
+          💬{cCount}
+        </span>
+      {/if}
+    </div>
+  {/snippet}
+
+  {#snippet navDirRows(d: NavDir, depth: number)}
+    {#each d.dirs as sub (sub.path)}
+      {#if !navDirHidden(sub)}
+        <div
+          class="nav-dir-row"
+          style="padding-inline-start: {8 + depth * 12}px"
+          role="button"
+          tabindex="0"
+          onclick={() => toggleNavDir(sub.path)}
+          onkeydown={(e) => e.key === 'Enter' && toggleNavDir(sub.path)}
+          title={sub.path}
+        >
+          <span class="nav-dir-chevron">
+            <Icon name={navDirCollapsed[sub.path] ? 'chevronRight' : 'chevronDown'} size={10} />
+          </span>
+          <Icon name="folder" size={11} />
+          <span class="nav-dir-label">{sub.label}</span>
+        </div>
+        {#if !navDirCollapsed[sub.path]}
+          {@render navDirRows(sub, depth + 1)}
+        {/if}
+      {/if}
+    {/each}
+    {#each d.files as file (file.path)}
+      {@render navFileRow(file, depth)}
+    {/each}
+  {/snippet}
+
   {#if showNav && prMode}
-    <aside class="diff-nav" class:nav-collapsed={navCollapsed}>
+    <aside
+      class="diff-nav"
+      class:nav-collapsed={navCollapsed}
+      class:nav-resizing={navResizing}
+      style={navCollapsed ? '' : `--navw:${navW}px`}
+    >
       <div class="nav-header">
         {#if !navCollapsed}
           <span class="nav-title">
@@ -452,49 +613,18 @@
         </div>
 
         <div class="nav-files">
-          {#each diff.files as file (file.path)}
-            {@const stats = fileStats.get(file.path) ?? { add: 0, del: 0 }}
-            {@const cCount = commentCountForFile(file.path)}
-            {@const isViewed = viewed.has(file.path)}
-            {@const matches = fileMatchesSearch(file)}
-            <div
-              class="nav-file"
-              class:nav-file-viewed={isViewed}
-              class:nav-file-hidden={!matches}
-              role="button"
-              tabindex="0"
-              onclick={() => scrollToFile(file.path)}
-              onkeydown={(e) => e.key === 'Enter' && scrollToFile(file.path)}
-              title={file.path}
-            >
-              <span class="nav-viewed-cb">
-                <input
-                  type="checkbox"
-                  checked={isViewed}
-                  title="Mark as viewed"
-                  onclick={(e) => e.stopPropagation()}
-                  onchange={() => toggleViewed(file.path)}
-                  aria-label="Mark {file.path} as viewed"
-                />
-              </span>
-              <span class="nav-file-path">
-                {#if dirName(file.path)}
-                  <span class="nav-dir">{dirName(file.path)}</span>
-                {/if}
-                <span class="nav-base">{baseName(file.path)}</span>
-              </span>
-              <span class="nav-file-stats">
-                <span class="add">+{stats.add}</span>
-                <span class="del">−{stats.del}</span>
-              </span>
-              {#if cCount > 0}
-                <span class="nav-comment-badge" title="{cCount} comment{cCount === 1 ? '' : 's'}">
-                  💬{cCount}
-                </span>
-              {/if}
-            </div>
-          {/each}
+          {@render navDirRows(navTree, 0)}
         </div>
+        <!-- Drag the trailing edge to resize (desktop); double-click resets. -->
+        <div
+          class="nav-resize-handle"
+          role="separator"
+          aria-label="Resize file sidebar"
+          aria-orientation="vertical"
+          title="Drag to resize · double-click to reset"
+          onmousedown={startNavResize}
+          ondblclick={() => setNavW(240)}
+        ></div>
       {/if}
     </aside>
   {/if}
@@ -587,11 +717,13 @@
               <div class="hunk-header mono">{hunk.header}</div>
 
               {#if effMode === 'unified'}
-                {#if hunk.lines.length > VLIST_THRESHOLD && !isHunkExpanded(file.path, hi)}
-                  <!-- Large hunk: virtualised rendering for smooth scroll.
-                       Comments and the composer are deliberately suppressed here —
-                       the "Load anyway" guard below lets the user fall back to the
-                       full table when they need to comment. -->
+                {#if !prMode && hunk.lines.length > VLIST_THRESHOLD && !isHunkExpanded(file.path, hi)}
+                  <!-- Large hunk (non-PR views only): virtualised rendering for
+                       smooth scroll. PR mode NEVER virtualises or caps — hiding
+                       inline comments behind a "Load all" button meant a file
+                       showing "💬 5" rendered zero visible comments (real repro:
+                       a 450-line hunk). Big-PR protection stays at the file
+                       level: >400-line files start collapsed. -->
                   <VirtualList
                     items={hunk.lines}
                     estimateHeight={VLIST_ROW_H}
@@ -615,7 +747,7 @@
                     </button>
                   </div>
                 {:else}
-                  {@const hunkCapped = !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
+                  {@const hunkCapped = !prMode && !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
                   {@const visibleLines = hunkCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
                   <table class="dtable">
                     <tbody>
@@ -683,8 +815,8 @@
                   </table>
                 {/if}
               {:else}
-                {#if hunk.lines.length > VLIST_THRESHOLD && !isHunkExpanded(file.path, hi)}
-                  <!-- Large split-hunk: virtualised. Comments suppressed (same guard above). -->
+                {#if !prMode && hunk.lines.length > VLIST_THRESHOLD && !isHunkExpanded(file.path, hi)}
+                  <!-- Large split-hunk (non-PR views only): virtualised. -->
                   {@const srows = splitRows(file.path, hi, hunk.lines)}
                   <VirtualList
                     items={srows}
@@ -709,7 +841,7 @@
                     </button>
                   </div>
                 {:else}
-                  {@const hunkSplitCapped = !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
+                  {@const hunkSplitCapped = !prMode && !isHunkExpanded(file.path, hi) && hunk.lines.length > HUNK_LINE_CAP}
                   {@const splitLines = hunkSplitCapped ? hunk.lines.slice(0, HUNK_LINE_CAP) : hunk.lines}
                   <table class="dtable split">
                     <tbody>
@@ -815,9 +947,11 @@
 
   /* ── Navigator sidebar ── */
   .diff-nav {
-    width: 240px;
-    min-width: 240px;
-    max-width: 240px;
+    /* Drag-resizable: --navw is set inline (persisted); default 240px. */
+    width: var(--navw, 240px);
+    min-width: var(--navw, 240px);
+    max-width: var(--navw, 240px);
+    position: relative;
     flex-shrink: 0;
     border-inline-end: 1px solid var(--border);
     background: var(--surface-2);
@@ -898,6 +1032,46 @@
     flex: 1;
     padding: 2px 0 8px;
   }
+  /* Directory group rows (tree). */
+  .nav-dir-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--text-dim);
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .nav-dir-row:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .nav-dir-chevron {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .nav-dir-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 600;
+  }
+  /* Drag handle on the trailing edge of the sidebar. Fully INSIDE the aside —
+     it has overflow:hidden, so any part hanging outside is unclickable. */
+  .nav-resize-handle {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 0;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 2;
+  }
+  .nav-resize-handle:hover,
+  .nav-resizing .nav-resize-handle {
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
+  }
   .nav-file {
     display: flex;
     align-items: center;
@@ -938,10 +1112,6 @@
     text-overflow: ellipsis;
     min-width: 0;
     line-height: 1.3;
-  }
-  .nav-dir {
-    color: var(--text-dim);
-    font-size: 10px;
   }
   .nav-base {
     font-weight: 600;
@@ -1217,9 +1387,11 @@
     .nav-title { font-size: 13px; }
     .nav-file { font-size: 13px; padding: 8px; }
     .nav-base { font-size: 13px; }
-    .nav-dir { font-size: 11px; }
+    .nav-dir-row { font-size: 13px; padding: 6px 8px; }
     .nav-file-stats { font-size: 12px; }
     .nav-search { font-size: 13px; height: 32px; }
+    /* No drag-resize on touch layouts — the sidebar is full-width there. */
+    .nav-resize-handle { display: none; }
 
     .diff-toolbar { flex-wrap: wrap; gap: 8px; }
     .toolbar-search-wrap { flex: 1; min-width: 120px; }
