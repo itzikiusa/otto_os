@@ -27,6 +27,18 @@
     });
   }
 
+  // Search: every whitespace-separated token must match method/url/status —
+  // the url covers domain, path and query string, so "api.foo 404 get" works.
+  let search = $state('');
+  const tokens = $derived(search.trim().toLowerCase().split(/\s+/).filter(Boolean));
+  function entryMatches(h: ApiHistoryEntry): boolean {
+    const hay = `${h.method} ${h.url} ${h.status ?? ''}`.toLowerCase();
+    return tokens.every((t) => hay.includes(t));
+  }
+  const filtered = $derived(
+    tokens.length ? apiClient.history.filter(entryMatches) : apiClient.history,
+  );
+
   function reload(h: ApiHistoryEntry): void {
     apiClient.loadHistoryIntoDraft(h);
   }
@@ -45,10 +57,27 @@
     {/if}
   </div>
 
+  {#if apiClient.history.length > 0}
+    <div class="list-search">
+      <Icon name="search" size={12} />
+      <input
+        class="list-search-input"
+        placeholder="Search by URL, method, status…"
+        bind:value={search}
+        aria-label="Search request history"
+      />
+      {#if search}
+        <button class="icon-btn" onclick={() => (search = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
+      {/if}
+    </div>
+  {/if}
+
   {#if apiClient.history.length === 0}
     <div class="empty-mini">No requests yet.</div>
+  {:else if filtered.length === 0}
+    <div class="empty-mini">No history matches “{search.trim()}”.</div>
   {:else}
-    <VirtualList items={apiClient.history} estimateHeight={28} class="hist-vlist">
+    <VirtualList items={filtered} estimateHeight={28} class="hist-vlist">
       {#snippet row(h: ApiHistoryEntry)}
         <button class="hist-row" onclick={() => reload(h)} title={h.url}>
           <span class="rm rm-{h.method.toLowerCase()}">{h.method}</span>
@@ -85,6 +114,27 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
+  }
+  .list-search {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 2px 6px;
+    color: var(--text-dim);
+  }
+  .list-search-input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    border-radius: var(--radius-s);
+    padding: 4px 7px;
+    font-size: 11.5px;
+  }
+  .list-search-input:focus {
+    outline: none;
+    border-color: var(--accent);
   }
   /* VirtualList container replaces .hist-list direct flex; keep for fallback reference */
   :global(.hist-vlist) {

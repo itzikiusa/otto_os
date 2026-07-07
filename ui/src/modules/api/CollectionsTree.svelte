@@ -90,6 +90,18 @@
   let collapsed: Record<string, boolean> = $state({});
   const canEdit = $derived(ws.myRole !== 'viewer');
 
+  // Search: every whitespace-separated token must match the request's
+  // method/name/url (so "get users staging" narrows by all three). A collection
+  // whose own name matches keeps all of its requests.
+  let search = $state('');
+  const tokens = $derived(search.trim().toLowerCase().split(/\s+/).filter(Boolean));
+  function matchesTokens(hay: string): boolean {
+    return tokens.every((t) => hay.includes(t));
+  }
+  function requestMatches(r: ApiRequest): boolean {
+    return matchesTokens(`${r.method} ${r.name} ${r.url}`.toLowerCase());
+  }
+
   function buildTree(parentId: string | null): TreeNode[] {
     return apiClient.collections
       .filter((c) => (c.parent_id ?? null) === parentId)
@@ -102,9 +114,26 @@
         children: buildTree(col.id),
       }));
   }
-  const tree = $derived(buildTree(null));
+  // Prune the tree to matching branches: keep a node when its own name matches
+  // (all items kept), when any of its requests match (only those kept), or when
+  // a descendant survives — so ancestor folders stay visible as context.
+  function filterTree(nodes: TreeNode[]): TreeNode[] {
+    return nodes.flatMap((node) => {
+      if (matchesTokens(node.col.name.toLowerCase())) return [node];
+      const items = node.items.filter(requestMatches);
+      const children = filterTree(node.children);
+      if (items.length === 0 && children.length === 0) return [];
+      return [{ col: node.col, items, children }];
+    });
+  }
+  const tree = $derived.by(() => {
+    const full = buildTree(null);
+    return tokens.length ? filterTree(full) : full;
+  });
   const ungrouped = $derived(
-    apiClient.requests.filter((r) => !r.collection_id).sort((a, b) => a.name.localeCompare(b.name)),
+    apiClient.requests
+      .filter((r) => !r.collection_id && (tokens.length === 0 || requestMatches(r)))
+      .sort((a, b) => a.name.localeCompare(b.name)),
   );
 
   function toggle(id: string): void {
@@ -221,6 +250,21 @@
     </div>
   {/if}
 
+  {#if apiClient.collections.length > 0 || apiClient.requests.length > 0}
+    <div class="list-search">
+      <Icon name="search" size={12} />
+      <input
+        class="list-search-input"
+        placeholder="Search by name, URL, method…"
+        bind:value={search}
+        aria-label="Search collections and requests"
+      />
+      {#if search}
+        <button class="icon-btn" onclick={() => (search = '')} aria-label="Clear search"><Icon name="x" size={11} /></button>
+      {/if}
+    </div>
+  {/if}
+
   {#if apiClient.collections.length === 0 && apiClient.requests.length === 0}
     <EmptyState
       icon="folder"
@@ -235,6 +279,8 @@
         </button>
       {/if}
     </EmptyState>
+  {:else if tokens.length > 0 && tree.length === 0 && ungrouped.length === 0}
+    <div class="no-match">No requests match “{search.trim()}”.</div>
   {:else}
     <div class="tree">
       {#each tree as node (node.col.id)}
@@ -257,7 +303,8 @@
 </div>
 
 {#snippet collectionNode(node: TreeNode, depth: number)}
-  {@const isOpen = !collapsed[node.col.id]}
+  <!-- While filtering, force branches open so matches are never hidden. -->
+  {@const isOpen = tokens.length > 0 || !collapsed[node.col.id]}
   <div class="col-head" style="padding-left: {depth * 14 + 4}px">
     <button class="caret" onclick={() => toggle(node.col.id)} aria-label="Toggle collection">
       <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
@@ -415,6 +462,32 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+  .list-search {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 2px 6px;
+    color: var(--text-dim);
+  }
+  .list-search-input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    border-radius: var(--radius-s);
+    padding: 4px 7px;
+    font-size: 11.5px;
+  }
+  .list-search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .no-match {
+    font-size: 12px;
+    color: var(--text-dim);
+    padding: 8px 2px;
   }
   .tree-head {
     display: flex;
