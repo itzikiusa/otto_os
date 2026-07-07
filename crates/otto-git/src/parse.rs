@@ -4,7 +4,7 @@
 
 use otto_core::api::{
     BranchInfo, CommitInfo, ConflictSegment, DiffLine, DiffResp, FileChange, FileDiff, Hunk,
-    LineOrigin, RepoStatusResp, StashInfo,
+    LineOrigin, RepoStatusResp, StashInfo, SubmoduleInfo, WorktreeInfo,
 };
 use otto_core::{Error, Result};
 
@@ -353,6 +353,150 @@ pub fn parse_stash_list(out: &str) -> Vec<StashInfo> {
         });
     }
     stashes
+}
+
+/// Parse `git worktree list --porcelain` output. Entries are blank-line
+/// separated attribute blocks; the FIRST entry is always the main worktree.
+/// `dirty` is left false here — `local.rs` fills it in with a per-worktree
+/// status probe (it needs process access this pure parser doesn't have).
+pub fn parse_worktree_list(out: &str) -> Vec<WorktreeInfo> {
+    let mut wts: Vec<WorktreeInfo> = Vec::new();
+    let mut cur: Option<WorktreeInfo> = None;
+    for line in out.lines() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            if let Some(wt) = cur.take() {
+                wts.push(wt);
+            }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(wt) = cur.take() {
+                wts.push(wt);
+            }
+            cur = Some(WorktreeInfo {
+                path: path.to_string(),
+                head: String::new(),
+                branch: None,
+                is_main: wts.is_empty(),
+                locked: false,
+                lock_reason: None,
+                prunable: false,
+                dirty: false,
+            });
+            continue;
+        }
+        let Some(wt) = cur.as_mut() else { continue };
+        if let Some(sha) = line.strip_prefix("HEAD ") {
+            wt.head = sha.trim().to_string();
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            wt.branch = Some(
+                branch
+                    .trim()
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(branch.trim())
+                    .to_string(),
+            );
+        } else if line == "detached" {
+            wt.branch = None;
+        } else if line == "locked" || line.starts_with("locked ") {
+            wt.locked = true;
+            wt.lock_reason = line
+                .strip_prefix("locked ")
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map(str::to_string);
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            wt.prunable = true;
+        }
+        // "bare" and unknown future attributes are ignored.
+    }
+    if let Some(wt) = cur.take() {
+        wts.push(wt);
+    }
+    wts
+}
+
+/// Parse `git submodule status` output. Line shape:
+/// `<state-char><sha> <path> (<describe>)` where the leading char is
+/// ' ' = ok, '-' = uninitialized, '+' = checked-out ≠ recorded, 'U' = conflict.
+/// Malformed lines are skipped (empty output = no submodules, the common case).
+pub fn parse_submodule_status(out: &str) -> Vec<SubmoduleInfo> {
+    let mut subs = Vec::new();
+    for line in out.lines() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (state_ch, rest) = line.split_at(1);
+        let state = match state_ch {
+            "-" => "uninitialized",
+            "+" => "modified",
+            "U" => "conflict",
+            _ => "ok",
+        };
+        let mut it = rest.trim_start().splitn(2, ' ');
+        let (Some(sha), Some(tail)) = (it.next(), it.next()) else {
+            continue;
+        };
+        // Path may itself contain " (" — take the describe from the LAST " ("
+        // only when the line ends with ")" (git prints "(<describe>)" or nothing).
+        let (path, describe) = match (tail.rfind(" ("), tail.ends_with(')')) {
+            (Some(i), true) => (
+                tail[..i].trim(),
+                Some(tail[i + 2..tail.len() - 1].to_string()),
+            ),
+            _ => (tail.trim(), None),
+        };
+        if sha.is_empty() || path.is_empty() {
+            continue;
+        }
+        subs.push(SubmoduleInfo {
+            path: path.to_string(),
+            sha: sha.to_string(),
+            state: state.to_string(),
+            describe,
+            url: None,
+            branch: None,
+        });
+    }
+    subs
+}
+
+/// Enrich parsed submodules with `.gitmodules` config (`git config -f
+/// .gitmodules --list` output): submodule.<name>.path/url/branch triples are
+/// grouped by <name> and matched to entries by path.
+pub fn enrich_submodules(subs: &mut [SubmoduleInfo], config_list: &str) {
+    use std::collections::HashMap;
+    // name → (path, url, branch)
+    type ModCfg<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>);
+    let mut by_name: HashMap<&str, ModCfg> = HashMap::new();
+    for line in config_list.lines() {
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(rest) = key.strip_prefix("submodule.") else {
+            continue;
+        };
+        // The submodule NAME may contain dots; the trailing segment is the field.
+        let Some((name, field)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        let entry = by_name.entry(name).or_default();
+        match field {
+            "path" => entry.0 = Some(val),
+            "url" => entry.1 = Some(val),
+            "branch" => entry.2 = Some(val),
+            _ => {}
+        }
+    }
+    for (path, url, branch) in by_name.values() {
+        let Some(path) = path else { continue };
+        if let Some(sub) = subs.iter_mut().find(|s| s.path == *path) {
+            sub.url = url.map(str::to_string);
+            sub.branch = branch.map(str::to_string);
+        }
+    }
 }
 
 /// Extract the branch from a stash reflog subject: "WIP on main: …" or
@@ -1050,5 +1194,79 @@ suffix
             }
             other => panic!("expected conflict, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn worktree_list_porcelain() {
+        let out = "\
+worktree /Users/me/repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /Users/me/wt/feature-x
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/feature/x
+locked agent run in progress
+
+worktree /Users/me/wt/detached
+HEAD 3333333333333333333333333333333333333333
+detached
+prunable gitdir file points to non-existent location
+";
+        let wts = parse_worktree_list(out);
+        assert_eq!(wts.len(), 3);
+        assert!(wts[0].is_main);
+        assert_eq!(wts[0].path, "/Users/me/repo");
+        assert_eq!(wts[0].branch.as_deref(), Some("main"));
+        assert!(!wts[0].locked && !wts[0].prunable);
+        assert!(!wts[1].is_main);
+        assert_eq!(wts[1].branch.as_deref(), Some("feature/x"));
+        assert!(wts[1].locked);
+        assert_eq!(wts[1].lock_reason.as_deref(), Some("agent run in progress"));
+        assert!(wts[2].branch.is_none());
+        assert!(wts[2].prunable);
+        // no trailing blank line required
+        assert_eq!(parse_worktree_list("worktree /a\nHEAD abc\ndetached").len(), 1);
+        assert!(parse_worktree_list("").is_empty());
+    }
+
+    #[test]
+    fn submodule_status_lines() {
+        let out = "\
+ 4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b vendor/libfoo (v1.2.0-3-g4a5b6c7)
+-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa modules/not-inited
++bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb tools/drifted (heads/main)
+Ucccccccccccccccccccccccccccccccccccccccc conflicted/mod
+";
+        let subs = parse_submodule_status(out);
+        assert_eq!(subs.len(), 4);
+        assert_eq!(subs[0].state, "ok");
+        assert_eq!(subs[0].path, "vendor/libfoo");
+        assert_eq!(subs[0].describe.as_deref(), Some("v1.2.0-3-g4a5b6c7"));
+        assert_eq!(subs[1].state, "uninitialized");
+        assert!(subs[1].describe.is_none());
+        assert_eq!(subs[2].state, "modified");
+        assert_eq!(subs[3].state, "conflict");
+        assert!(parse_submodule_status("").is_empty());
+    }
+
+    #[test]
+    fn submodules_enriched_from_gitmodules() {
+        let mut subs = parse_submodule_status(
+            " 4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b vendor/libfoo (v1.2.0)\n",
+        );
+        let cfg = "\
+submodule.libfoo.path=vendor/libfoo
+submodule.libfoo.url=https://github.com/acme/libfoo.git
+submodule.libfoo.branch=main
+submodule.other.path=elsewhere
+submodule.other.url=https://example.com/other.git
+";
+        enrich_submodules(&mut subs, cfg);
+        assert_eq!(
+            subs[0].url.as_deref(),
+            Some("https://github.com/acme/libfoo.git")
+        );
+        assert_eq!(subs[0].branch.as_deref(), Some("main"));
     }
 }

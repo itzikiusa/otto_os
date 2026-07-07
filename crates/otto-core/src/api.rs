@@ -1142,6 +1142,53 @@ pub struct StashInfo {
     pub branch: Option<String>,
 }
 
+/// One entry from `git worktree list --porcelain`. Surfaced in the graph's
+/// WORKTREES sidebar section so agent-created worktrees (swarm, Run-with-Otto,
+/// goal loops, manual `git worktree add`) are visible and reapable from the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeInfo {
+    /// Absolute path of the worktree.
+    pub path: String,
+    /// HEAD commit SHA ("" for a bare entry).
+    #[serde(default)]
+    pub head: String,
+    /// Checked-out branch (short name); None when detached.
+    pub branch: Option<String>,
+    /// True for the main worktree (the repo itself) — never removable.
+    pub is_main: bool,
+    /// True when locked (`git worktree lock`).
+    #[serde(default)]
+    pub locked: bool,
+    /// Lock reason, when one was recorded.
+    pub lock_reason: Option<String>,
+    /// True when git considers the entry stale (its directory is gone) —
+    /// removable via `worktree prune` rather than `worktree remove`.
+    #[serde(default)]
+    pub prunable: bool,
+    /// True when the worktree has uncommitted changes (best-effort; false when
+    /// the check fails or the entry is prunable).
+    #[serde(default)]
+    pub dirty: bool,
+}
+
+/// One entry from `git submodule status`, enriched with `.gitmodules` config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmoduleInfo {
+    /// Path relative to the repo root (also the display name).
+    pub path: String,
+    /// Recorded/checked-out commit SHA (gitlink).
+    pub sha: String,
+    /// "ok" | "uninitialized" (-) | "modified" (+ checked-out ≠ recorded) |
+    /// "conflict" (U merge conflicts).
+    pub state: String,
+    /// `git describe` output for the checked-out commit, when git printed one.
+    pub describe: Option<String>,
+    /// Remote URL from `.gitmodules` (if configured).
+    pub url: Option<String>,
+    /// Tracking branch from `.gitmodules` (if configured).
+    pub branch: Option<String>,
+}
+
 /// One line origin in a diff hunk: "context" | "add" | "del".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

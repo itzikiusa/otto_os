@@ -276,10 +276,20 @@ that user's workspace roles. Bootstrap one with a one-time login, then save it i
 | 88 | GET /api/v1/auth/tokens | member | — | `ApiTokenInfo[]` (never the secret; newest first) |
 | 89 | DELETE /api/v1/auth/tokens/{id} | member | — | 204 (404 if not found / not owned) |
 | 90 | GET /api/v1/repos/{id}/stashes | ws viewer | — | `StashInfo[]` (read-only `git stash list`) |
+| 148 | GET /api/v1/repos/{id}/worktrees | ws viewer | — | `WorktreeInfo[]` (`git worktree list`; first entry = main) |
+| 149 | POST /api/v1/repos/{id}/worktrees/remove | ws editor | `{path, force?}` | `WorktreeInfo[]` (refreshed list; 400 on main/unknown path; git refuses dirty/locked without `force`) |
+| 150 | POST /api/v1/repos/{id}/worktrees/prune | ws editor | — | `WorktreeInfo[]` (drops stale registrations whose dir is gone) |
+| 151 | GET /api/v1/repos/{id}/submodules | ws viewer | — | `SubmoduleInfo[]` (`git submodule status` + `.gitmodules` url/branch) |
+| 152 | POST /api/v1/repos/{id}/submodules/update | ws editor | `{path?}` | `SubmoduleInfo[]` (`update --init --recursive`, one module or all) |
 
 Notes:
 - `StashInfo` = `{index, ref, sha, parents[], date, message, branch?}` — one entry per
   `git stash list`. `ref` is the `stash@{N}` selector; `parents` are `[base, index, (untracked)]`.
+- `WorktreeInfo` = `{path, head, branch?, is_main, locked, lock_reason?, prunable, dirty}` —
+  `dirty` is a best-effort uncommitted-changes probe; removal keeps the branch. Remove only
+  accepts a path the repo itself lists (never an arbitrary directory) and never the main worktree.
+- `SubmoduleInfo` = `{path, sha, state, describe?, url?, branch?}` with `state` one of
+  `ok | uninitialized | modified | conflict` (the `git submodule status` prefix char).
 - `ApiTokenInfo` = `{id, label?, token_prefix, created_at, last_seen_at, expires_at}`.
   `token_prefix` is the first 12 chars of the raw token (for identifying it in a list);
   the rest is unrecoverable.

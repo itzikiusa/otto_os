@@ -8,6 +8,7 @@ use std::process::Stdio;
 use otto_core::api::{
     BranchInfo, CommitInfo, ConflictFile, DiffResp, LocalMergeStrategy, MergeConflictStatus,
     MergePreview, MergeResult, RefBranch, RefTag, RefsResp, RepoStatusResp, StashInfo,
+    SubmoduleInfo, WorktreeInfo,
 };
 use otto_core::{Error, Result};
 use tokio::io::AsyncReadExt;
@@ -434,6 +435,92 @@ impl LocalGit {
             .run(&["worktree", "remove", "--force", path])
             .await;
         Ok(())
+    }
+
+    /// `git worktree list --porcelain` → parsed entries, each live worktree
+    /// probed for uncommitted changes (best-effort; prunable entries are
+    /// skipped — their directory is gone). The first entry is the main worktree.
+    pub async fn worktree_list(&self) -> Result<Vec<WorktreeInfo>> {
+        let out = self.run(&["worktree", "list", "--porcelain"]).await?;
+        let mut wts = crate::parse::parse_worktree_list(&out);
+        for wt in wts.iter_mut().filter(|w| !w.prunable) {
+            wt.dirty = self.path_has_changes(&wt.path).await;
+        }
+        Ok(wts)
+    }
+
+    /// True when the git tree at `path` has uncommitted changes (staged,
+    /// unstaged or untracked). Errors (missing dir, not a repo) read as clean —
+    /// this feeds a UI hint, not a safety gate (`worktree remove` re-checks).
+    async fn path_has_changes(&self, path: &str) -> bool {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["status", "--porcelain", "--untracked-files=normal"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .output()
+            .await;
+        matches!(out, Ok(o) if o.status.success() && !o.stdout.is_empty())
+    }
+
+    /// User-facing worktree removal: surfaces git's error (unlike the reaper's
+    /// best-effort [`worktree_remove`]) and only forces when asked — git refuses
+    /// to remove a dirty/locked tree without `--force`, which is the safety net
+    /// the UI relies on. Keeps the branch, like every other removal path.
+    pub async fn worktree_remove_checked(&self, path: &str, force: bool) -> Result<()> {
+        let mut args = vec!["worktree", "remove"];
+        if force {
+            // Twice: a locked worktree needs --force --force to be removed.
+            args.push("--force");
+            args.push("--force");
+        }
+        args.push("--");
+        args.push(path);
+        self.run(&args).await?;
+        Ok(())
+    }
+
+    /// `git worktree prune` — drop stale registrations whose directory is gone.
+    /// Returns git's verbose report ("" when there was nothing to prune).
+    pub async fn worktree_prune(&self) -> Result<String> {
+        let (out, err) = self.run_env(&["worktree", "prune", "--verbose"], &[]).await?;
+        // --verbose reports on stderr in some git versions; prefer whichever spoke.
+        let msg = if out.trim().is_empty() { err } else { out };
+        Ok(msg.trim().to_string())
+    }
+
+    /// `git submodule status` → parsed entries enriched with `.gitmodules`
+    /// url/branch. Empty list when the repo has no submodules.
+    pub async fn submodule_list(&self) -> Result<Vec<SubmoduleInfo>> {
+        let out = self.run(&["submodule", "status"]).await?;
+        let mut subs = crate::parse::parse_submodule_status(&out);
+        if subs.is_empty() {
+            return Ok(subs);
+        }
+        // .gitmodules may be absent even with gitlinks recorded — best-effort.
+        if let Ok((cfg, _)) = self
+            .run_env(&["config", "-f", ".gitmodules", "--list"], &[])
+            .await
+        {
+            crate::parse::enrich_submodules(&mut subs, &cfg);
+        }
+        Ok(subs)
+    }
+
+    /// `git submodule update --init --recursive [-- <path>]` — clone/checkout
+    /// the recorded commit(s). Network-touching for uninitialized modules; uses
+    /// the caller's ambient git auth (SSH agent / credential helper), like
+    /// fetch/pull do for the origin remote.
+    pub async fn submodule_update(&self, path: Option<&str>) -> Result<String> {
+        let mut args = vec!["submodule", "update", "--init", "--recursive"];
+        if let Some(p) = path {
+            args.push("--");
+            args.push(p);
+        }
+        let (out, err) = self.run_env(&args, &[]).await?;
+        let msg = if out.trim().is_empty() { err } else { out };
+        Ok(msg.trim().to_string())
     }
 
     pub async fn log(&self, limit: u32, skip: u32, all: bool) -> Result<Vec<CommitInfo>> {

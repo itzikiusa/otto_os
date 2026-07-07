@@ -16,7 +16,7 @@ use otto_core::api::{
     MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq,
     PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp, RepoStatusResp,
     RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, StagePathsReq, StashInfo,
-    TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq,
+    SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq, WorktreeInfo,
 };
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
@@ -95,6 +95,11 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/refs", get(repo_refs::<S>))
         .route("/repos/{id}/log", get(repo_log::<S>))
         .route("/repos/{id}/stashes", get(repo_stashes::<S>))
+        .route("/repos/{id}/worktrees", get(repo_worktrees::<S>))
+        .route("/repos/{id}/worktrees/remove", post(repo_worktree_remove::<S>))
+        .route("/repos/{id}/worktrees/prune", post(repo_worktree_prune::<S>))
+        .route("/repos/{id}/submodules", get(repo_submodules::<S>))
+        .route("/repos/{id}/submodules/update", post(repo_submodule_update::<S>))
         .route("/repos/{id}/fetch", post(repo_fetch::<S>))
         .route("/repos/{id}/diff", get(repo_diff::<S>))
         .route("/repos/{id}/stage", post(repo_stage::<S>))
@@ -1400,6 +1405,102 @@ async fn repo_stashes<S: GitCtx>(
 ) -> ApiResult<Json<Vec<StashInfo>>> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
     Ok(Json(git.stash_list().await?))
+}
+
+async fn repo_worktrees<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Vec<WorktreeInfo>>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(git.worktree_list().await?))
+}
+
+#[derive(Deserialize)]
+struct WorktreeRemoveReq {
+    /// Absolute worktree path, exactly as returned by GET …/worktrees.
+    path: String,
+    /// Force-remove a dirty/locked worktree (git refuses otherwise).
+    #[serde(default)]
+    force: Option<bool>,
+}
+
+async fn repo_worktree_remove<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<WorktreeRemoveReq>,
+) -> ApiResult<Json<Vec<WorktreeInfo>>> {
+    let path = req.path.trim();
+    if path.is_empty() {
+        return Err(Error::Invalid("worktree path must not be empty".into()).into());
+    }
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    // Only paths this repo actually lists are removable — the path is caller
+    // input, and `git worktree remove` on an arbitrary directory must never
+    // be reachable. The main worktree is the repo itself; git refuses it too,
+    // but rejecting up front gives a clear message instead of git's.
+    let wts = git.worktree_list().await?;
+    let Some(wt) = wts.iter().find(|w| w.path == path) else {
+        return Err(Error::Invalid(format!("'{path}' is not a worktree of this repo")).into());
+    };
+    if wt.is_main {
+        return Err(Error::Invalid("cannot remove the main worktree".into()).into());
+    }
+    if wt.prunable {
+        // The directory is already gone — remove the stale registration.
+        git.worktree_prune().await?;
+    } else {
+        git.worktree_remove_checked(path, req.force.unwrap_or(false))
+            .await?;
+    }
+    Ok(Json(git.worktree_list().await?))
+}
+
+async fn repo_worktree_prune<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Vec<WorktreeInfo>>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    git.worktree_prune().await?;
+    Ok(Json(git.worktree_list().await?))
+}
+
+async fn repo_submodules<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Vec<SubmoduleInfo>>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    Ok(Json(git.submodule_list().await?))
+}
+
+#[derive(Deserialize)]
+struct SubmoduleUpdateReq {
+    /// Update just this submodule (repo-relative path); all when absent.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+async fn repo_submodule_update<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<SubmoduleUpdateReq>,
+) -> ApiResult<Json<Vec<SubmoduleInfo>>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    if let Some(p) = req.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        // Same containment rule as worktree remove: only known submodule paths.
+        let known = git.submodule_list().await?;
+        if !known.iter().any(|s| s.path == p) {
+            return Err(Error::Invalid(format!("'{p}' is not a submodule of this repo")).into());
+        }
+        git.submodule_update(Some(p)).await?;
+    } else {
+        git.submodule_update(None).await?;
+    }
+    Ok(Json(git.submodule_list().await?))
 }
 
 #[derive(Deserialize)]

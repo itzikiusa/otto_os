@@ -1,7 +1,7 @@
 <script lang="ts">
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { api } from '../../lib/api/client';
-  import type { CommitInfo, RefsResp, RefBranch, RefTag, StashInfo, RepoStatusResp, DiffResp, FileDiff, DiffLine } from '../../lib/api/types';
+  import type { CommitInfo, RefsResp, RefBranch, RefTag, StashInfo, SubmoduleInfo, WorktreeInfo, RepoStatusResp, DiffResp, FileDiff, DiffLine } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -105,6 +105,8 @@
   let remoteOpen = $state(true);
   let tagsOpen = $state(false);
   let stashesOpen = $state(false);
+  let worktreesOpen = $state(false);
+  let submodulesOpen = $state(false);
   // Collapsed branch FOLDERS (e.g. "local:feature", "remote:release"). Default
   // expanded; a folder key here is collapsed. See groupBranches()/folderKey().
   let collapsedFolders = $state(new Set<string>());
@@ -162,6 +164,10 @@
   // ── Stashes (read-only `git stash list`) ──────────────────────────────────
   let stashes: StashInfo[] = $state([]);
 
+  // ── Worktrees + submodules (sidebar sections; best-effort like stashes) ───
+  let worktrees: WorktreeInfo[] = $state([]);
+  let submodules: SubmoduleInfo[] = $state([]);
+
   // ── Commit detail / diff ─────────────────────────────────────────────────
   let selectedSha = $state<string | null>(null);
   let selectedCommit = $state<CommitInfo | null>(null);
@@ -196,6 +202,18 @@
       .get<StashInfo[]>(`/repos/${id}/stashes`)
       .then((s) => (stashes = s))
       .catch(() => (stashes = []));
+
+    // Worktrees + submodules: same best-effort contract as stashes.
+    worktrees = [];
+    submodules = [];
+    void api
+      .get<WorktreeInfo[]>(`/repos/${id}/worktrees`)
+      .then((w) => (worktrees = w))
+      .catch(() => (worktrees = []));
+    void api
+      .get<SubmoduleInfo[]>(`/repos/${id}/submodules`)
+      .then((s) => (submodules = s))
+      .catch(() => (submodules = []));
   });
 
   // ── Context-menu helpers ────────────────────────────────────────────────────
@@ -220,6 +238,7 @@
         .then((c) => (commits = c))
         .catch(() => {}),
       api.get<StashInfo[]>(`/repos/${repoId}/stashes`).then((s) => (stashes = s)).catch(() => {}),
+      api.get<WorktreeInfo[]>(`/repos/${repoId}/worktrees`).then((w) => (worktrees = w)).catch(() => {}),
     ]);
   }
 
@@ -665,6 +684,100 @@
   function selectStash(s: StashInfo): void {
     const c = bySha.get(s.sha);
     if (c) void selectCommit(c);
+  }
+
+  // ── Worktree actions (sidebar WORKTREES section) ────────────────────────────
+  /** Display name for a worktree: the last path segment. */
+  function wtName(w: WorktreeInfo): string {
+    return w.path.split('/').filter(Boolean).pop() ?? w.path;
+  }
+
+  async function wtRemove(w: WorktreeInfo): Promise<void> {
+    // A dirty tree needs --force and the confirm must say what that discards.
+    // Removal always KEEPS the branch (and its commits) either way.
+    const detail = w.dirty
+      ? ' It has UNCOMMITTED changes that will be discarded.'
+      : w.locked
+        ? ` It is locked${w.lock_reason ? ` (${w.lock_reason})` : ''}.`
+        : '';
+    const ok = await confirmer.ask(
+      `Remove worktree "${wtName(w)}" at ${w.path}?${detail} The branch${w.branch ? ` "${w.branch}"` : ''} and its commits are kept.`,
+      { title: 'Remove worktree', confirmLabel: 'Remove', danger: true },
+    );
+    if (!ok) return;
+    try {
+      worktrees = await api.post<WorktreeInfo[]>(`/repos/${repoId}/worktrees/remove`, {
+        path: w.path,
+        force: w.dirty || w.locked,
+      });
+      toasts.success('Worktree removed', wtName(w));
+    } catch (e) {
+      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function wtPrune(): Promise<void> {
+    try {
+      worktrees = await api.post<WorktreeInfo[]>(`/repos/${repoId}/worktrees/prune`, {});
+      toasts.success('Pruned', 'Stale worktree entries removed');
+    } catch (e) {
+      toasts.error('Prune failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function wtMenu(e: MouseEvent | KeyboardEvent, w: WorktreeInfo): void {
+    const items: MenuItem[] = [];
+    if (!w.is_main) {
+      if (w.prunable) {
+        // Directory is already gone — the only cleanup is dropping the entry.
+        items.push({ label: 'Remove stale entry', icon: 'trash', danger: true, action: () => void wtPrune() });
+      } else {
+        items.push({
+          label: w.dirty ? 'Remove (discard changes)…' : 'Remove worktree…',
+          icon: 'trash',
+          danger: true,
+          action: () => void wtRemove(w),
+        });
+      }
+      items.push({ separator: true });
+    }
+    items.push({ label: 'Copy path', icon: 'copy', action: () => void clip(w.path, w.path) });
+    if (w.branch) {
+      const branch = w.branch;
+      items.push({ label: 'Copy branch', icon: 'branch', action: () => void clip(branch, branch) });
+    }
+    ctxMenu.show(e, items);
+  }
+
+  // ── Submodule actions (sidebar SUBMODULES section) ──────────────────────────
+  async function subUpdate(path?: string): Promise<void> {
+    try {
+      submodules = await api.post<SubmoduleInfo[]>(`/repos/${repoId}/submodules/update`, {
+        path: path ?? null,
+      });
+      toasts.success('Submodules updated', path ?? 'all');
+    } catch (e) {
+      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function subMenu(e: MouseEvent | KeyboardEvent, sub: SubmoduleInfo): void {
+    const items: MenuItem[] = [
+      {
+        label: sub.state === 'uninitialized' ? 'Initialize (clone)' : 'Update to recorded commit',
+        icon: 'refresh',
+        action: () => void subUpdate(sub.path),
+      },
+      { label: 'Update all submodules', icon: 'refresh', action: () => void subUpdate() },
+      { separator: true },
+      { label: 'Copy path', icon: 'copy', action: () => void clip(sub.path, sub.path) },
+    ];
+    if (sub.url) {
+      const url = sub.url;
+      items.push({ label: 'Copy URL', icon: 'copy', action: () => void clip(url, url) });
+    }
+    items.push({ label: 'Copy commit SHA', icon: 'copy', action: () => void clip(sub.sha, sub.sha.slice(0, 10)) });
+    ctxMenu.show(e, items);
   }
 
   async function checkout(branch: string, create: boolean): Promise<void> {
@@ -1507,6 +1620,85 @@
           {/each}
         {/if}
       </div>
+
+      <!-- WORKTREES — `git worktree list`; right-click to remove/prune. Shows
+           agent-created trees (swarm, Run-with-Otto, goal loops) too. -->
+      <div class="ref-section">
+        <button class="ref-header" onclick={() => (worktreesOpen = !worktreesOpen)}>
+          <Icon name={worktreesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name="folder" size={12} />
+          <span>WORKTREES</span>
+          <span class="ref-count">{worktrees.length}</span>
+        </button>
+        {#if worktreesOpen}
+          {#each worktrees as w (w.path)}
+            <div
+              class="ref-row stash-row"
+              role="button"
+              tabindex="0"
+              title={`${w.path}${w.branch ? ` · ${w.branch}` : ' · detached'}${w.dirty ? ' · uncommitted changes' : ''}${w.prunable ? ' · stale (directory gone)' : ''}`}
+              oncontextmenu={(e) => wtMenu(e, w)}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') wtMenu(e, w);
+              }}
+            >
+              <Icon name="folder" size={10} />
+              <span class="ref-name stash-msg" class:dim={w.prunable}>{wtName(w)}</span>
+              {#if w.dirty}<span class="wt-dirty" title="Uncommitted changes">●</span>{/if}
+              {#if w.locked}<Icon name="lock" size={9} />{/if}
+              {#if w.prunable}
+                <span class="wt-flag mono dim">stale</span>
+              {:else if w.is_main}
+                <span class="wt-flag mono dim">main</span>
+              {:else if w.branch}
+                <span class="stash-branch mono dim">{w.branch}</span>
+              {:else}
+                <span class="wt-flag mono dim">detached</span>
+              {/if}
+            </div>
+          {:else}
+            <div class="dim ref-empty">No worktrees</div>
+          {/each}
+          {#if worktrees.some((w) => w.prunable)}
+            <button class="ref-row stash-row wt-prune" onclick={() => void wtPrune()}>
+              <Icon name="trash" size={10} />
+              <span class="ref-name">Prune stale entries</span>
+            </button>
+          {/if}
+        {/if}
+      </div>
+
+      <!-- SUBMODULES — `git submodule status`; right-click to init/update. -->
+      {#if submodules.length > 0}
+        <div class="ref-section">
+          <button class="ref-header" onclick={() => (submodulesOpen = !submodulesOpen)}>
+            <Icon name={submodulesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+            <Icon name="shapes" size={12} />
+            <span>SUBMODULES</span>
+            <span class="ref-count">{submodules.length}</span>
+          </button>
+          {#if submodulesOpen}
+            {#each submodules as sub (sub.path)}
+              <div
+                class="ref-row stash-row"
+                role="button"
+                tabindex="0"
+                title={`${sub.path} @ ${sub.sha.slice(0, 10)}${sub.url ? ` · ${sub.url}` : ''}${sub.state !== 'ok' ? ` · ${sub.state}` : ''}`}
+                oncontextmenu={(e) => subMenu(e, sub)}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') subMenu(e, sub);
+                }}
+              >
+                <Icon name="shapes" size={10} />
+                <span class="ref-name stash-msg">{sub.path}</span>
+                {#if sub.state !== 'ok'}
+                  <span class="wt-flag mono" class:sub-warn={sub.state !== 'uninitialized'}>{sub.state}</span>
+                {/if}
+              </div>
+            {/each}
+          {/if}
+        </div>
+      {/if}
     {/if}
   </aside>
 
@@ -2407,6 +2599,30 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* worktree/submodule row accents (share the stash-row base) */
+  .wt-dirty {
+    flex-shrink: 0;
+    color: #febc2e;
+    font-size: 8px;
+    line-height: 1;
+  }
+  .wt-flag {
+    flex-shrink: 0;
+    font-size: 9px;
+    color: var(--text-dim);
+  }
+  .wt-flag.sub-warn {
+    color: #febc2e;
+  }
+  .wt-prune {
+    width: 100%;
+    text-align: start;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 11px;
   }
 
   /* ── detail panel ── */

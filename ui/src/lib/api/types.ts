@@ -2034,6 +2034,40 @@ export interface StashInfo {
   branch: string | null;
 }
 
+/** One `git worktree list --porcelain` entry (first = main worktree). Fed by
+ *  GET /repos/{id}/worktrees; POST …/worktrees/remove `{path, force?}` and
+ *  POST …/worktrees/prune both return the refreshed list. */
+export interface WorktreeInfo {
+  /** Absolute path of the worktree. */
+  path: string;
+  /** HEAD commit SHA ("" for a bare entry). */
+  head: string;
+  /** Checked-out branch (short name); null when detached. */
+  branch: string | null;
+  /** True for the main worktree — never removable. */
+  is_main: boolean;
+  locked: boolean;
+  lock_reason: string | null;
+  /** Stale registration (directory gone) — cleared by prune, not remove. */
+  prunable: boolean;
+  /** Best-effort uncommitted-changes probe (false when unknown). */
+  dirty: boolean;
+}
+
+/** One `git submodule status` entry + `.gitmodules` config. Fed by
+ *  GET /repos/{id}/submodules; POST …/submodules/update `{path?}` returns the
+ *  refreshed list. */
+export interface SubmoduleInfo {
+  /** Path relative to the repo root. */
+  path: string;
+  sha: string;
+  /** "ok" | "uninitialized" | "modified" | "conflict". */
+  state: string;
+  describe: string | null;
+  url: string | null;
+  branch: string | null;
+}
+
 export type LineOrigin = 'context' | 'add' | 'del';
 
 export interface DiffLine {
