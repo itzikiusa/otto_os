@@ -15,6 +15,7 @@
     HandoverTarget,
     HandoverBriefResp,
   } from '../../lib/api/types';
+  import { allProviders } from '../../lib/providers';
 
   interface Props {
     sessionId: string;
@@ -23,7 +24,7 @@
   let { sessionId, onclose }: Props = $props();
 
   const source = $derived(ws.sessions.find((s) => s.id === sessionId) ?? null);
-  const providers = $derived(auth.meta?.providers ?? ['claude', 'codex', 'shell']);
+  const providers = $derived(allProviders());
   // Other agent sessions in this workspace, eligible as existing targets.
   const otherAgents = $derived(ws.plainAgentSessions.filter((s) => s.id !== sessionId));
 

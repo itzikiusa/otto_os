@@ -1,9 +1,21 @@
 <script lang="ts" module>
-  // Providers with a real brand mark below. Everything else (shell, custom
-  // slugs…) keeps the plain text label — callers gate on this.
-  const KNOWN = new Set(['claude', 'codex', 'agy']);
+  // Providers with a real brand mark below (claude/codex/agy). ANY other
+  // provider — shell or a custom slug like `grok` — still gets an icon: a
+  // generic monogram tile, so custom providers look first-class everywhere
+  // (never a bare text label as if they weren't there). So this is always true
+  // for a non-empty provider; kept as a function so existing callers compile.
+  const BRANDED = new Set(['claude', 'codex', 'agy']);
   export function hasProviderIcon(provider: string | null | undefined): boolean {
-    return !!provider && KNOWN.has(provider.toLowerCase());
+    return !!provider && provider.trim() !== '';
+  }
+  export function isBrandedProvider(provider: string | null | undefined): boolean {
+    return !!provider && BRANDED.has(provider.toLowerCase());
+  }
+  /** Deterministic hue (0–360) from a provider slug, for the monogram tile. */
+  function hueFor(slug: string): number {
+    let h = 0;
+    for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) % 360;
+    return h;
   }
 </script>
 
@@ -18,6 +30,9 @@
   }
   let { provider, size = 14 }: Props = $props();
   const p = $derived((provider ?? '').toLowerCase());
+  // Monogram: up to 2 leading alphanumerics of a custom provider slug.
+  const mono = $derived((p.match(/[a-z0-9]/g) ?? []).slice(0, 2).join('').toUpperCase() || '?');
+  const hue = $derived(hueFor(p));
 </script>
 
 {#if p === 'claude'}
@@ -80,5 +95,22 @@
       stroke-width="3.4"
       stroke-linecap="round"
     />
+  </svg>
+{:else}
+  <!-- Generic monogram tile for shell + custom providers (grok, …): a
+       deterministic per-slug hue so each custom provider is visually distinct
+       and first-class, not a bare label. -->
+  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" role="img">
+    <rect x="1" y="1" width="22" height="22" rx="5.5" fill="hsl({hue} 55% 42%)" />
+    <text
+      x="12"
+      y="12"
+      text-anchor="middle"
+      dominant-baseline="central"
+      font-size={mono.length > 1 ? 9 : 12}
+      font-weight="700"
+      fill="#fff"
+      font-family="ui-sans-serif, system-ui, sans-serif"
+    >{mono}</text>
   </svg>
 {/if}

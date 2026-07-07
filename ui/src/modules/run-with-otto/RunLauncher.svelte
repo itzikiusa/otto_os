@@ -16,6 +16,7 @@
   import RunStageRail from './RunStageRail.svelte';
   import { SOURCE_KINDS, sourceColor, sourceLabel } from './runStatus';
   import type { OttoRun, Repo, RunDetectResp, RunMode } from '../../lib/api/types';
+  import { agentProviders } from '../../lib/providers';
 
   interface Props {
     wsId: string;
@@ -54,7 +55,7 @@
   // Providers from /meta; `shell` can't take an agent prompt. Single-agent
   // execution runs on the claude PTY — the provider choice applies to goal loops.
   const providers = $derived(
-    (auth.meta?.providers ?? ['claude', 'codex']).filter((p) => p !== 'shell'),
+    agentProviders(),
   );
   const effectiveProvider = $derived(mode === 'single_agent' ? 'claude' : provider);
 

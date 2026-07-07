@@ -10,6 +10,7 @@
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
+  import { agentProviders } from '../../lib/providers';
 
   interface Props {
     editor: { generate: (p: string) => Promise<void>; isGenerating: () => boolean } | undefined;
@@ -23,7 +24,7 @@
   // Which agent drives this canvas's Ask-AI (single choice; 'shell' isn't an
   // agent so it's excluded). Changing it persists on the scene.
   const providers = $derived(
-    (auth.meta?.providers ?? ['claude', 'codex']).filter((p) => p !== 'shell'),
+    agentProviders(),
   );
   async function setProvider(p: string): Promise<void> {
     if (!canvas.currentId || p === canvas.provider) return;

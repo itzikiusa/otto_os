@@ -613,6 +613,9 @@ async fn orchestrate(
                 connections,
                 cwd: ws.root_path,
                 default_provider,
+                // Live registry (builtins + custom providers) so the planner can
+                // spawn any configured provider by name, e.g. "open grok session".
+                available_providers: ctx.manager.providers().names(),
             },
         )
         .await

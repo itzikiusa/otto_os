@@ -14,6 +14,7 @@
   } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { agentProviders } from '../../lib/providers';
 
   interface Props {
     starting: boolean;
@@ -23,7 +24,7 @@
 
   // Agent CLIs available for implementation / validation / improvement.
   const providerOpts = $derived.by(() => {
-    const ps = (auth.meta?.providers ?? []).filter((p) => p !== 'shell');
+    const ps = agentProviders();
     return ps.length > 0 ? ps : ['claude', 'codex', 'agy'];
   });
 

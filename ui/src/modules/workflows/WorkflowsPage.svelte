@@ -11,6 +11,7 @@
   import FileTree from '../panels/FileTree.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { agentProviders } from '../../lib/providers';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -937,7 +938,8 @@
     providers?: string[];
     instructions?: string;
   }
-  const REVIEW_PROVIDERS = ['claude', 'codex', 'agy'];
+  // Reviewer providers come from the live registry (built-ins + custom).
+  const REVIEW_PROVIDERS = $derived(agentProviders());
 
   function reviewers(): ReviewerRow[] {
     const p = selectedNode?.params as Record<string, unknown> | undefined;
