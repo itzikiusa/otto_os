@@ -76,20 +76,106 @@ pub fn augment_prompt(base_prompt: &str, findings_path: &str) -> String {
     )
 }
 
+/// One finding as an agent actually emits it. Agents are TOLD to emit
+/// `{path, line, severity: info|warn|bug, body}`, but review-lens skills (and
+/// the models themselves) routinely use their own vocabulary — `file` for the
+/// path, `summary`/`description`/`message` for the body, `blocker`/`major`/
+/// `minor` severities. Silently defaulting those to `null`/`""` destroyed
+/// whole runs (45 real findings → empty husks → the summarizer correctly
+/// answered `[]` → 0 comments, no error). Every alternate key is captured
+/// explicitly (NOT `#[serde(alias)]` — an object carrying both the canonical
+/// and the alias key would then fail the WHOLE array as a duplicate field).
 #[derive(serde::Deserialize)]
 struct RawFinding {
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    file: Option<String>,
     #[serde(default)]
     line: Option<u32>,
     #[serde(default = "default_severity")]
     severity: String,
     #[serde(default)]
     body: String,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    comment: Option<String>,
+    #[serde(default)]
+    issue: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    details: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    failure_scenario: Option<String>,
+    #[serde(default)]
+    suggested_fix: Option<String>,
+    #[serde(default)]
+    fix: Option<String>,
 }
 
 fn default_severity() -> String {
     "info".to_string()
+}
+
+/// Map agent severity vocabularies onto the engine's `info|warn|bug` scale.
+/// Unknown labels pass through unchanged (the UI renders them as text).
+fn normalize_severity(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "blocker" | "critical" | "bug" | "error" | "high" => "bug".to_string(),
+        "major" | "warn" | "warning" | "medium" => "warn".to_string(),
+        "minor" | "nit" | "suggestion" | "low" | "info" | "note" => "info".to_string(),
+        _ => raw.to_string(),
+    }
+}
+
+impl RawFinding {
+    fn into_finding(self) -> ReviewFinding {
+        let mut body = if self.body.trim().is_empty() {
+            // Longest-form candidates first; `title` (a one-liner) is the floor.
+            [
+                self.summary,
+                self.description,
+                self.message,
+                self.comment,
+                self.issue,
+                self.details,
+                self.detail,
+                self.title,
+            ]
+            .into_iter()
+            .flatten()
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or_default()
+        } else {
+            self.body
+        };
+        // Fold the auxiliary detail fields in so their substance survives the
+        // summarizer (which only ever sees `body`).
+        if let Some(fs) = self.failure_scenario.filter(|s| !s.trim().is_empty()) {
+            body = format!("{body}\n\nFailure scenario: {fs}");
+        }
+        if let Some(fx) = self
+            .suggested_fix
+            .or(self.fix)
+            .filter(|s| !s.trim().is_empty())
+        {
+            body = format!("{body}\n\nSuggested fix: {fx}");
+        }
+        ReviewFinding {
+            path: self.path.or(self.file).filter(|s| !s.trim().is_empty()),
+            line: self.line,
+            severity: normalize_severity(&self.severity),
+            body,
+        }
+    }
 }
 
 /// Extract the JSON array of findings from arbitrary agent output (tolerates
@@ -107,16 +193,7 @@ pub fn parse_findings(text: &str) -> Vec<ReviewFinding> {
         return Vec::new();
     }
     serde_json::from_str::<Vec<RawFinding>>(&stripped[start..end])
-        .map(|raw| {
-            raw.into_iter()
-                .map(|r| ReviewFinding {
-                    path: r.path,
-                    line: r.line,
-                    severity: r.severity,
-                    body: r.body,
-                })
-                .collect()
-        })
+        .map(|raw| raw.into_iter().map(RawFinding::into_finding).collect())
         .unwrap_or_default()
 }
 
@@ -471,5 +548,46 @@ mod tests {
         assert_eq!(parse_findings("[{\"body\":\"n\"}]")[0].severity, "info");
         assert!(parse_findings("not json").is_empty());
         assert!(parse_findings("").is_empty());
+    }
+
+    #[test]
+    fn parse_findings_accepts_skill_style_keys() {
+        // The review-lens skills teach {file, line, severity, summary,
+        // failure_scenario, …} — the exact shape that wiped review
+        // 01KWYP3Z3N2CRPV1X15ZCAWKAR to empty bodies. It must map cleanly.
+        let raw = r#"[{
+            "file": "libs/a/b.component.ts",
+            "line": 208,
+            "severity": "major",
+            "confidence": "confirmed",
+            "category": "correctness",
+            "summary": "Add-mode pricing table never refills",
+            "failure_scenario": "Open dialog twice; second open is empty."
+        }]"#;
+        let f = parse_findings(raw);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].path.as_deref(), Some("libs/a/b.component.ts"));
+        assert_eq!(f[0].line, Some(208));
+        assert_eq!(f[0].severity, "warn"); // major → warn
+        assert!(f[0].body.starts_with("Add-mode pricing table never refills"));
+        assert!(f[0].body.contains("Failure scenario: Open dialog twice"));
+    }
+
+    #[test]
+    fn parse_findings_prefers_canonical_keys_and_maps_severities() {
+        // Canonical body wins even when a summary is also present, and an
+        // object carrying BOTH path and file must not fail the array.
+        let raw = r#"[
+            {"path":"x.rs","file":"y.rs","line":1,"severity":"blocker","body":"real body","summary":"ignored"},
+            {"file":"z.rs","severity":"nit","description":"via description"}
+        ]"#;
+        let f = parse_findings(raw);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].path.as_deref(), Some("x.rs"));
+        assert_eq!(f[0].severity, "bug"); // blocker → bug
+        assert_eq!(f[0].body, "real body");
+        assert_eq!(f[1].path.as_deref(), Some("z.rs"));
+        assert_eq!(f[1].severity, "info"); // nit → info
+        assert_eq!(f[1].body, "via description");
     }
 }

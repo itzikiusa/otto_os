@@ -11,8 +11,9 @@
 
   interface Props {
     review: Review;
-    /** 'running' shows every agent (incl. the trailing summarizer, not
-     *  retryable); 'done' shows the reviewers only (summarizer sliced off). */
+    /** 'running' and 'done' both show every agent, incl. the trailing
+     *  summarizer — hiding the summarizer when done left a wiped run (agents
+     *  done, 0 comments) with nothing to inspect or retry. */
     view: 'running' | 'done';
     /** Called after a successful retry with the refreshed review, so the parent
      *  can update its state and resume polling. */
@@ -20,10 +21,8 @@
   }
   let { review, view, onretried }: Props = $props();
 
-  // Rows to render: during a run, all agents; when done, drop the summarizer
-  // (the last entry) — it has no standalone session/findings to open.
-  const rows = $derived(view === 'done' ? review.agents.slice(0, -1) : review.agents);
-  // The summarizer is the last entry of the FULL list and is never retryable.
+  const rows = $derived(review.agents);
+  // The summarizer is the last entry; it retries via its own endpoint (below).
   const lastRetryable = $derived(review.agents.length - 1);
 
   // Inline live terminals (multiple may be open at once), keyed by session id.
@@ -56,6 +55,24 @@
       toasts.error('Retry failed', e instanceof Error ? e.message : String(e));
     } finally {
       retrying = { ...retrying, [index]: false };
+    }
+  }
+
+  // Re-run ONLY the summarize+persist stage from the stored per-agent findings
+  // (cheap — no reviewer re-runs). Replaces the review's unposted draft
+  // comments; the parent resumes polling via onretried.
+  let retryingSummary = $state(false);
+  async function retrySummarizer(): Promise<void> {
+    if (retryingSummary) return;
+    retryingSummary = true;
+    try {
+      const r = await api.post<Review>(`/reviews/${review.id}/summarizer/retry`);
+      onretried?.(r);
+      toasts.info('Re-running the summary…');
+    } catch (e) {
+      toasts.error('Summary retry failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      retryingSummary = false;
     }
   }
 
@@ -108,6 +125,15 @@
           >
             {retrying[i] ? 'Retrying…' : 'Retry'}
           </button>
+        {:else if view === 'done' || agent.status === 'done' || agent.status === 'error'}
+          <button
+            class="btn small ghost"
+            disabled={retryingSummary}
+            onclick={retrySummarizer}
+            title="Re-run only the summary over the agents' stored findings (replaces draft comments; approved/posted ones stay)"
+          >
+            {retryingSummary ? 'Retrying…' : 'Retry summary'}
+          </button>
         {/if}
         {#if agent.fallback}
           <span
@@ -131,7 +157,9 @@
           {agent.status}
         </span>
       </div>
-      {#if agent.note && (view === 'running' || agent.status !== 'done')}
+      {#if agent.note && (view === 'running' || agent.status !== 'done' || i === lastRetryable)}
+        <!-- The summarizer's note ("N final comments" / fallback) stays visible
+             when done — it's the only trace of what the summary stage did. -->
         <p class="rp-agent-note">{agent.note}</p>
       {/if}
       {#if agent.status === 'waiting'}

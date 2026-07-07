@@ -50,17 +50,24 @@
     // registered repo is already open — then list any not-yet-open repos to
     // open. Picking one that's already open just activates it (openRepoTab is
     // idempotent), so there's no duplicate-tab risk.
-    ctxMenu.show(e, [
-      { label: 'Clone a repository…', icon: 'download', action: () => onadd('clone') },
-      { label: 'Browse remote to clone…', icon: 'globe', action: () => onadd('browse') },
-      { label: 'Add a local repository…', icon: 'folder', action: () => onadd('register') },
-      ...(closedRepos.length > 0 ? [{ separator: true }] : []),
-      ...closedRepos.map((r) => ({
-        label: r.name,
-        icon: 'branch',
-        action: () => onopen(r.id),
-      })),
-    ]);
+    // The repo list is data-driven and can be long — searchable, and capped at
+    // a dozen visible rows (the search narrows into the rest). The three add
+    // actions stay pinned above the list.
+    ctxMenu.show(
+      e,
+      [
+        { label: 'Clone a repository…', icon: 'download', pinned: true, action: () => onadd('clone') },
+        { label: 'Browse remote to clone…', icon: 'globe', pinned: true, action: () => onadd('browse') },
+        { label: 'Add a local repository…', icon: 'folder', pinned: true, action: () => onadd('register') },
+        ...(closedRepos.length > 0 ? [{ separator: true }] : []),
+        ...closedRepos.map((r) => ({
+          label: r.name,
+          icon: 'branch',
+          action: () => onopen(r.id),
+        })),
+      ],
+      { filter: true, filterPlaceholder: 'Search repositories…', maxVisible: 12 },
+    );
   }
 
   // ── Drag-to-reorder (mirrors shell/TabBar) ───────────────────────────────

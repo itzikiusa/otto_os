@@ -9,12 +9,17 @@ import { expectFullyInViewport, openPage } from './helpers';
 // ─────────────────────────────────────────────────────────────────────────────
 // Git "+" repo picker with MANY registered repos (desktop-browser only).
 //
-// Regression: the picker is a context menu listing every not-yet-open repo.
+// Regression 1: the picker is a context menu listing every not-yet-open repo.
 // With enough registered repos the menu grew taller than the window; the
 // clamp logic "flipped" it above the cursor (top = y - height → negative), so
 // the whole menu rendered above the viewport — only its last item peeked out
 // at the very top and nothing was clickable. The menu must instead be clamped
-// INSIDE the viewport and scroll internally, keeping every entry reachable.
+// INSIDE the viewport and scroll internally.
+//
+// The picker is now also FILTERABLE: it shows at most 12 repo rows (a "+N
+// more" hint collapses the rest) with a pinned search input that narrows the
+// list — so every repo stays reachable by typing, not by scrolling a
+// window-height menu.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const REPO_COUNT = 30; // enough rows to exceed the 800px viewport height
@@ -50,15 +55,21 @@ test('add-repo picker stays inside the viewport and every entry is reachable', a
 
   await expectFullyInViewport(page, menu, 'add-repo picker menu');
 
-  // The static "add" actions at the top must be visible…
+  // The pinned "add" actions at the top must be visible…
   await expect(menu.getByRole('menuitem', { name: 'Clone a repository…' })).toBeVisible();
 
-  // …and the LAST repo entry must be reachable (menu scrolls internally) and
-  // actually work: clicking it opens that repo as a tab.
-  const last = menu.getByRole('menuitem', { name: `e2e-menu-${REPO_COUNT - 1}` });
-  await last.scrollIntoViewIfNeeded();
+  // …the repo list is capped (12 rows + the 3 pinned actions) with a "+N more"
+  // hint instead of a window-height scroll…
+  const rows = menu.getByRole('menuitem');
+  await expect(rows).toHaveCount(12 + 3);
+  await expect(menu.locator('.ctx-more')).toContainText('more');
+
+  // …and the LAST repo (hidden by the cap) is reachable via the search input
+  // and actually works: narrowing to it and clicking opens that repo as a tab.
+  const lastName = `e2e-menu-${REPO_COUNT - 1}`;
+  await menu.locator('.ctx-search-input').fill(lastName);
+  const last = menu.getByRole('menuitem', { name: lastName });
+  await expect(last).toBeVisible();
   await last.click();
-  await expect(
-    page.locator('.git-tab-name', { hasText: `e2e-menu-${REPO_COUNT - 1}` }),
-  ).toBeVisible();
+  await expect(page.locator('.git-tab-name', { hasText: lastName })).toBeVisible();
 });

@@ -9,6 +9,9 @@
     ReviewComment,
     ReviewConfig,
     ReviewAgentCfg,
+    ReviewConfigPreset,
+    RepoReviewBinding,
+    RepoReviewConfigResp,
     StartReviewReq,
     DiffResp,
     FileDiff,
@@ -118,6 +121,19 @@
   });
   // Custom presets (persisted in ReviewConfig.custom_presets)
   let editPresets: ReviewAgentCfg[] = $state([]);
+  // ── Per-repo scope ──────────────────────────────────────────────────────
+  // The modal edits either the GLOBAL config (all repos without an override)
+  // or THIS repository's config (a named preset or a repo-only custom config).
+  let configScope: 'global' | 'repo' = $state('global');
+  let globalCfg: ReviewConfig | null = $state(null);
+  let repoCfg: RepoReviewConfigResp | null = $state(null);
+  // Named full-config presets ("conf A" / "conf Y") shared across repos.
+  let namedPresets: ReviewConfigPreset[] = $state([]);
+  // '' = repo-only custom config (no preset backing it).
+  let selectedPresetId = $state('');
+  // Inline "save as preset" name row.
+  let presetSaveOpen = $state(false);
+  let presetNameDraft = $state('');
 
   /** Ensure an agent always has a `providers` array (migration from old format). */
   function normalizeAgent(a: ReviewAgentCfg): ReviewAgentCfg {
@@ -484,20 +500,131 @@
 
   // --- Config modal ---
 
+  // Load the repo's binding once (and on repo change) so the panel can badge
+  // an active override next to the Configure buttons.
+  $effect(() => {
+    const rid = repoId;
+    void api
+      .get<RepoReviewConfigResp>(`/repos/${rid}/review-config`)
+      .then((r) => (repoCfg = r))
+      .catch(() => {});
+  });
+
+  /** Short badge text for an active repo override ('' = none). */
+  const repoCfgBadge = $derived.by(() => {
+    const rc = repoCfg;
+    if (rc === null || rc.scope === 'global') return '';
+    return rc.scope === 'preset' ? (rc.preset_name ?? 'preset') : 'repo config';
+  });
+
+  /** Seed the edit fields from a config (normalizing `providers` arrays). */
+  function seedEditFields(cfg: ReviewConfig): void {
+    editAgents = cfg.agents.map((a) => normalizeAgent({ ...a }));
+    editSummarizer = { ...cfg.summarizer };
+  }
+
   async function openConfig(): Promise<void> {
     showConfig = true;
     configLoading = true;
     try {
-      const cfg = await api.get<ReviewConfig>('/settings/pr-review');
-      // Normalize: ensure every reviewer agent has a populated `providers` array.
-      editAgents = cfg.agents.map((a) => normalizeAgent({ ...a }));
-      editSummarizer = { ...cfg.summarizer };
+      const [cfg, presets, binding] = await Promise.all([
+        api.get<ReviewConfig>('/settings/pr-review'),
+        api.get<ReviewConfigPreset[]>('/settings/pr-review/presets'),
+        api.get<RepoReviewConfigResp>(`/repos/${repoId}/review-config`),
+      ]);
+      globalCfg = cfg;
+      namedPresets = presets;
+      repoCfg = binding;
+      // Per-agent presets live on the GLOBAL config regardless of scope.
       editPresets = (cfg.custom_presets ?? []).map((p) => normalizeAgent({ ...p }));
+      // Open on the scope the repo actually reviews with.
+      configScope = binding.scope === 'global' ? 'global' : 'repo';
+      selectedPresetId = binding.preset_id ?? '';
+      seedEditFields(configScope === 'global' ? cfg : binding.config);
     } catch (e) {
       toasts.error('Could not load config', e instanceof Error ? e.message : String(e));
       showConfig = false;
     } finally {
       configLoading = false;
+    }
+  }
+
+  /** Switch the modal between the global config and this repo's config. */
+  function setConfigScope(scope: 'global' | 'repo'): void {
+    if (scope === configScope) return;
+    configScope = scope;
+    if (scope === 'global') {
+      if (globalCfg) seedEditFields(globalCfg);
+    } else if (repoCfg) {
+      selectedPresetId = repoCfg.preset_id ?? '';
+      seedEditFields(repoCfg.config);
+    }
+  }
+
+  /** Load a named preset's config into the edit fields. '' keeps the current
+   *  fields as a repo-only custom config. */
+  function pickNamedPreset(id: string): void {
+    selectedPresetId = id;
+    const p = namedPresets.find((x) => x.id === id);
+    if (p) seedEditFields(p.config);
+  }
+
+  /** The config currently in the edit fields, provider-synced. Repo-scoped
+   *  configs never carry the global per-agent presets. */
+  function currentEditConfig(includePresets: boolean): ReviewConfig {
+    const base = buildConfigFromEditState(includePresets ? editPresets : []);
+    return includePresets ? base : { ...base, custom_presets: [] };
+  }
+
+  /** Compare two configs ignoring per-agent presets (preset "drift" check). */
+  function sameConfig(a: ReviewConfig, b: ReviewConfig): boolean {
+    const strip = (c: ReviewConfig): unknown => ({
+      agents: c.agents.map((x) => ({ ...normalizeAgent(x), provider: undefined })),
+      summarizer: { ...c.summarizer },
+    });
+    return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
+  }
+
+  /** Revert this repo to the global config (drops its binding). */
+  async function useGlobalConfig(): Promise<void> {
+    configSaving = true;
+    try {
+      repoCfg = await api.del<RepoReviewConfigResp>(`/repos/${repoId}/review-config`);
+      configScope = 'global';
+      selectedPresetId = '';
+      if (globalCfg) seedEditFields(globalCfg);
+      toasts.success('Repo now uses the global review config');
+    } catch (e) {
+      toasts.error('Could not revert to global', e instanceof Error ? e.message : String(e));
+    } finally {
+      configSaving = false;
+    }
+  }
+
+  /** Save the current edit fields as a NEW named preset (or update the one
+   *  with the same name) and bind this repo to it. */
+  async function saveAsNamedPreset(): Promise<void> {
+    const name = presetNameDraft.trim();
+    if (name === '') return;
+    configSaving = true;
+    try {
+      const cfg = currentEditConfig(false);
+      const existing = namedPresets.find((p) => p.name === name);
+      const id = existing?.id ?? crypto.randomUUID();
+      const next = existing
+        ? namedPresets.map((p) => (p.id === id ? { ...p, config: cfg } : p))
+        : [...namedPresets, { id, name, config: cfg }];
+      namedPresets = await api.put<ReviewConfigPreset[]>('/settings/pr-review/presets', next);
+      const body: RepoReviewBinding = { preset_id: id };
+      repoCfg = await api.put<RepoReviewConfigResp>(`/repos/${repoId}/review-config`, body);
+      selectedPresetId = id;
+      presetSaveOpen = false;
+      presetNameDraft = '';
+      toasts.success(existing ? `Preset “${name}” updated` : `Preset “${name}” created`, 'This repo now uses it');
+    } catch (e) {
+      toasts.error('Could not save preset', e instanceof Error ? e.message : String(e));
+    } finally {
+      configSaving = false;
     }
   }
 
@@ -532,10 +659,22 @@
     };
   }
 
-  /** Persist presets immediately without closing the modal. */
+  /** Persist per-agent presets immediately without closing the modal. They
+   *  live on the GLOBAL config — when the modal is editing a repo-scoped
+   *  config, keep the stored global agents/summarizer instead of overwriting
+   *  them with this repo's edit fields. */
   async function persistPresets(presets: ReviewAgentCfg[]): Promise<void> {
     try {
-      await api.put('/settings/pr-review', buildConfigFromEditState(presets));
+      const synced = presets.map((a) => {
+        const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || 'claude'];
+        return { ...a, provider: ps[0], providers: ps };
+      });
+      const cfg: ReviewConfig =
+        configScope === 'repo' && globalCfg
+          ? { ...globalCfg, custom_presets: synced }
+          : buildConfigFromEditState(presets);
+      await api.put('/settings/pr-review', cfg);
+      globalCfg = cfg;
     } catch (e) {
       toasts.error('Could not persist presets', e instanceof Error ? e.message : String(e));
     }
@@ -628,21 +767,28 @@
   async function saveConfig(): Promise<void> {
     configSaving = true;
     try {
-      // Keep `provider` in sync with `providers[0]` for backward compatibility.
-      const syncedAgents = editAgents.map((a) => {
-        const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || 'claude'];
-        return { ...a, provider: ps[0], providers: ps };
-      });
-      const cfg: ReviewConfig = {
-        agents: syncedAgents,
-        summarizer: editSummarizer,
-        custom_presets: editPresets.map((a) => {
-          const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || 'claude'];
-          return { ...a, provider: ps[0], providers: ps };
-        }),
-      };
-      await api.put('/settings/pr-review', cfg);
-      toasts.success('Review config saved');
+      if (configScope === 'global') {
+        const cfg = currentEditConfig(true);
+        await api.put('/settings/pr-review', cfg);
+        globalCfg = cfg;
+        toasts.success('Review config saved', 'Applies to every repo without an override');
+      } else {
+        // Repo scope: an untouched preset saves as the preset reference (so the
+        // repo tracks later preset edits); any drift saves as a repo-only
+        // custom config instead of silently mutating the shared preset.
+        const cfg = currentEditConfig(false);
+        const chosen = namedPresets.find((p) => p.id === selectedPresetId);
+        const body: RepoReviewBinding =
+          chosen && sameConfig(cfg, chosen.config) ? { preset_id: chosen.id } : { config: cfg };
+        repoCfg = await api.put<RepoReviewConfigResp>(`/repos/${repoId}/review-config`, body);
+        selectedPresetId = repoCfg.preset_id ?? '';
+        toasts.success(
+          'Repo review config saved',
+          repoCfg.scope === 'preset'
+            ? `Uses preset “${repoCfg.preset_name}”`
+            : 'Custom config for this repo only',
+        );
+      }
       showConfig = false;
     } catch (e) {
       toasts.error('Could not save config', e instanceof Error ? e.message : String(e));
@@ -770,6 +916,9 @@
       </div>
       <button class="btn small ghost rp-cfg-btn" onclick={openConfig}>
         &#9881; Configure agents
+        {#if repoCfgBadge !== ''}
+          <span class="chip rp-cfg-chip" title="This repository has its own review config">{repoCfgBadge}</span>
+        {/if}
       </button>
     </div>
   {:else if review.status === 'running'}
@@ -839,7 +988,12 @@
           <span class="chip">{draftCount} draft</span>
         {/if}
       </span>
-      <button class="btn small ghost" onclick={openConfig}>&#9881; Configure</button>
+      <button class="btn small ghost" onclick={openConfig}>
+        &#9881; Configure
+        {#if repoCfgBadge !== ''}
+          <span class="chip rp-cfg-chip" title="This repository has its own review config">{repoCfgBadge}</span>
+        {/if}
+      </button>
       <button class="btn small ghost" disabled={starting} onclick={startReview}>
         <Icon name="refresh" size={11} /> {starting ? 'Starting…' : 'Re-run review'}
       </button>
@@ -1084,6 +1238,71 @@
         <p class="dim cfg-note">
           Each agent reviews the diff with its own lens. The summarizer merges all results into the final comment list.
         </p>
+
+        <!-- Scope: the global default vs. a config bound to THIS repository. -->
+        <div class="segmented cfg-scope">
+          <button class:active={configScope === 'global'} onclick={() => setConfigScope('global')}>
+            Global default
+          </button>
+          <button class:active={configScope === 'repo'} onclick={() => setConfigScope('repo')}>
+            This repository
+          </button>
+        </div>
+        {#if configScope === 'global'}
+          {#if repoCfg && repoCfg.scope !== 'global'}
+            <p class="dim cfg-scope-note">
+              Heads-up: this repo has its own config
+              ({repoCfg.scope === 'preset' ? `preset “${repoCfg.preset_name ?? repoCfg.preset_id}”` : 'custom'})
+              — reviews here ignore the global agents until you revert it under “This repository”.
+            </p>
+          {/if}
+        {:else}
+          <div class="cfg-repo-row">
+            <select
+              class="cfg-select cfg-preset-select"
+              value={selectedPresetId}
+              onchange={(e) => pickNamedPreset((e.currentTarget as HTMLSelectElement).value)}
+            >
+              <option value="">Custom — this repo only</option>
+              {#each namedPresets as p (p.id)}
+                <option value={p.id}>{p.name}</option>
+              {/each}
+            </select>
+            <button class="btn small ghost" onclick={() => (presetSaveOpen = !presetSaveOpen)}>
+              Save as preset…
+            </button>
+            {#if repoCfg && repoCfg.scope !== 'global'}
+              <button class="btn small ghost" disabled={configSaving} onclick={useGlobalConfig}>
+                Use global
+              </button>
+            {/if}
+          </div>
+          {#if presetSaveOpen}
+            <div class="cfg-repo-row cfg-preset-save-row">
+              <input
+                class="cfg-input"
+                bind:value={presetNameDraft}
+                placeholder="Preset name (e.g. Backend services)"
+                onkeydown={(e) => { if (e.key === 'Enter') void saveAsNamedPreset(); }}
+              />
+              <button
+                class="btn small primary"
+                disabled={configSaving || presetNameDraft.trim() === ''}
+                onclick={saveAsNamedPreset}
+              >
+                Save & use
+              </button>
+            </div>
+          {/if}
+          <p class="dim cfg-scope-note">
+            {#if selectedPresetId === ''}
+              These agents apply only to this repository.
+            {:else}
+              Editing a preset here saves the changes as a repo-only custom config —
+              use “Save as preset…” with the same name to update the preset itself.
+            {/if}
+          </p>
+        {/if}
 
         <h3 class="cfg-section-title">Review agents</h3>
         {#each editAgents as agent, i (i)}
@@ -1638,6 +1857,36 @@
   .cfg-note {
     font-size: 12px;
     margin: 0 0 14px;
+  }
+  /* Scope switch (global vs. this repo) + preset row */
+  .cfg-scope {
+    margin-bottom: 10px;
+  }
+  .cfg-repo-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .cfg-preset-select {
+    flex: 1;
+    min-width: 0;
+  }
+  .cfg-preset-save-row .cfg-input {
+    flex: 1;
+    min-width: 0;
+  }
+  .cfg-scope-note {
+    font-size: 11.5px;
+    margin: 0 0 14px;
+  }
+  /* Override badge on the Configure buttons */
+  .rp-cfg-chip {
+    margin-inline-start: 6px;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .cfg-add-row {
     display: flex;

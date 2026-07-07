@@ -42,6 +42,55 @@
     item.action?.();
     ctxMenu.close();
   }
+
+  // ── Filterable mode ────────────────────────────────────────────────────────
+  // Order-preserving view: pinned items + separators always show; other items
+  // must match the query, and at most `maxVisible` of them render at once (the
+  // rest collapse into a "+N more" hint until the query narrows the list).
+  const view = $derived.by(() => {
+    const items = ctxMenu.items;
+    if (!ctxMenu.filter) return { items, hidden: 0 };
+    const q = ctxMenu.query.trim().toLowerCase();
+    const cap = ctxMenu.maxVisible > 0 ? ctxMenu.maxVisible : Infinity;
+    const out: typeof items = [];
+    let shown = 0;
+    let hidden = 0;
+    for (const it of items) {
+      if (it.pinned || it.separator || !it.label) {
+        out.push(it);
+        continue;
+      }
+      if (q !== '' && !it.label.toLowerCase().includes(q)) continue;
+      if (shown < cap) {
+        out.push(it);
+        shown++;
+      } else {
+        hidden++;
+      }
+    }
+    return { items: out, hidden };
+  });
+
+  // Auto-focus the search input when a filterable menu opens.
+  let searchEl: HTMLInputElement | null = $state(null);
+  $effect(() => {
+    if (ctxMenu.open && ctxMenu.filter) {
+      requestAnimationFrame(() => searchEl?.focus());
+    }
+  });
+
+  /** Enter in the search box activates the first matched list item. */
+  function onSearchKey(e: KeyboardEvent): void {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      ctxMenu.close();
+      return;
+    }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const first = view.items.find((it) => !it.pinned && !it.separator && it.label && !it.disabled && it.action);
+    if (first) clickItem(first);
+  }
 </script>
 
 {#if ctxMenu.open}
@@ -63,7 +112,21 @@
     role="menu"
     aria-label="Context menu"
   >
-    {#each ctxMenu.items as item, i (i)}
+    {#if ctxMenu.filter}
+      <div class="ctx-search">
+        <Icon name="search" size={12} />
+        <input
+          bind:this={searchEl}
+          class="ctx-search-input"
+          type="text"
+          placeholder={ctxMenu.filterPlaceholder}
+          bind:value={ctxMenu.query}
+          spellcheck="false"
+          onkeydown={onSearchKey}
+        />
+      </div>
+    {/if}
+    {#each view.items as item, i (i)}
       {#if item.separator || !item.label}
         <div class="ctx-sep" role="separator"></div>
       {:else}
@@ -84,6 +147,9 @@
         </button>
       {/if}
     {/each}
+    {#if view.hidden > 0}
+      <div class="ctx-more">+{view.hidden} more — type to narrow</div>
+    {/if}
   </div>
 {/if}
 
@@ -177,5 +243,36 @@
     height: 1px;
     background: var(--border);
     margin: 3px 4px;
+  }
+
+  /* Filterable-menu search row — sticky so it stays visible while the list
+     below scrolls (the menu itself is the scroll container). */
+  .ctx-search {
+    position: sticky;
+    top: -4px; /* cancel the menu's 4px padding so it hugs the top edge */
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: -4px -4px 3px;
+    padding: 7px 10px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .ctx-search-input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 12.5px;
+    outline: none;
+  }
+  .ctx-more {
+    padding: 5px 8px 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: center;
   }
 </style>

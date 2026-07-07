@@ -12,7 +12,8 @@ use axum::{Json, Router};
 use otto_connections::{ConnectionsService, Spawner};
 use otto_core::api::{
     CreateSessionReq, ExecutePlanReq, HandoffReq, LocalReviewReq, NewPrCommentReq, OrchestrateReq,
-    OrchestrateResp, ReviewConfig, StartReviewReq, UpdateProvidersReq,
+    OrchestrateResp, RepoReviewBinding, RepoReviewConfigResp, ReviewConfig, ReviewConfigPreset,
+    StartReviewReq, UpdateProvidersReq,
 };
 use otto_core::auth::{BoxFuture, RoleChecker};
 use otto_core::domain::{
@@ -1692,6 +1693,61 @@ async fn load_review_config(ctx: &ServerCtx) -> ReviewConfig {
     }
 }
 
+/// Settings key holding one repo's review-config binding.
+fn repo_review_binding_key(repo_id: &Id) -> String {
+    format!("pr_review_repo:{repo_id}")
+}
+
+/// Load the named review-config presets (settings key `pr_review_presets`).
+/// A missing/corrupt value is an empty list, never an error.
+async fn load_review_presets(ctx: &ServerCtx) -> Vec<ReviewConfigPreset> {
+    let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
+    match repo.get("pr_review_presets").await {
+        Ok(Some(v)) => serde_json::from_value(v).unwrap_or_else(|e| {
+            tracing::warn!("failed to deserialize pr_review_presets: {e}; using empty");
+            Vec::new()
+        }),
+        _ => Vec::new(),
+    }
+}
+
+/// Load the stored per-repo binding, if any. Corrupt values read as `None` so a
+/// bad row can never brick reviews for the repo.
+async fn load_repo_review_binding(ctx: &ServerCtx, repo_id: &Id) -> Option<RepoReviewBinding> {
+    let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
+    match repo.get(&repo_review_binding_key(repo_id)).await {
+        Ok(Some(v)) => serde_json::from_value(v)
+            .map_err(|e| {
+                tracing::warn!(repo = %repo_id, "failed to deserialize repo review binding: {e}");
+            })
+            .ok(),
+        _ => None,
+    }
+}
+
+/// Resolve the EFFECTIVE review config for a repo: inline per-repo config >
+/// per-repo preset reference > global `pr_review` config. A dangling preset
+/// reference (preset deleted) falls back to global with a warn — reviews must
+/// never fail because a preset went away.
+async fn load_review_config_for_repo(ctx: &ServerCtx, repo_id: &Id) -> ReviewConfig {
+    if let Some(binding) = load_repo_review_binding(ctx, repo_id).await {
+        if let Some(cfg) = binding.config {
+            return cfg;
+        }
+        if let Some(pid) = binding.preset_id {
+            if let Some(p) = load_review_presets(ctx)
+                .await
+                .into_iter()
+                .find(|p| p.id == pid)
+            {
+                return p.config;
+            }
+            tracing::warn!(repo = %repo_id, preset = %pid, "repo review preset missing; using global config");
+        }
+    }
+    load_review_config(ctx).await
+}
+
 /// Derive the model `Option<&str>` for `run_agent` from an agent's model field.
 fn model_opt(model: &str) -> Option<&str> {
     let m = model.trim();
@@ -1845,10 +1901,11 @@ async fn run_review_core(
     };
 
     // 1. Load config: a per-call override (e.g. a workflow `review_run` step that
-    //    sets its own providers + lenses) wins; otherwise the stored/default config.
+    //    sets its own providers + lenses) wins; otherwise the repo's binding
+    //    (inline > preset) and finally the stored/default global config.
     let cfg = match cfg_override {
         Some(c) => c,
-        None => load_review_config(ctx).await,
+        None => load_review_config_for_repo(ctx, repo_id).await,
     };
 
     // 2. Expand agent×provider pairs.
@@ -2102,12 +2159,12 @@ async fn run_review_core(
 
     // Collect each agent's findings for the summarizer (each task already
     // persisted its own live state, so a panicked task just yields no findings).
-    let mut agent_outputs: Vec<String> = vec!["[]".to_string(); run_count];
+    let mut agent_findings: Vec<Vec<otto_core::domain::ReviewFinding>> =
+        vec![Vec::new(); run_count];
     while let Some(joined) = set.join_next().await {
         if let Ok((i, res)) = joined {
             if !res.errored {
-                agent_outputs[i] =
-                    serde_json::to_string(&res.findings).unwrap_or_else(|_| "[]".to_string());
+                agent_findings[i] = res.findings;
             }
         }
     }
@@ -2127,32 +2184,133 @@ async fn run_review_core(
         return Ok(());
     }
 
-    // Reclaim the live states (updated by the tasks) for the summarizer step.
-    let mut agent_states = { states.lock().await.clone() };
+    // 4–7. Summarize the per-agent findings and persist comments + workflow
+    // findings. Shared with `retry_summarizer` (which re-runs ONLY this stage
+    // from the stored per-agent findings, without re-running the reviewers).
+    summarize_and_persist(
+        ctx,
+        review_id,
+        repo_path,
+        workspace,
+        repo_id,
+        pr_number,
+        &cfg.summarizer,
+        &agent_findings,
+    )
+    .await
+}
 
-    // 4. Summarizer: mark running.
-    let summarizer_idx = run_count;
+/// A draft review comment as emitted by the summarizer.
+#[derive(Deserialize)]
+struct DraftComment {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<u32>,
+    /// Optional end of a multi-line finding range. Anchors the finding to a
+    /// span, not just a single line, when the agent reports one.
+    #[serde(default)]
+    line_end: Option<u32>,
+    #[serde(default = "default_draft_severity")]
+    severity: String,
+    body: String,
+    // Enriched workflow fields (optional; derived from `body` when absent).
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    evidence: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    suggested_fix: Option<String>,
+}
+fn default_draft_severity() -> String {
+    "info".to_string()
+}
+
+/// Parse the summarizer's reply into draft comments (tolerates fences/prose).
+fn parse_draft_comments(review_id: &Id, summary_text: &str) -> Vec<DraftComment> {
+    let stripped = summary_text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let start = stripped.find('[').unwrap_or(0);
+    let end = stripped.rfind(']').map(|i| i + 1).unwrap_or(stripped.len());
+    let slice = &stripped[start..end];
+    serde_json::from_str(slice).unwrap_or_else(|e| {
+        tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
+        vec![]
+    })
+}
+
+/// Run the summarizer over the reviewers' findings and persist the result:
+/// the summarizer live-state row (last element), the draft comments, and the
+/// promoted workflow findings (+ resolve_absent + proof pack).
+///
+/// Guard rails: a summarizer error falls back to the deterministic Rust-side
+/// summary, and — CRITICALLY — so does a summarizer reply that parses to ZERO
+/// comments while the reviewers produced findings. Without that second guard a
+/// confused summarizer answering `[]` silently threw away a whole run's work
+/// (45 findings → "done", 0 comments, no error).
+#[allow(clippy::too_many_arguments)]
+async fn summarize_and_persist(
+    ctx: &ServerCtx,
+    review_id: &Id,
+    repo_path: &str,
+    workspace: &Workspace,
+    repo_id: &Id,
+    pr_number: u64,
+    summarizer_cfg: &ReviewAgentCfg,
+    agent_findings: &[Vec<otto_core::domain::ReviewFinding>],
+) -> Result<()> {
+    // Reclaim the live states (updated by the reviewer tasks) and mark the
+    // summarizer (always the LAST row) running.
+    let mut agent_states = ctx.reviews_store.get_review(review_id).await?.agents;
+    let summarizer_idx = agent_states.len().saturating_sub(1);
     agent_states[summarizer_idx].status = "running".to_string();
     ctx.reviews_store
         .set_agents(review_id, &agent_states)
         .await?;
 
-    let batches = agent_outputs
+    // A finding with an empty body carries nothing reviewable — feeding husks
+    // to the summarizer just teaches it to answer `[]`. Drop them up front.
+    let agent_findings: Vec<Vec<otto_core::domain::ReviewFinding>> = agent_findings
+        .iter()
+        .map(|fs| {
+            fs.iter()
+                .filter(|f| !f.body.trim().is_empty())
+                .cloned()
+                .collect()
+        })
+        .collect();
+    let agent_findings = agent_findings.as_slice();
+    let total_findings: usize = agent_findings.iter().map(|f| f.len()).sum();
+    let batches = agent_findings
         .iter()
         .enumerate()
-        .map(|(i, o)| format!("Batch {}:\n{}", i + 1, o))
+        .map(|(i, f)| {
+            format!(
+                "Batch {}:\n{}",
+                i + 1,
+                serde_json::to_string(f).unwrap_or_else(|_| "[]".to_string())
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let summarizer_prompt = format!("{}\n\n{}", cfg.summarizer.prompt, batches);
+    let summarizer_prompt = format!("{}\n\n{}", summarizer_cfg.prompt, batches);
 
-    tracing::info!(review = %review_id, "running summarizer agent");
+    tracing::info!(review = %review_id, "running summarizer agent ({total_findings} findings in)");
     let mut summary_fallback = false;
     let summary_text = match ctx
         .orchestrator
         .run_agent(
             &summarizer_prompt,
             repo_path,
-            model_opt(&cfg.summarizer.model),
+            model_opt(&summarizer_cfg.model),
             Duration::from_secs(120),
         )
         .await
@@ -2164,59 +2322,25 @@ async fn run_review_core(
             // and badge the run so the UI can say so.
             tracing::warn!(review = %review_id, "summarizer failed: {e}; deterministic fallback");
             summary_fallback = true;
-            let batches: Vec<Vec<otto_core::domain::ReviewFinding>> = agent_outputs
-                .iter()
-                .map(|o| serde_json::from_str(o).unwrap_or_default())
-                .collect();
-            crate::review_fallback::deterministic_summary(&batches)
+            crate::review_fallback::deterministic_summary(agent_findings)
         }
     };
 
     // 5. Parse the final JSON robustly.
-    #[derive(Deserialize)]
-    struct DraftComment {
-        #[serde(default)]
-        path: Option<String>,
-        #[serde(default)]
-        line: Option<u32>,
-        /// Optional end of a multi-line finding range. Anchors the finding to a
-        /// span, not just a single line, when the agent reports one.
-        #[serde(default)]
-        line_end: Option<u32>,
-        #[serde(default = "default_severity")]
-        severity: String,
-        body: String,
-        // Enriched workflow fields (optional; derived from `body` when absent).
-        #[serde(default)]
-        category: Option<String>,
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        evidence: Option<String>,
-        #[serde(default)]
-        reasoning: Option<String>,
-        #[serde(default)]
-        suggested_fix: Option<String>,
-    }
-    fn default_severity() -> String {
-        "info".to_string()
-    }
+    let mut parsed = parse_draft_comments(review_id, &summary_text);
 
-    let parsed: Vec<DraftComment> = {
-        let stripped = summary_text
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
-        let start = stripped.find('[').unwrap_or(0);
-        let end = stripped.rfind(']').map(|i| i + 1).unwrap_or(stripped.len());
-        let slice = &stripped[start..end];
-        serde_json::from_str(slice).unwrap_or_else(|e| {
-            tracing::warn!(review = %review_id, "failed to parse final JSON ({e}); no comments stored");
-            vec![]
-        })
-    };
+    // Guard: reviewers found things but the summary came back empty — that is
+    // a summarizer failure, NOT "no issues". Use the deterministic summary so
+    // the run's work is never silently discarded.
+    if parsed.is_empty() && total_findings > 0 && !summary_fallback {
+        tracing::warn!(
+            review = %review_id,
+            "summarizer returned 0 comments for {total_findings} findings; deterministic fallback"
+        );
+        summary_fallback = true;
+        let fb = crate::review_fallback::deterministic_summary(agent_findings);
+        parsed = parse_draft_comments(review_id, &fb);
+    }
 
     let sum_count = parsed.len();
     agent_states[summarizer_idx].status = "done".to_string();
@@ -2225,7 +2349,7 @@ async fn run_review_core(
     agent_states[summarizer_idx].note = format!(
         "{}{} final comment{}",
         if summary_fallback {
-            "deterministic fallback (claude unavailable) — "
+            "deterministic fallback — "
         } else {
             ""
         },
@@ -2233,7 +2357,7 @@ async fn run_review_core(
         if sum_count == 1 { "" } else { "s" }
     );
     ctx.reviews_store
-        .set_agents(review_id, &agent_states)
+        .set_agent_at(review_id, summarizer_idx, &agent_states[summarizer_idx])
         .await?;
 
     // 6. Persist draft comments AND promote each into a tracked workflow Finding
@@ -2804,6 +2928,10 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
         .route(
             "/reviews/{review_id}/agents/{index}/retry",
             post(retry_review_agent),
+        )
+        .route(
+            "/reviews/{review_id}/summarizer/retry",
+            post(retry_summarizer),
         )
         .route(
             "/reviews/{review_id}/agents/{index}/stop",
@@ -3681,6 +3809,143 @@ async fn retry_review_agent(
     ))
 }
 
+/// `POST /reviews/{review_id}/summarizer/retry` — re-run ONLY the summarize +
+/// persist stage from the STORED per-agent findings, replacing the review's
+/// unposted draft comments. Cheap compared to re-running every reviewer: the
+/// findings already exist; only the final dedupe/rank turn is repeated.
+async fn retry_summarizer(
+    Path(review_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> crate::error::ApiResult<Json<Review>> {
+    let review = ctx
+        .reviews_store
+        .get_review(&review_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    let repo = ctx
+        .git_store
+        .get_repo(&review.repo_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+    let workspace = ctx
+        .workspaces
+        .get(&repo.workspace_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+
+    if review.status == ReviewStatus::Running {
+        return Err(crate::error::ApiError(Error::Invalid(
+            "review is still running — wait for it to finish first".into(),
+        )));
+    }
+    if review.agents.len() < 2 {
+        return Err(crate::error::ApiError(Error::Invalid(
+            "this review has no summarizer stage to retry".into(),
+        )));
+    }
+
+    // The reviewers' findings are durable on the agent rows — the summarizer is
+    // always the last row and contributes none.
+    let agent_findings: Vec<Vec<otto_core::domain::ReviewFinding>> = review.agents
+        [..review.agents.len() - 1]
+        .iter()
+        .map(|a| a.findings.clone())
+        .collect();
+    // Only findings with actual content count — a run whose findings were
+    // gutted (empty bodies) has nothing to summarize and needs a re-run.
+    if !agent_findings
+        .iter()
+        .flatten()
+        .any(|f| !f.body.trim().is_empty())
+    {
+        return Err(crate::error::ApiError(Error::Invalid(
+            "no stored agent findings with content to summarize — re-run the review instead"
+                .into(),
+        )));
+    }
+
+    // Flip the run back to running so the UI tracks the re-summarize live.
+    ctx.reviews_store
+        .set_status(&review_id, ReviewStatus::Running, None)
+        .await
+        .map_err(crate::error::ApiError)?;
+    let _ = ctx.events.send(Event::ReviewChanged {
+        workspace_id: workspace.id.clone(),
+        session_id: None,
+        review_id: review_id.clone(),
+        status: ReviewStatus::Running.as_str().to_string(),
+    });
+
+    let ctx_bg = ctx.clone();
+    let review_id_bg = review_id.clone();
+    let repo_path = repo.path.clone();
+    let repo_id = review.repo_id.clone();
+    let pr_number = review.pr_number;
+    tokio::spawn(async move {
+        // The summarizer follows the repo's EFFECTIVE config (per-repo binding
+        // resolution included), same as a fresh run would.
+        let cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
+        // A re-run replaces the previous draft comments; posted/approved/
+        // declined ones are user decisions and stay untouched.
+        match ctx_bg.reviews_store.delete_draft_comments(&review_id_bg).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(review = %review_id_bg, "summarizer retry: cleared {n} draft comments")
+            }
+            Err(e) => {
+                tracing::warn!(review = %review_id_bg, "summarizer retry: clear drafts failed: {e}")
+            }
+            _ => {}
+        }
+        let result = summarize_and_persist(
+            &ctx_bg,
+            &review_id_bg,
+            &repo_path,
+            &workspace,
+            &repo_id,
+            pr_number,
+            &cfg.summarizer,
+            &agent_findings,
+        )
+        .await;
+        let status = match result {
+            Ok(()) => {
+                tracing::info!(review = %review_id_bg, "summarizer retry complete");
+                ReviewStatus::Done
+            }
+            Err(e) => {
+                tracing::warn!(review = %review_id_bg, "summarizer retry failed: {e}");
+                let _ = ctx_bg
+                    .reviews_store
+                    .set_status(&review_id_bg, ReviewStatus::Error, Some(&e.to_string()))
+                    .await;
+                let _ = ctx_bg.events.send(Event::ReviewChanged {
+                    workspace_id: workspace.id.clone(),
+                    session_id: None,
+                    review_id: review_id_bg.clone(),
+                    status: ReviewStatus::Error.as_str().to_string(),
+                });
+                return;
+            }
+        };
+        let _ = ctx_bg.reviews_store.set_status(&review_id_bg, status, None).await;
+        let _ = ctx_bg.events.send(Event::ReviewChanged {
+            workspace_id: workspace.id.clone(),
+            session_id: None,
+            review_id: review_id_bg.clone(),
+            status: status.as_str().to_string(),
+        });
+    });
+
+    Ok(Json(
+        ctx.reviews_store
+            .get_review(&review_id)
+            .await
+            .map_err(crate::error::ApiError)?,
+    ))
+}
+
 /// `POST /reviews/{review_id}/agents/{index}/stop` — stop one running/waiting
 /// review agent without touching the rest of the run. Trips the agent's cancel
 /// flag FIRST (so the recovery loop sees the kill as intentional, not a failure
@@ -4412,12 +4677,178 @@ async fn put_review_config(
     Ok(Json(body))
 }
 
-/// Routes for PR review agent configuration.
+async fn get_review_presets(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(_user): CurrentUser,
+) -> crate::error::ApiResult<Json<Vec<ReviewConfigPreset>>> {
+    Ok(Json(load_review_presets(&ctx).await))
+}
+
+async fn put_review_presets(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<Vec<ReviewConfigPreset>>,
+) -> crate::error::ApiResult<Json<Vec<ReviewConfigPreset>>> {
+    crate::auth::require_root(&user)?;
+    // Reject blank/duplicate ids up front — a dangling or ambiguous id would
+    // silently fall repos back to the global config.
+    let mut seen = std::collections::HashSet::new();
+    for p in &body {
+        if p.id.trim().is_empty() {
+            return Err(crate::error::ApiError(Error::Invalid(
+                "preset id must not be empty".to_string(),
+            )));
+        }
+        if !seen.insert(p.id.as_str()) {
+            return Err(crate::error::ApiError(Error::Invalid(format!(
+                "duplicate preset id: {}",
+                p.id
+            ))));
+        }
+    }
+    let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
+    let value = serde_json::to_value(&body).map_err(|e| {
+        crate::error::ApiError(otto_core::Error::Internal(format!("serialize: {e}")))
+    })?;
+    repo.put("pr_review_presets", &value)
+        .await
+        .map_err(crate::error::ApiError)?;
+    Ok(Json(body))
+}
+
+/// Resolve a repo id to its workspace and check the caller's role there.
+async fn require_repo_role(
+    ctx: &ServerCtx,
+    user: &User,
+    repo_id: &Id,
+    role: WorkspaceRole,
+) -> crate::error::ApiResult<()> {
+    let repo = ctx
+        .git_store
+        .get_repo(repo_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    crate::auth::require_ws_role(ctx, user, &repo.workspace_id, role).await?;
+    Ok(())
+}
+
+/// Build the `GET /repos/{id}/review-config` response: the stored binding
+/// (if any) resolved to its scope + effective config.
+async fn repo_review_config_resp(ctx: &ServerCtx, repo_id: &Id) -> RepoReviewConfigResp {
+    if let Some(binding) = load_repo_review_binding(ctx, repo_id).await {
+        if let Some(cfg) = binding.config {
+            return RepoReviewConfigResp {
+                scope: "custom".to_string(),
+                preset_id: None,
+                preset_name: None,
+                config: cfg,
+            };
+        }
+        if let Some(pid) = binding.preset_id {
+            let preset = load_review_presets(ctx)
+                .await
+                .into_iter()
+                .find(|p| p.id == pid);
+            return match preset {
+                Some(p) => RepoReviewConfigResp {
+                    scope: "preset".to_string(),
+                    preset_id: Some(p.id),
+                    preset_name: Some(p.name),
+                    config: p.config,
+                },
+                // Dangling reference: report it (preset_id set, name None) but
+                // surface the config reviews will ACTUALLY run with — global.
+                None => RepoReviewConfigResp {
+                    scope: "preset".to_string(),
+                    preset_id: Some(pid),
+                    preset_name: None,
+                    config: load_review_config(ctx).await,
+                },
+            };
+        }
+    }
+    RepoReviewConfigResp {
+        scope: "global".to_string(),
+        preset_id: None,
+        preset_name: None,
+        config: load_review_config(ctx).await,
+    }
+}
+
+async fn get_repo_review_config(
+    Path(repo_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> crate::error::ApiResult<Json<RepoReviewConfigResp>> {
+    require_repo_role(&ctx, &user, &repo_id, WorkspaceRole::Viewer).await?;
+    Ok(Json(repo_review_config_resp(&ctx, &repo_id).await))
+}
+
+async fn put_repo_review_config(
+    Path(repo_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<RepoReviewBinding>,
+) -> crate::error::ApiResult<Json<RepoReviewConfigResp>> {
+    require_repo_role(&ctx, &user, &repo_id, WorkspaceRole::Editor).await?;
+    if body.config.is_none() && body.preset_id.is_none() {
+        return Err(crate::error::ApiError(Error::Invalid(
+            "binding needs a preset_id or an inline config (DELETE to revert to global)"
+                .to_string(),
+        )));
+    }
+    if let Some(pid) = &body.preset_id {
+        if body.config.is_none()
+            && !load_review_presets(&ctx).await.iter().any(|p| &p.id == pid)
+        {
+            return Err(crate::error::ApiError(Error::Invalid(format!(
+                "unknown preset id: {pid}"
+            ))));
+        }
+    }
+    let settings = otto_state::SettingsRepo::new(ctx.pool.clone());
+    let value = serde_json::to_value(&body).map_err(|e| {
+        crate::error::ApiError(otto_core::Error::Internal(format!("serialize: {e}")))
+    })?;
+    settings
+        .put(&repo_review_binding_key(&repo_id), &value)
+        .await
+        .map_err(crate::error::ApiError)?;
+    Ok(Json(repo_review_config_resp(&ctx, &repo_id).await))
+}
+
+async fn delete_repo_review_config(
+    Path(repo_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> crate::error::ApiResult<Json<RepoReviewConfigResp>> {
+    require_repo_role(&ctx, &user, &repo_id, WorkspaceRole::Editor).await?;
+    let settings = otto_state::SettingsRepo::new(ctx.pool.clone());
+    settings
+        .delete(&repo_review_binding_key(&repo_id))
+        .await
+        .map_err(crate::error::ApiError)?;
+    Ok(Json(repo_review_config_resp(&ctx, &repo_id).await))
+}
+
+/// Routes for PR review agent configuration (global config, named presets,
+/// and the per-repo binding).
 pub fn review_config_routes() -> Router<ServerCtx> {
-    Router::new().route(
-        "/settings/pr-review",
-        get(get_review_config).put(put_review_config),
-    )
+    Router::new()
+        .route(
+            "/settings/pr-review",
+            get(get_review_config).put(put_review_config),
+        )
+        .route(
+            "/settings/pr-review/presets",
+            get(get_review_presets).put(put_review_presets),
+        )
+        .route(
+            "/repos/{id}/review-config",
+            get(get_repo_review_config)
+                .put(put_repo_review_config)
+                .delete(delete_repo_review_config),
+        )
 }
 
 /// Append an approved review comment as a markdown bullet to

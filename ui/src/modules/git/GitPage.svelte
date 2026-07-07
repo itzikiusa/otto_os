@@ -62,6 +62,19 @@
 
   const accountsWithNs = $derived(accounts.filter((a) => a.namespace));
 
+  // Landing-hub repo filter: matches name, local path, or remote URL.
+  let repoFilter = $state('');
+  const filteredRepos = $derived.by(() => {
+    const q = repoFilter.trim().toLowerCase();
+    if (q === '') return git.allRepos;
+    return git.allRepos.filter(
+      (r) =>
+        r.name.toLowerCase().includes(q) ||
+        r.path.toLowerCase().includes(q) ||
+        (r.remote_url ?? '').toLowerCase().includes(q),
+    );
+  });
+
   $effect(() => {
     // default the browse account to the first one that has a namespace
     if (browseAccount === '' && accountsWithNs.length > 0) browseAccount = accountsWithNs[0].id;
@@ -251,8 +264,34 @@
                 <Icon name="plus" size={12} /> Add Repository
               </button>
             </div>
+            <div class="repo-search">
+              <Icon name="search" size={13} />
+              <input
+                class="repo-search-input"
+                type="search"
+                bind:value={repoFilter}
+                placeholder="Search repositories by name, path or remote…"
+                spellcheck="false"
+                onkeydown={(e) => {
+                  if (e.key === 'Escape' && repoFilter !== '') {
+                    e.stopPropagation();
+                    repoFilter = '';
+                  }
+                }}
+              />
+              {#if repoFilter.trim() !== ''}
+                <span class="repo-search-count dim">
+                  {filteredRepos.length} / {git.allRepos.length}
+                </span>
+              {/if}
+            </div>
+            {#if filteredRepos.length === 0}
+              <div class="repo-search-empty dim">
+                No repositories match “{repoFilter.trim()}”.
+              </div>
+            {/if}
             <div class="repo-grid">
-              {#each git.allRepos as r (r.id)}
+              {#each filteredRepos as r (r.id)}
               <div class="repo-card card">
                 <button class="repo-main" onclick={() => openRepo(r.id)}>
                   <div class="repo-name">
@@ -525,6 +564,43 @@
     font-size: 12px;
     color: var(--status-exited);
   }
+  /* Filter row above the repo grid — styled like an input but with an inline
+     leading icon + live match count, so it reads as part of the hub chrome. */
+  .repo-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 10px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    transition: border-color 130ms ease-out;
+  }
+  .repo-search:focus-within {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  }
+  .repo-search-input {
+    flex: 1;
+    min-width: 0;
+    height: 34px;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 12.5px;
+    outline: none;
+  }
+  .repo-search-count {
+    font-size: 11px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .repo-search-empty {
+    font-size: 12px;
+    padding: 18px 4px;
+    text-align: center;
+  }
   .repo-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -602,6 +678,9 @@
        than the content box on a 375px screen. */
     .repo-grid {
       grid-template-columns: 1fr;
+    }
+    .repo-search-input {
+      min-height: 38px;
     }
     .repo-actions .btn,
     .repo-actions .icon-btn {

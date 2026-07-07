@@ -494,11 +494,15 @@
     }
   }
 
-  // ── Clickable links (URLs + `file:line(:col)`) ─────────────────────────────
+  // ── Clickable links (URLs, `file:line(:col)`, plain absolute paths) ────────
   // Implemented with xterm's built-in registerLinkProvider (no web-links addon
   // dependency). For each buffer line we scan the text and surface ranges for:
   //   • http(s) URLs            → open in the system browser (openExternal)
   //   • path:line(:col) refs    → open the file in the Files panel at the line
+  //   • absolute paths (/… ~/…) → open the file in the Files panel viewer
+  //     (agents often print bare output paths, e.g. "Findings were written
+  //     to: /var/folders/…/review.json" — the viewer reads any absolute path,
+  //     including ones outside the session's file-tree root)
   // Detection is conservative to avoid turning ordinary prose into dead links.
 
   interface LinkHit {
@@ -523,6 +527,10 @@
   // `/abs/path` isn't blocked. `host:port` false positives (example.com:8080) are
   // filtered in scanLine via SOURCE_FILE_EXTS for refs that contain no `/`.
   const FILE_RE = /(?<![\w.@~+-])(\/?(?:[\w.@~+-]+\/)*[\w.@~+-]+\.([A-Za-z0-9]{1,8})):(\d+)(?::(\d+))?\b/g;
+  // Plain absolute path with NO trailing `:line` — rooted at `/` or `~/`, at
+  // least one directory segment, and a 1–8 char extension so bare prose words
+  // never match. Ranges already claimed by a URL or `path:line` hit win.
+  const ABS_PATH_RE = /(?<![\w.@~+-])(?:~\/|\/)(?:[\w.@+-]+\/)+[\w.@+-]+\.([A-Za-z0-9]{1,8})\b/g;
 
   // Source/text file extensions we'll treat as a file link even when the ref has
   // no `/` (so `file.go:7` links but `example.com:8080` / `redis.io:6379` don't).
@@ -577,6 +585,16 @@
       // ref containing a `/` is an explicit path and always links.
       if (!path.includes('/') && !SOURCE_FILE_EXTS.has(ext)) continue;
       hits.push({ start, end, kind: 'file', text: m[0], path, line, col });
+    }
+
+    // Plain absolute paths (no :line). A `path:line` hit's path prefix overlaps
+    // its claimed range, so the overlap check also dedupes those.
+    ABS_PATH_RE.lastIndex = 0;
+    for (let m = ABS_PATH_RE.exec(text); m; m = ABS_PATH_RE.exec(text)) {
+      const start = m.index;
+      const end = m.index + m[0].length;
+      if (hits.some((h) => start < h.end && end > h.start)) continue;
+      hits.push({ start, end, kind: 'file', text: m[0], path: m[0] });
     }
     return hits;
   }

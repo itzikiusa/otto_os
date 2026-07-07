@@ -1702,6 +1702,48 @@ pub struct ReviewConfig {
     pub timeout_secs: Option<u64>,
 }
 
+/// A named, reusable full review configuration ("conf A" / "conf Y").
+/// Stored as a list in the `settings` table under the key `pr_review_presets`.
+/// `GET /api/v1/settings/pr-review/presets` and `PUT /api/v1/settings/pr-review/presets`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewConfigPreset {
+    pub id: String,
+    pub name: String,
+    pub config: ReviewConfig,
+}
+
+/// Per-repo review-config binding, stored in the `settings` table under the
+/// key `pr_review_repo:<repo_id>`. Exactly one of `preset_id` / `config` is
+/// set: a preset reference tracks later edits to the preset; an inline config
+/// is fully custom to the repo. No stored binding = the repo follows the
+/// global `pr_review` config.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RepoReviewBinding {
+    /// Reference into `pr_review_presets` (by preset `id`).
+    #[serde(default)]
+    pub preset_id: Option<String>,
+    /// Inline repo-specific config (wins over `preset_id` if both are set).
+    #[serde(default)]
+    pub config: Option<ReviewConfig>,
+}
+
+/// `GET /api/v1/repos/{id}/review-config` — the repo's binding plus the
+/// EFFECTIVE config reviews of this repo will run with (after preset / global
+/// resolution), so the UI can render both the choice and its result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoReviewConfigResp {
+    /// "global" | "preset" | "custom".
+    pub scope: String,
+    /// Set when `scope == "preset"`.
+    #[serde(default)]
+    pub preset_id: Option<String>,
+    /// Preset display name (resolved; `None` if the preset was deleted).
+    #[serde(default)]
+    pub preset_name: Option<String>,
+    /// The effective config after resolution.
+    pub config: ReviewConfig,
+}
+
 // ---------------------------------------------------------------------------
 // Goal Loops
 // ---------------------------------------------------------------------------

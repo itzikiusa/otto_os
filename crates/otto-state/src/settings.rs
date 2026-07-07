@@ -70,6 +70,15 @@ impl SettingsRepo {
         Ok(())
     }
 
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM settings WHERE key = ?")
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete setting"))?;
+        Ok(())
+    }
+
     pub async fn all(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
         let rows = sqlx::query("SELECT key, value_json FROM settings")
             .fetch_all(&self.pool)

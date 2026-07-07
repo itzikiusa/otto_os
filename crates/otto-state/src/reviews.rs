@@ -190,6 +190,20 @@ impl ReviewsRepo {
         self.get_comment(&id).await
     }
 
+    /// Delete a review's unposted draft comments (a summarizer re-run replaces
+    /// them). Approved/declined/posted comments are user decisions and stay.
+    pub async fn delete_draft_comments(&self, review_id: &Id) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM pr_review_comments
+             WHERE review_id = ? AND state = 'draft' AND posted = 0",
+        )
+        .bind(review_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("delete draft comments"))?;
+        Ok(res.rows_affected())
+    }
+
     /// Fetch a review by id, loading its comments.
     pub async fn get_review(&self, id: &Id) -> Result<Review> {
         let row = sqlx::query("SELECT * FROM pr_reviews WHERE id = ?")

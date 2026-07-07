@@ -825,6 +825,7 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
 | POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. |
+| POST /reviews/{review_id}/summarizer/retry | ws editor | — | re-run ONLY the summarize+persist stage from the STORED per-agent findings (no reviewer re-runs). Deletes the review's unposted `draft` comments (approved/declined/posted stay), flips the run back to `running` (live via `review_changed`), re-summarizes with the repo's effective config, and persists the new comments + workflow findings. Falls back to the deterministic Rust-side summary if the summarizer fails OR returns 0 comments while findings exist. `400` if the review is still running or no stored finding has content. Returns the (now `running`) Review. |
 | POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). `409` if the row is not running/waiting or is the trailing summarizer; broadcasts `review_changed`. |
 | GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
 | POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |
@@ -1785,6 +1786,13 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 |---|---|---|---|
 | GET /settings/pr-review | root | — | ReviewConfig |
 | PUT /settings/pr-review | root | ReviewConfig | config |
+| GET /settings/pr-review/presets | member (Git View) | — | ReviewConfigPreset[] |
+| PUT /settings/pr-review/presets | root | ReviewConfigPreset[] | ReviewConfigPreset[] (full replace; ids must be unique + non-empty) |
+| GET /repos/{id}/review-config | ws viewer | — | RepoReviewConfigResp |
+| PUT /repos/{id}/review-config | ws editor | RepoReviewBinding | RepoReviewConfigResp |
+| DELETE /repos/{id}/review-config | ws editor | — | RepoReviewConfigResp (reverted to global) |
+
+**Named presets + per-repo binding.** A `ReviewConfigPreset` is `{ id, name, config: ReviewConfig }` — a reusable full review configuration. A repo may bind one of them (`RepoReviewBinding { preset_id }`) or carry a fully custom inline config (`RepoReviewBinding { config }`; inline wins if both are set). Review runs resolve the effective config as **repo inline > repo preset > global `pr_review`**; a dangling `preset_id` (preset deleted) falls back to global rather than failing the run. `RepoReviewConfigResp` is `{ scope: "global"|"preset"|"custom", preset_id?, preset_name?, config }` where `config` is the EFFECTIVE post-resolution config (`preset_name` is null for a dangling reference). Bindings are stored in the settings table under `pr_review_repo:<repo_id>`; presets under `pr_review_presets`. A per-call `cfg_override` (workflow `review_run` steps) still wins over everything.
 
 **`ReviewConfig` DTO additions (A2 — additive, optional):**
 - `max_attempts?: number | null` — max total agent attempts per run (default 3); overrides the compiled-in constant.

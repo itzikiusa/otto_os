@@ -492,9 +492,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // Workspace-scoped repo-rules list (Context feature).
         return Require(Context, if get { View } else { Edit });
     }
-    if p == "/settings/pr-review" {
-        // PR-review config — read=View, write=Edit (it's a Git-feature setting,
-        // not a daemon Settings concern).
+    if p == "/settings/pr-review" || p == "/settings/pr-review/presets" {
+        // PR-review config + named presets — read=View, write=Edit (it's a
+        // Git-feature setting, not a daemon Settings concern).
         return Require(Git, if get { View } else { Edit });
     }
 
@@ -1510,6 +1510,19 @@ mod tests {
         assert_eq!(
             pol(Method::GET, "/api/v1/settings/pr-review"),
             Require(Git, View)
+        );
+        // Named review presets + per-repo binding: GET=View, PUT/DELETE=Edit.
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/settings/pr-review/presets"),
+            Require(Git, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/repos/{id}/review-config"),
+            Require(Git, View)
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/repos/{id}/review-config"),
+            Require(Git, Edit)
         );
         // A1: new findings / merge-readiness routes — GET=View, POST=Edit.
         assert_eq!(

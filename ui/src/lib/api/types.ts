@@ -2656,6 +2656,31 @@ export interface ReviewConfig {
   timeout_secs?: number | null;
 }
 
+/** A named, reusable full review configuration.
+ *  GET/PUT /settings/pr-review/presets (PUT replaces the whole list). */
+export interface ReviewConfigPreset {
+  id: string;
+  name: string;
+  config: ReviewConfig;
+}
+
+/** PUT /repos/{id}/review-config body — exactly one of preset_id / config.
+ *  Inline `config` wins if both are set; DELETE reverts the repo to global. */
+export interface RepoReviewBinding {
+  preset_id?: string | null;
+  config?: ReviewConfig | null;
+}
+
+/** GET/PUT/DELETE /repos/{id}/review-config response: the repo's binding
+ *  resolved to its scope plus the EFFECTIVE config reviews will run with. */
+export interface RepoReviewConfigResp {
+  scope: 'global' | 'preset' | 'custom';
+  preset_id?: string | null;
+  /** Resolved preset display name; null when the referenced preset was deleted. */
+  preset_name?: string | null;
+  config: ReviewConfig;
+}
+
 export interface MergeReadiness {
   unresolved_blocker_count: number;
   unresolved_total: number;
