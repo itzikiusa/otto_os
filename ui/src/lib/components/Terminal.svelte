@@ -426,7 +426,13 @@
       return false; // container not laid out / detached
     }
     if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return false;
-    if (dims.cols < 1 || dims.rows < 1) return false;
+    // Floor, not just >0: when the right panel expands to viewport-max the pane
+    // is squeezed to a sliver (~12 cols). Fitting then would SIGWINCH the PTY
+    // and a TUI (claude/codex) repaints its whole screen at that width,
+    // permanently mangling the scrollback. Below the floor keep the last sane
+    // grid — the (mostly occluded) pane clips, and restoring the layout re-fits
+    // to the same wide grid with no repaint.
+    if (dims.cols < 20 || dims.rows < 3) return false;
     try {
       fit.fit();
     } catch {

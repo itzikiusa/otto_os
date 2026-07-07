@@ -195,3 +195,30 @@ test('shell terminal fits its pane (no stale-narrow PTY width)', async ({ page }
     })
     .toBeGreaterThan(100);
 });
+
+test('expanding the right panel to wide view leaves the terminal grid untouched', async ({ page }) => {
+  await page.goto(`/#/agents/${idByTitle.Zlatan}`);
+  const host = page.locator('.term-host');
+  const cols = () => host.getAttribute('data-cols').then((v: string | null) => Number(v ?? '0'));
+  await expect(host).toBeVisible({ timeout: 30_000 });
+  await expect.poll(cols, { timeout: 15_000 }).toBeGreaterThan(100);
+
+  // Open the right panel (⌘J) and let the pane re-fit to the reduced width.
+  await page.keyboard.press('Meta+j');
+  const expand = page.getByRole('button', { name: 'Expand panel' });
+  await expect(expand).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(1000); // fit debounce + verify timers (200/650ms)
+  const before = await cols();
+  expect(before).toBeGreaterThan(50);
+
+  // Expand to viewport-max: the session pane is squeezed to a sliver. The
+  // terminal must NOT push that sliver grid to the PTY (a TUI would repaint at
+  // ~12 cols and permanently mangle its scrollback) — the grid stays put.
+  await expand.click();
+  await page.waitForTimeout(1200);
+  expect(await cols()).toBe(before);
+
+  // Restoring the panel re-fits back to the same measurement, no repaint churn.
+  await page.getByRole('button', { name: 'Restore panel width' }).click();
+  await expect.poll(cols, { timeout: 10_000 }).toBe(before);
+});
