@@ -11,8 +11,12 @@
     ProductTestcase,
     TestcaseSteps,
   } from './types';
+  import { agentProviders } from '../../lib/providers';
 
-  const PROVIDERS = ['claude', 'openai'] as const;
+  // The rewrite/tests/inject run spawns an agent CLI session via the live
+  // registry, so the provider must be a real registered agent (built-in or
+  // custom like grok) — openai/gemini were never valid here.
+  const PROVIDERS = $derived(agentProviders());
   const CATEGORIES = ['happy', 'validation', 'error', 'edge'] as const;
   type Category = (typeof CATEGORIES)[number];
 

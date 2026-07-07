@@ -23,10 +23,7 @@
   let { starting, onstart }: Props = $props();
 
   // Agent CLIs available for implementation / validation / improvement.
-  const providerOpts = $derived.by(() => {
-    const ps = agentProviders();
-    return ps.length > 0 ? ps : ['claude', 'codex', 'agy'];
-  });
+  const providerOpts = $derived(agentProviders());
 
   let sources: SkillSourceInfo[] = $state([]);
   // 'custom' = the path/archive branch; otherwise an index into `sources`.

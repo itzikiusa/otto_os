@@ -2,7 +2,7 @@
   // Analysis tab — multi-provider per-lens config, summarizer select, live polling.
   import { untrack } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
-  import { api } from '../../lib/api/client';
+  import { agentProviders } from '../../lib/providers';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { ProductAnalysis, ProductAnalysisDetail, ProductAnalysisAgent } from './types';
@@ -40,14 +40,9 @@
   async function initConfig(): Promise<void> {
     if (configLoaded) return;
 
-    // Providers from /meta (drop the shell pseudo-provider).
-    try {
-      const meta = await api.get<{ providers: string[] }>('/meta');
-      availableProviders = (meta.providers ?? []).filter((p) => p !== 'shell');
-      if (availableProviders.length === 0) availableProviders = ['claude'];
-    } catch {
-      availableProviders = ['claude'];
-    }
+    // Agent providers from the live registry (built-ins + custom, e.g. grok),
+    // minus the shell pseudo-provider. Single source of truth — no re-fetch.
+    availableProviders = agentProviders();
 
     // Lens catalog (curated, backend-driven). Fall back to the trio on any
     // failure or empty result so the tab is always usable.

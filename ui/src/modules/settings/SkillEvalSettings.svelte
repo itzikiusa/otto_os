@@ -8,10 +8,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { agentProviders } from '../../lib/providers';
 
-  const providerOpts = $derived.by(() => {
-    const ps = agentProviders();
-    return ps.length > 0 ? ps : ['claude', 'codex', 'agy'];
-  });
+  const providerOpts = $derived(agentProviders());
 
   let cfg: SkillEvalConfig | null = $state(null);
   let loading = $state(true);
