@@ -47,8 +47,16 @@ const STOPWORDS = new Set([
   'agents', 'window', 'windows', 'tab', 'tabs', 'new', 'open', 'please',
 ]);
 
-/** Map a token to a canonical provider, tolerating typos (clude, codx, …). */
-export function resolveProvider(tok: string): string | null {
+/** Map a token to a canonical provider, tolerating typos (clude, codx, …).
+ *  `extra` is the LIVE registry names (from `auth.meta.providers`), so CUSTOM
+ *  providers (e.g. `grok`) resolve in the deterministic ⌘K fast-path — an exact
+ *  match on a registry name always wins over the built-in fuzzy aliases. */
+export function resolveProvider(tok: string, extra?: string[]): string | null {
+  if (extra) {
+    for (const name of extra) {
+      if (tok === name.toLowerCase()) return name;
+    }
+  }
   if (PROVIDER_ALIASES[tok]) return PROVIDER_ALIASES[tok];
   if (tok.length < 4 || STOPWORDS.has(tok)) return null;
   // Tight fuzzy threshold (edit distance ≤ 1) so only real typos match —
@@ -61,6 +69,18 @@ export function resolveProvider(tok: string): string | null {
     if (d < bestDist) {
       bestDist = d;
       best = PROVIDER_ALIASES[alias];
+    }
+  }
+  // Custom registry names also get typo tolerance (≤1), after the built-ins.
+  if (extra) {
+    for (const name of extra) {
+      const lower = name.toLowerCase();
+      if (lower.length < 4 || PROVIDER_ALIASES[lower]) continue;
+      const d = editDistance(tok, lower);
+      if (d < bestDist) {
+        bestDist = d;
+        best = name;
+      }
     }
   }
   return best;
@@ -81,12 +101,13 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-/** Scan for "<count> <provider>" pairs anywhere in the text. */
-function extractSpawnItems(text: string): { provider: string; count: number }[] {
+/** Scan for "<count> <provider>" pairs anywhere in the text. `extra` = live
+ *  registry names so custom providers are recognized. */
+function extractSpawnItems(text: string, extra?: string[]): { provider: string; count: number }[] {
   const items: { provider: string; count: number }[] = [];
   const tokens = text.split(/[\s,]+/).filter(Boolean);
   for (let i = 0; i < tokens.length; i++) {
-    const provider = resolveProvider(tokens[i].replace(/[^a-z0-9-]/g, ''));
+    const provider = resolveProvider(tokens[i].replace(/[^a-z0-9-]/g, ''), extra);
     if (!provider) continue;
     // Look back a few tokens for a count (skipping "new"/articles).
     let count = 1;
@@ -98,7 +119,7 @@ function extractSpawnItems(text: string): { provider: string; count: number }[] 
         count = c;
         break;
       }
-      if (resolveProvider(t)) break; // hit another provider — stop
+      if (resolveProvider(t, extra)) break; // hit another provider — stop
     }
     items.push({ provider, count });
   }
@@ -112,12 +133,12 @@ function extractSpawnItems(text: string): { provider: string; count: number }[] 
  * Parse `input` into an ActionPlan deterministically, or return null when the
  * intent is unclear (caller may fall back to the AI planner).
  */
-export function parseCommand(input: string): ActionPlan | null {
+export function parseCommand(input: string, extra?: string[]): ActionPlan | null {
   const text = normalize(input);
   if (text === '') return null;
 
   const hasSpawn = SPAWN_VERBS.test(text);
-  const items = extractSpawnItems(text);
+  const items = extractSpawnItems(text, extra);
 
   // Spawn: a verb + at least one provider, OR a provider with an explicit count.
   if (items.length > 0 && (hasSpawn || items.some((i) => i.count > 1))) {
@@ -175,9 +196,9 @@ export function startsWithCloseVerb(input: string): boolean {
 
 /** The first provider named anywhere in `input` (claude/codex/agy/shell, with
  *  alias + typo tolerance), or undefined. */
-export function firstProvider(input: string): string | undefined {
+export function firstProvider(input: string, extra?: string[]): string | undefined {
   for (const tok of normalize(input).split(/[\s,]+/)) {
-    const p = resolveProvider(tok.replace(/[^a-z0-9-]/g, ''));
+    const p = resolveProvider(tok.replace(/[^a-z0-9-]/g, ''), extra);
     if (p) return p;
   }
   return undefined;
@@ -207,14 +228,14 @@ function extractPositions(text: string): number[] {
  * the current layout. Returns null when it isn't clearly a close request, so the
  * caller falls through to spawn/broadcast/AI.
  */
-export function parseClose(input: string): CloseRequest | null {
+export function parseClose(input: string, extra?: string[]): CloseRequest | null {
   const text = normalize(input);
   // Only treat as a close command when it STARTS with a close verb — otherwise a
   // relayed message that merely contains "stop"/"close" would be hijacked.
   if (!START_CLOSE.test(text)) return null;
   const hasNoun = SESSION_NOUN.test(text);
   const permanent = PERMANENT_VERBS.test(text);
-  const provider = firstProvider(text);
+  const provider = firstProvider(text, extra);
   const isAll = /\b(all|every|everything|everyone)\b/.test(text);
   const positions = extractPositions(text);
 

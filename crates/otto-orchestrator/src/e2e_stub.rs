@@ -22,8 +22,47 @@ pub fn canned_reply(prompt: &str) -> String {
     if prompt.contains("OTTO_TASK: scheduled_task") {
         return scheduled_task_reply();
     }
+    // The ⌘K orchestrator plan prompt (no task sentinel): deterministically
+    // echo a spawn_sessions plan for the provider the user named, chosen from
+    // the prompt's OWN provider enum — so "open grok session" plans `grok`
+    // (proving custom providers reach the planner), with no real LLM.
+    if prompt.contains("spawn_sessions") {
+        if let Some(plan) = spawn_plan_reply(prompt) {
+            return plan;
+        }
+    }
     // Generic fallback for any other agent call under E2E.
     "OK".to_string()
+}
+
+/// Build a `spawn_sessions` plan by matching the instruction against the
+/// prompt's provider enum. Returns `None` when the instruction names no known
+/// provider (the caller falls back to "OK").
+fn spawn_plan_reply(prompt: &str) -> Option<String> {
+    // The enum is rendered as `"provider":"a"|"b"|"c","count"`; pull the quoted
+    // names out of that segment.
+    let seg_start = prompt.find("\"provider\":")? + "\"provider\":".len();
+    let seg = &prompt[seg_start..];
+    let seg_end = seg.find(",\"count\"").unwrap_or(seg.len());
+    let providers: Vec<String> = seg[..seg_end]
+        .split('|')
+        .filter_map(|t| {
+            let t = t.trim().trim_matches('"').trim();
+            (!t.is_empty()).then(|| t.to_string())
+        })
+        .collect();
+    // The user's instruction is embedded verbatim after "Instruction: ".
+    let instruction = prompt
+        .rsplit_once("Instruction: ")
+        .map(|(_, i)| i.to_lowercase())
+        .unwrap_or_default();
+    // First enum provider named in the instruction wins.
+    let picked = providers
+        .iter()
+        .find(|p| instruction.split(|c: char| !c.is_alphanumeric()).any(|w| w == p.as_str()))?;
+    Some(format!(
+        "[{{\"action\":\"spawn_sessions\",\"provider\":\"{picked}\",\"count\":1}}]"
+    ))
 }
 
 /// E2E stub for a scheduled task: a representative Markdown report with a counts
@@ -176,6 +215,19 @@ mod tests {
         let st = canned_reply("OTTO_TASK: scheduled_task run the job");
         assert!(st.contains("Reviewed:") && st.contains("\n---\n"));
         assert_eq!(canned_reply("no sentinel"), "OK");
+    }
+
+    #[test]
+    fn spawn_plan_picks_named_custom_provider_from_enum() {
+        // A plan prompt whose enum includes a custom provider; the instruction
+        // names it → the stub plans exactly that provider (not a default).
+        let prompt = "schema: {\"action\":\"spawn_sessions\",\"provider\":\"claude\"|\"codex\"|\"grok\",\"count\":<1-255>}\n\nInstruction: open grok session";
+        let reply = canned_reply(prompt);
+        assert!(reply.contains("\"action\":\"spawn_sessions\""));
+        assert!(reply.contains("\"provider\":\"grok\""), "reply: {reply}");
+        // A plan prompt whose instruction names no enum provider → "OK".
+        let none = "schema: {\"action\":\"spawn_sessions\",\"provider\":\"claude\"|\"codex\",\"count\":<1-255>}\n\nInstruction: do something vague";
+        assert_eq!(canned_reply(none), "OK");
     }
 
     #[test]

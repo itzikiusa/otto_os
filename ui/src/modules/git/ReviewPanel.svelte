@@ -34,6 +34,7 @@
   // re-fetch when the running review for this PR completes/errors, replacing the
   // fixed-interval visibility-gated poll for the running state.
   import { reviewBus } from '../../lib/events.svelte';
+  import { agentProviders } from '../../lib/providers';
 
   // --- Installed-skill metadata (library API; category + version are new) ----
   // Defined locally so this panel can read the extended fields without touching
@@ -165,7 +166,10 @@
   // Per-comment collapse state: true = expanded (default for draft)
   let diffExpanded: Record<string, boolean> = $state({});
 
-  const PROVIDER_OPTIONS = ['claude', 'codex', 'agy'];
+  // The Run-on / summarizer provider choices come from the LIVE registry
+  // (built-ins + the user's custom providers, e.g. grok) — never a hardcoded
+  // subset. Shell can't review, so agent providers only.
+  const PROVIDER_OPTIONS = $derived(agentProviders());
   const MAX_POLLS = 600; // ~20 min at 2s — covers long multi-agent live reviews
 
   // --- Data-driven review-skill presets ------------------------------------

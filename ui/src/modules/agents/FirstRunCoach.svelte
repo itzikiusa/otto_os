@@ -15,6 +15,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import { agentProviders as registryAgentProviders } from '../../lib/providers';
 
   interface Props {
     /** Called when the user dismisses the coach (falls back to the bare empty state). */
@@ -26,9 +27,7 @@
   // `providers` is the STATIC provider registry — it always lists claude/codex/agy
   // regardless of what's installed, so it can't gate the launch. Real detection
   // lives in /meta.tools: a coding agent is usable only when its tool is `found`.
-  const agentProviders = $derived(
-    (auth.meta?.providers ?? []).filter((p) => p !== 'shell'),
-  );
+  const agentProviders = $derived(registryAgentProviders());
   // Tool rows for claude/codex from /meta.tools (shows version when found).
   const agentTools = $derived(
     (auth.meta?.tools ?? []).filter((t) => t.name === 'claude' || t.name === 'codex'),

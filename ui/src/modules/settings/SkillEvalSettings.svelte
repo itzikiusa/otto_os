@@ -6,9 +6,10 @@
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type { SkillEvalConfig, SkillEvalValidationCfg } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
+  import { agentProviders } from '../../lib/providers';
 
   const providerOpts = $derived.by(() => {
-    const ps = (auth.meta?.providers ?? []).filter((p) => p !== 'shell');
+    const ps = agentProviders();
     return ps.length > 0 ? ps : ['claude', 'codex', 'agy'];
   });
 

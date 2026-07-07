@@ -5,6 +5,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AcceptanceCriterion, GoalLoopDraft } from '../../lib/api/types';
+  import { agentProviders } from '../../lib/providers';
 
   let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
 
@@ -27,7 +28,7 @@
   let execProvider = $state('claude');
   let execModel = $state('');
   const providers = $derived(
-    (auth.meta?.providers ?? ['claude', 'codex']).filter((p) => p !== 'shell'),
+    agentProviders(),
   );
   const MODEL_SUGGESTIONS = ['opus', 'sonnet', 'haiku'];
 

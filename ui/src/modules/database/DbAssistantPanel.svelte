@@ -12,6 +12,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import type { DbAssistMode } from '../../lib/api/types';
+  import { allProviders } from '../../lib/providers';
 
   let draft = $state('');
 
@@ -37,7 +38,7 @@
 
   // Provider picker (chosen BEFORE the first turn; the choice locks once a session
   // exists). Same source/defaulting as NewSession.
-  const providers = $derived(auth.meta?.providers ?? ['claude', 'codex', 'shell']);
+  const providers = $derived(allProviders());
   const defaultProvider = $derived(
     (typeof ws.current?.settings?.default_provider === 'string' &&
       ws.current.settings.default_provider) ||

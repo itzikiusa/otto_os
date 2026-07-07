@@ -8,6 +8,7 @@
   import { isAbortError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { AgentSkill, CreateAgentReq, RecruitedAgent } from './types';
+  import { agentProvidersWith } from '../../lib/providers';
 
   interface Props {
     onclose: () => void;
@@ -183,7 +184,7 @@
       <div class="field">
         <label for="rc-prov">Provider</label>
         <select id="rc-prov" class="input" bind:value={provider}>
-          {#each Array.from(new Set([provider, 'claude', 'codex', 'agy'])) as p (p)}<option value={p}>{p}</option>{/each}
+          {#each agentProvidersWith(provider) as p (p)}<option value={p}>{p}</option>{/each}
         </select>
       </div>
       <div class="field">

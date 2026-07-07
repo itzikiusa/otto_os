@@ -5,13 +5,14 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { allProviders } from '../../lib/providers';
 
   interface Props {
     onclose: () => void;
   }
   let { onclose }: Props = $props();
 
-  const providers = $derived(auth.meta?.providers ?? ['claude', 'codex', 'shell']);
+  const providers = $derived(allProviders());
   // Effective default agent: this workspace's override, else the global default.
   const wsDefault = $derived(
     typeof ws.current?.settings?.default_provider === 'string'

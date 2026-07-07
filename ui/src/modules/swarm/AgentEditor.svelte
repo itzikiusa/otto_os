@@ -7,6 +7,7 @@
   import { contextApi } from '../../lib/api/context';
   import { toasts } from '../../lib/toast.svelte';
   import type { AgentSchedule, AgentSkill, CreateAgentReq, SwarmAgent } from './types';
+  import { agentProvidersWith } from '../../lib/providers';
 
   interface Props {
     agent?: SwarmAgent | null;
@@ -50,9 +51,9 @@
   let weekday = $state(initSched?.weekday ?? 1);
   let directive = $state(initSched?.directive ?? '');
 
-  const providers = $derived(
-    Array.from(new Set([provider, 'claude', 'codex', 'agy'])).filter(Boolean),
-  );
+  // Live registry (built-ins + custom, e.g. grok); keep the agent's current
+  // provider even if it's since been removed from the registry.
+  const providers = $derived(agentProvidersWith(provider));
 
   let busy = $state(false);
   let knownSkills = $state<string[]>([]);

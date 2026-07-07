@@ -164,6 +164,12 @@ mod tests {
             }],
             cwd: "/tmp".into(),
             default_provider: "claude".into(),
+            available_providers: vec![
+                "claude".into(),
+                "codex".into(),
+                "agy".into(),
+                "shell".into(),
+            ],
         }
     }
 

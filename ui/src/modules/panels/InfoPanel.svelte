@@ -8,6 +8,7 @@
   import AttachIssue from '../agents/AttachIssue.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
+  import { allProviders } from '../../lib/providers';
 
   const session = $derived(ws.activeSession);
   const workspace = $derived(ws.current);
@@ -16,7 +17,7 @@
   );
 
   // Per-workspace default agent (overrides the global default). '' = inherit.
-  const providers = $derived(auth.meta?.providers ?? ['claude', 'codex', 'shell']);
+  const providers = $derived(allProviders());
   const wsDefaultAgent = $derived(
     typeof workspace?.settings?.default_provider === 'string'
       ? (workspace.settings.default_provider as string)

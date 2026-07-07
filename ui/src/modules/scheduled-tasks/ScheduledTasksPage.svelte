@@ -6,6 +6,7 @@
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
+  import { allProviders } from '../../lib/providers';
 
   let creating = $state(false);
   let editId = $state<string | null>(null);
@@ -54,7 +55,8 @@
   let fEnabled = $state(true);
   let fCwd = $state('');
 
-  const PROVIDERS = ['claude', 'codex', 'agy', 'shell'];
+  // Live registry (built-ins + custom); shell is valid for scheduled tasks.
+  const PROVIDERS = $derived(allProviders());
 
   $effect(() => {
     const id = ws.currentId;

@@ -20,6 +20,7 @@
     startsWithCloseVerb,
     type CloseRequest,
   } from '../lib/commandParser';
+  import { allProviders } from '../lib/providers';
   import { fuzzyMatch } from '../lib/fuzzy';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
@@ -317,7 +318,7 @@
     // "close ronaldo" (by name); "delete/kill …" removes instead of archiving.
     // Anchored on a leading close verb. handleClose returns false when nothing
     // resolves (e.g. free-form "delete the file foo") so it falls through to AI.
-    const closeReq = parseClose(englishText);
+    const closeReq = parseClose(englishText, allProviders());
     if (closeReq || startsWithCloseVerb(englishText)) {
       if (await handleClose(englishText, closeReq)) return;
     }
@@ -332,7 +333,7 @@
     // "broadcast run the tests") execute instantly with no LLM and no
     // confirmation step. Only fall through to the AI planner when this
     // can't parse the request AND the user enabled AI fallback.
-    const literal = parseCommand(englishText);
+    const literal = parseCommand(englishText, allProviders());
     if (literal && literal.length > 0) {
       plan = literal;
       await executePlan();

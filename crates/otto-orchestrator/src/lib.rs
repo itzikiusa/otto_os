@@ -28,7 +28,8 @@ const CLAUDE_NO_PROGRESS: Duration = Duration::from_secs(120);
 /// Model for planning/optimizing turns — haiku keeps them fast and cheap.
 const PLANNER_MODEL: &str = "haiku";
 
-/// Providers the model may reference in `spawn_sessions` actions.
+/// Ultimate fallback provider enum when the caller passes no live registry
+/// (empty `available_providers`) — e.g. a unit test building a bare context.
 const DEFAULT_PROVIDERS: &[&str] = &["claude", "codex", "agy", "shell"];
 
 /// Workspace context given to the planner (and used for plan validation).
@@ -42,6 +43,23 @@ pub struct OrchestratorContext {
     /// default, else global, else "claude"). Steers `spawn_sessions` when the
     /// user doesn't name a specific CLI.
     pub default_provider: String,
+    /// The LIVE provider registry names (builtins + custom, e.g. `grok`) the
+    /// model may reference in `spawn_sessions` — the single source of truth so
+    /// a user's custom providers are first-class in the planner. Empty falls
+    /// back to [`DEFAULT_PROVIDERS`].
+    pub available_providers: Vec<String>,
+}
+
+impl OrchestratorContext {
+    /// The provider enum for the plan prompt + validation: the live registry
+    /// names, or [`DEFAULT_PROVIDERS`] when none were supplied.
+    fn allowed_providers(&self) -> Vec<String> {
+        if self.available_providers.is_empty() {
+            DEFAULT_PROVIDERS.iter().map(|s| s.to_string()).collect()
+        } else {
+            self.available_providers.clone()
+        }
+    }
 }
 
 /// Plain-English → ActionPlan orchestrator backed by real claude sessions.
@@ -77,13 +95,10 @@ impl Orchestrator {
         }
         let plan_input = optimized_text.as_deref().unwrap_or(&req.text);
 
-        let allowed: Vec<String> = DEFAULT_PROVIDERS.iter().map(|s| s.to_string()).collect();
+        let allowed: Vec<String> = ctx.allowed_providers();
         let planned: Result<ActionPlan> = async {
             let prompt = build_plan_prompt(plan_input, &ctx);
-            let text = self
-                .claude
-                .run_prompt(&prompt, &ctx.cwd, Some(PLANNER_MODEL), CLAUDE_NO_PROGRESS)
-                .await?;
+            let text = self.planner_turn(&prompt, &ctx.cwd).await?;
             let plan = parse::parse_plan(&text)?;
             parse::validate_plan(&plan, &ctx, &allowed)?;
             Ok(plan)
@@ -141,11 +156,21 @@ impl Orchestrator {
             "Rewrite the following instruction to be a precise, unambiguous prompt \
              for a coding agent. Reply with ONLY the rewritten prompt.\n\n{text}"
         );
-        let text = self
-            .claude
-            .run_prompt(&prompt, cwd, Some(PLANNER_MODEL), CLAUDE_NO_PROGRESS)
-            .await?;
+        let text = self.planner_turn(&prompt, cwd).await?;
         Ok(text.trim().to_string())
+    }
+
+    /// One planner/optimizer claude turn — routed through the deterministic E2E
+    /// stub under `OTTO_E2E=1` (like [`Self::run_agent`]) so the whole ⌘K
+    /// plain-English flow is drivable offline without a real claude PTY. In
+    /// normal operation it drives the real interactive session.
+    async fn planner_turn(&self, prompt: &str, cwd: &str) -> Result<String> {
+        if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
+            return Ok(crate::e2e_stub::canned_reply(prompt));
+        }
+        self.claude
+            .run_prompt(prompt, cwd, Some(PLANNER_MODEL), CLAUDE_NO_PROGRESS)
+            .await
     }
 }
 
@@ -180,16 +205,26 @@ fn build_plan_prompt(text: &str, ctx: &OrchestratorContext) -> String {
             c.kind.as_str()
         ));
     }
-    prompt.push_str(
+    // The provider enum is the LIVE registry (builtins + the user's custom
+    // providers like `grok`), pipe-joined and quoted, so the planner can spawn
+    // any configured provider — not a hardcoded subset.
+    let provider_enum = ctx
+        .allowed_providers()
+        .iter()
+        .map(|p| format!("\"{p}\""))
+        .collect::<Vec<_>>()
+        .join("|");
+    prompt.push_str(&format!(
         "\nRespond with ONLY a JSON array of 1 to 10 action objects, no prose, no \
          markdown fences. Each object is tagged by a string field \"action\" with \
          snake_case variant names. The exact schema (serde tag = \"action\"):\n\
-         - {\"action\":\"spawn_sessions\",\"provider\":\"claude\"|\"codex\"|\"shell\",\"count\":<1-255>}\n\
-         - {\"action\":\"broadcast\",\"text\":\"<sent to every running agent session>\"}\n\
-         - {\"action\":\"open_connection\",\"connection_id\":\"<a connection id from the context>\"}\n\
-         - {\"action\":\"run_command\",\"session_id\":\"<a session id from the context>\",\"text\":\"<sent to that session>\"}\n\
-         Only reference session/connection ids listed in the context.\n",
-    );
+         - {{\"action\":\"spawn_sessions\",\"provider\":{provider_enum},\"count\":<1-255>}}\n\
+         - {{\"action\":\"broadcast\",\"text\":\"<sent to every running agent session>\"}}\n\
+         - {{\"action\":\"open_connection\",\"connection_id\":\"<a connection id from the context>\"}}\n\
+         - {{\"action\":\"run_command\",\"session_id\":\"<a session id from the context>\",\"text\":\"<sent to that session>\"}}\n\
+         Only reference session/connection ids listed in the context. Use the EXACT provider \
+         name the user names (e.g. spawn a \"grok\" session when they say grok).\n"
+    ));
     // When the user doesn't name an agent CLI, steer spawn_sessions to the
     // configured default agent (per-workspace, else global, else claude).
     if !ctx.default_provider.trim().is_empty() {
@@ -374,4 +409,46 @@ pub async fn execute(plan: &ActionPlan, spawner: &dyn PlanSpawner, io: &dyn Plan
         results.push(result);
     }
     ExecuteResp { results }
+}
+
+#[cfg(test)]
+mod plan_prompt_tests {
+    use super::*;
+
+    fn ctx_with(providers: &[&str]) -> OrchestratorContext {
+        OrchestratorContext {
+            sessions: vec![],
+            connections: vec![],
+            cwd: "/tmp".into(),
+            default_provider: "claude".into(),
+            available_providers: providers.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// The plan prompt's provider enum is driven by the live registry, so a
+    /// custom provider (grok) is offered to the planner — not a hardcoded set.
+    #[test]
+    fn plan_prompt_enum_includes_custom_providers() {
+        let prompt = build_plan_prompt("open grok session", &ctx_with(&["claude", "codex", "grok"]));
+        assert!(prompt.contains("\"claude\"|\"codex\"|\"grok\""), "prompt: {prompt}");
+        // The instruction is embedded verbatim so the planner sees "grok".
+        assert!(prompt.contains("Instruction: open grok session"));
+    }
+
+    /// An empty registry falls back to the built-in default enum.
+    #[test]
+    fn plan_prompt_enum_falls_back_when_empty() {
+        let prompt = build_plan_prompt("hi", &ctx_with(&[]));
+        assert!(prompt.contains("\"claude\"|\"codex\"|\"agy\"|\"shell\""));
+    }
+
+    /// `allowed_providers` mirrors the live registry, with the built-in fallback.
+    #[test]
+    fn allowed_providers_uses_registry_then_fallback() {
+        assert_eq!(ctx_with(&["grok", "claude"]).allowed_providers(), vec!["grok", "claude"]);
+        assert_eq!(
+            ctx_with(&[]).allowed_providers(),
+            vec!["claude", "codex", "agy", "shell"]
+        );
+    }
 }

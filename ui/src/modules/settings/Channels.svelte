@@ -11,6 +11,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { allProviders } from '../../lib/providers';
 
   // ---------------------------------------------------------------------------
   // State
@@ -21,7 +22,7 @@
   let testBusy: Channel | null = $state(null); // which channel is mid-test
 
   // Agent CLIs offered in the per-channel picker (from /meta).
-  const providers = $derived(auth.meta?.providers ?? ['claude', 'codex', 'shell']);
+  const providers = $derived(allProviders());
 
   // Edit modal state
   let editOpen = $state(false);

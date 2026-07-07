@@ -12,12 +12,13 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { parsePlan, setItemStatus, type Status, type Task } from './plan_parse';
   import type { ProductStoryVersion } from './types';
+  import { agentProviders } from '../../lib/providers';
 
   // ── Provider selection (Otto's REAL provider list, like NewSession) ──────────
   // Drop the 'shell' pseudo-provider — it can't plan. Fall back to ['claude'] if
   // /meta hasn't loaded yet.
   const availableProviders = $derived(
-    (auth.meta?.providers ?? ['claude']).filter((p) => p !== 'shell'),
+    agentProviders(),
   );
   // Effective default agent: this workspace's override, else the global default,
   // else the first available provider.
