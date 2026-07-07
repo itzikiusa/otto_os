@@ -42,6 +42,17 @@
     document.body.style.userSelect = 'none';
   }
 
+  // The tab row scrolls horizontally when the panel is narrow (the labels
+  // don't shrink); keep the active tab in view whenever it changes — e.g.
+  // opened from the collapsed strip or after the user drags the panel small.
+  let tabsEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    void ui.rightTab;
+    queueMicrotask(() =>
+      tabsEl?.querySelector('.rtab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }),
+    );
+  });
+
   const tabs: { id: RightTab; icon: string; label: string }[] = [
     { id: 'git', icon: 'branch', label: 'Git' },
     { id: 'files', icon: 'file', label: 'Files' },
@@ -100,7 +111,7 @@
       ></div>
     {/if}
     <header class="rpanel-head">
-      <div class="rpanel-tabs" role="tablist">
+      <div class="rpanel-tabs" role="tablist" bind:this={tabsEl}>
         {#each tabs as t (t.id)}
           <button
             class="rtab"
@@ -232,8 +243,21 @@
   .rpanel-tabs {
     display: flex;
     gap: 2px;
+    /* Narrow panel: the row scrolls instead of shoving the expand/collapse
+       buttons off the edge (they're flex-pinned below). */
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none; /* wheel/trackpad + active-tab scroll-into-view */
+  }
+  .rpanel-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .rpanel-head > :global(.icon-btn) {
+    flex-shrink: 0;
   }
   .rtab {
+    flex-shrink: 0;
     height: 24px;
     padding: 0 10px;
     border: none;
