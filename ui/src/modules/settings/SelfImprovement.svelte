@@ -12,8 +12,8 @@
     SelfImprovementConfig,
   } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { agentProviders } from '../../lib/providers';
   import { improvementBus } from '../../lib/events.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -41,16 +41,14 @@
   // The currently-active / focused session in the workspace — used by "Evolve now".
   const activeSession = $derived(ws.activeSession);
 
-  // Agent CLIs the analysis can run on: installed tools (minus shell), plus
-  // anything already selected and claude, so the list is stable even before
-  // /meta loads. Each selected provider yields its own set of suggestions.
+  // Agent CLIs the analysis can run on: the live provider registry (built-ins +
+  // custom, e.g. grok), minus the `shell` pseudo-provider — NOT /meta.tools,
+  // which also lists non-agent tools like git/clickhouse. Anything already
+  // selected is kept so a since-removed provider doesn't silently vanish. Each
+  // selected provider yields its own set of suggestions.
   const providerChoices = $derived.by(() => {
-    const found = (auth.meta?.tools ?? [])
-      .filter((t) => t.found && t.name !== 'shell')
-      .map((t) => t.name);
-    const set = new Set<string>(found.length ? found : ['claude', 'codex', 'agy']);
+    const set = new Set<string>(agentProviders());
     for (const p of cfg?.providers ?? []) set.add(p);
-    set.add('claude');
     return [...set];
   });
 

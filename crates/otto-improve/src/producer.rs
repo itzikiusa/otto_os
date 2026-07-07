@@ -24,28 +24,32 @@ pub trait ProposalProducer: Send + Sync {
 }
 
 /// Headless (non-interactive) CLI invocation for a non-claude provider: the
-/// program and the args that precede the prompt. claude is driven via the
+/// program name and the args that precede the prompt. claude is driven via the
 /// orchestrator's interactive PTY path instead (it reads the reply from the
-/// session transcript), so it returns `None` here.
+/// session transcript), so it is handled separately in `run_one`.
 ///
 /// codex has a first-class `exec` subcommand; agy is a claude-compatible fork
-/// so it uses claude's `-p` print mode. A failing provider is logged and
-/// skipped by the engine, never aborting the others.
-fn headless_exec(provider: &str) -> Option<(&'static str, Vec<String>)> {
+/// so it uses claude's `-p` print mode. For ANY OTHER provider — including a
+/// user's CUSTOM provider (e.g. `grok`) — we BEST-EFFORT the claude-compatible
+/// `-p` print convention (most agent CLIs, and every claude fork, accept it).
+/// A provider that doesn't support it simply exits non-zero; the engine logs
+/// and skips it, never aborting the others — so a custom provider is offered
+/// consistently and works whenever its CLI has a print mode.
+fn headless_exec(provider: &str) -> (String, Vec<String>) {
     match provider {
-        "codex" => Some((
-            "codex",
+        "codex" => (
+            "codex".into(),
             vec![
                 "exec".into(),
                 "--dangerously-bypass-approvals-and-sandbox".into(),
                 "--skip-git-repo-check".into(),
             ],
-        )),
-        "agy" => Some((
-            "agy",
+        ),
+        // agy and every other (custom) provider: the claude-style print mode.
+        other => (
+            other.to_string(),
             vec!["-p".into(), "--dangerously-skip-permissions".into()],
-        )),
-        _ => None,
+        ),
     }
 }
 
@@ -70,13 +74,12 @@ impl RealProposalProducer {
         if provider == "claude" {
             // None = provider default model.
             self.orchestrator.run_agent(prompt, cwd, None, self.timeout).await
-        } else if let Some((program, args)) = headless_exec(provider) {
-            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            otto_orchestrator::run_cli_exec(program, &arg_refs, prompt, cwd, self.timeout).await
         } else {
-            Err(Error::Invalid(format!(
-                "self-improvement: provider '{provider}' has no headless analysis mode"
-            )))
+            // codex/agy/custom → headless CLI exec (best-effort print mode for
+            // custom providers; a non-supporting CLI errors and is skipped).
+            let (program, args) = headless_exec(provider);
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            otto_orchestrator::run_cli_exec(&program, &arg_refs, prompt, cwd, self.timeout).await
         }
     }
 }

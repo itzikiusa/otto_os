@@ -12,6 +12,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import SkillReviewAgents from './SkillReviewAgents.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
     wsId: string;
@@ -32,13 +33,20 @@
   // New-review form.
   let fSkill = $state('');
   let fMode = $state<'static' | 'agents'>('agents');
-  let fClaude = $state(true);
-  let fCodex = $state(false);
+  // Reviewer providers from the live registry (built-ins + custom, e.g. grok).
+  // Selection is a set of provider names; default to the first agent provider.
+  let fProviders = $state<Set<string>>(new Set([defaultAgentProvider()]));
+  function toggleReviewer(p: string): void {
+    const next = new Set(fProviders);
+    if (next.has(p)) next.delete(p);
+    else next.add(p);
+    fProviders = next;
+  }
   let fInstructions = $state('');
   let starting = $state(false);
 
   // Apply-fixes form.
-  let fixProvider = $state('claude');
+  let fixProvider = $state(defaultAgentProvider());
   let fixInstructions = $state('');
   let fixTermOpen = $state(false);
   let applying = $state(false);
@@ -101,9 +109,8 @@
     if (!opt) return;
     const providers: string[] = [];
     if (fMode === 'agents') {
-      if (fClaude) providers.push('claude');
-      if (fCodex) providers.push('codex');
-      if (providers.length === 0) providers.push('claude');
+      providers.push(...fProviders);
+      if (providers.length === 0) providers.push(defaultAgentProvider());
     }
     starting = true;
     try {
@@ -276,8 +283,11 @@
         {#if fMode === 'agents'}
           <fieldset class="lr-field">
             <span>Reviewer agents</span>
-            <label class="lr-check"><input type="checkbox" bind:checked={fClaude} /> claude</label>
-            <label class="lr-check"><input type="checkbox" bind:checked={fCodex} /> codex</label>
+            {#each agentProviders() as p (p)}
+              <label class="lr-check">
+                <input type="checkbox" checked={fProviders.has(p)} onchange={() => toggleReviewer(p)} /> {p}
+              </label>
+            {/each}
           </fieldset>
         {/if}
         <label class="lr-field">
@@ -425,8 +435,7 @@
                 </p>
                 <div class="lr-fix-form">
                   <select bind:value={fixProvider} title="Fixer provider">
-                    <option value="claude">claude</option>
-                    <option value="codex">codex</option>
+                    {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
                   </select>
                   <input
                     type="text"

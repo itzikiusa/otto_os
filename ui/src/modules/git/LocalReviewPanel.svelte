@@ -12,6 +12,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ReviewAgents from './ReviewAgents.svelte';
   import FindingsBoard from './FindingsBoard.svelte';
+  import { agentProviders } from '../../lib/providers';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
 
   interface Props {
@@ -57,7 +58,8 @@
   // slate (review === null) every stored run is "past".
   const pastRuns = $derived(review ? history.slice(1) : history);
 
-  const PROVIDER_OPTIONS = ['claude', 'codex', 'agy'];
+  // Reviewer providers from the live registry (built-ins + custom, e.g. grok).
+  const PROVIDER_OPTIONS = $derived(agentProviders());
 
   // ---------------------------------------------------------------------------
   // Load refs once on mount, and try to load an existing local review

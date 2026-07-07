@@ -89,3 +89,17 @@ test('Scheduled-task form offers the custom provider', async ({ page }) => {
   await expect(providerSelect).toBeVisible({ timeout: 10_000 });
   await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
 });
+
+test('Self-Improvement lists the custom provider and NOT non-agent tools', async ({ page }) => {
+  await page.goto('/#/settings/self-improvement');
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
+  await page.waitForLoadState('networkidle').catch(() => {});
+
+  const chips = page.locator('.provider-grid .provider-chip .mono');
+  // The custom provider is offered…
+  await expect(chips.filter({ hasText: /^grok$/ })).toHaveCount(1, { timeout: 10_000 });
+  await expect(chips.filter({ hasText: /^claude$/ })).toHaveCount(1);
+  // …and the earlier bug is gone: git/clickhouse are TOOLS, never providers.
+  await expect(chips.filter({ hasText: /^git$/ })).toHaveCount(0);
+  await expect(chips.filter({ hasText: /^clickhouse$/ })).toHaveCount(0);
+});
