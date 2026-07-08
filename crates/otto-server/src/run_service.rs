@@ -58,6 +58,26 @@ pub async fn launch(
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| default_title(kind, &source_ref));
 
+    // Resolve the run's agent provider through the configured default: explicit
+    // request → workspace default → global default → "claude".
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let ws_default = ctx
+        .workspaces
+        .get(workspace_id)
+        .await
+        .ok()
+        .map(|ws| otto_core::provider::workspace_default(&ws.settings).to_string())
+        .unwrap_or_default();
+    let provider = otto_core::provider::resolve_provider(&[
+        req.provider.as_deref().unwrap_or(""),
+        ws_default.as_str(),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
+
     let run = ctx
         .runs
         .create(NewRun {
@@ -68,10 +88,7 @@ pub async fn launch(
             source_url: url,
             goal,
             mode: req.mode.unwrap_or_default(),
-            provider: req
-                .provider
-                .filter(|p| !p.trim().is_empty())
-                .unwrap_or_else(|| "claude".to_string()),
+            provider,
             model: req
                 .model
                 .as_deref()

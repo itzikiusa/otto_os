@@ -6,7 +6,7 @@
   import { renderMarkdown } from '../../lib/md';
   import { toasts } from '../../lib/toast.svelte';
   import type { InjectBundle } from './types';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   // The rewrite/tests/inject run spawns an agent CLI session via the live
   // registry, so the provider must be a real registered agent (built-in or
@@ -17,7 +17,7 @@
   let loading = $state(false);
   let copying = $state(false);
   let launching = $state(false);
-  let provider = $state<string>('claude');
+  let provider = $state<string>(defaultAgentProvider());
   let cwd = $state('');
 
   // Collapsible state per section index.

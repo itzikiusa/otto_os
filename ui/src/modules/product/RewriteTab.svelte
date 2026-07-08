@@ -7,7 +7,7 @@
   import { renderMarkdown } from '../../lib/md';
   import DiffView from '../../lib/components/DiffView.svelte';
   import type { ProductStoryVersion } from './types';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   // The rewrite/tests/inject run spawns an agent CLI session via the live
   // registry, so the provider must be a real registered agent (built-in or
@@ -15,7 +15,7 @@
   const PROVIDERS = $derived(agentProviders());
 
   // ── Local UI state ──────────────────────────────────────────────────────────
-  let provider = $state<string>('claude');
+  let provider = $state<string>(defaultAgentProvider());
   let generating = $state(false);
   let publishing = $state(false);
   let confirmPublish = $state(false);

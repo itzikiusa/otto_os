@@ -10,6 +10,7 @@
   import { mockupAssist, type MockupFormat } from '../../lib/stores/mockup-assist.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { ProductAttachment } from './types';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
     /** Called after a turn commits, with the committed mockup attachment. */
@@ -20,8 +21,13 @@
 
   let draft = $state('');
 
-  // The format can only be chosen before the mockup exists; once it does (or we're
-  // refining), it's locked.
+  // Provider for the mockup's agent session — honored only when a NEW mockup is
+  // created (a refine resumes the existing session). Sourced from the live
+  // registry so custom providers (e.g. grok) work.
+  let provider = $state(defaultAgentProvider());
+
+  // The format (and provider) can only be chosen before the mockup exists; once
+  // it does (or we're refining), it's locked.
   const locked = $derived(mockupAssist.attachmentId !== null);
 
   const STARTERS = [
@@ -40,7 +46,7 @@
     if (!p || mockupAssist.busy) return;
     draft = '';
     try {
-      const att = await mockupAssist.ask(p);
+      const att = await mockupAssist.ask(p, provider);
       oncommit?.(att);
     } catch (e) {
       toasts.error('Mockup agent failed', e instanceof Error ? e.message : String(e));
@@ -72,6 +78,11 @@
         Diagram
       </button>
     </div>
+    <label class="ma-provider" title="Agent provider (locked once the mockup exists)">
+      <select bind:value={provider} aria-label="Mockup provider" disabled={locked || mockupAssist.busy}>
+        {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
+      </select>
+    </label>
     {#if mockupAssist.busy}<span class="ma-working">working…</span>{/if}
     <button class="ma-close" onclick={onclose} aria-label="Close mockup agent">
       <Icon name="x" size={15} />
@@ -174,6 +185,23 @@
     color: var(--accent);
   }
   .ma-format button:disabled {
+    cursor: default;
+    opacity: 0.55;
+  }
+  .ma-provider {
+    display: inline-flex;
+    align-items: center;
+  }
+  .ma-provider select {
+    font-size: 11px;
+    padding: 2px 5px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .ma-provider select:disabled {
     cursor: default;
     opacity: 0.55;
   }

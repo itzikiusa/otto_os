@@ -885,8 +885,9 @@ pub async fn run_analysis(
             let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
             // Run as a real, openable session honoring this spec's provider.
-            // Analysis lenses use no caller-specified model (each spec/lens picks
-            // its own provider; model override is not surfaced at analysis level).
+            // Each lens carries its own model (persisted on the agent row above);
+            // pass it through so SessionManager injects `--model <name>` for
+            // providers that support it (empty is filtered inside recovery).
             // Work-graph: attribute this session to the source story.
             let lens_work = serde_json::to_value(WorkRef {
                 story_id: Some(story_id.clone()),
@@ -899,7 +900,7 @@ pub async fn run_analysis(
                 &ws,
                 &user_id,
                 &spec.provider,
-                None,
+                spec.model.as_deref(),
                 lens_work,
                 &cwd,
                 &prompt,
@@ -2387,8 +2388,10 @@ pub async fn run_generate_plan(
     providers: Vec<String>,
     summarizer_provider: String,
     interactive: bool,
-    // model override reserved for future use when run_lens_session gains per-session model selection
-    _model: Option<String>,
+    // Optional model override, threaded into each planning (and summarizer)
+    // session so SessionManager injects `--model <name>` for providers that
+    // support it (claude/codex); empty is filtered inside run_agent_with_recovery.
+    model: Option<String>,
     cwd: String,
     focus: Option<String>,
 ) {
@@ -2604,6 +2607,7 @@ pub async fn run_generate_plan(
         let emit_plan_run = emit_plan_run.clone();
         let plan_id = plan_id.clone();
         let plan_work = plan_work.clone();
+        let model = model.clone();
         // Unique per-session cwd (codex usage attribution), like the analysis fan-out.
         let planner_cwd = session_cwd(&cwd);
 
@@ -2636,7 +2640,7 @@ pub async fn run_generate_plan(
                 &ws,
                 &user_id,
                 &provider,
-                None,
+                model.as_deref(),
                 plan_work,
                 &planner_cwd,
                 &prompt,
@@ -2708,7 +2712,7 @@ pub async fn run_generate_plan(
                 &ws,
                 &user_id,
                 &summarizer_provider,
-                None,
+                model.as_deref(),
                 plan_work.clone(),
                 &summarizer_cwd,
                 &prompt,

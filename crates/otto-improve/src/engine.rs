@@ -86,7 +86,7 @@ impl ImprovementEngine {
         ws_id: &Id,
         trigger: ImprovementTrigger,
     ) -> Result<()> {
-        self.execute_run_inner(run_id, ws_id, trigger, None).await
+        self.execute_run_inner(run_id, ws_id, trigger, None, None).await
     }
 
     /// Like [`Self::execute_run`] but forces a specific [`Autonomy`] for THIS run,
@@ -100,7 +100,25 @@ impl ImprovementEngine {
         trigger: ImprovementTrigger,
         autonomy: otto_core::domain::Autonomy,
     ) -> Result<()> {
-        self.execute_run_inner(run_id, ws_id, trigger, Some(autonomy)).await
+        self.execute_run_inner(run_id, ws_id, trigger, Some(autonomy), None)
+            .await
+    }
+
+    /// Like [`Self::execute_run_with_autonomy`] but also OVERRIDES which agent
+    /// providers run the analysis (ignoring the workspace's configured set) when
+    /// `providers` is non-empty. The workflow `self_improve` node uses this so the
+    /// node's own Provider picker chooses the reflecting agent(s).
+    pub async fn execute_run_with_autonomy_providers(
+        &self,
+        run_id: &Id,
+        ws_id: &Id,
+        trigger: ImprovementTrigger,
+        autonomy: otto_core::domain::Autonomy,
+        providers: Vec<String>,
+    ) -> Result<()> {
+        let override_providers = (!providers.is_empty()).then_some(providers);
+        self.execute_run_inner(run_id, ws_id, trigger, Some(autonomy), override_providers)
+            .await
     }
 
     async fn execute_run_inner(
@@ -109,6 +127,7 @@ impl ImprovementEngine {
         ws_id: &Id,
         _trigger: ImprovementTrigger,
         autonomy_override: Option<otto_core::domain::Autonomy>,
+        providers_override: Option<Vec<String>>,
     ) -> Result<()> {
         let _ = self.events.send(Event::ImprovementRunStarted {
             workspace_id: ws_id.clone(),
@@ -162,7 +181,12 @@ impl ImprovementEngine {
         // Run the analysis on every configured provider; each contributes its
         // own suggestions (labeled by provider). One provider failing never
         // aborts the others — we merge whatever succeeds.
-        let providers = effective_providers(&cfg.providers);
+        // The self_improve node's Provider picker (providers_override) wins over
+        // the workspace's configured Self-Improvement providers when set.
+        let providers = match providers_override {
+            Some(ref p) if !p.is_empty() => effective_providers(p),
+            _ => effective_providers(&cfg.providers),
+        };
         let mut edits: Vec<ProposedEdit> = Vec::new();
         let mut summaries: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
@@ -994,6 +1018,106 @@ mod tests {
         ) -> otto_core::auth::BoxFuture<'a, Result<ImprovementProposal>> {
             Box::pin(async move { Ok(self.0.clone()) })
         }
+    }
+
+    /// Records the providers `produce` was invoked with (the self_improve
+    /// override test asserts which providers actually ran the analysis).
+    #[derive(Clone)]
+    struct CapturingProducer(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl ProposalProducer for CapturingProducer {
+        fn produce<'a>(
+            &'a self,
+            _prompt: &'a str,
+            _cwd: &'a str,
+            provider: &'a str,
+        ) -> otto_core::auth::BoxFuture<'a, Result<ImprovementProposal>> {
+            let seen = self.0.clone();
+            let p = provider.to_string();
+            Box::pin(async move {
+                seen.lock().unwrap().push(p);
+                Ok(ImprovementProposal { run_summary: "s".into(), edits: vec![] })
+            })
+        }
+    }
+
+    /// The self_improve node's Provider picker overrides the configured
+    /// Self-Improvement providers when non-empty, and falls back to them when empty.
+    #[tokio::test]
+    async fn self_improve_provider_override_drives_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let workspaces = WorkspacesRepo::new(pool.clone());
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let uid = users.create("root", "pw", "root", true).await.unwrap().id;
+        let ws = workspaces.create("t", dir.path().to_str().unwrap(), &uid).await.unwrap();
+        // Configure the workspace's self-improvement providers to codex.
+        let settings = serde_json::json!({ "self_improvement": { "providers": ["codex"] } });
+        workspaces.update(&ws.id, None, None, Some(&settings), None).await.unwrap();
+
+        // Seed a session with a transcript so the run has something to analyze.
+        let psid = "22222222-2222-4222-8222-222222222222";
+        let proj = otto_orchestrator::claude_pty::project_dir(dir.path().to_str().unwrap());
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join(format!("{psid}.jsonl")),
+            r#"{"message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (events, _) = broadcast::channel(16);
+        let engine = ImprovementEngine {
+            improvements: ImprovementsRepo::new(pool.clone()),
+            sessions: SessionsRepo::new(pool.clone()),
+            workspaces: WorkspacesRepo::new(pool.clone()),
+            producer: Arc::new(CapturingProducer(seen.clone())),
+            events,
+            library_root: dir.path().join("library"),
+        };
+        engine
+            .sessions
+            .create(otto_state::NewSession {
+                workspace_id: ws.id.clone(),
+                kind: otto_core::domain::SessionKind::Agent,
+                provider: "claude".into(),
+                title: "t".into(),
+                cwd: dir.path().to_str().unwrap().to_string(),
+                provider_session_id: Some(psid.to_string()),
+                connection_id: None,
+                created_by: uid.clone(),
+                meta: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        // Override with grok + agy → those run, NOT the configured codex.
+        let run = engine.improvements.create_run(&ws.id, ImprovementTrigger::Manual).await.unwrap();
+        engine
+            .execute_run_with_autonomy_providers(
+                &run.id,
+                &ws.id,
+                ImprovementTrigger::Manual,
+                otto_core::domain::Autonomy::Propose,
+                vec!["grok".into(), "agy".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec!["grok".to_string(), "agy".to_string()]);
+
+        // Empty override → falls back to the configured set (codex).
+        seen.lock().unwrap().clear();
+        let run2 = engine.improvements.create_run(&ws.id, ImprovementTrigger::Manual).await.unwrap();
+        engine
+            .execute_run_with_autonomy_providers(
+                &run2.id,
+                &ws.id,
+                ImprovementTrigger::Manual,
+                otto_core::domain::Autonomy::Propose,
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec!["codex".to_string()]);
     }
 
     // Build an engine over a temp SQLite pool + temp workspace dir.

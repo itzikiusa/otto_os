@@ -2,8 +2,8 @@
   // Context & Soul settings page: per-workspace context provisioning. Pick which
   // library skills are active, which soul (persona) to use, free-form extra
   // context, and whether to inline the workspace MEMORY.md. A "Materialize now"
-  // button per provider (claude / codex) writes the resolved context into the
-  // workspace's native CLI files on demand.
+  // button per provider (claude / codex / agy) writes the resolved context into
+  // the workspace's native CLI files on demand.
   import { contextApi } from '../../lib/api/context';
   import type {
     ContextPreviewReq,
@@ -12,9 +12,9 @@
     UpdateWorkspaceContextReq,
     WorkspaceContextConfig,
   } from '../../lib/api/types';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ContextPreview from '../agents/ContextPreview.svelte';
@@ -38,8 +38,18 @@
 
   const wsId = $derived(ws.currentId);
 
-  // Which provider the dry-run preview targets.
-  let previewProvider = $state('claude');
+  // The agent CLIs this feature can materialize into. The backend only knows how
+  // to write a context bundle for these three (anything else is skipped), so the
+  // set is a genuine capability limit — NOT the full provider registry.
+  const MATERIALIZE_PROVIDERS = ['claude', 'codex', 'agy'] as const;
+
+  // Which provider the dry-run preview targets. Seed from the configured default
+  // agent, constrained to the materializable set (fall back to the first one).
+  let previewProvider = $state(
+    (MATERIALIZE_PROVIDERS as readonly string[]).includes(defaultAgentProvider())
+      ? defaultAgentProvider()
+      : MATERIALIZE_PROVIDERS[0],
+  );
   // The not-yet-saved selection, fed to the preview so it reflects in-flight
   // edits (skills/soul/extra/memory) rather than only what's persisted.
   function buildPreviewOverrides(c: WorkspaceContextConfig): ContextPreviewReq {
@@ -52,12 +62,10 @@
     };
   }
 
-  // Agent CLIs offered for materialization (from /meta), restricted to the two
-  // providers this feature supports.
+  // Agent CLIs offered for materialization: the live registry, restricted to the
+  // providers whose context bundle the backend can actually write.
   const providers = $derived(
-    (auth.meta?.providers ?? ['claude', 'codex']).filter(
-      (p) => p === 'claude' || p === 'codex',
-    ),
+    agentProviders().filter((p) => (MATERIALIZE_PROVIDERS as readonly string[]).includes(p)),
   );
 
   // ---------------------------------------------------------------------------

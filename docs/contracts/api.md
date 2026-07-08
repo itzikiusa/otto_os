@@ -984,7 +984,7 @@ mutations). The upload route carries a 40 MB body cap (raw content cap 25 MB).
 | POST /product/attachments/{aid}/annotations | ws editor | AnnotationCreateReq | MockupAnnotation |
 | PATCH /product/annotations/{id} | ws editor | AnnotationPatchReq | MockupAnnotation |
 | DELETE /product/annotations/{id} | ws editor | — | 204 |
-| POST /product/stories/{sid}/mockups/assist | ws editor | MockupAssistReq `{prompt, format?, mockup_id?}` | ProductAttachment — in-place mockup agent: generates (`format`: `html`\|`mermaid`) or refines (`mockup_id`) a `kind:mockup` attachment; streams `mockup_session_started` + `mockup_updated` WS events |
+| POST /product/stories/{sid}/mockups/assist | ws editor | MockupAssistReq `{prompt, format?, mockup_id?, provider?, model?}` | ProductAttachment — in-place mockup agent: generates (`format`: `html`\|`mermaid`) or refines (`mockup_id`) a `kind:mockup` attachment; streams `mockup_session_started` + `mockup_updated` WS events. `provider`/`model` pick the agent (resolved via configured default when empty; honored on the first/new-mockup session) |
 
 ### Product story refinement (talk-to-agent)
 
@@ -1000,7 +1000,7 @@ story's workspace gates each route (Viewer reads, Editor converse/mutate).
 | POST /product/stories/{sid}/refinement-threads | ws editor | CreateThreadReq? ({discovery_run_id?, title?}) | RefinementThread |
 | GET /product/stories/{sid}/refinement-threads | ws viewer | — | RefinementThread[] (newest first) |
 | GET /product/refinement-threads/{tid} | ws viewer | — | {thread, messages} |
-| POST /product/refinement-threads/{tid}/messages | ws editor | {body} | {user_message, agent_message, story_updated, version_no?} (synchronous; agent turn runs inline) |
+| POST /product/refinement-threads/{tid}/messages | ws editor | {body, provider?, model?} | {user_message, agent_message, story_updated, version_no?} (synchronous; the agent turn runs inline as a managed `run_session_turn` session — `provider`/`model` pick the agent, resolved via the configured default when empty) |
 | POST /product/refinement-threads/{tid}/archive | ws editor | — | RefinementThread |
 
 ### Product discovery swarm
@@ -2300,7 +2300,7 @@ Persistence: `otto_state::product_chat` (`DiscoveryChat`, `DiscoveryChatMessage`
 | 109 | POST /api/v1/product/stories/{sid}/discovery-chats | ws editor | `{title?}` | DiscoveryChat |
 | 110 | GET /api/v1/product/stories/{sid}/discovery-chats | ws viewer | — | `DiscoveryChat[]` (newest first) |
 | 111 | GET /api/v1/product/discovery-chats/{cid} | ws viewer | — | `{chat, messages}` |
-| 112 | POST /api/v1/product/discovery-chats/{cid}/messages | ws editor | `{body}` | `{user_message, agent_message}` (one turn; agent_message carries `actions_json`) |
+| 112 | POST /api/v1/product/discovery-chats/{cid}/messages | ws editor | `{body, provider?, model?}` | `{user_message, agent_message}` (one turn; agent_message carries `actions_json`; `provider`/`model` pick the agent, resolved via the configured default when empty) |
 | 113 | POST /api/v1/product/discovery-chats/{cid}/archive | ws editor | — | DiscoveryChat |
 | 114 | POST /api/v1/product/discovery-chats/{cid}/apply | ws editor | `{action}` | ApplyResult `{story_updated, created_question_ids, created_note_ids, canvas_id}` |
 

@@ -120,8 +120,9 @@ pub async fn assist_scene(
     let _ = tokio::fs::write(&file_path, &current).await;
     let dir_str = dir.to_string_lossy().to_string();
     // The agent gets Edit/Write tools in this cwd; trust it so the PTY doesn't
-    // stall on a first-run trust prompt (same as the orchestrate path).
-    otto_sessions::trust::ensure_trusted("claude", &dir_str);
+    // stall on a first-run trust prompt (same as the orchestrate path). Trust the
+    // SCENE's provider — a non-claude provider must trust the dir it will run in.
+    otto_sessions::trust::ensure_trusted(&scene.provider, &dir_str);
 
     // Live preview: broadcast each file change while the turn runs.
     let poll = spawn_file_poll(&ctx, &scene, &file_path, &format, &current);
@@ -245,6 +246,11 @@ pub async fn assist_preview(
 
     let prompt = build_assist_prompt(&req.prompt, "mermaid", "canvas.mermaid", "flowchart TD\n");
     let meta = serde_json::json!({ "source": "canvas_assist_preview" });
+    // No scene here (throwaway preview) → no scene provider to honor. Run under the
+    // user's global default agent rather than hard-coding claude, and pre-trust the
+    // cwd so a non-claude provider doesn't stall on the first-run trust prompt.
+    let provider = preview_provider(&ctx).await;
+    otto_sessions::trust::ensure_trusted(&provider, &ws.root_path);
     let (raw, sid) = crate::agent_session::run_session_turn(
         &ctx,
         &ws,
@@ -252,7 +258,7 @@ pub async fn assist_preview(
         None,
         "Canvas: preview",
         &ws.root_path,
-        "claude",
+        &provider,
         meta,
         &prompt,
         crate::agent_session::STUCK_IDLE,
@@ -263,6 +269,19 @@ pub async fn assist_preview(
     let parsed = parse_assist(&raw);
     let src = parsed.mermaid.clone().unwrap_or_default();
     Ok(Json(result_for("mermaid", &src, parsed.note)))
+}
+
+/// The provider for a scene-less preview turn: the workspace/global default
+/// agent (mirrors `insights::default_provider`), never a hard-coded "claude".
+async fn preview_provider(ctx: &ServerCtx) -> String {
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
+        global_default.as_ref(),
+    )])
 }
 
 // ---------------------------------------------------------------------------

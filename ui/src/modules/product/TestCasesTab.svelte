@@ -11,7 +11,7 @@
     ProductTestcase,
     TestcaseSteps,
   } from './types';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   // The rewrite/tests/inject run spawns an agent CLI session via the live
   // registry, so the provider must be a real registered agent (built-in or
@@ -32,7 +32,7 @@
   const PRIORITY_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 };
 
   // ── Local UI state ──────────────────────────────────────────────────────────
-  let provider = $state<string>('claude');
+  let provider = $state<string>(defaultAgentProvider());
   let generating = $state(false);
   let approvingRun = $state(false);
   let bulkApproving = $state(false);

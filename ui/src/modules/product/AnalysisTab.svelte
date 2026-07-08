@@ -31,7 +31,7 @@
   // Selected providers per lens (multi-select chips).
   let lensProviders = $state<Record<string, string[]>>({});
 
-  let summarizerProvider = $state<string>('claude');
+  let summarizerProvider = $state<string>(defaultAgentProvider());
 
   /** Load the provider list (/meta) and the lens catalog, then (re)build the
    *  per-lens enabled/provider maps as fresh objects keyed by the returned

@@ -703,13 +703,18 @@ async fn host_agents_run(
         return r;
     }
     let cwd = req.cwd.unwrap_or_else(|| ".".into());
-    let provider = req
-        .provider
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .unwrap_or("claude");
-    let result = match provider {
+    // No workspace context here (plugins are host-scoped), so resolve the default
+    // agent through the global `default_provider` setting, else "claude".
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let provider = otto_core::provider::resolve_provider(&[
+        req.provider.as_deref().unwrap_or(""),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
+    let result = match provider.as_str() {
         "claude" => {
             ctx.orchestrator
                 .run_agent(&req.prompt, &cwd, req.model.as_deref(), Duration::from_secs(180))

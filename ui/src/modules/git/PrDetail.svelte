@@ -14,6 +14,7 @@
   import ReviewPanel from './ReviewPanel.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
     repoId: string;
@@ -51,6 +52,9 @@
   let mergeStrategy: MergeStrategy = $state('merge');
   let showRequestChanges = $state(false);
   let requestChangesBody = $state('');
+  // Provider to spawn the "open as session" review agent on (registry-sourced,
+  // defaults to the configured default agent — never a hardcoded 'claude').
+  let reviewProvider = $state(defaultAgentProvider());
 
   const inlineComments = $derived.by(() => (pr?.comments ?? []).filter((c) => c.path !== null));
   const generalComments = $derived.by(() => (pr?.comments ?? []).filter((c) => c.path === null));
@@ -228,7 +232,7 @@
     try {
       await ws.createSession({
         kind: 'agent',
-        provider: 'claude',
+        provider: reviewProvider,
         title: `review PR #${pr.number}`,
         meta: {
           pr_context: {
@@ -259,6 +263,11 @@
         <span class="back-arrow" aria-hidden="true">←</span> Pull Requests
       </button>
       <span class="grow"></span>
+      <select class="prd-provider-select" bind:value={reviewProvider} disabled={busy !== ''} title="Agent to open the review session on">
+        {#each agentProviders() as p (p)}
+          <option value={p}>{p}</option>
+        {/each}
+      </select>
       <button class="btn small" disabled={busy !== ''} onclick={openAsSession}>
         <Icon name="terminal" size={11} /> Open as session
       </button>
@@ -527,6 +536,15 @@
     align-items: center;
     gap: 8px;
     margin-bottom: 10px;
+  }
+  .prd-provider-select {
+    height: 28px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 11.5px;
   }
   .prd-title {
     font-size: 17px;

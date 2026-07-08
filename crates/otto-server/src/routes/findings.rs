@@ -27,7 +27,7 @@ use serde::Deserialize;
 use otto_core::domain::{User, WorkspaceRole};
 use otto_core::event::Event;
 use otto_core::finding::{Finding, FindingActionResp, FindingDetail, FindingStatus, RepoRule};
-use otto_core::Error;
+use otto_core::{Error, Id};
 use otto_state::repo_rules::NewRepoRule;
 use otto_state::FindingPatch;
 
@@ -54,11 +54,34 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/workspaces/{ws}/__e2e/findings", post(e2e_seed))
 }
 
-/// The provider used for agent-backed finding actions. Kept simple (the daemon's
-/// default agent CLI); the session is best-effort so a missing CLI just means no
-/// live session, not a failed action.
-fn finding_agent_provider() -> String {
-    std::env::var("OTTO_DEFAULT_PROVIDER").unwrap_or_else(|_| "claude".to_string())
+/// The provider used for agent-backed finding actions. Resolves through the
+/// configured default: `OTTO_DEFAULT_PROVIDER` env override (highest precedence)
+/// → the finding's workspace default → the global `default_provider` setting →
+/// "claude". The session is best-effort so a missing CLI just means no live
+/// session, not a failed action.
+async fn finding_agent_provider(ctx: &ServerCtx, workspace_id: &Id) -> String {
+    // Env override wins outright (deploy/test escape hatch).
+    if let Ok(p) = std::env::var("OTTO_DEFAULT_PROVIDER") {
+        if !p.trim().is_empty() {
+            return p.trim().to_string();
+        }
+    }
+    let ws_default = ctx
+        .workspaces
+        .get(workspace_id)
+        .await
+        .ok()
+        .map(|ws| otto_core::provider::workspace_default(&ws.settings).to_string())
+        .unwrap_or_default();
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    otto_core::provider::resolve_provider(&[
+        ws_default.as_str(),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +586,7 @@ async fn fix(
         cur.clone()
     };
     let repo = ctx.git_store.get_repo(&f.repo_id).await.map_err(ApiError)?;
-    let provider = finding_agent_provider();
+    let provider = finding_agent_provider(&ctx, &f.workspace_id).await;
     let session_id = match finding_agent::provision_worktree(&repo.path, &f.id).await {
         Ok((wt, base)) => {
             let sid = finding_agent::spawn_session(
@@ -622,7 +645,7 @@ async fn verify(
         ))));
     }
     let repo = ctx.git_store.get_repo(&cur.repo_id).await.map_err(ApiError)?;
-    let provider = finding_agent_provider();
+    let provider = finding_agent_provider(&ctx, &cur.workspace_id).await;
     // Spawn an openable verify agent (best-effort) for the user to watch.
     let session_id = match finding_agent::provision_worktree(&repo.path, &cur.id).await {
         Ok((wt, _)) => {
@@ -679,7 +702,7 @@ async fn regression_test(
     let cur = load_for_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     let who = actor_label(&user);
     let repo = ctx.git_store.get_repo(&cur.repo_id).await.map_err(ApiError)?;
-    let provider = finding_agent_provider();
+    let provider = finding_agent_provider(&ctx, &cur.workspace_id).await;
     let session_id = match finding_agent::provision_worktree(&repo.path, &cur.id).await {
         Ok((wt, _)) => {
             let before = finding_agent::list_test_files(std::path::Path::new(&wt));

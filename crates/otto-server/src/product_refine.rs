@@ -5,7 +5,7 @@
 //! can edit the story by emitting a new `suggested` version that the existing
 //! Publish-as-Jira/RFC buttons pick up.
 //!
-//! Each turn is one-shot `orchestrator.run_agent(prompt, cwd, model, no_progress)`
+//! Each turn is one managed `run_session_turn` (provider-selectable), driven
 //! with the **whole history replayed in the prompt**. The agent returns a single
 //! JSON object `{reply, updated_story_md?, summary?}`; when `updated_story_md` is
 //! present the backend writes a new `suggested` story version (non-destructive —
@@ -71,6 +71,16 @@ pub struct ThreadDetail {
 #[derive(Debug, Deserialize)]
 pub struct SendMessageReq {
     pub body: String,
+    /// Agent provider to run this turn on (built-in or custom, e.g. grok).
+    /// Empty/absent = default agent (resolved request → workspace → global →
+    /// claude). Each turn replays the whole thread history in the prompt, so a
+    /// per-turn provider is self-contained.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Optional model alias for this turn (empty = the thread's model, else the
+    /// provider default).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Result of one conversational turn: the persisted user + agent messages and
@@ -237,7 +247,7 @@ pub async fn archive_thread(
 ///      history (last `HISTORY_TURN_CAP`).
 ///   4. Build the one-shot prompt.
 ///   5. `create_dir_all(&thread.cwd)` (best-effort) BEFORE the agent run.
-///   6. `run_agent` (whole history replayed in the prompt).
+///   6. `run_session_turn` (whole history replayed in the prompt).
 ///   7. Parse `{reply, updated_story_md?, summary?}` (tolerant; malformed → reply=raw).
 ///   8. On a non-empty `updated_story_md`: write a `suggested` version + emit
 ///      `ProductChanged`.
@@ -357,17 +367,53 @@ pub async fn send_message(
         warn!("product_refine: create_dir_all({}) failed: {e}", thread.cwd);
     }
 
-    // 6. Run the agent (whole history replayed in the prompt).
-    let raw = ctx
-        .orchestrator
-        .run_agent(
-            &prompt,
-            &thread.cwd,
-            thread.model.as_deref(),
-            REFINE_NO_PROGRESS,
-        )
+    // 6. Run the agent as a managed, provider-aware Otto session (whole history
+    //    replayed in the prompt, so each turn is self-contained). Mirrors Discovery
+    //    Chat's `run_session_turn` call, but with `existing: None` — refinement
+    //    replays the full transcript every turn, so a fresh session per turn keeps
+    //    the prior throwaway-PTY cardinality while making the run visible in Agents
+    //    and drivable by any configured provider. Provider precedence:
+    //    request → workspace default → global default → claude.
+    let ws = ctx
+        .workspaces
+        .get(&story.workspace_id)
         .await
         .map_err(ApiError)?;
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let provider = otto_core::provider::resolve_provider(&[
+        req.provider.as_deref().unwrap_or(""),
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
+    let mut meta = json!({ "source": "product_refine", "story_id": thread.story_id, "thread_id": tid });
+    // Model: this turn's override, else the thread's stored model.
+    if let Some(m) = req
+        .model
+        .as_deref()
+        .or(thread.model.as_deref())
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        meta["model"] = json!(m);
+    }
+    let (raw, _sid) = crate::agent_session::run_session_turn(
+        &ctx,
+        &ws,
+        &user,
+        None,
+        &format!("Refine: {}", story.title),
+        &thread.cwd,
+        &provider,
+        meta,
+        &prompt,
+        REFINE_NO_PROGRESS,
+        |_| {},
+    )
+    .await?;
 
     // 7. Parse — tolerant; malformed/missing → reply=raw, no update.
     let (reply, updated_story_md, summary) = parse_turn(&raw);

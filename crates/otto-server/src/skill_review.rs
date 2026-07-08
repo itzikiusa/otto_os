@@ -405,7 +405,20 @@ async fn apply_fixes(
     }
     let dir = real_skill_dir(&ctx, &review.skill_name, &review.skill_source).map_err(ApiError)?;
 
-    let provider = if req.provider.trim().is_empty() { "claude".to_string() } else { req.provider.trim().to_string() };
+    // Resolve the fixer provider through the configured default (mirrors the
+    // skill-eval path): explicit request → workspace default → global default →
+    // "claude".
+    let ws = ctx.workspaces.get(&review.workspace_id).await.map_err(ApiError)?;
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let provider = otto_core::provider::resolve_provider(&[
+        req.provider.trim(),
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
     let row = SkillReviewAgent {
         name: "fixer".into(),
         provider: provider.clone(),
@@ -417,7 +430,6 @@ async fn apply_fixes(
     };
     ctx.skill_reviews_store.set_fix(&id, &row).await.map_err(ApiError)?;
 
-    let ws = ctx.workspaces.get(&review.workspace_id).await.map_err(ApiError)?;
     let out = fix_result_path(&id);
     let prompt = fixer_prompt(&review, &findings, &patch_plan, &req.instructions, &dir, &out.to_string_lossy());
     let ctx_bg = ctx.clone();

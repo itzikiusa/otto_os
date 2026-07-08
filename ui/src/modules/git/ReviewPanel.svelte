@@ -34,7 +34,7 @@
   // re-fetch when the running review for this PR completes/errors, replacing the
   // fixed-interval visibility-gated poll for the running state.
   import { reviewBus } from '../../lib/events.svelte';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   // --- Installed-skill metadata (library API; category + version are new) ----
   // Defined locally so this panel can read the extended fields without touching
@@ -115,7 +115,7 @@
   let editAgents: ReviewAgentCfg[] = $state([]);
   let editSummarizer: ReviewAgentCfg = $state({
     name: 'Summarizer',
-    provider: 'claude',
+    provider: defaultAgentProvider(),
     providers: [],
     model: '',
     prompt: '',
@@ -139,19 +139,19 @@
   /** Ensure an agent always has a `providers` array (migration from old format). */
   function normalizeAgent(a: ReviewAgentCfg): ReviewAgentCfg {
     if (!a.providers || a.providers.length === 0) {
-      return { ...a, providers: [a.provider || 'claude'] };
+      return { ...a, providers: [a.provider || defaultAgentProvider()] };
     }
     return a;
   }
 
   /** Toggle a provider in/out of the agent's providers list. Keeps at least one. */
   function toggleProvider(agentIdx: number, p: string): void {
-    const current = editAgents[agentIdx].providers ?? ['claude'];
+    const current = editAgents[agentIdx].providers ?? [defaultAgentProvider()];
     const has = current.includes(p);
     let next: string[];
     if (has) {
       next = current.filter((x) => x !== p);
-      if (next.length === 0) next = ['claude']; // never allow empty
+      if (next.length === 0) next = [defaultAgentProvider()]; // never allow empty
     } else {
       next = [...current, p];
     }
@@ -639,7 +639,7 @@
   function addAgent(): void {
     editAgents = [
       ...editAgents,
-      { name: 'New agent', provider: 'claude', providers: ['claude'], model: '', prompt: '' },
+      { name: 'New agent', provider: defaultAgentProvider(), providers: [defaultAgentProvider()], model: '', prompt: '' },
     ];
   }
 
@@ -650,14 +650,14 @@
   /** Build the ReviewConfig body from current edit state (same shape as saveConfig). */
   function buildConfigFromEditState(presets: ReviewAgentCfg[]): ReviewConfig {
     const syncedAgents = editAgents.map((a) => {
-      const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || 'claude'];
+      const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || defaultAgentProvider()];
       return { ...a, provider: ps[0], providers: ps };
     });
     return {
       agents: syncedAgents,
       summarizer: editSummarizer,
       custom_presets: presets.map((a) => {
-        const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || 'claude'];
+        const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || defaultAgentProvider()];
         return { ...a, provider: ps[0], providers: ps };
       }),
     };
@@ -670,7 +670,7 @@
   async function persistPresets(presets: ReviewAgentCfg[]): Promise<void> {
     try {
       const synced = presets.map((a) => {
-        const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || 'claude'];
+        const ps = a.providers && a.providers.length > 0 ? a.providers : [a.provider || defaultAgentProvider()];
         return { ...a, provider: ps[0], providers: ps };
       });
       const cfg: ReviewConfig =
@@ -689,7 +689,7 @@
     const agent = editAgents[i];
     const effectiveProviders = (agent.providers && agent.providers.length > 0)
       ? agent.providers
-      : [agent.provider || 'claude'];
+      : [agent.provider || defaultAgentProvider()];
     const copy: ReviewAgentCfg = {
       name: agent.name,
       provider: effectiveProviders[0],
@@ -741,7 +741,7 @@
   function addPreset(p: { name: string; focus: string }): void {
     editAgents = [
       ...editAgents,
-      { name: p.name, provider: 'claude', providers: ['claude'], model: '', prompt: `${p.focus} ${JSON_INSTR}` },
+      { name: p.name, provider: defaultAgentProvider(), providers: [defaultAgentProvider()], model: '', prompt: `${p.focus} ${JSON_INSTR}` },
     ];
   }
 
@@ -1310,7 +1310,7 @@
 
         <h3 class="cfg-section-title">Review agents</h3>
         {#each editAgents as agent, i (i)}
-          {@const agentProviders = agent.providers && agent.providers.length > 0 ? agent.providers : [agent.provider || 'claude']}
+          {@const agentProviders = agent.providers && agent.providers.length > 0 ? agent.providers : [agent.provider || defaultAgentProvider()]}
           <div class="cfg-agent-row card">
             <div class="cfg-agent-fields">
               <div class="cfg-field">

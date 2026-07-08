@@ -116,6 +116,31 @@ impl ProviderRegistry {
         *self.disabled.write().expect("provider registry lock") = set;
     }
 
+    /// Resolve a NEW-spawn default provider from ordered `candidates`, SKIPPING
+    /// disabled providers: the first non-blank candidate that is currently ENABLED
+    /// wins; else "claude" if enabled; else the first enabled provider; else
+    /// "claude". This mirrors the UI's `defaultAgentProvider()` so the picker label
+    /// and what the daemon actually spawns agree — a provider the admin excluded is
+    /// never auto-selected as a default. (Existing sessions still resume a disabled
+    /// provider via `build_spec`, which is intentionally NOT filtered.)
+    pub fn resolve_default(&self, candidates: &[&str]) -> String {
+        let enabled = self.names(); // already disabled-filtered + sorted
+        let is_enabled = |name: &str| enabled.iter().any(|n| n == name);
+        for c in candidates {
+            let c = c.trim();
+            if !c.is_empty() && is_enabled(c) {
+                return c.to_string();
+            }
+        }
+        if is_enabled(otto_core::provider::FALLBACK_PROVIDER) {
+            return otto_core::provider::FALLBACK_PROVIDER.to_string();
+        }
+        enabled
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| otto_core::provider::FALLBACK_PROVIDER.to_string())
+    }
+
     /// The currently-excluded provider names, sorted (for the settings UI).
     pub fn disabled_names(&self) -> Vec<String> {
         let mut v: Vec<String> = self
@@ -451,6 +476,28 @@ mod tests {
         // Re-enable clears the exclusion.
         reg.set_disabled::<String>(&[]);
         assert!(reg.names().contains(&"agy".to_string()));
+    }
+
+    /// `resolve_default` never returns a DISABLED provider — a default that names
+    /// an excluded provider is skipped, matching the UI picker, so the daemon and
+    /// the label agree on what a new spawn actually runs.
+    #[test]
+    fn resolve_default_skips_disabled_providers() {
+        let reg = ProviderRegistry::new(None);
+        // Nothing disabled: the configured default wins, else claude.
+        assert_eq!(reg.resolve_default(&["", "codex"]), "codex");
+        assert_eq!(reg.resolve_default(&["", ""]), "claude");
+
+        // Disable the configured default (codex) → it is skipped, falls to claude.
+        reg.set_disabled(&["codex"]);
+        assert_eq!(reg.resolve_default(&["", "codex"]), "claude");
+
+        // Disable claude (the fallback) too → falls to the first ENABLED provider
+        // (sorted: agy), never a disabled name.
+        reg.set_disabled(&["codex", "claude"]);
+        let d = reg.resolve_default(&["", "codex"]);
+        assert!(d != "codex" && d != "claude", "got disabled provider: {d}");
+        assert!(reg.names().contains(&d));
     }
 
     /// A providers reload preserves the current skip-permissions mode.

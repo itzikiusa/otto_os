@@ -41,13 +41,17 @@ pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
     // The configured default agent (a provider name). Used by the UI to
     // preselect a provider for new sessions, and mirrors the value channel
     // replies fall back to. Stored as a bare JSON string; empty => unset.
+    // A default that names a now-DISABLED provider is reported as unset, so the
+    // UI never labels an excluded provider as the default (and doesn't disagree
+    // with what the daemon would actually spawn).
     let default_provider = settings
         .get("default_provider")
         .await?
         .as_ref()
         .and_then(Value::as_str)
         .map(str::to_string)
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .filter(|s| providers.iter().any(|p| p == s));
 
     let tools = futures_util::future::join_all(DETECTED_TOOLS.iter().map(|t| detect_tool(t))).await;
 

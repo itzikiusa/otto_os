@@ -11,7 +11,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import { allProviders } from '../../lib/providers';
+  import { agentProviders } from '../../lib/providers';
 
   // ---------------------------------------------------------------------------
   // State
@@ -21,8 +21,9 @@
   let loading = $state(false);
   let testBusy: Channel | null = $state(null); // which channel is mid-test
 
-  // Agent CLIs offered in the per-channel picker (from /meta).
-  const providers = $derived(allProviders());
+  // Agent CLIs offered in the per-channel picker: a channel reply needs a
+  // reasoning agent, so exclude the `shell` pseudo-provider (from /meta).
+  const providers = $derived(agentProviders());
 
   // Edit modal state
   let editOpen = $state(false);

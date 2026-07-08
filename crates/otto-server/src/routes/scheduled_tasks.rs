@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use otto_core::domain::{ScheduledTask, ScheduledTaskPreset, ScheduledTaskRun, WorkspaceRole};
 use otto_core::workflows::{ConvertTaskReq, ConvertTaskResp, WorkflowEdge, WorkflowGraph, WorkflowNode};
-use otto_core::Error;
+use otto_core::{Error, Id};
 use otto_state::{NewScheduledTask, NewWorkflowTrigger, ScheduledTaskPatch, TriggersRepo, WorkflowsRepo};
 
 use crate::auth::{require_ws_role, CurrentUser};
@@ -49,6 +49,29 @@ pub fn routes() -> Router<ServerCtx> {
         )
 }
 
+/// Resolve a scheduled-task agent provider through the configured default:
+/// explicit pick → the workspace's `default_provider` → the global
+/// `default_provider` setting → "claude".
+async fn resolve_task_provider(ctx: &ServerCtx, ws_id: &Id, explicit: &str) -> String {
+    let ws_default = ctx
+        .workspaces
+        .get(ws_id)
+        .await
+        .ok()
+        .map(|ws| otto_core::provider::workspace_default(&ws.settings).to_string())
+        .unwrap_or_default();
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    otto_core::provider::resolve_provider(&[
+        explicit,
+        ws_default.as_str(),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ])
+}
+
 /// `POST /scheduled-tasks/{id}/convert-to-workflow` — materialize a scheduled
 /// task as a Workflow (`manual_trigger → agent_prompt [→ channel_notify]`) plus a
 /// `schedule` trigger mirroring its cadence (interval/daily/weekly/cron + tz).
@@ -73,11 +96,7 @@ async fn convert_to_workflow(
         params,
         retry: None,
     };
-    let provider = if task.provider.trim().is_empty() {
-        "claude".to_string()
-    } else {
-        task.provider.clone()
-    };
+    let provider = resolve_task_provider(&ctx, &task.workspace_id, &task.provider).await;
     let mut nodes = vec![
         node("trigger", "manual_trigger", "Start", 40.0, Value::Null),
         node(
@@ -328,7 +347,8 @@ async fn create(
     if req.name.trim().is_empty() {
         return Err(ApiError(Error::Invalid("name is required".into())));
     }
-    let provider = req.provider.unwrap_or_else(|| "claude".into());
+    let provider =
+        resolve_task_provider(&ctx, &ws_id, req.provider.as_deref().unwrap_or("")).await;
     check_provider(&provider)?;
     let kind = req.kind.unwrap_or_else(|| "agent_prompt".into());
     check_kind(&kind)?;

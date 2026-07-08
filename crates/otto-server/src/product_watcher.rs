@@ -146,7 +146,24 @@ async fn supervise(watcher: WatcherManager, cancel: Arc<AtomicBool>) {
             let orchestrator = Arc::clone(&watcher.orchestrator);
             let improve = Arc::clone(&watcher.improve);
             let events = watcher.events.clone();
-            let _default_provider = watcher.default_provider.clone();
+            // NOTE: the reconcile pass in `poll_story` runs via
+            // `orchestrator.run_agent` — a CLAUDE-ONLY headless PTY that takes no
+            // provider (only an optional model). The watcher's configured
+            // `default_provider` therefore CANNOT be honored here: reconcile is
+            // claude-only BY ARCHITECTURE. Making it provider-aware would mean
+            // driving it through `run_session_turn`, which needs a Workspace + User
+            // + SessionManager (a full `ServerCtx`) that this deliberately lean,
+            // ServerCtx-free supervisor doesn't hold — a much larger change than a
+            // one-shot JSON reconcile warrants. The field is retained for the day the
+            // watcher is given that session context; until then we surface (rather
+            // than silently swallow) a non-claude default so it isn't a silent no-op.
+            if !watcher.default_provider.is_empty() && watcher.default_provider != "claude" {
+                tracing::debug!(
+                    provider = %watcher.default_provider,
+                    story = %story.id,
+                    "story watcher: reconcile is claude-only by architecture; configured default_provider is not applied"
+                );
+            }
 
             tokio::spawn(async move {
                 if let Err(e) = poll_story(

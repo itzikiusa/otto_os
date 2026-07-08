@@ -373,7 +373,7 @@ async fn run_turn_inner(
                     origin: Some("swarm".into()),
                     ..Default::default()
                 };
-    let swarm_meta = json!({
+    let mut swarm_meta = json!({
                 "source": "swarm",
                 "swarm_id": swarm.id,
                 "agent_id": agent.id,
@@ -382,6 +382,12 @@ async fn run_turn_inner(
                 "run_id": run.id,
                 "work": serde_json::to_value(&work_ref).unwrap_or_default(),
             });
+    // Carry the agent's model into meta so SessionManager can inject
+    // `--model <name>` for providers that support it (claude/codex); for others
+    // it is attribution-only. Mirrors insights.rs / product_run.rs.
+    if let Some(m) = agent.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                swarm_meta["model"] = json!(m);
+            }
             let provider = provider.clone();
             let cwd = cwd.clone();
             let prompt = prompt.clone();

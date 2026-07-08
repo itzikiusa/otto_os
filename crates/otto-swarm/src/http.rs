@@ -154,13 +154,29 @@ async fn create_swarm<S: SwarmCtx>(
     Json(req): Json<CreateSwarmReq>,
 ) -> ApiResult<Json<SwarmDetail>> {
     check(&s, &user, &ws, WorkspaceRole::Editor).await?;
+    // Resolve the default agent provider for this workspace up front: the
+    // workspace's configured `default_provider`, else the first available
+    // provider, else "claude". Drives both the swarm's default `config.provider`
+    // and preset-agent instantiation. (The global default lives behind the
+    // settings repo, which this crate can't reach; the server resolves that layer
+    // for its own meta-agents.)
+    let providers = s.available_providers();
+    let ws_default = s
+        .workspaces()
+        .get(&ws)
+        .await
+        .ok()
+        .map(|w| otto_core::provider::workspace_default(&w.settings).to_string())
+        .unwrap_or_default();
+    let default = otto_core::provider::resolve_provider(&[
+        ws_default.as_str(),
+        providers.first().map(String::as_str).unwrap_or(""),
+    ]);
     // Preset instantiation (Phase 5) maps providers to installed CLIs; for a blank
     // create or when the preset is unknown we just create the swarm row.
     let preset = req.preset_slug.clone();
-    let swarm = s.swarm().create_swarm(&ws, &user.0.id, req).await?;
+    let swarm = s.swarm().create_swarm(&ws, &user.0.id, req, &default).await?;
     if let Some(slug) = preset {
-        let providers = s.available_providers();
-        let default = providers.first().cloned().unwrap_or_else(|| "claude".into());
         // Best-effort: ignore unknown presets (blank swarm remains usable).
         let _ = crate::presets::instantiate(
             &s.swarm().repo,
