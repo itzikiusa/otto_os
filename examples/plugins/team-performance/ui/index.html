@@ -152,6 +152,10 @@
       const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
       const err = (m) => ($('err').textContent = m || '');
       let HPD = 8; // working hours per business day (from config)
+      // Agent providers offered in worker rows — replaced by Otto's live
+      // registry (built-ins + custom) via the otto:init message. Fallback list
+      // keeps the UI usable if a host predates provider injection.
+      let PROVIDERS = ['claude', 'codex'];
       const fmtD = (v) => {
         if (v == null) return '—';
         if (v > 0 && v < 1) return (Math.round(v * HPD * 10) / 10) + 'h';
@@ -346,6 +350,9 @@
         if (!m || m.type !== 'otto:init') return;
         API = m.apiBase; TOKEN = m.token || '';
         PARENT_ORIGIN = ev.origin || '*';
+        // Otto's live agent-provider registry (built-ins + custom, e.g. grok);
+        // the worker rows pick from this instead of a hardcoded list.
+        if (Array.isArray(m.providers) && m.providers.length) PROVIDERS = m.providers;
         applyTheme(m.theme);
         try { const c = await api('/config'); if (c && c.hours_per_day) HPD = c.hours_per_day; if (c && c._version) $('tp-version').textContent = 'v' + c._version; } catch { /* default 8 */ }
         await boot();
@@ -1446,7 +1453,7 @@
 
           const workerRow = (w, i) => `
             <div class="worker-row" data-i="${i}">
-              <select class="wk-provider">${['claude', 'codex'].map((p) => `<option ${w.provider === p ? 'selected' : ''}>${p}</option>`).join('')}</select>
+              <select class="wk-provider">${PROVIDERS.map((p) => `<option ${w.provider === p ? 'selected' : ''}>${p}</option>`).join('')}</select>
               <input type="text" class="wk-model" placeholder="model (optional, e.g. haiku)" value="${esc(w.model || '')}">
               <button class="small wk-del">✕</button>
             </div>`;
@@ -1533,7 +1540,7 @@
           };
           $('wk-add').onclick = () => {
             const div = document.createElement('div');
-            div.innerHTML = workerRow({ provider: 'claude', model: '' }, Date.now());
+            div.innerHTML = workerRow({ provider: PROVIDERS[0] || 'claude', model: '' }, Date.now());
             const row = div.firstElementChild;
             $('workers').appendChild(row);
             row.querySelector('.wk-del').onclick = () => row.remove();

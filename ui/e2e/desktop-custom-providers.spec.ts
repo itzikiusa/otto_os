@@ -103,3 +103,43 @@ test('Self-Improvement lists the custom provider and NOT non-agent tools', async
   await expect(chips.filter({ hasText: /^git$/ })).toHaveCount(0);
   await expect(chips.filter({ hasText: /^clickhouse$/ })).toHaveCount(0);
 });
+
+test('Run with Otto (single-agent) offers the custom provider', async ({ page }) => {
+  await openPage(page, 'run-with-otto');
+
+  // Single-agent mode is the default; its Provider <select> used to be a fixed
+  // "claude" label and now comes from the live registry (both modes honor it).
+  const providerSelect = page.locator('select[aria-label="Provider"]');
+  await expect(providerSelect).toBeVisible({ timeout: 10_000 });
+  await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
+});
+
+test('Insights settings offers a custom provider for report generation', async ({ page }) => {
+  await page.goto('/#/settings/insights');
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
+  await page.waitForLoadState('networkidle').catch(() => {});
+
+  const providerSelect = page.locator('.agent-row select');
+  await expect(providerSelect).toBeVisible({ timeout: 10_000 });
+  await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
+});
+
+test('Workflow agent node offers provider + model from the registry', async ({ page }) => {
+  await openPage(page, 'workflows');
+
+  // Start a blank workflow to open the editor (empty state otherwise).
+  await page.getByRole('button', { name: 'Start blank' }).click();
+
+  // Open the node palette and add an Agent node.
+  const nodeBtn = page.locator('.menu-wrap button', { hasText: 'Node' });
+  await expect(nodeBtn).toBeVisible({ timeout: 10_000 });
+  await nodeBtn.click();
+  await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
+
+  // The new node is auto-selected → its inspector shows the Provider select +
+  // Model input (agent_prompt was Model-only before, no provider).
+  const providerSelect = page.locator('#np-provider');
+  await expect(providerSelect).toBeVisible({ timeout: 10_000 });
+  await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
+  await expect(page.locator('#np-model')).toBeVisible();
+});

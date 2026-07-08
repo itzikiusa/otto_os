@@ -4726,6 +4726,11 @@ export interface InsightsConfig {
   weekly: boolean;
   /** Previous month (1st), catch-up if the app was closed. */
   monthly: boolean;
+  /** Agent provider to generate reports on (built-in or custom, e.g. grok).
+   *  Empty = the global default agent. */
+  provider?: string;
+  /** Optional model alias (empty = provider default). */
+  model?: string;
 }
 
 export type InsightKind = 'daily' | 'weekly' | 'monthly' | 'adhoc';

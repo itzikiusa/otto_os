@@ -15,8 +15,14 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ActionCard from './ActionCard.svelte';
   import type { DiscoveryChatMessage, DiscoveryAction } from './types';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   let { cid }: { cid: string } = $props();
+
+  // Provider for this chat's persistent agent session — chosen BEFORE the first
+  // message (the session is created on it and then retained). Sourced from the
+  // live registry so custom providers (e.g. grok) work.
+  let provider = $state(defaultAgentProvider());
 
   // ── Local state ────────────────────────────────────────────────────────────
   let messages = $state<DiscoveryChatMessage[]>([]);
@@ -87,7 +93,13 @@
     sending = true;
 
     try {
-      const resp = await product.sendDiscoveryMessage(cid, body);
+      // Provider only matters on the FIRST message (session create); pass it
+      // while the chat is still empty so a custom provider is honored.
+      const resp = await product.sendDiscoveryMessage(
+        cid,
+        body,
+        messages.length <= 1 ? provider : undefined,
+      );
       // Reconcile: drop the optimistic bubble, append the real user + agent msgs.
       messages = [
         ...messages.filter((m) => m.id !== optimisticMsg.id),
@@ -218,6 +230,16 @@
 
   <!-- ── Composer ──────────────────────────────────────────────────────────── -->
   <div class="input-area">
+    {#if messages.length === 0}
+      <!-- Provider is fixed once the chat's session starts, so it's only
+           pickable before the first message. -->
+      <label class="dc-provider">
+        <span class="dim">Agent</span>
+        <select bind:value={provider} aria-label="Chat provider" disabled={sending}>
+          {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
+        </select>
+      </label>
+    {/if}
     <textarea
       bind:this={composerEl}
       class="msg-input"
@@ -421,6 +443,17 @@
     gap: 8px;
     padding: 8px 8px 0;
     border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .dc-provider {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    flex-basis: 100%;
+  }
+  .dc-provider select {
+    padding: 3px 6px;
   }
   .msg-input {
     flex: 1;

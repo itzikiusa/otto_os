@@ -238,13 +238,41 @@ async fn execute_single_agent(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         .await?;
     let resolved = reconstruct_resolved(run);
     let packet = crate::run_context::build_packet(run, &resolved, &repo);
-    // "" = provider default; single-agent execution runs on the claude PTY, so
-    // the model alias goes straight through as `--model`.
+    // "" = provider default; the model alias goes straight through as `--model`.
     let model = (!run.model.trim().is_empty()).then(|| run.model.trim());
-    let reply = ctx
-        .orchestrator
-        .run_agent(&packet.prompt, &wt, model, EXEC_NO_PROGRESS)
-        .await?;
+    let provider = if run.provider.trim().is_empty() { "claude" } else { run.provider.trim() };
+    // claude runs on the fast headless PTY (also the deterministic E2E-stubbed
+    // path). ANY OTHER registered provider (codex / agy / grok / …) runs as a
+    // real, openable session so the run view can watch it — both honor `model`.
+    // The agent commits its own work either way; the diff/proof/PR stages read
+    // the worktree afterward.
+    let reply = if provider == "claude" {
+        ctx.orchestrator
+            .run_agent(&packet.prompt, &wt, model, EXEC_NO_PROGRESS)
+            .await?
+    } else {
+        let ws = ctx.workspaces.get(&run.workspace_id).await?;
+        let user = otto_state::UsersRepo::new(ctx.pool.clone())
+            .get(&run.created_by)
+            .await?;
+        let mut meta = serde_json::json!({
+            "source": "run_with_otto",
+            "run_id": run.id,
+            "cwd": wt,
+        });
+        if let Some(m) = model {
+            meta["model"] = serde_json::json!(m);
+        }
+        let rid = run.id.to_string();
+        let title = format!("Run with Otto · {}", &rid[..rid.len().min(8)]);
+        let (reply, _sid) = crate::agent_session::run_session_turn(
+            ctx, &ws, &user, None, &title, &wt, provider, meta, &packet.prompt,
+            EXEC_NO_PROGRESS, |_id| {},
+        )
+        .await
+        .map_err(|e| e.0)?;
+        reply
+    };
 
     // E2E seam: the stubbed `run_agent` writes no files. Commit a deterministic
     // note so the proof/diff/PR-draft stages have real material. Production never

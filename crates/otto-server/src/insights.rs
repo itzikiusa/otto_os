@@ -101,7 +101,7 @@ impl Kind {
 
 /// Global opt-in config. ALL default `false` (insights are off until the user
 /// turns a cadence on).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InsightsConfig {
     #[serde(default)]
     pub daily: bool,
@@ -109,6 +109,13 @@ pub struct InsightsConfig {
     pub weekly: bool,
     #[serde(default)]
     pub monthly: bool,
+    /// Agent provider to generate reports on (built-in or custom, e.g. grok).
+    /// Empty = the global default agent.
+    #[serde(default)]
+    pub provider: String,
+    /// Optional model alias (empty = provider default).
+    #[serde(default)]
+    pub model: String,
 }
 
 impl InsightsConfig {
@@ -420,17 +427,28 @@ pub async fn run_insights(ctx: &ServerCtx, kind: Kind, offset: i64) -> otto_core
         .unwrap_or_else(|| ctx.context_library.root.clone());
     let cwd = data_dir.to_string_lossy().into_owned();
 
-    let provider = default_provider(ctx).await;
+    // Provider/model come from the insights config (built-in or custom, e.g.
+    // grok); an empty provider falls back to the global default agent.
+    let cfg = read_config(&insights_dir(ctx));
+    let provider = if cfg.provider.trim().is_empty() {
+        default_provider(ctx).await
+    } else {
+        cfg.provider.trim().to_string()
+    };
     otto_sessions::trust::ensure_trusted(&provider, &cwd);
 
     let prompt = build_run_prompt(kind, offset);
+    let mut meta = serde_json::json!({ "source": "insights" });
+    if !cfg.model.trim().is_empty() {
+        meta["model"] = serde_json::json!(cfg.model.trim());
+    }
     let req = otto_core::api::CreateSessionReq {
         kind: otto_core::domain::SessionKind::Agent,
         provider: Some(provider.clone()),
         title: Some(format!("Insights: {}", kind.word())),
         cwd: Some(cwd.clone()),
         connection_id: None,
-        meta: Some(serde_json::json!({ "source": "insights" })),
+        meta: Some(meta),
     };
 
     let session = ctx.manager.create(&ws, &user_id, req, None).await?;
@@ -830,7 +848,7 @@ mod tests {
         let cfg = read_config(dir.path());
         assert!(!cfg.daily && !cfg.weekly && !cfg.monthly);
 
-        let on = InsightsConfig { daily: true, weekly: false, monthly: true };
+        let on = InsightsConfig { daily: true, weekly: false, monthly: true, ..Default::default() };
         write_config(dir.path(), &on).unwrap();
         let read = read_config(dir.path());
         assert_eq!(read, on);

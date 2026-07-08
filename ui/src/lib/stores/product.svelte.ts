@@ -516,8 +516,17 @@ class ProductStore {
     return api.get<DiscoveryChatDetail>(`/product/discovery-chats/${cid}`);
   }
 
-  async sendDiscoveryMessage(cid: string, body: string): Promise<DiscoveryChatTurn> {
-    return api.post<DiscoveryChatTurn>(`/product/discovery-chats/${cid}/messages`, { body });
+  async sendDiscoveryMessage(
+    cid: string,
+    body: string,
+    provider?: string,
+    model?: string,
+  ): Promise<DiscoveryChatTurn> {
+    return api.post<DiscoveryChatTurn>(`/product/discovery-chats/${cid}/messages`, {
+      body,
+      provider: provider || undefined,
+      model: model || undefined,
+    });
   }
 
   async archiveDiscoveryChat(cid: string): Promise<DiscoveryChat> {

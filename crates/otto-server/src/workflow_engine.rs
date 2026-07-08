@@ -1872,6 +1872,7 @@ async fn execute_node(
             // Run as a real, openable session (reusing the shared session runner)
             // so the run view can watch/inspect it — not the headless PTY.
             let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+            let model = p.get("model").and_then(Value::as_str);
             // File-based handoff (design 2026-07-02): point the agent at the
             // run's context dir (instruction, repos.json, prior step files)
             // and name the step file IT must write. The inline [input data]
@@ -1891,7 +1892,7 @@ async fn execute_node(
             );
             let acwd = node_cwd(node, &input, run_cwd);
             let (reply, sid) =
-                run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, &full, &acwd, session_tx).await?;
+                run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, session_tx).await?;
             // Publish WHERE the implementer worked (+ thread the ambient repo/base)
             // so a downstream review/PR is aware of exactly this directory — even
             // when the agent ran in its own per-node cwd. This is what carries the
@@ -1968,8 +1969,9 @@ async fn execute_node(
                 let full = prepend_skills(ctx, p,
                     &format!("{preamble}{agent_prompt_txt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)));
                 let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+                let model = p.get("model").and_then(Value::as_str);
                 let acwd = node_cwd(node, &input, run_cwd);
-                let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, &full, &acwd, session_tx).await?;
+                let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, session_tx).await?;
                 out.insert("reply".into(), json!(reply));
                 out.insert("session_id".into(), json!(sid));
                 out.insert("working_directory".into(), json!(acwd));
@@ -3217,7 +3219,7 @@ async fn execute_node(
                          where each score and the overall score are 0–100.\n\nGoals:\n- {}",
                         goals.join("\n- ")
                     );
-                    match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, "claude", &gprompt, worktree, session_tx).await {
+                    match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, "claude", None, &gprompt, worktree, session_tx).await {
                         Ok((reply, _sid)) => match extract_json(&reply) {
                             Some(v) => {
                                 let gs = v.get("score").and_then(Value::as_i64).unwrap_or(review_score).clamp(0, 100);
@@ -3407,7 +3409,9 @@ async fn execute_node(
                 truncate(&context, 8000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, "claude", &prompt, &acwd, session_tx).await?;
+            let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+            let model = p.get("model").and_then(Value::as_str);
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &prompt, &acwd, session_tx).await?;
             let mut out = serde_json::Map::new();
             out.insert("story_id".into(), json!(story_id));
             out.insert("session_id".into(), json!(sid));
@@ -3511,7 +3515,9 @@ async fn execute_node(
                 truncate(&input.to_string(), 4000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, "claude", &full, &acwd, session_tx).await?;
+            let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+            let model = p.get("model").and_then(Value::as_str);
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, session_tx).await?;
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
             // Write under the data dir (never the user's repo working tree).
             let ext = canvas_node_ext(mode);
@@ -4019,6 +4025,9 @@ async fn run_node_agent(
     wf_name: &str,
     run_id: &Id,
     provider: &str,
+    // Optional model alias (e.g. "opus"/"haiku"). Empty/None = provider default.
+    // Forwarded via `meta.model` so `SessionManager::model_args` adds `--model`.
+    model: Option<&str>,
     prompt: &str,
     cwd: &str,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
@@ -4031,7 +4040,7 @@ async fn run_node_agent(
     // Stamp the FULL run id (+ workflow name) into meta so every workflow-spawned
     // session is provably attributable to its specific run — the UI/global Agents
     // list can filter + group sessions by exact run.
-    let meta = json!({
+    let mut meta = json!({
         "source": "workflow",
         "run_id": run_id,
         "wf_name": wf_name,
@@ -4039,6 +4048,11 @@ async fn run_node_agent(
         "node_kind": node.kind,
         "cwd": cwd,
     });
+    // Forward the model alias so the spawn adds `--model` (providers without the
+    // flag ignore it). Empty string = provider default → omitted.
+    if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        meta["model"] = json!(m);
+    }
     let tx = session_tx.clone();
     // R2/R3: every agent-backed step runs as a single agent that does all the work
     // itself — no sub-agents / background tasks — and doesn't yield its turn early.
