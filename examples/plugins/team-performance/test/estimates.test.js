@@ -92,6 +92,65 @@ test('runEstimation: caches results, splits batches across workers, falls back o
   assert.equal(calls.length, before, 'no calls when fully cached');
 });
 
+test('medianReconcile: median days + majority routine across workers', () => {
+  const per = [
+    { 'K-1': { days: 2, routine: true }, 'K-2': { days: 5, routine: false } },
+    { 'K-1': { days: 4, routine: true }, 'K-2': { days: 9, routine: true } },
+    { 'K-1': { days: 6, routine: false }, 'K-2': { days: 7, routine: false } },
+  ];
+  const out = E.medianReconcile(['K-1', 'K-2'], per);
+  assert.equal(out['K-1'].days, 4, 'median of 2,4,6');
+  assert.equal(out['K-1'].routine, true, '2/3 routine → true');
+  assert.equal(out['K-2'].days, 7, 'median of 5,7,9');
+  assert.equal(out['K-2'].routine, false, '1/3 routine → false');
+});
+
+test('runEstimation consensus: every worker sizes each task; summarizer reconciles', async () => {
+  const records = [rec({ key: 'X-1', summary: 'a' }), rec({ key: 'X-2', summary: 'b' })];
+  const seen = { workers: [], summarizer: 0 };
+  const workers = [{ provider: 'claude', model: '' }, { provider: 'grok', model: '' }];
+  const summarizer = { provider: 'codex', model: '' };
+  const agentRun = async (prompt, who) => {
+    const keys = [...prompt.matchAll(/key=([A-Z]+-\d+)/g)].map((m) => m[1]);
+    if (who.provider === 'codex') {
+      // Summarizer prompt lists per-task votes ("- X-1: agent1=..."). Reconcile → 3d.
+      seen.summarizer++;
+      const sumKeys = [...prompt.matchAll(/- ([A-Z]+-\d+):/g)].map((m) => m[1]);
+      return JSON.stringify(sumKeys.map((k) => ({ key: k, days: 3, routine: false })));
+    }
+    seen.workers.push(who.provider);
+    const d = who.provider === 'claude' ? 2 : 6;
+    return JSON.stringify(keys.map((k) => ({ key: k, days: d, routine: false })));
+  };
+  const cache = {};
+  const res = await E.runEstimation({
+    records, cache, windowMonths: 6, maxBatches: 10,
+    mode: 'consensus', workers, summarizer, agentRun, nowMs: NOW,
+  });
+  assert.equal(res.estimated, 2);
+  // BOTH workers sized the batch (consensus, not round-robin split).
+  assert.ok(seen.workers.includes('claude') && seen.workers.includes('grok'));
+  assert.ok(seen.summarizer >= 1, 'summarizer ran');
+  assert.equal(cache['X-1'].days, 3, 'summarizer value wins');
+  assert.equal(cache['X-2'].days, 3);
+});
+
+test('runEstimation consensus: no summarizer → deterministic median of workers', async () => {
+  const records = [rec({ key: 'Y-1', summary: 'a' })];
+  const workers = [{ provider: 'claude', model: '' }, { provider: 'grok', model: '' }];
+  const agentRun = async (prompt, who) => {
+    const keys = [...prompt.matchAll(/key=([A-Z]+-\d+)/g)].map((m) => m[1]);
+    const d = who.provider === 'claude' ? 4 : 8;
+    return JSON.stringify(keys.map((k) => ({ key: k, days: d, routine: false })));
+  };
+  const cache = {};
+  const res = await E.runEstimation({
+    records, cache, windowMonths: 6, maxBatches: 10, mode: 'consensus', workers, agentRun, nowMs: NOW,
+  });
+  assert.equal(res.estimated, 1);
+  assert.equal(cache['Y-1'].days, 6, 'median of 4 and 8');
+});
+
 test('changeFingerprint invalidates the cache as the diff grows; prompt embeds evidence', () => {
   const base = rec({ key: 'C-1', git_change: { commits: 1, files: 1, insertions: 5, deletions: 0 } });
   const grown = rec({ key: 'C-1', git_change: { commits: 6, files: 18, insertions: 900, deletions: 1300 } });

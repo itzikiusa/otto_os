@@ -220,8 +220,102 @@ async function runEstimation(opts) {
     }
   };
 
+  // ── CONSENSUS mode ────────────────────────────────────────────────────────
+  // Every worker estimates the SAME batch (multi-agent), then a summarizer
+  // reconciles their per-task estimates into one — the PR-review pattern
+  // (N agents → summarizer). Falls back to a deterministic median when no
+  // summarizer is configured (or its reply can't be parsed).
+  if (opts.mode === 'consensus') {
+    const summarizer = opts.summarizer && opts.summarizer.provider ? opts.summarizer : null;
+    for (let bi = 0; bi < batches.length; bi++) {
+      const batch = batches[bi];
+      if (bi > 0) await sleep(PACE_MS);
+      const keys = batch.map((r) => r.key);
+      // Fan out: each worker estimates this batch (a failed worker is skipped).
+      const texts = await Promise.all(
+        workers.map((w) =>
+          agentRun(batchPrompt(batch, rubric, corrections, instructions), w).catch(() => null),
+        ),
+      );
+      const perWorker = texts.filter(Boolean).map((t) => parseBatch(t, keys));
+      if (perWorker.length === 0) {
+        failed++;
+        done += batch.length;
+        if (opts.onProgress) opts.onProgress(Math.min(done, total), total);
+        continue;
+      }
+      // Reconcile: a summarizer agent if configured, else deterministic median.
+      let reconciled = null;
+      if (summarizer) {
+        try {
+          const sText = await agentRun(consensusPrompt(batch, perWorker), summarizer);
+          reconciled = parseBatch(sText, keys);
+        } catch {
+          reconciled = null;
+        }
+      }
+      if (!reconciled || Object.keys(reconciled).length === 0) {
+        reconciled = medianReconcile(keys, perWorker);
+      }
+      for (const r of batch) {
+        const e = reconciled[r.key];
+        if (!e) continue;
+        cache[r.key] = { hash: contentHash(r), days: e.days, routine: e.routine, v: PROMPT_V, at: nowMs };
+        estimated++;
+      }
+      done += batch.length;
+      if (opts.onProgress) opts.onProgress(Math.min(done, total), total);
+    }
+    return { estimated, failed_batches: failed, remaining: Math.max(0, targets.length - total) };
+  }
+
   await Promise.all(workers.map((_, i) => lane(i)));
   return { estimated, failed_batches: failed, remaining: Math.max(0, targets.length - total) };
 }
 
-module.exports = { contentHash, selectTargets, batchPrompt, parseBatch, runEstimation, evidenceLine, DEFAULT_RUBRIC, BATCH_SIZE };
+/** Deterministic reconciliation: median engineering-days across the workers
+ *  that produced an estimate for a task, majority `routine` flag. */
+function medianReconcile(keys, perWorker) {
+  const out = {};
+  for (const key of keys) {
+    const days = [];
+    let routineVotes = 0;
+    let n = 0;
+    for (const est of perWorker) {
+      const e = est[key];
+      if (!e || typeof e.days !== 'number') continue;
+      days.push(e.days);
+      if (e.routine) routineVotes++;
+      n++;
+    }
+    if (!days.length) continue;
+    days.sort((a, b) => a - b);
+    const mid = Math.floor(days.length / 2);
+    const median = days.length % 2 ? days[mid] : (days[mid - 1] + days[mid]) / 2;
+    out[key] = { days: Math.round(median * 100) / 100, routine: routineVotes * 2 > n };
+  }
+  return out;
+}
+
+/** Summarizer prompt: for each task, list every worker's estimate and ask for a
+ *  single reconciled JSON in the SAME schema `parseBatch` reads. */
+function consensusPrompt(batch, perWorker) {
+  const lines = batch.map((r) => {
+    const votes = perWorker
+      .map((est, i) => {
+        const e = est[r.key];
+        return e ? `agent${i + 1}=${e.days}d${e.routine ? ' (routine)' : ''}` : null;
+      })
+      .filter(Boolean)
+      .join(', ');
+    return `- ${r.key}: ${votes || '(no estimates)'}`;
+  });
+  return `Multiple estimator agents independently sized the SAME engineering tasks (ideal effort in days for an average developer). Reconcile their estimates into ONE consensus per task — weigh agreement, discard clear outliers, and use your judgement; do not just average blindly.
+
+Reply with ONLY a JSON array (no prose, no markdown fence) of objects {"key":string,"days":number,"routine":boolean} — one per task, using the EXACT keys below.
+
+Per-task agent estimates:
+${lines.join('\n')}`;
+}
+
+module.exports = { contentHash, selectTargets, batchPrompt, parseBatch, runEstimation, medianReconcile, consensusPrompt, evidenceLine, DEFAULT_RUBRIC, BATCH_SIZE };

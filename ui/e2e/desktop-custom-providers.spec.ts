@@ -143,3 +143,41 @@ test('Workflow agent node offers provider + model from the registry', async ({ p
   await expect(providerSelect.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
   await expect(page.locator('#np-model')).toBeVisible();
 });
+
+test('Workflow node inspector docks to a resizable side panel', async ({ page }) => {
+  await openPage(page, 'workflows');
+  await page.getByRole('button', { name: 'Start blank' }).click();
+
+  // Add + select a node so the inspector shows.
+  const nodeBtn = page.locator('.menu-wrap button', { hasText: 'Node' });
+  await nodeBtn.click();
+  await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
+
+  const inspector = page.locator('.inspector');
+  await expect(inspector).toBeVisible({ timeout: 10_000 });
+  // Bottom dock by default (no .side).
+  await expect(inspector).not.toHaveClass(/\bside\b/);
+
+  // Toggle to the side dock → the inspector becomes a right column.
+  await page.locator('.insp-dock-btn').click();
+  await expect(inspector).toHaveClass(/\bside\b/);
+  const box = await inspector.boundingBox();
+  const vw = page.viewportSize()!.width;
+  // It sits on the right half of the viewport (a real side column).
+  expect(box!.x).toBeGreaterThan(vw / 2);
+
+  // Drag the vertical grip left to widen it; width grows and persists.
+  const before = box!.width;
+  const grip = page.locator('.insp-grip.side');
+  const gb = (await grip.boundingBox())!;
+  await page.mouse.move(gb.x + gb.width / 2, gb.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(gb.x - 140, gb.y + 200, { steps: 6 });
+  await page.mouse.up();
+  const after = (await inspector.boundingBox())!.width;
+  expect(after).toBeGreaterThan(before + 80);
+
+  // Toggle back to the bottom dock.
+  await page.locator('.insp-dock-btn').click();
+  await expect(inspector).not.toHaveClass(/\bside\b/);
+});
