@@ -83,14 +83,13 @@
   // actually being an agent session.
   const showRightPanel = $derived(moduleName === 'agents' && ws.activeSession?.kind === 'agent');
 
-  // The notification bell floats at the top-right of the center column. When the
-  // Workflows editor docks its inspector to a right column, slide the bell in by
-  // that column's width so it sits BEFORE the docked panel — same arrangement as
-  // the agents view, where the bell sits before the Right panel rail. Otherwise
-  // it hugs the 10px corner as usual.
-  const bellInset = $derived(
-    moduleName === 'workflows' && ui.wfDockSide ? ui.wfInspSideWidth + 10 : 10,
-  );
+  // When the Workflows editor docks its inspector to a right column, that panel
+  // owns the top-right corner — it renders its OWN notification bell in its
+  // header (agents-style) and reaches the window edge. So here we (a) hide the
+  // floating shell bell and (b) drop the 42px bell-gutter that would otherwise
+  // hold the panel 42px short of the edge (the black strip). Every other view
+  // keeps the floating bell + gutter.
+  const wfDocked = $derived(moduleName === 'workflows' && ui.wfDockSide);
 
   // Load the runtime plugin list once authenticated (drives the sidebar). Reads
   // auth.phase only; the write to plugins.list isn't read here, so no loop.
@@ -591,13 +590,15 @@
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice">✕</button>
     </div>
   {/if}
-  <div class="bell-anchor" class:tauri-top={isTauri} style="inset-inline-end:{bellInset}px">
-    <NotificationBell />
-  </div>
+  {#if !wfDocked}
+    <div class="bell-anchor" class:tauri-top={isTauri}>
+      <NotificationBell />
+    </div>
+  {/if}
   {#if moduleName === 'agents'}
     <TabBar bellGutter />
   {/if}
-  <div class="content" class:bell-gutter={moduleName !== 'agents'}>
+  <div class="content" class:bell-gutter={moduleName !== 'agents' && !wfDocked}>
     {#if moduleName === 'agents'}
       <AgentsPage />
     {:else if moduleName === 'mission-control'}
