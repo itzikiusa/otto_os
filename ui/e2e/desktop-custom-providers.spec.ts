@@ -182,6 +182,55 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   await expect(inspector).not.toHaveClass(/\bside\b/);
 });
 
+test('Provider "default" option reads claude (the daemon fallback), not agy', async ({ page }) => {
+  await openPage(page, 'workflows');
+  await page.getByRole('button', { name: 'Start blank' }).click();
+
+  // Add + select an Agent node → its Provider select renders.
+  const nodeBtn = page.locator('.menu-wrap button', { hasText: 'Node' });
+  await nodeBtn.click();
+  await page.locator('.pal-item', { hasText: 'Agent' }).first().click();
+
+  // The empty (unset) option must label the ACTUAL runtime default. With no
+  // configured default_provider, resolve_provider falls back to "claude" — so it
+  // must read "default (claude)", never "default (agy)" (alphabetically first).
+  const defOpt = page.locator('.inspector select option[value=""]').first();
+  await expect(defOpt).toHaveText('default (claude)');
+});
+
+test('Excluding a provider hides it from /meta and every picker', async ({ page }) => {
+  const { ctx, base } = await apiCtx();
+  try {
+    // Exclude agy.
+    const put = await ctx.put(`${base}/api/v1/settings`, {
+      data: { disabled_providers: ['agy'] },
+    });
+    expect(put.ok(), `disable agy → ${put.status()}`).toBeTruthy();
+
+    // /meta.providers no longer lists agy, but keeps the others.
+    const meta = await (await ctx.get(`${base}/api/v1/meta`)).json();
+    expect(meta.providers).not.toContain('agy');
+    expect(meta.providers).toContain('claude');
+    expect(meta.providers).toContain('grok');
+
+    // The New Session sheet drops the agy card while keeping claude + grok.
+    await openPage(page, 'agents');
+    const dialog = page.locator('.sheet[role="dialog"][aria-label="New Session"]');
+    await page.keyboard.press('Meta+t');
+    if (!(await dialog.isVisible().catch(() => false))) {
+      await page.getByTitle('New session (⌘T)').click();
+    }
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator('.provider-card', { hasText: 'claude' })).toHaveCount(1);
+    await expect(dialog.locator('.provider-card', { hasText: 'grok' })).toHaveCount(1);
+    await expect(dialog.locator('.provider-card', { hasText: /^agy$/ })).toHaveCount(0);
+  } finally {
+    // Re-enable so the shared test daemon is left clean.
+    await ctx.put(`${base}/api/v1/settings`, { data: { disabled_providers: [] } });
+    await ctx.dispose();
+  }
+});
+
 test('Dock opens a persistent side panel with a working close button', async ({ page }) => {
   await openPage(page, 'workflows');
   await page.getByRole('button', { name: 'Start blank' }).click();

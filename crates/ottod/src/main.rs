@@ -156,6 +156,16 @@ async fn run(cfg: Config) -> Result<(), String> {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     providers.set_skip_permissions(skip_permissions, provider_overrides.as_ref());
+    // Apply the admin's EXCLUDED providers (`disabled_providers`): a JSON array of
+    // provider names hidden from every picker (they might have a CLI installed but
+    // not want to use it). Specs stay registered so existing sessions still resume.
+    let disabled_providers: Vec<String> = settings
+        .get("disabled_providers")
+        .await
+        .map_err(|e| format!("read disabled_providers setting: {e}"))?
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    providers.set_disabled(&disabled_providers);
 
     // Embedded ClickHouse usage + metrics store. Config lives in the settings
     // table (`usage` key); degrades to a no-op when the binary isn't installed.

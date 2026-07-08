@@ -2,7 +2,7 @@
   // Analysis tab — multi-provider per-lens config, summarizer select, live polling.
   import { untrack } from 'svelte';
   import { product } from '../../lib/stores/product.svelte';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { ProductAnalysis, ProductAnalysisDetail, ProductAnalysisAgent } from './types';
@@ -53,15 +53,15 @@
       // keep FALLBACK_LENSES
     }
 
-    const firstProvider = availableProviders[0] ?? 'claude';
-    const defaultPick = availableProviders.includes('claude') ? 'claude' : firstProvider;
+    // Honor the configured default agent (Settings → Providers), else claude.
+    const defaultPick = defaultAgentProvider();
 
     // Build fresh maps keyed by the live lens list — never carry stale keys.
     lensEnabled = Object.fromEntries(lenses.map((l) => [l.skill, l.default_on]));
     lensProviders = Object.fromEntries(lenses.map((l) => [l.skill, [defaultPick]]));
 
     if (!availableProviders.includes(summarizerProvider)) {
-      summarizerProvider = firstProvider;
+      summarizerProvider = defaultPick;
     }
     configLoaded = true;
   }
@@ -207,7 +207,7 @@
       const trimmedFocus = focusText.trim() || undefined;
       const analysis = await product.analyze({
         agents,
-        summarizer_provider: summarizerProvider || availableProviders[0],
+        summarizer_provider: summarizerProvider || defaultAgentProvider(),
         focus: trimmedFocus,
       });
       startPolling(analysis.id);
