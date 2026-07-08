@@ -11,7 +11,7 @@
   import FileTree from '../panels/FileTree.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -1525,6 +1525,28 @@
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream">▶ From here</button>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, true)} title="Run only this node">Only this</button>
             </div>
+            <!-- Shared Provider + Model editor for every agent-running node —
+                 sourced from the live registry (built-ins + custom, e.g. grok)
+                 so no node is hardcoded to claude. Empty provider = default. -->
+            {#snippet agentProviderModel()}
+              <label for="np-provider">Provider</label>
+              <select
+                id="np-provider"
+                value={paramStr('provider') || ''}
+                onchange={(e) => onParam('provider', e.currentTarget.value || undefined)}
+              >
+                <option value="">default ({defaultAgentProvider()})</option>
+                {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
+              </select>
+              <label for="np-model">Model (optional)</label>
+              <input
+                id="np-model"
+                type="text"
+                placeholder="e.g. opus / sonnet / haiku (default)"
+                value={paramStr('model')}
+                oninput={(e) => onParam('model', e.currentTarget.value)}
+              />
+            {/snippet}
             <!-- Per-kind param forms. Each kind exposes only its meaningful
                  params; unrecognised kinds fall through to a raw JSON editor. -->
             {#if selectedNode.kind === 'manual_trigger'}
@@ -1605,14 +1627,7 @@
                 value={paramStr('prompt')}
                 oninput={(e) => onParam('prompt', e.currentTarget.value)}
               ></textarea>
-              <label for="np-model">Model (optional)</label>
-              <input
-                id="np-model"
-                type="text"
-                placeholder="e.g. claude-opus-4-8 (default)"
-                value={paramStr('model')}
-                oninput={(e) => onParam('model', e.currentTarget.value)}
-              />
+              {@render agentProviderModel()}
               <label for="np-skills">Skills (comma-separated)</label>
               <input
                 id="np-skills"
@@ -2036,6 +2051,7 @@
                 value={paramStr('instruction')}
                 oninput={(e) => onParam('instruction', e.currentTarget.value)}
               />
+              {@render agentProviderModel()}
               {#if selectedNode.kind !== 'product_analyze'}
                 <label class="np-chk">
                   <input
@@ -2141,6 +2157,7 @@
                 <option value="mermaid">Mermaid</option>
                 <option value="excalidraw">Excalidraw</option>
               </select>
+              {@render agentProviderModel()}
             {:else if selectedNode.kind === 'git_pr'}
               <p class="insp-note">
                 Leave Repo&nbsp;ID and Base empty to <strong>inherit the reference</strong> the
@@ -2757,10 +2774,24 @@
   /* Drag grip that sits just above the inspector (between the canvas and the
      run detail), so it never scrolls with the content. (R6) */
   .insp-grip {
-    height: 7px;
+    height: 12px;
     flex-shrink: 0;
     cursor: row-resize;
     border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* Visible drag handle so the resize affordance is discoverable. */
+  .insp-grip::after {
+    content: '';
+    width: 40px;
+    height: 3px;
+    border-radius: 3px;
+    background: var(--border);
+  }
+  .insp-grip:hover::after {
+    background: var(--accent);
   }
   .insp-grip:hover {
     background: linear-gradient(

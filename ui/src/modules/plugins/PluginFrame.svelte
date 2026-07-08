@@ -8,6 +8,7 @@
   // modifier-chords back as `otto:keydown` messages; we re-dispatch them as
   // synthetic window keydowns so the shell's shortcut handlers fire normally.
   import { baseUrl, getToken } from '../../lib/api/client';
+  import { agentProviders } from '../../lib/providers';
 
   let { slug }: { slug: string } = $props();
 
@@ -31,6 +32,9 @@
         apiBase: `${baseUrl()}/api/v1/plugins/${slug}`,
         token: getToken(),
         theme: themeVars(),
+        // The live agent-provider registry (built-ins + custom, e.g. grok) so a
+        // plugin's provider pickers stay in sync with Otto — never hardcoded.
+        providers: agentProviders(),
       },
       origin,
     );

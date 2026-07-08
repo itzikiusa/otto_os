@@ -60,6 +60,14 @@ pub struct ChatDetail {
 #[derive(Debug, Deserialize)]
 pub struct SendMessageReq {
     pub body: String,
+    /// Agent provider to run the chat on (built-in or custom, e.g. grok). Only
+    /// used when the chat's persistent session is FIRST created; later messages
+    /// resume the existing session regardless. Empty/absent = default agent.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Optional model alias for the first turn (empty = provider default).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -231,7 +239,16 @@ pub async fn send_message(
         .get(&chat.workspace_id)
         .await
         .map_err(ApiError)?;
-    let meta = json!({ "source": "discovery_chat", "story_id": chat.story_id, "chat_id": cid });
+    // Provider is honored only on FIRST message (session create); resumes ignore
+    // it. Default to the workspace/global default agent, else claude.
+    let default_provider = otto_core::provider::resolve_provider(&[
+        req.provider.as_deref().unwrap_or(""),
+        otto_core::provider::workspace_default(&ws.settings),
+    ]);
+    let mut meta = json!({ "source": "discovery_chat", "story_id": chat.story_id, "chat_id": cid });
+    if let Some(m) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        meta["model"] = json!(m);
+    }
     let (raw, sid) = crate::agent_session::run_session_turn(
         &ctx,
         &ws,
@@ -239,7 +256,7 @@ pub async fn send_message(
         chat.session_id.as_ref(),
         &format!("Discovery: {}", chat.title),
         &chat.cwd,
-        "claude",
+        &default_provider,
         meta,
         &prompt,
         crate::agent_session::STUCK_IDLE,

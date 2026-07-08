@@ -8,6 +8,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   let cfg: InsightsConfig | null = $state(null);
   let loading = $state(true);
@@ -38,6 +39,23 @@
   // ---------------------------------------------------------------------------
   // PUT on every toggle change (optimistic + revert on failure)
   // ---------------------------------------------------------------------------
+
+  /** Persist a provider/model change (which agent generates the reports). */
+  async function saveAgent(patch: Partial<InsightsConfig>): Promise<void> {
+    if (!cfg || saving) return;
+    const next: InsightsConfig = { ...cfg, ...patch };
+    const prev = cfg;
+    cfg = next;
+    saving = true;
+    try {
+      cfg = await insightsApi.putConfig(next);
+    } catch (e) {
+      cfg = prev;
+      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      saving = false;
+    }
+  }
 
   async function toggle(key: keyof InsightsConfig): Promise<void> {
     if (!cfg || saving) return;
@@ -117,6 +135,30 @@
       </label>
     </div>
 
+    <div class="agent-row">
+      <label class="agent-fld">
+        <span class="toggle-title">Provider</span>
+        <select
+          value={cfg.provider || ''}
+          disabled={saving}
+          onchange={(e) => saveAgent({ provider: e.currentTarget.value })}
+        >
+          <option value="">default ({defaultAgentProvider()})</option>
+          {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
+        </select>
+      </label>
+      <label class="agent-fld">
+        <span class="toggle-title">Model <span class="toggle-desc">(optional)</span></span>
+        <input
+          type="text"
+          placeholder="default"
+          value={cfg.model || ''}
+          disabled={saving}
+          onchange={(e) => saveAgent({ model: e.currentTarget.value })}
+        />
+      </label>
+    </div>
+
     <div class="note">
       Requires the <span class="mono">insights</span> skill to be installed
       (<button class="link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>).
@@ -146,6 +188,24 @@
   .toggle-row + .toggle-row {
     border-top: 1px solid var(--border);
   }
+  .agent-row {
+    display: flex;
+    gap: 20px;
+    padding: 14px 18px 4px;
+    max-width: 560px;
+    flex-wrap: wrap;
+  }
+  .agent-fld {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 13px;
+  }
+  .agent-fld select,
+  .agent-fld input {
+    padding: 5px 8px;
+  }
+
 
   .toggle-text {
     display: flex;

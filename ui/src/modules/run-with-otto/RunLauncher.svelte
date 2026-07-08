@@ -16,7 +16,7 @@
   import RunStageRail from './RunStageRail.svelte';
   import { SOURCE_KINDS, sourceColor, sourceLabel } from './runStatus';
   import type { OttoRun, Repo, RunDetectResp, RunMode } from '../../lib/api/types';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
     wsId: string;
@@ -26,7 +26,7 @@
 
   let query = $state('');
   let mode = $state<RunMode>('single_agent');
-  let provider = $state('claude');
+  let provider = $state(defaultAgentProvider());
   let model = $state('');
   let repoId = $state('');
   let autoOpenPr = $state(false);
@@ -52,12 +52,12 @@
     })();
   });
 
-  // Providers from /meta; `shell` can't take an agent prompt. Single-agent
-  // execution runs on the claude PTY — the provider choice applies to goal loops.
-  const providers = $derived(
-    agentProviders(),
-  );
-  const effectiveProvider = $derived(mode === 'single_agent' ? 'claude' : provider);
+  // Providers from the live registry (built-ins + custom, e.g. grok); `shell`
+  // can't take an agent prompt. Both single-agent and goal-loop modes honor the
+  // chosen provider (single-agent runs claude on the fast PTY, any other
+  // provider as a real session — see run_engine::execute_single_agent).
+  const providers = $derived(agentProviders());
+  const effectiveProvider = $derived(provider);
 
   // Model alias suggestions (free text welcome — "" = provider default).
   const MODEL_SUGGESTIONS = ['opus', 'sonnet', 'haiku'];
@@ -233,21 +233,14 @@
       {registering ? 'Registering…' : 'Browse…'}
     </button>
 
-    {#if mode === 'goal_loop'}
-      <label class="ctl">
-        <span>Provider</span>
-        <select bind:value={provider} aria-label="Provider">
-          {#each providers as p (p)}
-            <option value={p}>{p}</option>
-          {/each}
-        </select>
-      </label>
-    {:else}
-      <span class="ctl fixed" title="Single-agent runs execute on the Claude CLI; pick Goal loop to use another provider">
-        <span>Provider</span>
-        <span class="fixed-val">claude</span>
-      </span>
-    {/if}
+    <label class="ctl">
+      <span>Provider</span>
+      <select bind:value={provider} aria-label="Provider">
+        {#each providers as p (p)}
+          <option value={p}>{p}</option>
+        {/each}
+      </select>
+    </label>
 
     <label class="ctl">
       <span>Model</span>
@@ -371,13 +364,6 @@
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: var(--radius-s); padding: 0.35rem 0.5rem; font: inherit; font-size: 0.82rem;
     max-width: 15rem;
-  }
-  .ctl.fixed .fixed-val {
-    color: var(--text);
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-s);
-    padding: 0.32rem 0.55rem;
-    cursor: help;
   }
   .chk { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--text); }
   .run { margin-left: auto; font-size: 0.95rem; padding: 0.5rem 1.1rem; }
