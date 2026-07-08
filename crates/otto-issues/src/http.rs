@@ -144,6 +144,10 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
             get(list_editmeta::<S>),
         )
         .route("/issue/{account_id}/{key}/fields", put(update_fields::<S>))
+        .route(
+            "/issue/{account_id}/{key}/description",
+            put(update_description::<S>),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -616,6 +620,38 @@ async fn update_fields<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     client.update_fields(&key, fields).await?;
+    let full = client.get_issue_full(&key).await?;
+    Ok(Json(full))
+}
+
+/// `PUT /issue/{account_id}/{key}/description`
+///
+/// Body: `{"body_md": "…markdown…"}` — replace the issue description. The
+/// markdown is converted to Atlassian Document Format (ADF) server-side before
+/// it is sent to Jira, so callers pass plain markdown (the same body_md the rest
+/// of Otto stores). Re-fetches and returns the updated [`IssueFull`] so the UI
+/// can swap state in one round-trip. A dedicated route (rather than the generic
+/// `/fields` path) is required because `description` must be ADF-wrapped — the
+/// generic `update_fields` sends values verbatim and would reject a raw string.
+async fn update_description<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path((account_id, key)): Path<(Id, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Json<IssueFull>> {
+    // `body_md` is required but may be empty (clearing the description).
+    let body_md = body
+        .get("body_md")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::Invalid("body_md is required".into()))?
+        .to_string();
+    let account = load_authorized_account(&s, &account_id, &user).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    client.update_description(&key, &body_md).await?;
     let full = client.get_issue_full(&key).await?;
     Ok(Json(full))
 }

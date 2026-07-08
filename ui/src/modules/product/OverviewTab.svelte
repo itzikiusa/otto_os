@@ -74,6 +74,18 @@
   let fieldDraft = $state<unknown>(null); // working value for the field being edited
   let fieldSaving = $state(false);
 
+  // ── Manual title / description edit (Jira stories) ────────────────────────
+  // Jira exposes summary + description as first-class editable content — the
+  // generic editmeta field editor deliberately filters both out, so they get
+  // dedicated inline editors here (title next to the header, description in the
+  // body column, mirroring Jira's own inline-edit affordances).
+  let editingTitle = $state(false);
+  let titleDraft = $state('');
+  let titleSaving = $state(false);
+  let editingDesc = $state(false);
+  let descDraft = $state('');
+  let descSaving = $state(false);
+
   // Collapsible sections
   let collapsed = $state<Record<string, boolean>>({
     details: false,
@@ -649,6 +661,77 @@
     }
   }
 
+  // ── Title (summary) edit ──────────────────────────────────────────────────
+  function beginEditTitle(): void {
+    if (!story) return;
+    titleDraft = story.title;
+    editingTitle = true;
+  }
+  function cancelEditTitle(): void {
+    editingTitle = false;
+    titleDraft = '';
+  }
+  /** Save the story summary via the generic fields endpoint (native string). */
+  async function saveTitle(): Promise<void> {
+    if (!story) return;
+    const next = titleDraft.trim();
+    if (!next) {
+      toasts.error('Title cannot be empty');
+      return;
+    }
+    if (next === story.title) {
+      cancelEditTitle();
+      return;
+    }
+    titleSaving = true;
+    try {
+      issueFull = await api.put<IssueFull>(
+        `/issue/${story.account_id}/${story.source_key}/fields`,
+        { fields: { summary: next } },
+      );
+      // Reflect the new title in the header + story list without a full refresh.
+      product.patchLocalTitle(next);
+      editingTitle = false;
+      titleDraft = '';
+      toasts.info('Title updated');
+    } catch (e) {
+      toasts.error('Could not update title', e instanceof Error ? e.message : String(e));
+    } finally {
+      titleSaving = false;
+    }
+  }
+
+  // ── Description edit ──────────────────────────────────────────────────────
+  function beginEditDesc(): void {
+    descDraft = bodyMd;
+    editingDesc = true;
+  }
+  function cancelEditDesc(): void {
+    editingDesc = false;
+    descDraft = '';
+  }
+  /** Save the description via the dedicated (ADF-aware) description endpoint. */
+  async function saveDesc(): Promise<void> {
+    if (!story) return;
+    descSaving = true;
+    try {
+      issueFull = await api.put<IssueFull>(
+        `/issue/${story.account_id}/${story.source_key}/description`,
+        { body_md: descDraft },
+      );
+      // The body column reads from the cached source version — patch it locally
+      // with exactly what we just sent so the change shows without a refresh.
+      product.patchLocalBody(descDraft);
+      editingDesc = false;
+      descDraft = '';
+      toasts.info('Description updated');
+    } catch (e) {
+      toasts.error('Could not update description', e instanceof Error ? e.message : String(e));
+    } finally {
+      descSaving = false;
+    }
+  }
+
   async function loadAttachmentUrl(attId: string): Promise<void> {
     if (!story || attachmentUrls[attId] || attachmentLoading[attId]) return;
     attachmentLoading = { ...attachmentLoading, [attId]: true };
@@ -989,7 +1072,36 @@
           <span class="source-key mono">{story.source_key}</span>
         {/if}
       </div>
-      <h1 class="story-title">{story.title}</h1>
+      {#if editingTitle}
+        <div class="title-edit">
+          <input
+            class="title-input"
+            bind:value={titleDraft}
+            spellcheck="false"
+            aria-label="Story title"
+            onkeydown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); void saveTitle(); }
+              else if (e.key === 'Escape') { e.preventDefault(); cancelEditTitle(); }
+            }}
+          />
+          <button class="field-save-btn" onclick={saveTitle} disabled={titleSaving}>
+            {titleSaving ? 'Saving…' : 'Save'}
+          </button>
+          <button class="field-cancel-btn" onclick={cancelEditTitle} disabled={titleSaving}>Cancel</button>
+        </div>
+      {:else}
+        <div class="title-row">
+          <h1 class="story-title">{story.title}</h1>
+          {#if isJira}
+            <button
+              class="title-edit-btn"
+              title="Edit title"
+              aria-label="Edit title"
+              onclick={beginEditTitle}
+            >✎</button>
+          {/if}
+        </div>
+      {/if}
 
       <!-- counts row -->
       <div class="counts-row">
@@ -1252,17 +1364,230 @@
               </div>
             {/if}
 
-            {#if renderedBody}
+            <!-- Description header + inline edit affordance (Jira-style). The Edit
+                 button is hidden while viewing a historical version — edits always
+                 apply to the live issue's current description. -->
+            <div class="desc-header">
+              <span class="desc-label">Description</span>
+              {#if !editingDesc && !viewingVersion}
+                <button class="desc-edit-btn" onclick={beginEditDesc}>
+                  <span aria-hidden="true">✎</span> Edit
+                </button>
+              {/if}
+            </div>
+
+            {#if editingDesc}
+              <div class="desc-editor">
+                <textarea
+                  class="desc-textarea"
+                  bind:value={descDraft}
+                  rows={16}
+                  placeholder="Write the description in Markdown…"
+                  spellcheck="false"
+                  aria-label="Description (Markdown)"
+                  onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); cancelEditDesc(); } }}
+                ></textarea>
+                <div class="desc-editor-actions">
+                  <button class="field-save-btn" onclick={saveDesc} disabled={descSaving}>
+                    {descSaving ? 'Saving…' : 'Save'}
+                  </button>
+                  <button class="field-cancel-btn" onclick={cancelEditDesc} disabled={descSaving}>Cancel</button>
+                </div>
+              </div>
+            {:else if renderedBody}
               <!-- resolvedBody has attachment:<id> tokens rewritten to authed blob URLs;
                    falls back to renderedBody while async resolution is in progress. -->
               <div class="md-body">{@html resolvedBody || renderedBody}</div>
             {:else}
-              <div class="muted">No content yet. Use Refresh to pull from source.</div>
+              <div class="muted">No description yet. Use Edit to add one, or Refresh to pull from source.</div>
             {/if}
           </div>
+
+          <!-- ── Activity: comments / history / attachments ──────────────
+               These live below the description in the main column (like Jira);
+               the right column keeps just Status / Assignee / Details / Links /
+               Development. `{#if issueFull}` narrows the type for the cards. -->
+          {#if issueFull}
+            <div class="jira-section jira-activity">
+              <!-- ── Comments ─────────────────────────────────────── -->
+              <div class="jira-card collapsible-card">
+                <button
+                  class="jira-coll-trigger"
+                  onclick={() => toggleSection('comments')}
+                  aria-expanded={!collapsed.comments}
+                >
+                  <span class="coll-arrow">{collapsed.comments ? '▶' : '▼'}</span>
+                  <span class="jira-section-label">Comments</span>
+                  <span class="section-count">({issueFull.comments.length})</span>
+                </button>
+                {#if !collapsed.comments}
+                  <div class="comments-list">
+                    {#if issueFull.comments.length === 0}
+                      <div class="comments-empty">No comments yet.</div>
+                    {:else}
+                      {#each issueFull.comments as comment (comment.id)}
+                        <div class="comment-item">
+                          <div class="comment-meta">
+                            <span class="comment-author">{comment.author}</span>
+                            <span class="comment-date">{relDate(comment.created)}</span>
+                          </div>
+                          <div class="comment-body md-body">{@html renderMarkdown(comment.body_md)}</div>
+                        </div>
+                      {/each}
+                    {/if}
+                  </div>
+                  <!-- Add comment form -->
+                  <div class="add-comment-form">
+                    <textarea
+                      class="textarea comment-textarea"
+                      bind:value={newCommentBody}
+                      rows={3}
+                      placeholder="Add a comment…"
+                      spellcheck="true"
+                      disabled={postingComment}
+                    ></textarea>
+                    <div class="add-comment-row">
+                      <button
+                        class="toolbar-btn comment-submit-btn"
+                        onclick={addComment}
+                        disabled={postingComment || !newCommentBody.trim()}
+                      >
+                        {postingComment ? 'Posting…' : 'Comment'}
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </div>
+
+              <!-- ── History ─────────────────────────────────────── -->
+              {#if issueFull.history && issueFull.history.length > 0}
+                <div class="jira-card collapsible-card">
+                  <button
+                    class="jira-coll-trigger"
+                    onclick={() => toggleSection('history')}
+                    aria-expanded={!collapsed.history}
+                  >
+                    <span class="coll-arrow">{collapsed.history ? '▶' : '▼'}</span>
+                    <span class="jira-section-label">History</span>
+                    <span class="section-count">({issueFull.history.length} entries)</span>
+                  </button>
+                  {#if !collapsed.history}
+                    <div class="history-list">
+                      {#each issueFull.history as entry, i (i)}
+                        <div class="history-entry">
+                          <div class="history-meta">
+                            <span class="history-author">{entry.author}</span>
+                            <span class="history-date">{relDate(entry.created)}</span>
+                          </div>
+                          {#each entry.items as item, j (j)}
+                            <div class="history-change">
+                              changed <span class="history-field">{item.field}</span>
+                              {#if item.from}
+                                from <span class="history-val">{item.from}</span>
+                              {/if}
+                              to <span class="history-val">{item.to ?? '(empty)'}</span>
+                            </div>
+                          {/each}
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+
+              <!-- ── Attachments (from Jira) ─────────────────────── -->
+              {#if issueFull.attachments && issueFull.attachments.length > 0}
+                <div class="jira-card collapsible-card">
+                  <button
+                    class="jira-coll-trigger"
+                    onclick={() => toggleSection('attachments')}
+                    aria-expanded={!collapsed.attachments}
+                  >
+                    <span class="coll-arrow">{collapsed.attachments ? '▶' : '▼'}</span>
+                    <span class="jira-section-label">Attachments</span>
+                    <span class="section-count">({issueFull.attachments.length})</span>
+                  </button>
+                  {#if !collapsed.attachments}
+                    <div class="attachments-grid">
+                      {#each issueFull.attachments as att (att.id)}
+                        <div class="attachment-card">
+                          <div class="att-header">
+                            <span class="att-filename" title={att.filename}>{att.filename}</span>
+                            <span class="att-meta">{fmtBytes(att.size)} · {att.mime}</span>
+                          </div>
+
+                          {#if att.mime.startsWith('image/')}
+                            <div class="att-preview">
+                              {#if attachmentUrls[att.id]}
+                                <img
+                                  class="att-img"
+                                  src={attachmentUrls[att.id]}
+                                  alt={att.filename}
+                                />
+                              {:else}
+                                <button
+                                  class="att-load-btn"
+                                  onclick={() => loadAttachmentUrl(att.id)}
+                                  disabled={attachmentLoading[att.id]}
+                                >
+                                  {attachmentLoading[att.id] ? 'Loading…' : 'Load preview'}
+                                </button>
+                              {/if}
+                            </div>
+                          {:else if att.mime === 'application/pdf'}
+                            <div class="att-preview">
+                              {#if attachmentUrls[att.id]}
+                                <iframe
+                                  class="att-pdf"
+                                  src={attachmentUrls[att.id]}
+                                  title={att.filename}
+                                ></iframe>
+                              {:else}
+                                <button
+                                  class="att-load-btn"
+                                  onclick={() => loadAttachmentUrl(att.id)}
+                                  disabled={attachmentLoading[att.id]}
+                                >
+                                  {attachmentLoading[att.id] ? 'Loading…' : 'Preview PDF'}
+                                </button>
+                              {/if}
+                            </div>
+                          {:else}
+                            <div class="att-download">
+                              {#if attachmentUrls[att.id]}
+                                <a
+                                  class="att-dl-link"
+                                  href={attachmentUrls[att.id]}
+                                  download={att.filename}
+                                >
+                                  Download
+                                </a>
+                              {:else}
+                                <button
+                                  class="att-load-btn"
+                                  onclick={() => loadAttachmentUrl(att.id)}
+                                  disabled={attachmentLoading[att.id]}
+                                >
+                                  {attachmentLoading[att.id] ? 'Preparing…' : 'Download'}
+                                </button>
+                              {/if}
+                            </div>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
+
+          <!-- Otto-side attachments (drop / paste / file-picker). Shown for
+               Jira stories below the activity, mirroring Jira's attachment area. -->
+          <AttachmentsPanel bind:this={panelRef} />
         </div>
 
-        <!-- Right: Jira metadata panel -->
+        <!-- Right: Jira metadata panel (Details sidebar) -->
         <div class="col-right">
           <div class="jira-section">
             {#if issueLoading}
@@ -1626,182 +1951,8 @@
                 {/if}
               </div>
 
-              <!-- ── Comments ─────────────────────────────────────── -->
-              <div class="jira-card collapsible-card">
-                <button
-                  class="jira-coll-trigger"
-                  onclick={() => toggleSection('comments')}
-                  aria-expanded={!collapsed.comments}
-                >
-                  <span class="coll-arrow">{collapsed.comments ? '▶' : '▼'}</span>
-                  <span class="jira-section-label">Comments</span>
-                  <span class="section-count">({issueFull.comments.length})</span>
-                </button>
-                {#if !collapsed.comments}
-                  <div class="comments-list">
-                    {#if issueFull.comments.length === 0}
-                      <div class="comments-empty">No comments yet.</div>
-                    {:else}
-                      {#each issueFull.comments as comment (comment.id)}
-                        <div class="comment-item">
-                          <div class="comment-meta">
-                            <span class="comment-author">{comment.author}</span>
-                            <span class="comment-date">{relDate(comment.created)}</span>
-                          </div>
-                          <div class="comment-body md-body">{@html renderMarkdown(comment.body_md)}</div>
-                        </div>
-                      {/each}
-                    {/if}
-                  </div>
-                  <!-- Add comment form -->
-                  <div class="add-comment-form">
-                    <textarea
-                      class="textarea comment-textarea"
-                      bind:value={newCommentBody}
-                      rows={3}
-                      placeholder="Add a comment…"
-                      spellcheck="true"
-                      disabled={postingComment}
-                    ></textarea>
-                    <div class="add-comment-row">
-                      <button
-                        class="toolbar-btn comment-submit-btn"
-                        onclick={addComment}
-                        disabled={postingComment || !newCommentBody.trim()}
-                      >
-                        {postingComment ? 'Posting…' : 'Comment'}
-                      </button>
-                    </div>
-                  </div>
-                {/if}
-              </div>
-
-              <!-- ── History ─────────────────────────────────────── -->
-              {#if issueFull.history && issueFull.history.length > 0}
-                <div class="jira-card collapsible-card">
-                  <button
-                    class="jira-coll-trigger"
-                    onclick={() => toggleSection('history')}
-                    aria-expanded={!collapsed.history}
-                  >
-                    <span class="coll-arrow">{collapsed.history ? '▶' : '▼'}</span>
-                    <span class="jira-section-label">History</span>
-                    <span class="section-count">({issueFull.history.length} entries)</span>
-                  </button>
-                  {#if !collapsed.history}
-                    <div class="history-list">
-                      {#each issueFull.history as entry, i (i)}
-                        <div class="history-entry">
-                          <div class="history-meta">
-                            <span class="history-author">{entry.author}</span>
-                            <span class="history-date">{relDate(entry.created)}</span>
-                          </div>
-                          {#each entry.items as item, j (j)}
-                            <div class="history-change">
-                              changed <span class="history-field">{item.field}</span>
-                              {#if item.from}
-                                from <span class="history-val">{item.from}</span>
-                              {/if}
-                              to <span class="history-val">{item.to ?? '(empty)'}</span>
-                            </div>
-                          {/each}
-                        </div>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-              {/if}
-
-              <!-- ── Attachments ─────────────────────────────────── -->
-              {#if issueFull.attachments && issueFull.attachments.length > 0}
-                <div class="jira-card collapsible-card">
-                  <button
-                    class="jira-coll-trigger"
-                    onclick={() => toggleSection('attachments')}
-                    aria-expanded={!collapsed.attachments}
-                  >
-                    <span class="coll-arrow">{collapsed.attachments ? '▶' : '▼'}</span>
-                    <span class="jira-section-label">Attachments</span>
-                    <span class="section-count">({issueFull.attachments.length})</span>
-                  </button>
-                  {#if !collapsed.attachments}
-                    <div class="attachments-grid">
-                      {#each issueFull.attachments as att (att.id)}
-                        <div class="attachment-card">
-                          <div class="att-header">
-                            <span class="att-filename" title={att.filename}>{att.filename}</span>
-                            <span class="att-meta">{fmtBytes(att.size)} · {att.mime}</span>
-                          </div>
-
-                          {#if att.mime.startsWith('image/')}
-                            <div class="att-preview">
-                              {#if attachmentUrls[att.id]}
-                                <img
-                                  class="att-img"
-                                  src={attachmentUrls[att.id]}
-                                  alt={att.filename}
-                                />
-                              {:else}
-                                <button
-                                  class="att-load-btn"
-                                  onclick={() => loadAttachmentUrl(att.id)}
-                                  disabled={attachmentLoading[att.id]}
-                                >
-                                  {attachmentLoading[att.id] ? 'Loading…' : 'Load preview'}
-                                </button>
-                              {/if}
-                            </div>
-                          {:else if att.mime === 'application/pdf'}
-                            <div class="att-preview">
-                              {#if attachmentUrls[att.id]}
-                                <iframe
-                                  class="att-pdf"
-                                  src={attachmentUrls[att.id]}
-                                  title={att.filename}
-                                ></iframe>
-                              {:else}
-                                <button
-                                  class="att-load-btn"
-                                  onclick={() => loadAttachmentUrl(att.id)}
-                                  disabled={attachmentLoading[att.id]}
-                                >
-                                  {attachmentLoading[att.id] ? 'Loading…' : 'Preview PDF'}
-                                </button>
-                              {/if}
-                            </div>
-                          {:else}
-                            <div class="att-download">
-                              {#if attachmentUrls[att.id]}
-                                <a
-                                  class="att-dl-link"
-                                  href={attachmentUrls[att.id]}
-                                  download={att.filename}
-                                >
-                                  Download
-                                </a>
-                              {:else}
-                                <button
-                                  class="att-load-btn"
-                                  onclick={() => loadAttachmentUrl(att.id)}
-                                  disabled={attachmentLoading[att.id]}
-                                >
-                                  {attachmentLoading[att.id] ? 'Preparing…' : 'Download'}
-                                </button>
-                              {/if}
-                            </div>
-                          {/if}
-                        </div>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-              {/if}
-
             {/if}
           </div>
-
-          <!-- Attachments panel in Jira right column -->
-          <AttachmentsPanel bind:this={panelRef} />
         </div>
       </div>
 
@@ -2053,6 +2204,64 @@
     line-height: 1.25;
     color: var(--text);
   }
+  /* Title row: heading + an on-hover pencil (mirrors the field-edit pattern). */
+  .title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .title-row .story-title {
+    margin-bottom: 0;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .title-edit-btn {
+    flex-shrink: 0;
+    margin-top: 2px;
+    width: 24px;
+    height: 24px;
+    line-height: 1;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 13px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 100ms, background 100ms, color 100ms;
+  }
+  .title-row:hover .title-edit-btn,
+  .title-edit-btn:focus-visible {
+    opacity: 1;
+  }
+  .title-edit-btn:hover {
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    color: var(--text);
+  }
+  .title-edit {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 10px;
+    flex-wrap: wrap;
+  }
+  .title-input {
+    flex: 1 1 260px;
+    min-width: 0;
+    height: 34px;
+    padding: 0 10px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 18px;
+    font-weight: 700;
+  }
+  .title-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
   .stage-badge {
     font-size: 10px;
     font-weight: 700;
@@ -2293,6 +2502,11 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  /* Activity (comments / history / attachments) sits below the description in the
+     main column, separated from the body with a little breathing room. */
+  .jira-activity {
+    margin-top: 18px;
   }
   .jira-loading,
   .jira-error {
@@ -2652,6 +2866,68 @@
   .field-cancel-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  /* ── Description edit (Jira-style inline editor) ───────────────── */
+  .desc-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .desc-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+  }
+  .desc-edit-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 24px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: background 100ms, color 100ms, border-color 100ms;
+  }
+  .desc-edit-btn:hover {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text);
+    border-color: var(--text-dim);
+  }
+  .desc-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .desc-textarea {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 220px;
+    resize: vertical;
+    padding: 10px 12px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+  .desc-textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .desc-editor-actions {
+    display: flex;
+    gap: 6px;
   }
 
   /* ── Links ─────────────────────────────────────────────────── */
