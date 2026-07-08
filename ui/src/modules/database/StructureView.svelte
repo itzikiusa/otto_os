@@ -7,7 +7,7 @@
   import TableDesigner from './TableDesigner.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { DbForeignKey, SchemaNode } from '../../lib/api/types';
+  import type { DbForeignKey, DbIndexDef, SchemaNode } from '../../lib/api/types';
 
   const detail = $derived(database.objectDetail);
   // A stored procedure / function — its "columns" are parameters and its main
@@ -32,6 +32,7 @@
   $effect(() => {
     const d = detail;
     ddlOpen = !!d?.ddl && (d.kind === 'procedure' || d.kind === 'function' || d.columns.length === 0);
+    openIdxDef = null;
   });
 
   function prettyExtra(extra: unknown): string {
@@ -94,6 +95,41 @@
       has_children: false,
     };
     void database.openObject(node);
+  }
+
+  // ── Full index definition viewer ────────────────────────────────────────────
+  // `definition` is the engine-native spec: Mongo = the raw listIndexes doc
+  // (partialFilterExpression, collation, TTL…), Postgres = a pg_get_indexdef
+  // DDL string. Clicking an index row expands it; reset on object switch above.
+  let openIdxDef = $state<number | null>(null);
+  function idxDefText(idx: DbIndexDef): string | null {
+    const d = idx.definition;
+    if (d == null) return null;
+    return typeof d === 'string' ? d : JSON.stringify(d, null, 2);
+  }
+  // Rebuild the shell statement that recreates this index — Mongo only (the
+  // definition is an object there); SQL engines already carry a DDL string.
+  function idxCreateSnippet(idx: DbIndexDef): string | null {
+    const d = idx.definition;
+    if (!detail || d == null || typeof d !== 'object') return null;
+    const rec = d as Record<string, unknown>;
+    if (rec.key == null) return null;
+    // Everything the server reports except the key itself and its internal
+    // bookkeeping (v/ns) is a createIndex option.
+    const opts: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(rec)) {
+      if (k !== 'key' && k !== 'v' && k !== 'ns') opts[k] = val;
+    }
+    const optsStr = Object.keys(opts).length > 0 ? `, ${JSON.stringify(opts, null, 2)}` : '';
+    return `db.${detail.name}.createIndex(${JSON.stringify(rec.key, null, 2)}${optsStr})`;
+  }
+  async function copyText(text: string, label: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      toasts.success(`Copied ${label}`);
+    } catch {
+      toasts.error('Copy failed');
+    }
   }
 
   // ── Index builder (per-engine) ──────────────────────────────────────────────
@@ -241,12 +277,41 @@
         {#if detail.indexes.length > 0}
           <ul class="idx-list">
             {#each detail.indexes as idx, i (i)}
-              <li class="idx">
-                <Icon name="key" size={11} />
-                <span class="idx-name mono">{idx.name}</span>
-                {#if idx.unique}<span class="tag unique">unique</span>{/if}
-                {#if idx.method}<span class="tag">{idx.method}</span>{/if}
-                <span class="idx-cols mono">({idx.columns.join(', ')})</span>
+              {@const defText = idxDefText(idx)}
+              <li class="idx-item">
+                <button
+                  class="idx"
+                  class:expandable={defText != null}
+                  disabled={defText == null}
+                  title={defText != null ? 'View full definition' : undefined}
+                  onclick={() => (openIdxDef = openIdxDef === i ? null : i)}
+                >
+                  <Icon name="key" size={11} />
+                  <span class="idx-name mono">{idx.name}</span>
+                  {#if idx.unique}<span class="tag unique">unique</span>{/if}
+                  {#if idx.method}<span class="tag">{idx.method}</span>{/if}
+                  <span class="idx-cols mono">({idx.columns.join(', ')})</span>
+                  {#if defText != null}
+                    <span class="grow"></span>
+                    <Icon name={openIdxDef === i ? 'chevronDown' : 'chevronRight'} size={10} />
+                  {/if}
+                </button>
+                {#if openIdxDef === i && defText != null}
+                  {@const snippet = idxCreateSnippet(idx)}
+                  <div class="idx-def">
+                    <div class="idx-def-actions">
+                      {#if snippet}
+                        <button class="copy-ddl" onclick={() => copyText(snippet, 'createIndex')}>
+                          <Icon name="file" size={11} />Copy createIndex
+                        </button>
+                      {/if}
+                      <button class="copy-ddl" onclick={() => copyText(defText, 'definition')}>
+                        <Icon name="file" size={11} />Copy
+                      </button>
+                    </div>
+                    <pre class="ddl mono">{defText}</pre>
+                  </div>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -632,6 +697,38 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     font-size: 11.5px;
+  }
+  .idx-item {
+    display: flex;
+    flex-direction: column;
+  }
+  /* The index row is a button so the full definition can expand under it.
+     Indexes without a definition render identically but aren't clickable. */
+  button.idx {
+    width: 100%;
+    font: inherit;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    text-align: start;
+    cursor: default;
+  }
+  button.idx.expandable {
+    cursor: pointer;
+  }
+  button.idx.expandable:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .idx-def {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+    padding-inline-start: 10px;
+  }
+  .idx-def-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 14px;
   }
   .idx-name,
   .fk-name {

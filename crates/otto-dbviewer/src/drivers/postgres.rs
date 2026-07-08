@@ -646,6 +646,7 @@ impl PostgresDriver {
     ) -> Result<Vec<IndexDef>> {
         let rows: Vec<PgIndexRow> = sqlx::query_as(
             "SELECT ic.relname AS name, ix.indisunique AS is_unique, am.amname AS method, \
+                    pg_catalog.pg_get_indexdef(ix.indexrelid) AS def, \
                     a.attname AS col, k.ord::int AS ord \
              FROM pg_catalog.pg_index ix \
              JOIN pg_catalog.pg_class ic ON ic.oid = ix.indexrelid \
@@ -674,6 +675,7 @@ impl PostgresDriver {
                     columns: Vec::new(),
                     unique: r.is_unique,
                     method: Some(r.method.clone()),
+                    definition: r.def.clone().map(Value::String),
                 }
             });
             // Expression-index members have no attname (attnum 0) → skipped.
@@ -1513,6 +1515,7 @@ struct PgIndexRow {
     name: String,
     is_unique: bool,
     method: String,
+    def: Option<String>,
     col: Option<String>,
     #[allow(dead_code)]
     ord: Option<i32>,

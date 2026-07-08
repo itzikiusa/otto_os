@@ -322,6 +322,11 @@ pub struct IndexDef {
     pub unique: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    /// Full engine-native definition when available: Mongo = the raw
+    /// `listIndexes` document (partialFilterExpression, collation, TTL…),
+    /// Postgres = the `pg_get_indexdef` DDL string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<Value>,
 }
 
 /// A foreign-key relationship — the basis for the visual JOIN builder.

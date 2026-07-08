@@ -4289,6 +4289,12 @@ export interface DbIndexDef {
   columns: string[];
   unique: boolean;
   method?: string | null;
+  /**
+   * Full engine-native definition when available: Mongo = the raw listIndexes
+   * document (partialFilterExpression, collation, TTL…), Postgres = the
+   * pg_get_indexdef DDL string.
+   */
+  definition?: unknown;
 }
 
 export interface DbForeignKey {

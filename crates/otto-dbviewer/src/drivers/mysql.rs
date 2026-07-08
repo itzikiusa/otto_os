@@ -785,6 +785,7 @@ impl MysqlDriver {
                     columns: cols.into_iter().map(|(_, c)| c).collect(),
                     unique,
                     method,
+                    definition: None,
                 });
             }
         }

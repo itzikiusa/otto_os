@@ -206,30 +206,34 @@ impl Driver for MongoDriver {
         // row_count is filled below from collStats (an exact, cheap count in
         // Mongo — unlike SQL's opt-in estimates).
 
-        // Indexes (name + keys → IndexDef; unique from options).
-        if let Ok(mut cursor) = coll.list_indexes().await {
+        // Indexes: raw `listIndexes` documents so the full server definition
+        // (partialFilterExpression, collation, expireAfterSeconds…) survives —
+        // the typed IndexModel round-trip drops anything it doesn't model.
+        if let Ok(reply) = db
+            .run_command(doc! { "listIndexes": coll_name, "cursor": { "batchSize": 1000 } })
+            .await
+        {
+            let batch = reply
+                .get_document("cursor")
+                .ok()
+                .and_then(|c| c.get_array("firstBatch").ok())
+                .cloned()
+                .unwrap_or_default();
             let mut indexes = Vec::new();
-            while let Some(next) = cursor.next().await {
-                if let Ok(model) = next {
-                    let columns: Vec<String> =
-                        model.keys.keys().map(|k| k.to_string()).collect();
-                    let unique = model
-                        .options
-                        .as_ref()
-                        .and_then(|o| o.unique)
-                        .unwrap_or(false);
-                    let name = model
-                        .options
-                        .as_ref()
-                        .and_then(|o| o.name.clone())
-                        .unwrap_or_else(|| join_index_keys(&model.keys));
-                    indexes.push(IndexDef {
-                        name,
-                        columns,
-                        unique,
-                        method: None,
-                    });
-                }
+            for item in &batch {
+                let Some(spec) = item.as_document() else { continue };
+                let keys = spec.get_document("key").cloned().unwrap_or_default();
+                let name = spec
+                    .get_str("name")
+                    .map(str::to_string)
+                    .unwrap_or_else(|_| join_index_keys(&keys));
+                indexes.push(IndexDef {
+                    name,
+                    columns: keys.keys().map(|k| k.to_string()).collect(),
+                    unique: spec.get_bool("unique").unwrap_or(false),
+                    method: None,
+                    definition: Some(bson_to_json(&Bson::Document(spec.clone()))),
+                });
             }
             detail.indexes = indexes;
         }
