@@ -10,6 +10,7 @@
 
 import { api } from '../api/client';
 import { ws } from './workspace.svelte';
+import { defaultAgentProvider } from '../providers';
 import { assistToNodes, emptyScene, parseScene } from '../../modules/canvas/scene';
 import type {
   AssistMode,
@@ -49,8 +50,9 @@ class CanvasStore {
   source = $state<string | null>(null);
   /** The scene's source format (drives the render path). */
   format = $state<CanvasFormat>('mermaid');
-  /** Which agent/provider drives this scene's Ask-AI (single choice). */
-  provider = $state<string>('claude');
+  /** Which agent/provider drives this scene's Ask-AI (single choice). Seeds from
+   *  the configured default agent, not a bare hardcoded 'claude'. */
+  provider = $state<string>(defaultAgentProvider());
   /** Lightweight inline conversation with the canvas agent (client-side; the
    *  diagram is the durable artifact, persisted server-side). */
   convo = $state<CanvasTurn[]>([]);
@@ -120,7 +122,7 @@ class CanvasStore {
       this.source = typeof doc?.source === 'string' ? doc.source : null;
       this.format =
         doc?.format === 'excalidraw' ? 'excalidraw' : doc?.format === 'd2' ? 'd2' : 'mermaid';
-      this.provider = (row as { provider?: string }).provider ?? 'claude';
+      this.provider = (row as { provider?: string }).provider ?? defaultAgentProvider();
       this.convo = [];
       this.sessionId = row.session_id;
       this.#history = [];

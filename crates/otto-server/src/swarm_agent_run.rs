@@ -123,6 +123,7 @@ pub async fn run_swarm_agent(
     task_id: Option<&str>,
     nominal_agent_id: &str,
     provider: &str,
+    model: Option<&str>,
     kind: &str,
     title: &str,
     cwd: &str,
@@ -180,12 +181,17 @@ pub async fn run_swarm_agent(
             }
         }
 
-        let meta = serde_json::json!({
+        let mut meta = serde_json::json!({
             "source": "swarm",
             "swarm_id": swarm_id,
             "swarm_run_id": run_id,
             "kind": kind,
         });
+        // A chosen model reaches the CLI only via meta["model"] (→ --model);
+        // omit when empty so the provider default holds.
+        if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
+            meta["model"] = serde_json::json!(m);
+        }
         let req = CreateSessionReq {
             kind: SessionKind::Agent,
             provider: Some(provider.to_string()),

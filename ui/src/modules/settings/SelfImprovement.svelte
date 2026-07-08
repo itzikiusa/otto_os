@@ -13,7 +13,7 @@
   } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { improvementBus } from '../../lib/events.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -58,7 +58,7 @@
     if (set.has(name)) set.delete(name);
     else set.add(name);
     // Always keep at least one provider selected.
-    cfg.providers = set.size > 0 ? [...set] : ['claude'];
+    cfg.providers = set.size > 0 ? [...set] : [defaultAgentProvider()];
   }
 
   // ---------------------------------------------------------------------------

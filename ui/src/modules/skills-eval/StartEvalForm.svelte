@@ -32,10 +32,10 @@
   let showPicker = $state(false);
 
   let task = $state('');
-  let implCli = $state('claude');
+  let implCli = $state(defaultAgentProvider());
   let iterations = $state(2);
   let validatorPasses = $state(1);
-  let improverProvider = $state('claude');
+  let improverProvider = $state(defaultAgentProvider());
   let baseRef = $state('');
   // Repo-specific commands → scored as tests/lint signals + proof-pack evidence.
   let testCmd = $state('');

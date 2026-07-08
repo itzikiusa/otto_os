@@ -5,7 +5,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AcceptanceCriterion, GoalLoopDraft } from '../../lib/api/types';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
 
@@ -25,7 +25,7 @@
   let executorCount = $state(1);
   // Executor agent: provider from /meta (shell can't take an agent prompt);
   // model is a free-text alias ("" = provider default).
-  let execProvider = $state('claude');
+  let execProvider = $state(defaultAgentProvider());
   let execModel = $state('');
   const providers = $derived(
     agentProviders(),
@@ -48,7 +48,7 @@
       maxIterations = d.suggested_limits.max_iterations;
       maxMinutes = Math.round(d.suggested_limits.max_runtime_secs / 60);
       perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
-      execProvider = d.suggested_config.executors[0]?.provider || 'claude';
+      execProvider = d.suggested_config.executors[0]?.provider || defaultAgentProvider();
       execModel = d.suggested_config.executors[0]?.model || '';
       feedback = '';
     } catch (e) {
@@ -91,7 +91,7 @@
     try {
       const base = draft.suggested_config.executors[0] ?? {
         name: 'Executor',
-        provider: 'claude',
+        provider: defaultAgentProvider(),
         model: '',
         prompt_extra: '',
       };

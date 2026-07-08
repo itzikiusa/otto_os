@@ -509,8 +509,17 @@ class ProductStore {
     return api.get<RefinementThreadDetail>(`/product/refinement-threads/${tid}`);
   }
 
-  async sendRefinementMessage(tid: string, body: string): Promise<RefineTurnResp> {
-    return api.post<RefineTurnResp>(`/product/refinement-threads/${tid}/messages`, { body });
+  async sendRefinementMessage(
+    tid: string,
+    body: string,
+    provider?: string,
+    model?: string,
+  ): Promise<RefineTurnResp> {
+    return api.post<RefineTurnResp>(`/product/refinement-threads/${tid}/messages`, {
+      body,
+      provider: provider || undefined,
+      model: model || undefined,
+    });
   }
 
   async archiveRefinementThread(tid: string): Promise<RefinementThread> {

@@ -7,7 +7,7 @@
   import { contextApi } from '../../lib/api/context';
   import { toasts } from '../../lib/toast.svelte';
   import type { AgentSchedule, AgentSkill, CreateAgentReq, SwarmAgent } from './types';
-  import { agentProvidersWith } from '../../lib/providers';
+  import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
     agent?: SwarmAgent | null;
@@ -33,7 +33,7 @@
 
   let name = $state(src.name ?? '');
   let title = $state(src.title ?? '');
-  let provider = $state(src.provider ?? swarm.detail?.config.provider ?? 'claude');
+  let provider = $state(src.provider ?? swarm.detail?.config.provider ?? defaultAgentProvider());
   // Model alias (e.g. opus / sonnet / haiku) — blank = the provider's default.
   // Lets you duplicate an agent and run the copy on a different model.
   let model = $state((src.model ?? '') as string);

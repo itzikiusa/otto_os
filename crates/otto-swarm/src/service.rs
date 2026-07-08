@@ -32,9 +32,12 @@ impl SwarmService {
         Self { repo }
     }
 
-    fn default_config() -> Value {
+    /// Default swarm config when the create request omits one. `provider` is the
+    /// caller-resolved default agent (workspace → global → "claude"); threaded in
+    /// rather than hardcoded so a new swarm honors the configured default.
+    fn default_config(provider: &str) -> Value {
         json!({
-            "provider": "claude",
+            "provider": provider,
             "max_parallel_sessions": 4,
             "cwd_mode": "scratch",
             "auto_submit": false
@@ -56,8 +59,11 @@ impl SwarmService {
         ws: &Id,
         user: &Id,
         req: CreateSwarmReq,
+        default_provider: &str,
     ) -> Result<Swarm> {
-        let config = req.config.unwrap_or_else(Self::default_config);
+        let config = req
+            .config
+            .unwrap_or_else(|| Self::default_config(default_provider));
         // Budget defaults: an omitted field (None) takes the sensible default;
         // an explicit `null` (Some(None)) means unlimited for that dimension.
         self.repo

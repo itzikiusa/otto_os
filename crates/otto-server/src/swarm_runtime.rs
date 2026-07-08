@@ -1125,6 +1125,22 @@ async fn check(ctx: &ServerCtx, user: &AuthUser, ws: &Id, role: WorkspaceRole) -
     ctx.roles.check(&user.0, ws, role).await.map_err(ApiError)
 }
 
+/// Resolve the default agent provider a swarm meta-agent (recruiter / planner /
+/// summarizer) should run on: the workspace's `default_provider`, else the global
+/// `default_provider` setting, else "claude". Keeps these coordinator-spawned
+/// sessions on the user's configured default instead of a bare "claude" literal.
+async fn swarm_meta_provider(ctx: &ServerCtx, ws: &otto_core::domain::Workspace) -> String {
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    otto_core::provider::resolve_provider(&[
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ])
+}
+
 async fn start(
     State(ctx): State<ServerCtx>,
     Extension(user): Extension<AuthUser>,
@@ -1318,6 +1334,10 @@ async fn recruit(
         use otto_swarm::SwarmCtx;
         ctx.available_providers()
     };
+    // The provider the recruiter meta-agent itself runs on — the configured
+    // default (workspace → global → "claude"), not a bare literal.
+    let workspace = ctx.workspaces.get(&ws).await.map_err(ApiError)?;
+    let meta_provider = swarm_meta_provider(&ctx, &workspace).await;
     let prompt = otto_swarm::recruiter::recruiter_prompt(
         &req.role, &swarm_name, &mission, &titles, &capped_skills, &providers,
         req.context.as_deref(), req.naming_theme.as_deref(),
@@ -1328,7 +1348,6 @@ async fn recruit(
     // headless one-shot turn (nothing to attach a run/session to).
     let (reply, run_id): (String, Option<Id>) = match &req.swarm_id {
         Some(sid) => {
-            let ws_obj = ctx.workspaces.get(&ws).await.map_err(ApiError)?;
             let nominal = ctx
                 .swarm_repo
                 .list_agents(sid)
@@ -1339,7 +1358,7 @@ async fn recruit(
                 .unwrap_or_else(|| "recruiter".to_string());
             let cancel = crate::swarm_agent_run::begin(sid);
             let (raw, rid) = crate::swarm_agent_run::run_swarm_agent(
-                &ctx, &ws_obj, &user.0, sid, None, None, &nominal, "claude", "recruit",
+                &ctx, &workspace, &user.0, sid, None, None, &nominal, &meta_provider, None, "recruit",
                 &format!("Recruit: {}", req.role), &cwd, &prompt,
                 |t| otto_swarm::recruiter::parse_recruited(t).is_some(),
                 &cancel,
@@ -1365,9 +1384,14 @@ async fn recruit(
     // skill the recruiter invents that is not in the real library is dropped.
     let known: std::collections::HashSet<String> = all_skills.into_iter().collect();
     recruited.skills.retain(|s| known.contains(&s.name));
-    // Force the provider to an available one.
+    // Force the provider to an available one. Prefer the configured default when
+    // it's actually available, else the first available provider, else "claude".
     if !providers.iter().any(|p| p == &recruited.suggested_provider) {
-        recruited.suggested_provider = providers.first().cloned().unwrap_or_else(|| "claude".into());
+        recruited.suggested_provider = if providers.iter().any(|p| p == &meta_provider) {
+            meta_provider.clone()
+        } else {
+            providers.first().cloned().unwrap_or_else(|| "claude".into())
+        };
     }
     // Persist the proposal on the run so it can be hired straight from the Runs
     // list even if the Recruit modal was closed while the agent worked.
@@ -1416,6 +1440,9 @@ async fn plan(
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
     let ws_obj = ctx.workspaces.get(&ws).await.map_err(ApiError)?;
+    // The provider the planner/summarizer meta-agents run on — the configured
+    // default (workspace → global → "claude").
+    let meta_provider = swarm_meta_provider(&ctx, &ws_obj).await;
     let nominal_agent = agents
         .first()
         .map(|a| a.id.clone())
@@ -1433,7 +1460,7 @@ async fn plan(
         let title = format!("Plan {}/{}: {}", i + 1, angles.len(), project.name);
         let (raw, _) = crate::swarm_agent_run::run_swarm_agent(
             &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), None, &nominal_agent,
-            "claude", "plan", &title, &cwd, &prompt,
+            &meta_provider, None, "plan", &title, &cwd, &prompt,
             |t| otto_swarm::recruiter::extract_json(t).is_some(),
             &cancel,
         )
@@ -1450,7 +1477,7 @@ async fn plan(
         );
         let (raw, _) = crate::swarm_agent_run::run_swarm_agent(
             &ctx, &ws_obj, &user.0, &project.swarm_id, Some(&project.id), None, &nominal_agent,
-            "claude", "plan", &format!("Plan summary: {}", project.name), &cwd, &sum_prompt,
+            &meta_provider, None, "plan", &format!("Plan summary: {}", project.name), &cwd, &sum_prompt,
             |t| otto_swarm::recruiter::extract_json(t).is_some(),
             &cancel,
         )

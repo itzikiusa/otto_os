@@ -906,7 +906,30 @@ async fn run_executor_attempt(
     out_path: &std::path::Path,
     timeout: Duration,
 ) -> RunOutcome {
-    let provider = if exec.provider.is_empty() { "claude" } else { &exec.provider };
+    // A blank executor provider resolves to the workspace/global default agent
+    // (not a bare hardcoded "claude"), honoring Settings → Providers.
+    let resolved_provider;
+    let provider = if exec.provider.trim().is_empty() {
+        let global = otto_state::SettingsRepo::new(ctx.pool.clone())
+            .get("default_provider")
+            .await
+            .ok()
+            .flatten();
+        let ws_default = ctx
+            .workspaces
+            .get(&loop_.workspace_id)
+            .await
+            .ok()
+            .map(|w| otto_core::provider::workspace_default(&w.settings).to_string())
+            .unwrap_or_default();
+        resolved_provider = otto_core::provider::resolve_provider(&[
+            ws_default.as_str(),
+            otto_core::provider::global_default(global.as_ref()),
+        ]);
+        resolved_provider.as_str()
+    } else {
+        exec.provider.trim()
+    };
     let mut meta = serde_json::json!({
         "source": "goal_loop",
         "loop_id": loop_.id,

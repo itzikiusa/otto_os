@@ -15,7 +15,7 @@
     HandoverTarget,
     HandoverBriefResp,
   } from '../../lib/api/types';
-  import { allProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
     sessionId: string;
@@ -24,7 +24,9 @@
   let { sessionId, onclose }: Props = $props();
 
   const source = $derived(ws.sessions.find((s) => s.id === sessionId) ?? null);
-  const providers = $derived(allProviders());
+  // A handover target must be able to reason — shell is not a valid target, so
+  // the list is registry-sourced AGENT providers only (never plain shell).
+  const providers = $derived(agentProviders());
   // Other agent sessions in this workspace, eligible as existing targets.
   const otherAgents = $derived(ws.plainAgentSessions.filter((s) => s.id !== sessionId));
 
@@ -63,12 +65,16 @@
           : 'Custom provider';
   }
 
-  // Default to the first available provider that differs from the source.
+  // Default to the configured default agent; only if it equals the source (or
+  // isn't available) fall back to an available provider that differs from it.
   $effect(() => {
     if (provider === '' && providers.length > 0) {
       const avail = providers.filter(toolFound);
+      const def = defaultAgentProvider();
       provider =
-        avail.find((p) => p !== source?.provider) ?? avail[0] ?? providers[0];
+        def !== source?.provider && avail.includes(def)
+          ? def
+          : (avail.find((p) => p !== source?.provider) ?? avail[0] ?? providers[0]);
     }
   });
 

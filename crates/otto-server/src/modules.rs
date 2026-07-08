@@ -2146,6 +2146,7 @@ async fn run_review_core(
                 &ws,
                 &user,
                 &run.provider,
+                &run.model,
                 &cwd,
                 &review_id_s,
                 i,
@@ -2195,6 +2196,7 @@ async fn run_review_core(
         review_id,
         repo_path,
         workspace,
+        &review_user,
         repo_id,
         pr_number,
         &cfg.summarizer,
@@ -2265,6 +2267,7 @@ async fn summarize_and_persist(
     review_id: &Id,
     repo_path: &str,
     workspace: &Workspace,
+    user: &otto_core::domain::User,
     repo_id: &Id,
     pr_number: u64,
     summarizer_cfg: &ReviewAgentCfg,
@@ -2308,16 +2311,44 @@ async fn summarize_and_persist(
 
     tracing::info!(review = %review_id, "running summarizer agent ({total_findings} findings in)");
     let mut summary_fallback = false;
-    let summary_text = match ctx
-        .orchestrator
-        .run_agent(
-            &summarizer_prompt,
+    // Run the summarizer on its CONFIGURED provider (the ReviewPanel exposes a
+    // summarizer-provider picker). claude/unset ⇒ the fast orchestrator PTY
+    // (unchanged); any other provider ⇒ a managed `run_session_turn` so a chosen
+    // codex/agy/custom summarizer actually runs instead of being ignored.
+    let sp = summarizer_cfg.provider.trim();
+    let run_text: std::result::Result<String, String> = if sp.is_empty() || sp == "claude" {
+        ctx.orchestrator
+            .run_agent(
+                &summarizer_prompt,
+                repo_path,
+                model_opt(&summarizer_cfg.model),
+                Duration::from_secs(120),
+            )
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        let mut meta = serde_json::json!({ "source": "review_summarizer", "review_id": review_id });
+        if !summarizer_cfg.model.trim().is_empty() {
+            meta["model"] = serde_json::json!(summarizer_cfg.model.trim());
+        }
+        crate::agent_session::run_session_turn(
+            ctx,
+            workspace,
+            user,
+            None,
+            "Review summarizer",
             repo_path,
-            model_opt(&summarizer_cfg.model),
+            sp,
+            meta,
+            &summarizer_prompt,
             Duration::from_secs(120),
+            |_id| {},
         )
         .await
-    {
+        .map(|(t, _sid)| t)
+        .map_err(|e| format!("{e:?}"))
+    };
+    let summary_text = match run_text {
         Ok(t) => t,
         Err(e) => {
             // Deterministic floor (design 2026-07-04 §C): dedupe + rank the raw
@@ -3127,7 +3158,7 @@ async fn fetch_pr_details_for_readiness(
 /// First `[A-Z]+-[0-9]+` token in a branch name (e.g. `feature/PROJ-16232-x` →
 /// `PROJ-16232`). Seeds the Jira key into commit/PR drafts. Returns `None` when the
 /// branch carries no such token — we never fabricate a key.
-fn jira_key_from_branch(branch: &str) -> Option<String> {
+pub(crate) fn jira_key_from_branch(branch: &str) -> Option<String> {
     let b = branch.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -3159,7 +3190,7 @@ fn jira_key_from_branch(branch: &str) -> Option<String> {
 /// include the key, but LLMs forget (especially under the Conventional-Commits
 /// format), so this makes the reference always present, identically for PRs and
 /// commits.
-fn ensure_jira_in_subject(subject: &str, key: &str) -> String {
+pub(crate) fn ensure_jira_in_subject(subject: &str, key: &str) -> String {
     if subject.contains(key) {
         subject.to_string()
     } else {
@@ -3323,7 +3354,7 @@ mod review_lens_prompt_tests {
 /// Tolerantly pull `{title, description}` out of an agent reply (which may wrap
 /// the JSON in prose or a markdown fence). Falls back to using the branch name
 /// as the title and the whole reply as the description.
-fn parse_pr_draft(text: &str, fallback_title: &str) -> (String, String) {
+pub(crate) fn parse_pr_draft(text: &str, fallback_title: &str) -> (String, String) {
     if let (Some(s), Some(e)) = (text.find('{'), text.rfind('}')) {
         if e > s {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text[s..=e]) {
@@ -3382,6 +3413,36 @@ pub(crate) async fn draft_pr_core(
     repo_path: &str,
     base: Option<&str>,
 ) -> Result<otto_core::api::DraftPrResp> {
+    // HTTP path: draft with the default agent (orchestrator = claude PTY). The
+    // workflow git_pr node uses `pr_draft_prompt` + `run_node_agent` instead so it
+    // can honor the node's chosen Provider/Model.
+    let (prompt, source, base_branch) = pr_draft_prompt(ctx, repo_path, base).await?;
+    let reply = ctx
+        .orchestrator
+        .run_agent(&prompt, repo_path, None, std::time::Duration::from_secs(150))
+        .await?;
+    let (mut title, description) = parse_pr_draft(&reply, &source);
+    if let Some(key) = jira_key_from_branch(&source) {
+        title = ensure_jira_in_subject(&title, &key);
+    }
+    Ok(otto_core::api::DraftPrResp {
+        title,
+        description,
+        source_branch: source,
+        target_branch: base_branch,
+    })
+}
+
+/// Build the PR-draft agent prompt for the checkout at `repo_path` vs `base`
+/// (diff → title/description instructions + the installed `pull-request` skill).
+/// Returns `(prompt, source_branch, resolved_base_branch)`. Errors when there is
+/// no diff. Shared by [`draft_pr_core`] (HTTP, claude) and the workflow `git_pr`
+/// node (honors the node's provider) so both craft the message identically.
+pub(crate) async fn pr_draft_prompt(
+    ctx: &ServerCtx,
+    repo_path: &str,
+    base: Option<&str>,
+) -> Result<(String, String, String)> {
     let git = otto_git::LocalGit::new(repo_path);
     let source = git.current_branch().await?;
     let resolved = git.resolve_base(base).await?;
@@ -3443,23 +3504,7 @@ pub(crate) async fn draft_pr_core(
     let skill_text = resolve_skill_inline(&ctx.context_library, "pull-request");
     let prompt = compose_draft_prompt(&skill_text, &base_prompt);
 
-    let reply = ctx
-        .orchestrator
-        .run_agent(&prompt, repo_path, None, std::time::Duration::from_secs(150))
-        .await?;
-    let (mut title, description) = parse_pr_draft(&reply, &source);
-    // Deterministically guarantee the Jira key prefixes the title (the agent is
-    // asked to, but may omit it) — the reference must always be present.
-    if let Some(key) = jira_key_from_branch(&source) {
-        title = ensure_jira_in_subject(&title, &key);
-    }
-
-    Ok(otto_core::api::DraftPrResp {
-        title,
-        description,
-        source_branch: source,
-        target_branch: base.to_string(),
-    })
+    Ok((prompt, source, base.to_string()))
 }
 
 /// Launch an AI review on a specific branch/worktree (Run with Otto's `reviewing`
@@ -3743,6 +3788,9 @@ async fn retry_review_agent(
     }
 
     let provider = review.agents[index].provider.clone();
+    // Retry this reviewer with the SAME model it was configured with (empty →
+    // provider default) so the retry matches the original run.
+    let model = review.agents[index].model.clone();
     let cwd = repo.path.clone();
     // The prompt references the diff via an absolute temp path — re-materialize
     // it from the durable row if a reboot/temp-sweep removed it (best-effort;
@@ -3791,6 +3839,7 @@ async fn retry_review_agent(
             &workspace,
             &review_user,
             &provider,
+            &model,
             &cwd,
             &review_id_bg,
             index,
@@ -3906,6 +3955,7 @@ async fn retry_summarizer(
             &review_id_bg,
             &repo_path,
             &workspace,
+            &user,
             &repo_id,
             pr_number,
             &cfg.summarizer,
@@ -5393,14 +5443,21 @@ async fn inject_session(
         .await
         .map_err(ApiError)?;
 
-    // Spawn the agent session.
+    // Spawn the agent session. A chosen model reaches the CLI only via
+    // `meta.model` (→ `--model`); omit when empty so the provider default holds.
+    let meta = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|m| serde_json::json!({ "model": m }));
     let create_req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(provider),
         title: Some(format!("Implement {}", story.source_key)),
         cwd: Some(cwd),
         connection_id: None,
-        meta: None,
+        meta,
     };
     let session = ctx
         .manager

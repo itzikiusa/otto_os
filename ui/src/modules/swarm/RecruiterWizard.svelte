@@ -8,7 +8,7 @@
   import { isAbortError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { AgentSkill, CreateAgentReq, RecruitedAgent } from './types';
-  import { agentProvidersWith } from '../../lib/providers';
+  import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
     onclose: () => void;
@@ -41,7 +41,7 @@
   // Editable proposal fields (pre-filled when hiring from a completed run).
   let name = $state(seed?.name ?? '');
   let title = $state(seed?.title ?? '');
-  let provider = $state(seed?.suggested_provider ?? 'claude');
+  let provider = $state(seed?.suggested_provider ?? defaultAgentProvider());
   let model = $state(seed?.suggested_model ?? '');
   let reportsTo = $state(seededReportsTo);
   let specialization = $state(seed?.specialization ?? '');
@@ -88,7 +88,7 @@
       );
       name = r.name;
       title = r.title || role.trim();
-      provider = r.suggested_provider || 'claude';
+      provider = r.suggested_provider || defaultAgentProvider();
       model = r.suggested_model ?? '';
       specialization = r.specialization;
       soulMd = r.soul_md;

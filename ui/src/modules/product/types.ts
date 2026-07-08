@@ -566,6 +566,11 @@ export interface ProductMockupAssistReq {
   format?: 'html' | 'mermaid';
   /** Refine an existing agent mockup (resume its session); omit to create one. */
   mockup_id?: string;
+  /** Agent provider (built-in or custom, e.g. `grok`). Honored only when a NEW
+   *  mockup session is created; a refine resumes the existing one. */
+  provider?: string;
+  /** Optional model alias for the first turn. */
+  model?: string;
 }
 
 export interface DiscoveryRun {
@@ -644,6 +649,16 @@ export interface RefinementMessage {
 export interface RefinementThreadDetail { thread: RefinementThread; messages: RefinementMessage[] }
 
 export interface CreateThreadReq { discovery_run_id?: string | null; title?: string | null }
+
+/** Body for `POST /product/refinement-threads/{tid}/messages`. */
+export interface RefineSendReq {
+  body: string;
+  /** Agent provider for this turn (built-in or custom, e.g. `grok`). Each turn
+   *  replays the full thread history, so a per-turn provider is self-contained. */
+  provider?: string;
+  /** Optional model alias for this turn. */
+  model?: string;
+}
 
 export interface RefineTurnResp {
   user_message: RefinementMessage;

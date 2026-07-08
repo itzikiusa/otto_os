@@ -238,6 +238,11 @@ pub async fn run_agent_session(
     ws: &Workspace,
     user: &User,
     provider: &str,
+    // Per-reviewer model (e.g. a specific claude/codex model). Empty → the
+    // provider's default. Carried into meta so SessionManager injects
+    // `--model <name>` for providers that support it — mirrors the summarizer,
+    // which already honours its configured model via `model_opt`.
+    model: &str,
     // Working directory for the agent (the repo path — where the diff lives).
     cwd: &str,
     review_id: &str,
@@ -266,6 +271,9 @@ pub async fn run_agent_session(
     // `.agents/skills`) is the propagation bug; they get the lens method inline.
     if let Some(dirs) = review_skills_extra_dirs(provider, skills_add_dir) {
         meta["extra_dirs"] = dirs;
+    }
+    if !model.trim().is_empty() {
+        meta["model"] = serde_json::json!(model.trim());
     }
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
@@ -390,6 +398,8 @@ pub async fn run_agent_session_with_recovery(
     ws: &Workspace,
     user: &User,
     provider: &str,
+    // Per-reviewer model (empty → provider default); threaded into each attempt.
+    model: &str,
     cwd: &str,
     review_id: &str,
     agent_index: usize,
@@ -411,7 +421,7 @@ pub async fn run_agent_session_with_recovery(
         cancel,
         |_attempt| {
             run_agent_session(
-                manager, reviews, states, ws, user, provider, cwd, review_id, agent_index,
+                manager, reviews, states, ws, user, provider, model, cwd, review_id, agent_index,
                 base_prompt, timeout, skills_add_dir,
             )
         },

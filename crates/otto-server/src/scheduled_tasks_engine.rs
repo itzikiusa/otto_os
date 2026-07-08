@@ -428,7 +428,13 @@ async fn run_one_agent_session(
     use crate::agent_run::{FailReason, RunOutcome};
 
     let _ = std::fs::remove_file(out_path);
-    let meta = json!({ "source": "scheduled_task", "task_id": task.id, "run_id": run_id });
+    let mut meta = json!({ "source": "scheduled_task", "task_id": task.id, "run_id": run_id });
+    // Carry the task's model into meta so SessionManager can inject `--model
+    // <name>` for providers that support it — the headless path (execute_agent)
+    // already honours task.model; keep this visible-session path consistent.
+    if !task.model.trim().is_empty() {
+        meta["model"] = json!(task.model.trim());
+    }
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(task.provider.clone()),

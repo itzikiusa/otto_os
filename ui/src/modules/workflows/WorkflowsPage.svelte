@@ -973,7 +973,7 @@
     onParam('reviewers', rows.length ? rows : undefined);
   }
   function addReviewer(): void {
-    setReviewers([...reviewers(), { lens: '', providers: ['claude'] }]);
+    setReviewers([...reviewers(), { lens: '', providers: [defaultAgentProvider()] }]);
   }
   function removeReviewer(i: number): void {
     setReviewers(reviewers().filter((_, idx) => idx !== i));
@@ -984,7 +984,7 @@
   function toggleReviewerProvider(i: number, prov: string): void {
     const cur = reviewers()[i]?.providers ?? [];
     const next = cur.includes(prov) ? cur.filter((x) => x !== prov) : [...cur, prov];
-    updateReviewer(i, { providers: next.length ? next : ['claude'] });
+    updateReviewer(i, { providers: next.length ? next : [defaultAgentProvider()] });
   }
   function summarizerField(field: 'provider' | 'instructions'): string {
     const p = selectedNode?.params as Record<string, unknown> | undefined;
@@ -1009,6 +1009,104 @@
     const p = selectedNode?.params as Record<string, unknown> | undefined;
     const next = { ...((p?.scoring as Record<string, unknown>) ?? {}), [sev]: value };
     onParam('scoring', next);
+  }
+
+  // --- loop sub-steps: each step is a node-like {kind,name,params}. The loop
+  // runs them in order each iteration. Agent-running sub-steps (agent_prompt,
+  // prepare_context, review_run, product_*, canvas) get a real Provider/Model
+  // editor here — no more hand-editing raw JSON to set a sub-step's provider. ---
+  interface LoopStep {
+    kind: string;
+    name?: string;
+    params?: Record<string, unknown>;
+  }
+  // Sub-step kinds that spawn a single agent → Provider + Model (+ Prompt).
+  const LOOP_AGENT_KINDS = [
+    'agent_prompt',
+    'prepare_context',
+    'product_analyze',
+    'product_rewrite',
+    'product_plan',
+    'canvas',
+  ];
+  // Kinds a loop sub-step can be (agent kinds + review_run + the common
+  // non-agent utilities). Anything else stays editable via Advanced JSON.
+  const LOOP_STEP_KINDS = [...LOOP_AGENT_KINDS, 'review_run', 'http_request', 'db_query', 'delay', 'transform'];
+
+  // Kinds that render their OWN Provider control (inline or a richer multi-agent
+  // config). EVERY OTHER kind gets the shared universal Provider+Model block, so
+  // NO node is ever missing a provider selector — including git_pr (drafts the PR
+  // message with an agent), swarm_task, and the utility nodes.
+  const KINDS_WITH_OWN_PROVIDER = [
+    'agent_prompt',
+    'prepare_context',
+    'product_analyze',
+    'product_rewrite',
+    'product_plan',
+    'canvas',
+    'review_run',
+    'self_improve',
+    'loop',
+    'budget_gate',
+  ];
+
+  function loopSteps(): LoopStep[] {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    return Array.isArray(p?.steps) ? (p?.steps as LoopStep[]) : [];
+  }
+  function setLoopSteps(steps: LoopStep[]): void {
+    onParam('steps', steps.length ? steps : undefined);
+  }
+  function addLoopStep(): void {
+    setLoopSteps([...loopSteps(), { kind: 'agent_prompt', name: '', params: {} }]);
+  }
+  function removeLoopStep(i: number): void {
+    setLoopSteps(loopSteps().filter((_, idx) => idx !== i));
+  }
+  function updateLoopStep(i: number, patch: Partial<LoopStep>): void {
+    setLoopSteps(loopSteps().map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
+  }
+  function loopStepParam(i: number, key: string): string {
+    const v = (loopSteps()[i]?.params ?? {})[key];
+    return typeof v === 'string' ? v : v != null ? String(v) : '';
+  }
+  function loopStepParamList(i: number, key: string): string {
+    const v = (loopSteps()[i]?.params ?? {})[key];
+    if (Array.isArray(v)) return v.filter((x) => typeof x === 'string').join(', ');
+    return typeof v === 'string' ? v : '';
+  }
+  function updateLoopStepParam(i: number, key: string, value: unknown): void {
+    const step = loopSteps()[i];
+    if (!step) return;
+    const params = { ...(step.params ?? {}) };
+    if (value == null || value === '' || (Array.isArray(value) && value.length === 0)) delete params[key];
+    else params[key] = value;
+    updateLoopStep(i, { params });
+  }
+  function updateLoopStepSummarizer(i: number, provider: string): void {
+    const step = loopSteps()[i];
+    if (!step) return;
+    const params = { ...(step.params ?? {}) };
+    if (provider.trim() === '') delete params.summarizer;
+    else params.summarizer = { ...((params.summarizer as Record<string, unknown>) ?? {}), provider };
+    updateLoopStep(i, { params });
+  }
+  function loopStepSummarizer(i: number): string {
+    const s = (loopSteps()[i]?.params ?? {}).summarizer as Record<string, unknown> | undefined;
+    return typeof s?.provider === 'string' ? s.provider : '';
+  }
+
+  // --- self_improve: reflection can run on one or more agents; the node's
+  // `providers` array overrides the workspace's Self-Improvement providers. Empty
+  // ⇒ use the configured set (Settings → Self-Improvement). ---
+  function selfImproveProviders(): string[] {
+    const p = selectedNode?.params as Record<string, unknown> | undefined;
+    return Array.isArray(p?.providers) ? (p.providers as string[]) : [];
+  }
+  function toggleSelfImproveProvider(prov: string): void {
+    const cur = selfImproveProviders();
+    const next = cur.includes(prov) ? cur.filter((x) => x !== prov) : [...cur, prov];
+    onParam('providers', next.length ? next : undefined);
   }
 
   // --- Per-node retry policy (writes node.retry, not params) ----------------
@@ -1719,6 +1817,44 @@
                 value={paramList('skills')}
                 oninput={(e) => onParamList('skills', e.currentTarget.value)}
               />
+            {:else if selectedNode.kind === 'prepare_context'}
+              <p class="insp-note">
+                Fetches the Jira ticket from the input (if any) into a context file, then
+                — if you give it a prompt — runs an agent to consolidate a brief. The
+                Provider/Model below drive that agent phase.
+              </p>
+              <label for="np-pc-prompt">Prompt (optional — runs an agent when set)</label>
+              <textarea
+                id="np-pc-prompt"
+                rows="4"
+                placeholder="e.g. Read the ticket + repos and produce a consolidated brief…"
+                value={paramStr('prompt')}
+                oninput={(e) => onParam('prompt', e.currentTarget.value)}
+              ></textarea>
+              {@render agentProviderModel()}
+              <label for="np-pc-skills">Skills (comma-separated)</label>
+              <input
+                id="np-pc-skills"
+                type="text"
+                placeholder="e.g. golang-testing"
+                value={paramList('skills')}
+                oninput={(e) => onParamList('skills', e.currentTarget.value)}
+              />
+              <label for="np-pc-account">Jira account ID (optional — else the default)</label>
+              <input
+                id="np-pc-account"
+                type="text"
+                placeholder="inherits the default Jira account"
+                value={paramStr('account_id')}
+                oninput={(e) => onParam('account_id', e.currentTarget.value || undefined)}
+              />
+              <label class="np-chk">
+                <input
+                  type="checkbox"
+                  checked={paramBool('require')}
+                  onchange={(e) => onParam('require', e.currentTarget.checked || undefined)}
+                /> Fail the run if the Jira fetch fails
+              </label>
             {:else if selectedNode.kind === 'http_request'}
               <label for="np-method">Method</label>
               <select
@@ -1849,14 +1985,13 @@
                 <option value="telegram">Telegram</option>
               </select>
             {:else if selectedNode.kind === 'budget_gate'}
-              <label for="np-provider">Provider</label>
+              <label for="np-provider">Provider (whose usage budget to check)</label>
               <select
                 id="np-provider"
-                value={paramStr('provider') || 'claude'}
+                value={paramStr('provider') || defaultAgentProvider()}
                 onchange={(e) => onParam('provider', e.currentTarget.value)}
               >
-                <option value="claude">Claude</option>
-                <option value="codex">Codex</option>
+                {#each agentProviders() as pv (pv)}<option value={pv}>{pv}</option>{/each}
               </select>
               <p class="node-hint">Errors the run if the provider budget is exceeded and enforcement is on.</p>
             {:else if selectedNode.kind === 'human_approval'}
@@ -1957,14 +2092,87 @@
                 value={paramStr('until')}
                 oninput={(e) => onParam('until', e.currentTarget.value)}
               />
-              {@render jsonLabel('np-steps', 'Steps (JSON array)', 'steps')}
-              <textarea
-                id="np-steps"
-                rows="5"
-                placeholder={'[ { "kind": "agent_prompt", "params": {} } ]'}
-                value={paramJson('steps')}
-                oninput={(e) => onParamJson('steps', e.currentTarget.value)}
-              ></textarea>
+              <!-- Structured sub-step editor: the loop body runs these in order
+                   each iteration. Agent sub-steps expose Provider + Model + Prompt
+                   directly (no more raw-JSON editing to set a provider). -->
+              <div class="rv-h">
+                <span class="np-label">Steps — run in order each iteration</span>
+                <button class="btn small ghost" type="button" onclick={addLoopStep}>
+                  <Icon name="plus" size={11} /> Add step
+                </button>
+              </div>
+              {#if loopSteps().length === 0}
+                <p class="insp-note">No steps yet — add one (e.g. a <code>review_run</code> then an <code>agent_prompt</code> “fix”).</p>
+              {/if}
+              {#each loopSteps() as step, i (i)}
+                <div class="rv-row">
+                  <div class="rv-top">
+                    <select
+                      class="ls-kind"
+                      value={step.kind}
+                      onchange={(e) => updateLoopStep(i, { kind: e.currentTarget.value })}
+                    >
+                      {#each LOOP_STEP_KINDS as k (k)}<option value={k}>{k}</option>{/each}
+                      {#if !LOOP_STEP_KINDS.includes(step.kind)}<option value={step.kind}>{step.kind}</option>{/if}
+                    </select>
+                    <input
+                      class="rv-lens"
+                      type="text"
+                      placeholder="name (e.g. fix)"
+                      value={step.name ?? ''}
+                      oninput={(e) => updateLoopStep(i, { name: e.currentTarget.value || undefined })}
+                    />
+                    <button class="rv-del" type="button" title="Remove step" onclick={() => removeLoopStep(i)}>
+                      <Icon name="trash" size={11} />
+                    </button>
+                  </div>
+                  {#if LOOP_AGENT_KINDS.includes(step.kind)}
+                    <textarea
+                      class="rv-instr"
+                      rows="2"
+                      placeholder="prompt / instructions for this agent step"
+                      value={loopStepParam(i, 'prompt')}
+                      oninput={(e) => updateLoopStepParam(i, 'prompt', e.currentTarget.value)}
+                    ></textarea>
+                    <div class="ls-pm">
+                      <select
+                        class="ls-prov"
+                        value={loopStepParam(i, 'provider')}
+                        onchange={(e) => updateLoopStepParam(i, 'provider', e.currentTarget.value || undefined)}
+                      >
+                        <option value="">default ({defaultAgentProvider()})</option>
+                        {#each agentProviders() as pv (pv)}<option value={pv}>{pv}</option>{/each}
+                      </select>
+                      <input
+                        class="ls-model"
+                        type="text"
+                        placeholder="model (optional)"
+                        value={loopStepParam(i, 'model')}
+                        oninput={(e) => updateLoopStepParam(i, 'model', e.currentTarget.value || undefined)}
+                      />
+                    </div>
+                  {:else if step.kind === 'review_run'}
+                    <input
+                      class="rv-lens"
+                      type="text"
+                      placeholder="reviewer providers (comma-separated, e.g. claude, codex)"
+                      value={loopStepParamList(i, 'providers')}
+                      oninput={(e) => updateLoopStepParam(i, 'providers', e.currentTarget.value.split(',').map((s) => s.trim()).filter(Boolean))}
+                    />
+                    <input
+                      class="rv-lens"
+                      type="text"
+                      placeholder="summarizer provider (optional)"
+                      value={loopStepSummarizer(i)}
+                      oninput={(e) => updateLoopStepSummarizer(i, e.currentTarget.value)}
+                    />
+                  {:else}
+                    <p class="insp-note">
+                      <code>{step.kind}</code> takes no agent — edit its params in Advanced (JSON) below.
+                    </p>
+                  {/if}
+                </div>
+              {/each}
               <label class="np-chk">
                 <input
                   type="checkbox"
@@ -1972,6 +2180,17 @@
                   onchange={(e) => onParam('continue_on_error', e.currentTarget.checked)}
                 /> Continue on step error
               </label>
+              <details class="ls-advanced">
+                <summary>Advanced — edit steps as raw JSON</summary>
+                {@render jsonLabel('np-steps', 'Steps (JSON array)', 'steps')}
+                <textarea
+                  id="np-steps"
+                  rows="5"
+                  placeholder={'[ { "kind": "agent_prompt", "params": {} } ]'}
+                  value={paramJson('steps')}
+                  oninput={(e) => onParamJson('steps', e.currentTarget.value)}
+                ></textarea>
+              </details>
             {:else if selectedNode.kind === 'review_run'}
               <p class="insp-note">
                 Leave Repo&nbsp;ID and Base empty to review exactly where the implementer worked
@@ -2283,7 +2502,24 @@
                 Reflects on the workspace's recent agent sessions and <strong>offers</strong>
                 skill/memory improvements. They are <strong>queued for approval</strong> in
                 Self-Improvement — never auto-applied — and the offered list is posted to the
-                trigger's chat thread. No parameters.
+                trigger's chat thread.
+              </p>
+              <span class="np-label">Providers — the agent(s) that reflect (override Self-Improvement settings)</span>
+              <div class="rv-provs">
+                {#each agentProviders() as prov (prov)}
+                  <label class="rv-chip" class:on={selfImproveProviders().includes(prov)}>
+                    <input
+                      type="checkbox"
+                      checked={selfImproveProviders().includes(prov)}
+                      onchange={() => toggleSelfImproveProvider(prov)}
+                    />
+                    {prov}
+                  </label>
+                {/each}
+              </div>
+              <p class="node-hint">
+                Leave all unchecked to use the providers configured in
+                <strong>Settings → Self-Improvement</strong>.
               </p>
             {:else if selectedNode.kind !== 'manual_trigger' && selectedNode.kind !== 'log' && selectedNode.kind !== 'verifier'}
               <!-- Fallback raw-JSON editor for unrecognised or future node kinds -->
@@ -2301,6 +2537,16 @@
                   } catch { /* keep typing */ }
                 }}
               ></textarea>
+            {/if}
+
+            <!-- Universal Provider + Model: EVERY node that doesn't render its own
+                 provider control gets one here, so no node is ever missing it.
+                 For agent-running kinds (git_pr drafts the PR message, swarm_task,
+                 …) it drives the agent; for pure utility nodes it's simply present
+                 and unused. Kinds with their own control are excluded to avoid a
+                 duplicate. -->
+            {#if !KINDS_WITH_OWN_PROVIDER.includes(selectedNode.kind) && selectedNode.kind !== 'manual_trigger'}
+              {@render agentProviderModel()}
             {/if}
 
             <!-- Retry policy (any node): extra attempts with exponential backoff. -->
@@ -3567,6 +3813,32 @@
   }
   .rv-lens {
     flex: 1;
+  }
+  /* loop sub-step editor */
+  .ls-kind {
+    flex: 0 0 auto;
+    max-width: 150px;
+  }
+  .ls-pm {
+    display: flex;
+    gap: 6px;
+  }
+  .ls-prov {
+    flex: 1;
+    min-width: 0;
+  }
+  .ls-model {
+    flex: 1;
+    min-width: 0;
+  }
+  .ls-advanced {
+    margin-top: 2px;
+  }
+  .ls-advanced summary {
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
   }
   .rv-del {
     background: none;

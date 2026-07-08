@@ -888,12 +888,27 @@ pub async fn run_workflow(
     // The per-node execution environment (run identity + ambient cwd/base +
     // context files). The registry on `files` is the run's source of truth
     // for repos/branches — input threading loses keys hop by hop.
+    // Resolve the workspace's effective default agent once (workspace default →
+    // global default → "claude"), so nodes left on "default" honor the user's
+    // configured provider instead of a bare hardcoded "claude".
+    let global_default_setting = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    // `resolve_default` (not bare `resolve_provider`) so a DISABLED provider is
+    // never auto-selected — it skips excluded providers, matching the UI picker.
+    let default_provider = ctx.manager.providers().resolve_default(&[
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default_setting.as_ref()),
+    ]);
     let env = RunEnv {
         run_id: run_id.clone(),
         wf_name: workflow.name.clone(),
         run_cwd: run_cwd.clone(),
         run_base,
         files: files.clone(),
+        default_provider,
     };
     // 1-based number of the NEXT executed step — drives step-file naming.
     // Skipped nodes don't consume a number; cached nodes do (their files are
@@ -1792,6 +1807,12 @@ pub(crate) struct RunEnv {
     pub run_cwd: String,
     pub run_base: Option<String>,
     pub files: std::sync::Arc<crate::workflow_context::RunContextFiles>,
+    /// The workspace's effective default agent provider (per-workspace default →
+    /// global default → "claude"), resolved once at run start. Agent-running
+    /// nodes fall back to THIS when their `provider` param is empty — so a node
+    /// left on "default" honors the user's configured default, not a bare
+    /// hardcoded "claude".
+    pub default_provider: String,
 }
 
 /// Where a node execution sits in the run's step-file numbering: the 1-based
@@ -1871,7 +1892,7 @@ async fn execute_node(
             }
             // Run as a real, openable session (reusing the shared session runner)
             // so the run view can watch/inspect it — not the headless PTY.
-            let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+            let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
             let model = p.get("model").and_then(Value::as_str);
             // File-based handoff (design 2026-07-02): point the agent at the
             // run's context dir (instruction, repos.json, prior step files)
@@ -1968,7 +1989,7 @@ async fn execute_node(
                 let preamble = env.files.preamble_for(scope.step_no, node_display_name(node), scope.iter, scope.inner_idx);
                 let full = prepend_skills(ctx, p,
                     &format!("{preamble}{agent_prompt_txt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)));
-                let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+                let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
                 let model = p.get("model").and_then(Value::as_str);
                 let acwd = node_cwd(node, &input, run_cwd);
                 let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, session_tx).await?;
@@ -2343,13 +2364,14 @@ async fn execute_node(
         // causing downstream nodes to be skipped.  If exceeded but not blocked
         // (warn-only mode), it continues and sets `exceeded: true` in the output
         // so downstream nodes can branch on it.
-        // `params.provider`      — "claude" | "codex" | etc. (default "claude")
+        // `params.provider`      — provider name; empty ⇒ the run's resolved default agent
         // `params.workspace_id`  — override the run workspace (optional; default ws.id)
         "budget_gate" => {
             let provider = p
                 .get("provider")
                 .and_then(Value::as_str)
-                .unwrap_or("claude");
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(env.default_provider.as_str());
             let workspace_id_override = p
                 .get("workspace_id")
                 .and_then(Value::as_str)
@@ -3212,6 +3234,22 @@ async fn execute_node(
                 let (goals_score, goals_detail) = if goals.is_empty() {
                     (None, json!([]))
                 } else {
+                    // Score goals with the configured summarizer provider (it's the
+                    // node's consolidating agent), else the first reviewer provider,
+                    // else the workspace/global default — never a bare hardcoded
+                    // "claude" that ignores the user's Providers config.
+                    let goals_provider = match p
+                        .get("summarizer")
+                        .and_then(|s| s.get("provider"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        Some(s) => s.to_string(),
+                        None => match providers.first() {
+                            Some(s) => s.clone(),
+                            None => crate::modules::default_review_provider(ctx).await,
+                        },
+                    };
                     let gprompt = format!(
                         "Assess whether each goal below is met for the repository at `{worktree}` \
                          (review the code/tests). Reply with ONLY JSON of the form \
@@ -3219,7 +3257,7 @@ async fn execute_node(
                          where each score and the overall score are 0–100.\n\nGoals:\n- {}",
                         goals.join("\n- ")
                     );
-                    match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, "claude", None, &gprompt, worktree, session_tx).await {
+                    match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, &goals_provider, None, &gprompt, worktree, session_tx).await {
                         Ok((reply, _sid)) => match extract_json(&reply) {
                             Some(v) => {
                                 let gs = v.get("score").and_then(Value::as_i64).unwrap_or(review_score).clamp(0, 100);
@@ -3409,7 +3447,7 @@ async fn execute_node(
                 truncate(&context, 8000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
-            let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+            let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
             let model = p.get("model").and_then(Value::as_str);
             let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &prompt, &acwd, session_tx).await?;
             let mut out = serde_json::Map::new();
@@ -3515,7 +3553,7 @@ async fn execute_node(
                 truncate(&input.to_string(), 4000)
             );
             let acwd = node_cwd(node, &input, run_cwd);
-            let provider = p.get("provider").and_then(Value::as_str).unwrap_or("claude");
+            let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
             let model = p.get("model").and_then(Value::as_str);
             let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, session_tx).await?;
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
@@ -3662,8 +3700,32 @@ async fn execute_node(
                     }
                 };
                 let wt = if worktree.trim().is_empty() { repo.path.clone() } else { worktree.clone() };
-                let draft = match crate::modules::draft_pr_core(ctx, &wt, base.as_deref()).await {
-                    Ok(d) => d,
+                // Draft the PR message with the NODE's chosen provider/model (the
+                // "Open PR" node crafts title+description with an agent). Build the
+                // same prompt the HTTP draft uses, then run it through the node's
+                // provider instead of the claude-only orchestrator.
+                let draft = match crate::modules::pr_draft_prompt(ctx, &wt, base.as_deref()).await {
+                    Ok((draft_prompt, source, base_branch)) => {
+                        let provider = p
+                            .get("provider")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or(env.default_provider.as_str());
+                        let model = p.get("model").and_then(Value::as_str);
+                        match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &draft_prompt, &wt, session_tx).await {
+                            Ok((reply, _sid)) => {
+                                let (mut title, description) = crate::modules::parse_pr_draft(&reply, &source);
+                                if let Some(key) = crate::modules::jira_key_from_branch(&source) {
+                                    title = crate::modules::ensure_jira_in_subject(&title, &key);
+                                }
+                                otto_core::api::DraftPrResp { title, description, source_branch: source, target_branch: base_branch }
+                            }
+                            Err(e) => {
+                                notes.push(format!("{}: PR draft agent failed ({e})", repo.name));
+                                continue;
+                            }
+                        }
+                    }
                     Err(e) => {
                         notes.push(format!("{}: nothing to PR ({e})", repo.name));
                         continue;
@@ -3788,14 +3850,38 @@ async fn execute_node(
         "self_improve" => {
             use otto_core::domain::{Autonomy, ImprovementTrigger};
             let eng = &ctx.improve_engine;
+            // Provider picker on the node: `providers` (array) OR `provider`
+            // (single string) overrides the workspace's Self-Improvement providers
+            // for THIS run. Empty ⇒ fall back to the configured set.
+            let providers: Vec<String> = match p.get("providers").and_then(Value::as_array) {
+                Some(arr) => arr
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .filter(|s| !s.trim().is_empty())
+                    .collect(),
+                None => p
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .filter(|s| !s.trim().is_empty())
+                    .into_iter()
+                    .collect(),
+            };
             let run = eng
                 .improvements
                 .create_run(&ws.id, ImprovementTrigger::Manual)
                 .await
                 .map_err(|e| otto_core::Error::Internal(format!("self_improve: create run: {e}")))?;
-            eng.execute_run_with_autonomy(&run.id, &ws.id, ImprovementTrigger::Manual, Autonomy::Propose)
-                .await
-                .map_err(|e| otto_core::Error::Upstream(format!("self_improve: {e}")))?;
+            eng.execute_run_with_autonomy_providers(
+                &run.id,
+                &ws.id,
+                ImprovementTrigger::Manual,
+                Autonomy::Propose,
+                providers,
+            )
+            .await
+            .map_err(|e| otto_core::Error::Upstream(format!("self_improve: {e}")))?;
             let final_run = eng.improvements.get_run(&run.id).await.ok();
             let edits = eng.improvements.list_edits_by_run(&run.id).await.unwrap_or_default();
             let summary = final_run.as_ref().map(|r| r.summary.clone()).unwrap_or_default();

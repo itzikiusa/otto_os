@@ -198,6 +198,42 @@ test('Provider "default" option reads claude (the daemon fallback), not agy', as
   await expect(defOpt).toHaveText('default (claude)');
 });
 
+// Every AGENT-running workflow node must expose a Provider selector — not just
+// agent_prompt. These cover the gaps the user hit: prepare_context, loop
+// sub-steps, and self_improve.
+async function addWfNode(page: import('@playwright/test').Page, label: string): Promise<void> {
+  await openPage(page, 'workflows');
+  await page.getByRole('button', { name: 'Start blank' }).click();
+  await page.locator('.menu-wrap button', { hasText: 'Node' }).click();
+  await page.locator('.pal-item', { hasText: label }).first().click();
+}
+
+test('prepare_context node exposes a Provider selector', async ({ page }) => {
+  await addWfNode(page, 'Prepare relevant data');
+  const defOpt = page.locator('.inspector select#np-provider option[value=""]');
+  await expect(defOpt).toHaveText('default (claude)');
+  // …and the live registry providers are listed (grok from beforeAll).
+  await expect(page.locator('.inspector select#np-provider option', { hasText: /^grok$/ })).toHaveCount(1);
+});
+
+test('loop sub-steps expose a Provider selector (not raw JSON only)', async ({ page }) => {
+  await addWfNode(page, 'Loop (Until)');
+  // Add an agent sub-step → its Provider select appears with the default label.
+  await page.getByRole('button', { name: 'Add step' }).click();
+  const prov = page.locator('.inspector .ls-prov').first();
+  await expect(prov).toBeVisible();
+  await expect(prov.locator('option[value=""]')).toHaveText('default (claude)');
+  await expect(prov.locator('option', { hasText: /^grok$/ })).toHaveCount(1);
+});
+
+test('self_improve node exposes provider chips', async ({ page }) => {
+  await addWfNode(page, 'Self-Improve (offer)');
+  const chips = page.locator('.inspector .rv-chip');
+  // One chip per registered agent provider (claude + the custom grok present).
+  await expect(chips.filter({ hasText: 'claude' })).toHaveCount(1);
+  await expect(chips.filter({ hasText: 'grok' })).toHaveCount(1);
+});
+
 test('Excluding a provider hides it from /meta and every picker', async ({ page }) => {
   const { ctx, base } = await apiCtx();
   try {

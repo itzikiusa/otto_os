@@ -58,6 +58,14 @@ pub struct MockupAssistReq {
     /// Refine an EXISTING agent mockup (resume its session); omit to create one.
     #[serde(default)]
     pub mockup_id: Option<Id>,
+    /// Agent provider to run the mockup on (built-in or custom, e.g. grok). Only
+    /// used when the mockup's session is FIRST created; a refine resumes the
+    /// existing session regardless. Empty/absent = default agent.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Optional model alias for the first turn (empty = provider default).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// `POST /product/stories/{sid}/mockups/assist` — generate or refine a mockup with
@@ -71,6 +79,20 @@ pub async fn assist_mockup(
     let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
     let ws = ctx.workspaces.get(&story.workspace_id).await.map_err(ApiError)?;
+
+    // Resolve the agent provider (honored only when a NEW mockup session is
+    // created; a refine resumes the existing one). Precedence mirrors Discovery
+    // Chat: request → workspace default → global default → claude.
+    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("default_provider")
+        .await
+        .ok()
+        .flatten();
+    let provider = otto_core::provider::resolve_provider(&[
+        req.provider.as_deref().unwrap_or(""),
+        otto_core::provider::workspace_default(&ws.settings),
+        otto_core::provider::global_default(global_default.as_ref()),
+    ]);
 
     // Resolve the target attachment (+ whether THIS call minted it, for cleanup on
     // failure), its format, current source, and the resumable assist session id.
@@ -89,15 +111,18 @@ pub async fn assist_mockup(
     let work_file = dir.join(file_name(&format));
     let _ = tokio::fs::write(&work_file, &current).await;
     let dir_str = dir.to_string_lossy().to_string();
-    otto_sessions::trust::ensure_trusted("claude", &dir_str);
+    otto_sessions::trust::ensure_trusted(&provider, &dir_str);
 
     // Live preview: broadcast each file change while the turn runs.
     let poll = spawn_file_poll(&ctx, &story, &attachment_id, &work_file, &format, &current);
 
     let prompt = build_mockup_prompt(&req.prompt, &format, file_name(&format), &current, &story.title);
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "source": "mockup_assist", "story_id": story.id, "attachment_id": attachment_id,
     });
+    if let Some(m) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        meta["model"] = serde_json::json!(m);
+    }
     // Surface the session the MOMENT it exists (turn start) so the Assistant panel
     // attaches the live shell immediately, not after the turn.
     let ready_events = ctx.events.clone();
@@ -119,7 +144,7 @@ pub async fn assist_mockup(
         session_id.as_ref(),
         &format!("Mockup: {}", story.title),
         &dir_str,
-        "claude",
+        &provider,
         meta,
         &prompt,
         crate::agent_session::STUCK_IDLE,

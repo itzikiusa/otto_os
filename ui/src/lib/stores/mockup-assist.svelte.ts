@@ -60,14 +60,18 @@ class MockupAssistStore {
     }
   }
 
-  /** Run one agent turn. Returns the committed attachment (or throws). */
-  async ask(prompt: string): Promise<ProductAttachment> {
+  /** Run one agent turn. Returns the committed attachment (or throws). The
+   *  `provider` is honored only on the FIRST turn (new mockup → new session); a
+   *  refine resumes the existing session regardless. */
+  async ask(prompt: string, provider?: string, model?: string): Promise<ProductAttachment> {
     if (!this.storyId) throw new Error('No story selected');
     this.busy = true;
     try {
       const body: ProductMockupAssistReq = {
         prompt,
         ...(this.attachmentId ? { mockup_id: this.attachmentId } : { format: this.format }),
+        provider: provider || undefined,
+        model: model || undefined,
       };
       const att = await api.post<ProductAttachment>(
         `/product/stories/${this.storyId}/mockups/assist`,

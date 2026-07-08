@@ -6,8 +6,14 @@
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
   import type { RefinementMessage } from './types';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   let { tid }: { tid: string } = $props();
+
+  // Provider for this turn's agent. Each refinement turn replays the full thread
+  // history in the prompt, so a per-turn provider is self-contained — sourced
+  // from the live registry so custom providers (e.g. grok) work.
+  let provider = $state(defaultAgentProvider());
 
   // ── Local state ────────────────────────────────────────────────────────────
   let messages = $state<RefinementMessage[]>([]);
@@ -57,7 +63,7 @@
     sending = true;
 
     try {
-      const resp = await product.sendRefinementMessage(tid, body);
+      const resp = await product.sendRefinementMessage(tid, body, provider);
 
       // Reconcile: replace the optimistic bubble with the real one and append agent reply.
       messages = [
@@ -162,6 +168,12 @@
 
   <!-- ── Input ─────────────────────────────────────────────────────────────── -->
   <div class="input-area">
+    <label class="rc-provider">
+      <span class="dim">Agent</span>
+      <select bind:value={provider} aria-label="Refinement provider" disabled={sending}>
+        {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
+      </select>
+    </label>
     <textarea
       class="msg-input"
       placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
@@ -335,6 +347,20 @@
     gap: 8px;
     padding: 8px 8px 0;
     border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .rc-provider {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    flex-basis: 100%;
+  }
+  .rc-provider .dim {
+    color: var(--text-dim);
+  }
+  .rc-provider select {
+    padding: 3px 6px;
   }
 
   .msg-input {
