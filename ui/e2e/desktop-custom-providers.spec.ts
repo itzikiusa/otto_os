@@ -159,7 +159,7 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   await expect(inspector).not.toHaveClass(/\bside\b/);
 
   // Toggle to the side dock → the inspector becomes a right column.
-  await page.locator('.insp-dock-btn').click();
+  await page.getByRole('button', { name: 'Dock' }).click();
   await expect(inspector).toHaveClass(/\bside\b/);
   const box = await inspector.boundingBox();
   const vw = page.viewportSize()!.width;
@@ -178,6 +178,6 @@ test('Workflow node inspector docks to a resizable side panel', async ({ page })
   expect(after).toBeGreaterThan(before + 80);
 
   // Toggle back to the bottom dock.
-  await page.locator('.insp-dock-btn').click();
+  await page.getByRole('button', { name: 'Dock' }).click();
   await expect(inspector).not.toHaveClass(/\bside\b/);
 });

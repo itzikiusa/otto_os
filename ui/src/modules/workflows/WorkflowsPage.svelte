@@ -1316,6 +1316,16 @@
           <Icon name="commit" size={12} /> Versions
         </button>
 
+        <!-- Inspector dock: bottom strip ⇄ resizable right column. -->
+        <button
+          class="btn small"
+          class:active={sideDock}
+          onclick={() => ui.setWfDockSide(!sideDock)}
+          title={sideDock ? 'Dock the node inspector to the bottom' : 'Dock the node inspector to a resizable side panel'}
+        >
+          <Icon name="sidebar" size={12} /> Dock
+        </button>
+
         <!-- Context/Agents panel toggle: the sidebar's ONLY toggle when collapsed
              (no second full-height rail beside the app shell's right rail). -->
         {#if viewport.isDesktop && run && run.context_dir}
@@ -1485,16 +1495,6 @@
           class:side={sideDock}
           style={sideDock ? `width:${ui.wfInspSideWidth}px` : `max-height:${inspMaxPx()}px`}
         >
-          <!-- Dock toggle: bottom strip ⇄ resizable right column ("seamless",
-               wider view). Applies to both the config editor and runs. -->
-          <button
-            class="insp-dock-btn"
-            onclick={() => ui.setWfDockSide(!sideDock)}
-            title={sideDock ? 'Dock to the bottom' : 'Dock to a resizable side panel'}
-            aria-label="Toggle inspector dock"
-          >
-            <Icon name="sidebar" size={13} />
-          </button>
           {#if run}
             <!-- Run bar: live status + Cancel (R7) + maximize/zoom (R6). -->
             <div class="insp-bar">
@@ -2730,26 +2730,6 @@
   .insp-grip.side::after {
     width: 3px;
     height: 40px;
-  }
-  .insp-dock-btn {
-    position: absolute;
-    top: 6px;
-    inset-inline-end: 8px;
-    z-index: 2;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .insp-dock-btn:hover {
-    color: var(--accent);
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .bar {
     display: flex;
