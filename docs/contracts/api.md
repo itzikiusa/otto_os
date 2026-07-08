@@ -1044,12 +1044,19 @@ configured Jira/Confluence account.
 | POST /issue/{account_id}/{key}/comment | member | AddCommentReq | add a comment |
 | GET /issue/{account_id}/{key}/editmeta | member | — | editable fields (`EditableField[]`) |
 | PUT /issue/{account_id}/{key}/fields | member | `{ "fields": { "<fieldId>": <value>, ... } }` | full issue detail (re-fetched after update) |
+| PUT /issue/{account_id}/{key}/description | member | `{ "body_md": "…markdown…" }` | full issue detail (re-fetched after update) |
 | GET /issue/{account_id}/{project_key}/issue-types | member | — | issue types for a project |
 
 Fields body shape: `{ "fields": { <jiraFieldId>: <jiraShapedValue>, … } }` — values are sent
 in Jira's native shape (number; `{"id":"…"}` for a single option/version/component/priority;
 `[{"id":"…"}]` for an option array; `["a","b"]` for labels; `{"accountId":"…"}` for a user;
 `"YYYY-MM-DD"` for a date; `"YYYY-MM-DDTHH:mm:ss.sssZ"` for a datetime). `null` / `[]` clears a non-required field.
+
+Manual edits from the Product story page: the **title** is edited via `PUT .../fields` with
+`{ "fields": { "summary": "<new title>" } }` (a plain string in Jira's native shape), and the
+**description** via the dedicated `PUT .../description` endpoint, which accepts plain markdown
+(`body_md`) and converts it to ADF server-side before writing — the generic `/fields` path can
+not carry a description because Jira requires that field in ADF, not a raw string.
 
 ## Channel integrations (Telegram / Slack / Webhook / Loom)
 
