@@ -83,6 +83,15 @@
   // actually being an agent session.
   const showRightPanel = $derived(moduleName === 'agents' && ws.activeSession?.kind === 'agent');
 
+  // The notification bell floats at the top-right of the center column. When the
+  // Workflows editor docks its inspector to a right column, slide the bell in by
+  // that column's width so it sits BEFORE the docked panel — same arrangement as
+  // the agents view, where the bell sits before the Right panel rail. Otherwise
+  // it hugs the 10px corner as usual.
+  const bellInset = $derived(
+    moduleName === 'workflows' && ui.wfDockSide ? ui.wfInspSideWidth + 10 : 10,
+  );
+
   // Load the runtime plugin list once authenticated (drives the sidebar). Reads
   // auth.phase only; the write to plugins.list isn't read here, so no loop.
   $effect(() => {
@@ -582,7 +591,7 @@
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice">✕</button>
     </div>
   {/if}
-  <div class="bell-anchor" class:tauri-top={isTauri}>
+  <div class="bell-anchor" class:tauri-top={isTauri} style="inset-inline-end:{bellInset}px">
     <NotificationBell />
   </div>
   {#if moduleName === 'agents'}

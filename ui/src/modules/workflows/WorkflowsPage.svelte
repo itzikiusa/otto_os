@@ -1029,6 +1029,20 @@
   const selectedEdge = $derived(graph.edges.find((e) => e.id === selectedEdgeId) ?? null);
   // The inspector is shown when a run, node, or edge is active (drives side-dock).
   const inspShown = $derived(!!(run || selectedNode || selectedEdge));
+  // When docked to the side it stays open as a persistent right column (like the
+  // agents Right panel) even with nothing selected — pressing Dock has an
+  // immediate, visible effect and shows a "pick a node" placeholder. In bottom
+  // mode the strip only appears when there's something to show.
+  const inspOpen = $derived(inspShown || sideDock);
+
+  // Close the docked panel: clear any selection and pop the dock back to the
+  // bottom strip (so the × on the side panel actually dismisses it). The Dock
+  // toolbar button re-opens it. A live run still surfaces in the bottom strip.
+  function closeInspector(): void {
+    selectedId = null;
+    selectedEdgeId = null;
+    if (sideDock) ui.setWfDockSide(false);
+  }
 
   function onEdgeCondition(raw: string): void {
     if (!selectedEdge) return;
@@ -1215,8 +1229,8 @@
 
   <main
     class="main"
-    class:side-dock={sideDock && inspShown}
-    style={sideDock && inspShown
+    class:side-dock={sideDock}
+    style={sideDock
       ? `padding-inline-end:${ui.wfInspSideWidth}px;--wf-insp-w:${ui.wfInspSideWidth}px`
       : ''}
   >
@@ -1477,7 +1491,7 @@
         </div>
       {/if}
 
-      {#if run || selectedNode || selectedEdge}
+      {#if inspOpen}
         <!-- Drag grip: bottom mode grows the height cap; side mode (docked to a
              right column) drags the left edge to change width. Double-click
              resets. (R6) -->
@@ -1495,6 +1509,27 @@
           class:side={sideDock}
           style={sideDock ? `width:${ui.wfInspSideWidth}px` : `max-height:${inspMaxPx()}px`}
         >
+          {#if sideDock}
+            <!-- Persistent side-panel header (mirrors the agents Right panel):
+                 a title + a real close (×) that dismisses the dock. -->
+            <div class="insp-side-head">
+              <Icon name="sidebar" size={12} />
+              <strong>Inspector</strong>
+              <span class="grow"></span>
+              <button
+                class="icon-btn"
+                onclick={closeInspector}
+                title="Close the docked panel (re-open with Dock)"
+                aria-label="Close panel"
+              >
+                <Icon name="x" size={13} />
+              </button>
+            </div>
+          {/if}
+          {#if !run && !selectedNode && !selectedEdge}
+            <!-- Docked but nothing picked yet — tell the user what to do. -->
+            <div class="insp-empty">Select a node or connection to configure it.</div>
+          {/if}
           {#if run}
             <!-- Run bar: live status + Cancel (R7) + maximize/zoom (R6). -->
             <div class="insp-bar">
@@ -2730,6 +2765,32 @@
   .insp-grip.side::after {
     width: 3px;
     height: 40px;
+  }
+  /* Persistent header for the side-docked panel: title + close (×). Sticks to
+     the top so it stays reachable while the panel body scrolls. */
+  .insp-side-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+  .insp-side-head strong {
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .insp-side-head .grow {
+    flex: 1;
+  }
+  .insp-empty {
+    padding: 18px 14px;
+    color: var(--text-dim);
+    font-size: 12px;
+    text-align: center;
   }
   .bar {
     display: flex;
