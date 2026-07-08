@@ -9,6 +9,9 @@
   import RunSteps from './RunSteps.svelte';
   import RunAgents from './RunAgents.svelte';
   import FileTree from '../panels/FileTree.svelte';
+  // Hosted in the side-docked inspector header so the bell stays reachable when
+  // the shell's floating bell is hidden for the docked layout (agents-style).
+  import NotificationBell from '../../shell/NotificationBell.svelte';
   import TriggersPanel from './TriggersPanel.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -1511,11 +1514,13 @@
         >
           {#if sideDock}
             <!-- Persistent side-panel header (mirrors the agents Right panel):
-                 a title + a real close (×) that dismisses the dock. -->
+                 title on the left; the notification bell + a real close (×) on
+                 the right. The shell's floating bell is hidden in this layout,
+                 so this is the reachable bell. -->
             <div class="insp-side-head">
-              <Icon name="sidebar" size={12} />
               <strong>Inspector</strong>
               <span class="grow"></span>
+              <NotificationBell />
               <button
                 class="icon-btn"
                 onclick={closeInspector}
@@ -1525,10 +1530,6 @@
                 <Icon name="x" size={13} />
               </button>
             </div>
-          {/if}
-          {#if !run && !selectedNode && !selectedEdge}
-            <!-- Docked but nothing picked yet — tell the user what to do. -->
-            <div class="insp-empty">Select a node or connection to configure it.</div>
           {/if}
           {#if run}
             <!-- Run bar: live status + Cancel (R7) + maximize/zoom (R6). -->
@@ -2356,8 +2357,13 @@
               oninput={(e) => onEdgeCondition(e.currentTarget.value)}
             />
             <p class="node-hint">The target runs only when this is truthy. Leave blank for an unconditional edge.</p>
-          {:else}
-            <p class="empty">Select a step or connection above to edit it.</p>
+          {:else if !run}
+            <!-- Docked (or bottom) with nothing selected: a centered, intentional
+                 empty state — not a stray line floating at the top. -->
+            <div class="insp-blank">
+              <Icon name="split" size={30} />
+              <p>Select a node or connection<br />to configure it.</p>
+            </div>
           {/if}
         </div>
       {/if}
@@ -2766,17 +2772,21 @@
     width: 3px;
     height: 40px;
   }
-  /* Persistent header for the side-docked panel: title + close (×). Sticks to
-     the top so it stays reachable while the panel body scrolls. */
+  /* Persistent header for the side-docked panel (mirrors the agents Right panel
+     header): full-bleed to the panel edges, sticks to the top while the body
+     scrolls. Holds the title, the notification bell, and the close (×). */
   .insp-side-head {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 7px 10px;
+    gap: 4px;
+    /* Cancel the .inspector 10px/12px padding so the header spans edge-to-edge
+       and its bottom border reads as a clean divider. */
+    margin: -10px -12px 6px;
+    padding: 8px 10px 8px 12px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     position: sticky;
-    top: 0;
+    top: -10px;
     z-index: 2;
   }
   .insp-side-head strong {
@@ -2786,11 +2796,25 @@
   .insp-side-head .grow {
     flex: 1;
   }
-  .insp-empty {
-    padding: 18px 14px;
+  /* Centered, intentional empty state for the docked panel. */
+  .insp-blank {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 24px 16px;
     color: var(--text-dim);
-    font-size: 12px;
     text-align: center;
+  }
+  .insp-blank :global(svg) {
+    opacity: 0.5;
+  }
+  .insp-blank p {
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 0;
   }
   .bar {
     display: flex;
