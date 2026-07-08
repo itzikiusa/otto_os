@@ -35,6 +35,12 @@ pub async fn put_all(
     if let Some(value) = body.get("providers") {
         ctx.manager.providers().reload(Some(value));
     }
+    // Excluded providers apply immediately: hide them from every picker without a
+    // restart. A JSON array of names; anything else clears the exclusion.
+    if let Some(value) = body.get("disabled_providers") {
+        let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
+        ctx.manager.providers().set_disabled(&names);
+    }
     // The skip-permissions opt-out applies immediately too: rebuild the registry
     // against the current `providers` override with the new mode. New spawns pick
     // it up; running sessions are untouched.

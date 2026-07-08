@@ -14,7 +14,7 @@
   } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
     starting: boolean;
@@ -59,8 +59,7 @@
       iterations = cfg.iterations ?? 2;
       validatorPasses = cfg.validator_passes ?? 1;
       sources = src.sources;
-      const def = providerOpts[0] ?? 'claude';
-      implCli = providerOpts.includes('claude') ? 'claude' : def;
+      implCli = defaultAgentProvider();
       improverProvider = cfg.improver?.provider || implCli;
       if (sources.length > 0) sourceSel = 0;
     } catch (e) {

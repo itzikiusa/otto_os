@@ -6,7 +6,7 @@
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
-  import { allProviders } from '../../lib/providers';
+  import { allProviders, defaultAgentProvider } from '../../lib/providers';
 
   let creating = $state(false);
   let editId = $state<string | null>(null);
@@ -36,7 +36,7 @@
   let fPrompt = $state('');
   let fSkill = $state('');
   let fKind = $state<'agent_prompt' | 'workflow'>('agent_prompt');
-  let fProvider = $state('claude');
+  let fProvider = $state(defaultAgentProvider());
   let fWorkflowId = $state('');
   let fCadence = $state<'interval' | 'daily' | 'weekly' | 'cron'>('interval');
   let fEveryMin = $state(60);
@@ -74,7 +74,7 @@
     fPrompt = '';
     fSkill = '';
     fKind = 'agent_prompt';
-    fProvider = 'claude';
+    fProvider = defaultAgentProvider();
     fWorkflowId = '';
     fCadence = 'interval';
     fEveryMin = 60;
@@ -136,7 +136,7 @@
     fPrompt = t.prompt;
     fSkill = t.skill ?? '';
     fKind = t.kind === 'workflow' ? 'workflow' : 'agent_prompt';
-    fProvider = t.provider || 'claude';
+    fProvider = t.provider || defaultAgentProvider();
     fWorkflowId = t.workflow_id ?? '';
     loadSchedule(t.schedule ?? {});
     fTimezone = t.timezone || browserTz;

@@ -44,6 +44,10 @@
   let custom: Record<string, ProviderDef> = $state({});
   let allSettings: Record<string, unknown> = $state({});
   let defaultProvider = $state('');
+  // Providers the user has EXCLUDED — hidden from every picker (they may have the
+  // CLI installed but don't want to use it). Persisted as `disabled_providers`.
+  // `shell` is never excludable (plain terminals need it).
+  let disabled = $state<Set<string>>(new Set());
 
   // Daily CLI auto-update config (settings key `cli_auto_update`).
   let autoUpdate: CliAutoUpdate = $state({ ...AUTO_UPDATE_DEFAULTS });
@@ -90,6 +94,7 @@
         allSettings = await api.get<Record<string, unknown>>('/settings');
         custom = (allSettings['providers'] as Record<string, ProviderDef> | undefined) ?? {};
         defaultProvider = (allSettings['default_provider'] as string | undefined) ?? '';
+        disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
         autoUpdate = {
           ...AUTO_UPDATE_DEFAULTS,
           ...((allSettings['cli_auto_update'] as Partial<CliAutoUpdate> | undefined) ?? {}),
@@ -162,6 +167,35 @@
       toasts.error('Save failed', e instanceof Error ? e.message : String(e));
     } finally {
       saving = false;
+    }
+  }
+
+  // Exclude / re-include a provider. Optimistic; reverts on failure.
+  async function toggleProvider(nameOfProvider: string, enable: boolean): Promise<void> {
+    const next = new Set(disabled);
+    if (enable) next.delete(nameOfProvider);
+    else next.add(nameOfProvider);
+    disabled = next;
+    try {
+      allSettings = await api.put<Record<string, unknown>>('/settings', {
+        ...allSettings,
+        disabled_providers: [...next],
+      });
+      disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
+      await auth.refreshMeta();
+      toasts.success(
+        enable ? `${nameOfProvider} enabled` : `${nameOfProvider} hidden`,
+        enable
+          ? 'It reappears in every provider picker'
+          : 'Hidden from every picker; existing sessions keep working',
+      );
+    } catch (e) {
+      // revert
+      const revert = new Set(disabled);
+      if (enable) revert.add(nameOfProvider);
+      else revert.delete(nameOfProvider);
+      disabled = revert;
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -338,20 +372,47 @@
       </p>
     </div>
 
+    <!-- Enable/exclude toggle shared by built-in + custom rows. Excluding a
+         provider hides it from every picker (it may be installed but unwanted);
+         existing sessions on it keep working. `shell` is never excludable. -->
+    {#snippet enableToggle(pname: string)}
+      <label
+        class="tgl"
+        title={disabled.has(pname)
+          ? 'Excluded — click to show in pickers'
+          : 'Shown in pickers — click to hide'}
+      >
+        <input
+          type="checkbox"
+          checked={!disabled.has(pname)}
+          onchange={(e) => toggleProvider(pname, e.currentTarget.checked)}
+        />
+        <span>{disabled.has(pname) ? 'Hidden' : 'Enabled'}</span>
+      </label>
+    {/snippet}
+
     <div class="section">
       <div class="label">Built-in</div>
       <div class="list">
         {#each BUILTINS as b (b)}
-          <div class="item">
+          <div class="item" class:off={disabled.has(b.name)}>
             <span class="mono">{b.name}</span>
             <span class="grow"></span>
             {#if b.updateCmd}
               <span class="dim sm mono">{b.updateCmd}</span>
             {/if}
             <span class="dim sm">built-in{custom[b.name] ? ' · overridden below' : ''}</span>
+            {#if b.name !== 'shell'}
+              {@render enableToggle(b.name)}
+            {/if}
           </div>
         {/each}
       </div>
+      <p class="dim sm">
+        Toggle <strong>Enabled</strong> off to hide a provider from every picker
+        (Default agent, New session, workflows, …) — useful when a CLI is installed
+        but you don't want to use it. Sessions already using it keep working.
+      </p>
     </div>
 
     <div class="section">
@@ -361,12 +422,13 @@
       </div>
       <div class="list">
         {#each Object.entries(custom) as [n, p] (n)}
-          <div class="item">
+          <div class="item" class:off={disabled.has(n)}>
             <span class="mono">{n}</span>
             <span class="dim sm mono">{p.cmd} {(p.args ?? []).join(' ')}</span>
             <span class="grow"></span>
             {#if p.resume_args?.length}<span class="chip">resume</span>{/if}
             {#if p.update_command}<span class="chip">update</span>{/if}
+            {@render enableToggle(n)}
             <button class="btn sm" onclick={() => openEdit(n)}>Edit</button>
             <button class="btn sm danger" onclick={() => remove(n)} disabled={saving}>Remove</button>
           </div>
@@ -460,6 +522,25 @@
   }
   .item + .item {
     border-top: 1px solid var(--border);
+  }
+  /* Excluded provider: dim the row (its name/command) so it reads as inactive,
+     while leaving the toggle itself fully legible. */
+  .item.off > .mono,
+  .item.off > .dim {
+    opacity: 0.45;
+  }
+  .tgl {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .tgl input {
+    cursor: pointer;
   }
   .grow {
     flex: 1;

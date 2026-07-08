@@ -5,14 +5,13 @@
   import { product } from '../../lib/stores/product.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
   import { confirmer } from '../../lib/confirm.svelte';
   import { parsePlan, setItemStatus, type Status, type Task } from './plan_parse';
   import type { ProductStoryVersion } from './types';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   // ── Provider selection (Otto's REAL provider list, like NewSession) ──────────
   // Drop the 'shell' pseudo-provider — it can't plan. Fall back to ['claude'] if
@@ -20,16 +19,14 @@
   const availableProviders = $derived(
     agentProviders(),
   );
-  // Effective default agent: this workspace's override, else the global default,
-  // else the first available provider.
+  // Effective default agent: this workspace's override, else the shared
+  // resolution (configured global default → claude → first available).
   const wsDefaultProvider = $derived(
     typeof ws.current?.settings?.default_provider === 'string'
       ? (ws.current.settings.default_provider as string)
       : '',
   );
-  const defaultProvider = $derived(
-    wsDefaultProvider || auth.meta?.default_provider || availableProviders[0] || 'claude',
-  );
+  const defaultProvider = $derived(wsDefaultProvider || defaultAgentProvider());
 
   // Multi-select set of planning providers + the consolidating summarizer.
   let selectedProviders = $state<string[]>([]);

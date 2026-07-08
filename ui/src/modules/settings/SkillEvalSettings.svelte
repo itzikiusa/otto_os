@@ -6,7 +6,7 @@
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type { SkillEvalConfig, SkillEvalValidationCfg } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
-  import { agentProviders } from '../../lib/providers';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   const providerOpts = $derived(agentProviders());
 
@@ -33,7 +33,7 @@
     if (!cfg) return;
     cfg.validations = [
       ...cfg.validations,
-      { name: '', criteria: '', providers: [providerOpts[0] ?? 'claude'], model: '' },
+      { name: '', criteria: '', providers: [defaultAgentProvider()], model: '' },
     ];
   }
   function removeValidation(i: number): void {

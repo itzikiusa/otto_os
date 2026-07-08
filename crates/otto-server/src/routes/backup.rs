@@ -166,6 +166,10 @@ pub async fn import_settings(
         if key == "providers" {
             ctx.manager.providers().reload(Some(value));
         }
+        if key == "disabled_providers" {
+            let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
+            ctx.manager.providers().set_disabled(&names);
+        }
         if key == "agent_skip_permissions" {
             let skip = value.as_bool().unwrap_or(true);
             let overrides = repo.get("providers").await.ok().flatten();
@@ -348,6 +352,10 @@ pub async fn state_restore(
 
         if key == "providers" {
             ctx.manager.providers().reload(Some(value));
+        }
+        if key == "disabled_providers" {
+            let names: Vec<String> = serde_json::from_value(value.clone()).unwrap_or_default();
+            ctx.manager.providers().set_disabled(&names);
         }
         if key == "agent_skip_permissions" {
             let skip = value.as_bool().unwrap_or(true);

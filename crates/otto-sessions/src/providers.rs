@@ -1,7 +1,7 @@
 //! Data-driven agent provider registry: claude / codex / shell built-ins,
 //! overridable from the `providers` settings JSON.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
@@ -55,6 +55,12 @@ pub struct ProviderRegistry {
     /// setting), the flag is omitted and each CLI falls back to its own default
     /// permission mode (ask / auto), so tool use prompts in the session terminal.
     skip_permissions: AtomicBool,
+    /// Provider names the admin has EXCLUDED (settings `disabled_providers`). A
+    /// disabled provider is still built into `map` — so existing sessions that
+    /// use it keep resuming — but it is hidden from [`Self::names`], which drives
+    /// `/meta.providers` and therefore every picker + the planner's available
+    /// set. Lets a user hide an installed CLI they don't want to use.
+    disabled: RwLock<HashSet<String>>,
 }
 
 fn expand(template: &str, sid: &str, cwd: &str) -> String {
@@ -70,6 +76,7 @@ impl ProviderRegistry {
         Self {
             map: RwLock::new(Self::build_map(overrides, true)),
             skip_permissions: AtomicBool::new(true),
+            disabled: RwLock::new(HashSet::new()),
         }
     }
 
@@ -93,6 +100,33 @@ impl ProviderRegistry {
     /// The current skip-permissions mode (for `/meta` / the settings UI).
     pub fn skip_permissions(&self) -> bool {
         self.skip_permissions.load(Ordering::Relaxed)
+    }
+
+    /// Replace the set of EXCLUDED providers (settings `disabled_providers`).
+    /// Independent of the launch map, so a reload / skip-permissions change never
+    /// clears it. Applied at boot and whenever the setting changes; new pickers
+    /// pick it up immediately (running sessions are untouched — the specs stay in
+    /// `map` so a disabled provider still resumes).
+    pub fn set_disabled<S: AsRef<str>>(&self, names: &[S]) {
+        let set: HashSet<String> = names
+            .iter()
+            .map(|s| s.as_ref().trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        *self.disabled.write().expect("provider registry lock") = set;
+    }
+
+    /// The currently-excluded provider names, sorted (for the settings UI).
+    pub fn disabled_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .disabled
+            .read()
+            .expect("provider registry lock")
+            .iter()
+            .cloned()
+            .collect();
+        v.sort();
+        v
     }
 
     fn build_map(
@@ -285,13 +319,17 @@ impl ProviderRegistry {
             .is_some_and(|p| p.captures_session_id)
     }
 
-    /// Provider names, sorted (for `/meta.providers`).
+    /// Provider names, sorted, EXCLUDING any the admin disabled (for
+    /// `/meta.providers` → every UI picker + the planner). Disabled specs remain
+    /// in `map` so `build_spec` still resumes existing sessions.
     pub fn names(&self) -> Vec<String> {
+        let disabled = self.disabled.read().expect("provider registry lock");
         let mut names: Vec<String> = self
             .map
             .read()
             .expect("provider registry lock")
             .keys()
+            .filter(|k| !disabled.contains(k.as_str()))
             .cloned()
             .collect();
         names.sort();
@@ -387,6 +425,32 @@ mod tests {
         let agy = args_for(&reg, "agy", false);
         assert!(!agy.iter().any(|a| a.contains("dangerously")));
         assert!(agy.iter().any(|a| a.starts_with("--add-dir="))); // add-dir preserved
+    }
+
+    /// Disabling a provider hides it from `names()` (the picker/meta list) but
+    /// keeps its launch spec, so an existing session on it still resumes. A
+    /// reload or skip-permissions change preserves the disabled set.
+    #[test]
+    fn disabled_providers_hidden_from_names_but_still_spawnable() {
+        let reg = ProviderRegistry::new(None);
+        assert!(reg.names().contains(&"agy".to_string()));
+
+        reg.set_disabled(&["agy"]);
+        assert!(!reg.names().contains(&"agy".to_string()));
+        assert!(reg.names().contains(&"claude".to_string()));
+        assert_eq!(reg.disabled_names(), vec!["agy".to_string()]);
+        // Still launchable (existing sessions keep resuming).
+        assert!(reg.build_spec("agy", "SID", "/tmp", false).is_ok());
+
+        // A providers reload / skip-permissions toggle must not clear it.
+        reg.reload(None);
+        assert!(!reg.names().contains(&"agy".to_string()));
+        reg.set_skip_permissions(false, None);
+        assert!(!reg.names().contains(&"agy".to_string()));
+
+        // Re-enable clears the exclusion.
+        reg.set_disabled::<String>(&[]);
+        assert!(reg.names().contains(&"agy".to_string()));
     }
 
     /// A providers reload preserves the current skip-permissions mode.

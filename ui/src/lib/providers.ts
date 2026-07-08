@@ -49,12 +49,19 @@ export function agentProvidersWith(current: string | null | undefined): string[]
   return c && !list.includes(c) ? [c, ...list] : list;
 }
 
-/** The first registered agent provider (preferring the configured default),
- *  used as a safe default pick. */
+/** The provider a surface should default to when the user hasn't picked one.
+ *  Mirrors the daemon's `resolve_provider` precedence so the UI never labels a
+ *  different provider than what would actually run:
+ *    configured default (Settings → Providers → Default agent)
+ *      → `claude` (the daemon's FALLBACK_PROVIDER, i.e. "Auto")
+ *      → the first registered agent provider (only if claude isn't registered).
+ *  Notably this must NOT return the alphabetically-first provider (`agy`) when
+ *  nothing is configured — "Auto" means claude. */
 export function defaultAgentProvider(): string {
   const list = agentProviders();
-  const def = auth.meta?.default_provider;
+  const def = (auth.meta?.default_provider ?? '').trim();
   if (def && list.includes(def)) return def;
+  if (list.includes('claude')) return 'claude';
   return list[0] ?? 'claude';
 }
 
