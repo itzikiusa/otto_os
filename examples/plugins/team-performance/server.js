@@ -149,6 +149,10 @@ const DEFAULT_CONFIG = {
   report_instructions: '', // override the report requirements ('' = built-in default)
   evidence_months: 18, // how far back to collect git diff evidence
   estimate_workers: [{ provider: 'claude', model: '' }],
+  // 'split' = batches split across workers for throughput (default). 'consensus'
+  // = every worker estimates the SAME batch, then a summarizer reconciles them.
+  estimate_mode: 'split',
+  estimate_summarizer: { provider: 'claude', model: '' },
   feature_repos: [],
   auto_scan_minutes: 15, // 0 = off — silently re-runs the last scan's params
   roles: DEFAULT_ROLES,
@@ -171,7 +175,6 @@ function loadConfig() {
 }
 
 const PHASE_VALUES = ['design', 'implementation', 'waiting', 'excluded'];
-const PROVIDERS = ['claude', 'codex'];
 
 function validateConfig(body) {
   const c = { ...loadConfig() };
@@ -243,10 +246,25 @@ function validateConfig(body) {
     if (!Array.isArray(body.estimate_workers) || !body.estimate_workers.length || body.estimate_workers.length > 8) {
       throw new Error('estimate_workers must be 1..8 entries');
     }
+    // Accept ANY non-empty provider slug — Otto's session API is the real
+    // validator (built-ins + the user's custom providers, e.g. grok). The UI
+    // populates the picker from Otto's live registry (otto:init.providers).
     c.estimate_workers = body.estimate_workers.map((w) => {
-      if (!w || !PROVIDERS.includes(w.provider)) throw new Error(`estimate_workers provider must be one of ${PROVIDERS.join('/')}`);
-      return { provider: w.provider, model: String(w.model || '').trim().slice(0, 60) };
+      const provider = w && String(w.provider || '').trim();
+      if (!provider) throw new Error('estimate_workers provider must be a non-empty agent name');
+      return { provider, model: String((w && w.model) || '').trim().slice(0, 60) };
     });
+  }
+  if (body.estimate_mode !== undefined) {
+    const m = String(body.estimate_mode);
+    if (m !== 'split' && m !== 'consensus') throw new Error("estimate_mode must be 'split' or 'consensus'");
+    c.estimate_mode = m;
+  }
+  if (body.estimate_summarizer !== undefined) {
+    const s = body.estimate_summarizer || {};
+    const provider = String(s.provider || '').trim();
+    if (!provider) throw new Error('estimate_summarizer provider must be a non-empty agent name');
+    c.estimate_summarizer = { provider, model: String(s.model || '').trim().slice(0, 60) };
   }
   if (body.feature_repos !== undefined) {
     if (!Array.isArray(body.feature_repos) || !body.feature_repos.every((r) => typeof r === 'string')) {
@@ -566,6 +584,8 @@ async function estimateScope(account, projects, config, job) {
       sinceMs: config.estimate_since ? Date.parse(config.estimate_since) || 0 : 0,
       maxBatches: config.estimate_max_batches,
       workers,
+      mode: config.estimate_mode,
+      summarizer: config.estimate_summarizer,
       rubric: config.estimate_rubric,
       instructions: config.estimate_instructions,
       corrections,
@@ -594,6 +614,8 @@ async function estimateScope(account, projects, config, job) {
       sinceMs: config.estimate_since ? Date.parse(config.estimate_since) || 0 : 0,
       maxBatches: config.estimate_max_batches,
       workers,
+      mode: config.estimate_mode,
+      summarizer: config.estimate_summarizer,
       rubric: config.estimate_rubric,
       agentRun,
       onProgress: (done, total) => {

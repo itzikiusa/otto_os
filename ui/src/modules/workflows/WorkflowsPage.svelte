@@ -713,9 +713,30 @@
     const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
     return runDetailMax ? Math.round(vh * 0.85) : ui.runDetailHeight;
   }
+  // Whether the node inspector is docked as a right-side column (vs the bottom
+  // strip). Only meaningful when something is selected/running.
+  const sideDock = $derived(ui.wfDockSide);
+
   function startInspResize(e: MouseEvent): void {
     e.preventDefault();
     runDetailMax = false;
+    if (sideDock) {
+      // Side dock: drag the inspector's LEFT edge — leftward widens it.
+      const startX = e.clientX;
+      const startW = ui.wfInspSideWidth;
+      const onMove = (ev: MouseEvent) => ui.setWfInspSideWidth(startW + (startX - ev.clientX));
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      return;
+    }
     const startY = e.clientY;
     const startH = ui.runDetailHeight;
     const onMove = (ev: MouseEvent) => ui.setRunDetailHeight(startH + (startY - ev.clientY));
@@ -1006,6 +1027,8 @@
   // --- Edge condition editing ----------------------------------------------
   let selectedEdgeId = $state<string | null>(null);
   const selectedEdge = $derived(graph.edges.find((e) => e.id === selectedEdgeId) ?? null);
+  // The inspector is shown when a run, node, or edge is active (drives side-dock).
+  const inspShown = $derived(!!(run || selectedNode || selectedEdge));
 
   function onEdgeCondition(raw: string): void {
     if (!selectedEdge) return;
@@ -1190,7 +1213,13 @@
     <div class="side-resize" onmousedown={startSideResize} title="Drag to resize"></div>
   </aside>
 
-  <main class="main">
+  <main
+    class="main"
+    class:side-dock={sideDock && inspShown}
+    style={sideDock && inspShown
+      ? `padding-inline-end:${ui.wfInspSideWidth}px;--wf-insp-w:${ui.wfInspSideWidth}px`
+      : ''}
+  >
     {#if current}
       <header class="bar">
         {#if renamingId === current.id}
@@ -1439,15 +1468,33 @@
       {/if}
 
       {#if run || selectedNode || selectedEdge}
-        <!-- Drag grip: grow the run-detail height cap; double-click resets. (R6) -->
+        <!-- Drag grip: bottom mode grows the height cap; side mode (docked to a
+             right column) drags the left edge to change width. Double-click
+             resets. (R6) -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="insp-grip"
+          class:side={sideDock}
           onmousedown={startInspResize}
-          ondblclick={() => ui.setRunDetailHeight(300)}
+          ondblclick={() => (sideDock ? ui.setWfInspSideWidth(400) : ui.setRunDetailHeight(300))}
           title="Drag to resize · double-click to reset"
         ></div>
-        <div class="inspector" class:maxed={runDetailMax} style="max-height:{inspMaxPx()}px">
+        <div
+          class="inspector"
+          class:maxed={runDetailMax}
+          class:side={sideDock}
+          style={sideDock ? `width:${ui.wfInspSideWidth}px` : `max-height:${inspMaxPx()}px`}
+        >
+          <!-- Dock toggle: bottom strip ⇄ resizable right column ("seamless",
+               wider view). Applies to both the config editor and runs. -->
+          <button
+            class="insp-dock-btn"
+            onclick={() => ui.setWfDockSide(!sideDock)}
+            title={sideDock ? 'Dock to the bottom' : 'Dock to a resizable side panel'}
+            aria-label="Toggle inspector dock"
+          >
+            <Icon name="sidebar" size={13} />
+          </button>
           {#if run}
             <!-- Run bar: live status + Cancel (R7) + maximize/zoom (R6). -->
             <div class="insp-bar">
@@ -2652,6 +2699,57 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
+    /* Anchor for the side-docked inspector's absolute position. */
+    position: relative;
+  }
+  /* ── Side-docked inspector: a resizable right column instead of the bottom
+     strip. The `.main` reserves padding-inline-end (set inline = width) so the
+     canvas/graph is never hidden under it; the panel + its left-edge grip are
+     absolutely positioned into that reserved gutter. ── */
+  .inspector.side {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 0;
+    max-height: none;
+    border-top: none;
+    border-inline-start: 1px solid var(--border);
+    z-index: 6;
+    box-shadow: -2px 0 8px color-mix(in srgb, var(--bg) 40%, transparent);
+  }
+  .insp-grip.side {
+    position: absolute;
+    inset-block: 0;
+    /* Sit on the left edge of the panel (which is inset by its width). */
+    inset-inline-end: var(--wf-insp-w, 400px);
+    height: auto;
+    width: 10px;
+    border-top: none;
+    z-index: 7;
+    cursor: col-resize;
+  }
+  .insp-grip.side::after {
+    width: 3px;
+    height: 40px;
+  }
+  .insp-dock-btn {
+    position: absolute;
+    top: 6px;
+    inset-inline-end: 8px;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .insp-dock-btn:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .bar {
     display: flex;

@@ -47,6 +47,8 @@ const LS = {
   wfCtxTab: 'otto_wf_ctx_tab',
   wfSideWidth: 'otto_wf_side_width',
   runDetailH: 'otto_wf_run_detail_h',
+  wfDockSide: 'otto_wf_dock_side',
+  wfInspSideW: 'otto_wf_insp_side_w',
   clientId: 'otto_client_id',
   sessionIsolation: 'otto_session_isolation',
   sidebarOrder: 'otto_sidebar_order',
@@ -131,6 +133,12 @@ function clampWfCtx(px: number): number {
 function clampWfSide(px: number): number {
   return Math.max(200, Math.min(600, Math.round(px)));
 }
+function clampWfInspSide(px: number): number {
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1400;
+  const max = Math.max(300, Math.round(vw * 0.6));
+  return Math.max(280, Math.min(max, Math.round(px)));
+}
+
 function clampRunDetail(px: number): number {
   const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
   const max = Math.max(RUN_DETAIL_MIN, Math.round(vh * 0.85));
@@ -171,6 +179,10 @@ class UiStore {
   wfSideWidth = $state(clampWfSide(Number(lsGet(LS.wfSideWidth)) || 270));
   // Workflow run-detail (inspector) resizable max-height cap.
   runDetailHeight = $state(clampRunDetail(Number(lsGet(LS.runDetailH)) || 300));
+  // Workflow node inspector: dock to a resizable RIGHT column instead of the
+  // bottom strip (the 'seamless', wider view), + that column's width.
+  wfDockSide = $state(lsGet(LS.wfDockSide) === '1');
+  wfInspSideWidth = $state(clampWfInspSide(Number(lsGet(LS.wfInspSideW)) || 400));
   // Git page pane widths (Changes/History list; Graph list in detail mode).
   gitSideWidth = $state(clampGitSide(Number(lsGet(LS.gitSideWidth)) || 300));
   gitGraphListWidth = $state(clampGitGraphList(Number(lsGet(LS.gitGraphListWidth)) || 420));
@@ -389,6 +401,15 @@ class UiStore {
     this.runDetailHeight = clampRunDetail(px);
     lsSet(LS.runDetailH, String(this.runDetailHeight));
   }
+  setWfDockSide(on: boolean): void {
+    this.wfDockSide = on;
+    lsSet(LS.wfDockSide, on ? '1' : '0');
+  }
+  setWfInspSideWidth(px: number): void {
+    this.wfInspSideWidth = clampWfInspSide(px);
+    lsSet(LS.wfInspSideW, String(this.wfInspSideWidth));
+  }
+
 
   setRailWidth(px: number): void {
     this.railWidth = clampRail(px);

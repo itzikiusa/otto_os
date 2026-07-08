@@ -1513,9 +1513,21 @@
                 <textarea id="cfg-rubric" rows="6" style="width:100%;font:12px/1.4 ui-monospace,monospace" placeholder="One scoping rule per line, e.g.&#10;Small change to an existing component: 1-3 days&#10;New module built from scratch: ~15 days">${esc((config.estimate_rubric || []).join('\n'))}</textarea>
                 <h3>Extra estimator instructions <span class="dim">(appended to the estimation prompt; blank = none)</span></h3>
                 <textarea id="cfg-est-instr" rows="3" style="width:100%;font:12px/1.4 ui-monospace,monospace" placeholder="e.g. Be stricter on bug tickets without a linked commit.">${esc(config.estimate_instructions || '')}</textarea>
-                <h3>Workers <span class="dim">(batches split across providers in parallel)</span></h3>
+                <h3>Estimation mode</h3>
+                <select id="cfg-est-mode" title="How the worker agents are used">
+                  <option value="split" ${(config.estimate_mode || 'split') === 'split' ? 'selected' : ''}>Split — batches shared across workers (faster)</option>
+                  <option value="consensus" ${config.estimate_mode === 'consensus' ? 'selected' : ''}>Consensus — every worker sizes each task, a summarizer reconciles</option>
+                </select>
+                <h3>Workers <span class="dim">(split mode: batches shared in parallel · consensus mode: each worker sizes every task)</span></h3>
                 <div id="workers">${workersHtml}</div>
                 <button class="small" id="wk-add">+ add worker</button>
+                <div id="summarizer-wrap" style="margin-top:8px;${config.estimate_mode === 'consensus' ? '' : 'display:none'}">
+                  <h3>Summarizer <span class="dim">(reconciles the workers' estimates in consensus mode)</span></h3>
+                  <div class="worker-row">
+                    <select id="cfg-sum-provider">${PROVIDERS.map((p) => `<option ${(config.estimate_summarizer && config.estimate_summarizer.provider) === p ? 'selected' : ''}>${p}</option>`).join('')}</select>
+                    <input id="cfg-sum-model" placeholder="model (optional, e.g. haiku)" value="${esc((config.estimate_summarizer && config.estimate_summarizer.model) || '')}">
+                  </div>
+                </div>
               </div>
             </div>
             <div class="card"><h2>Report instructions <span class="dim">(what the agent-written HTML reports should contain / tone — edit without a rebuild)</span></h2>
@@ -1546,6 +1558,10 @@
             row.querySelector('.wk-del').onclick = () => row.remove();
           };
           card.querySelectorAll('.wk-del').forEach((b) => (b.onclick = () => b.closest('.worker-row').remove()));
+          // Consensus mode reveals the summarizer picker.
+          $('cfg-est-mode').onchange = (e) => {
+            $('summarizer-wrap').style.display = e.target.value === 'consensus' ? '' : 'none';
+          };
           const defs = (config._defaults) || {};
           const rd = card.querySelector('.rub-default');
           if (rd) rd.onclick = () => { $('cfg-rubric').value = (defs.rubric || []).join('\n'); };
@@ -1595,6 +1611,8 @@
               estimate_instructions: $('cfg-est-instr').value,
               report_instructions: $('cfg-report-instr').value,
               estimate_workers: workers.length ? workers : undefined,
+              estimate_mode: $('cfg-est-mode').value,
+              estimate_summarizer: { provider: $('cfg-sum-provider').value, model: $('cfg-sum-model').value.trim() },
               feature_repos: [...card.querySelectorAll('.fr-cb')].filter((cb) => cb.checked).map((cb) => cb.value),
               roles: $('cfg-roles').value.split(',').map((x) => x.trim()).filter(Boolean),
               status_map,
