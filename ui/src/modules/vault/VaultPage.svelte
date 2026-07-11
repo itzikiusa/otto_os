@@ -1,75 +1,325 @@
 <script lang="ts">
-  // Vault v2 — the "Repo Brain". A tabbed page over a workspace's knowledge and
-  // code intelligence:
-  //   Knowledge — the Obsidian-like memory browser (search/index/reader/backlinks)
-  //   Graph     — the unified knowledge + code force graph (headline view)
-  //   Repos     — indexed code repositories + an "index a repo" form
-  //   Symbols   — a code symbol browser
-  //   Backends  — remote backends (Qdrant / SurrealDB / Ollama)
-  //   Brain     — assemble focused context for a task
-  // The contract lives in docs/contracts; types in ui/src/lib/api/types.ts.
-  import { vault } from './vault.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  // Vault v3 — the docs home. Obsidian-style three-pane layout: left sidebar
+  // (Files / Search / Tags over the active vault), center (note edit⇄read or
+  // the graph), right panel (backlinks / outgoing / outline / properties /
+  // OKF). Files on disk are the truth; the daemon keeps a derived index.
+  import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import KnowledgeView from './KnowledgeView.svelte';
-  import CodeGraphView from './CodeGraphView.svelte';
-  import ReposView from './ReposView.svelte';
-  import SymbolsView from './SymbolsView.svelte';
-  import BackendsView from './BackendsView.svelte';
-  import BrainView from './BrainView.svelte';
-  import type { VaultTab } from './vault.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import FileTree from './FileTree.svelte';
+  import GraphView from './GraphView.svelte';
+  import NewNoteDialog from './NewNoteDialog.svelte';
+  import NoteView from './NoteView.svelte';
+  import RightPanel from './RightPanel.svelte';
+  import SearchPanel from './SearchPanel.svelte';
+  import Switcher from './Switcher.svelte';
+  import TagsPanel from './TagsPanel.svelte';
+  import { vault } from './vault.svelte';
 
-  // Load this workspace's memories + the active embedder when available.
-  $effect(() => {
-    if (ws.currentId) void vault.load();
-  });
-  $effect(() => {
-    void vault.loadEmbedder();
+  // -- pane widths (drag-resizable, persisted) ---------------------------------
+  const LEFT_W_KEY = 'otto_vault_left_w';
+  const RIGHT_W_KEY = 'otto_vault_right_w';
+  let leftW = $state(Number(localStorage.getItem(LEFT_W_KEY)) || 250);
+  let rightW = $state(Number(localStorage.getItem(RIGHT_W_KEY)) || 280);
+  let rightOpen = $state(localStorage.getItem('otto_vault_right_open') !== '0');
+  let resizing = $state(false);
+
+  function startResize(e: MouseEvent, side: 'left' | 'right'): void {
+    e.preventDefault();
+    resizing = true;
+    const startX = e.clientX;
+    const startW = side === 'left' ? leftW : rightW;
+    const onMove = (ev: MouseEvent) => {
+      const d = ev.clientX - startX;
+      const w = Math.max(180, Math.min(520, Math.round(side === 'left' ? startW + d : startW - d)));
+      if (side === 'left') {
+        leftW = w;
+        localStorage.setItem(LEFT_W_KEY, String(w));
+      } else {
+        rightW = w;
+        localStorage.setItem(RIGHT_W_KEY, String(w));
+      }
+    };
+    const onUp = () => {
+      resizing = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  // -- create-vault dialog -------------------------------------------------------
+  let createOpen = $state(false);
+  let cName = $state('');
+  let cPath = $state('');
+  let cOkf = $state(true);
+  let creating = $state(false);
+
+  async function submitCreate(): Promise<void> {
+    if (!cName.trim() || creating) return;
+    creating = true;
+    try {
+      await vault.create(cName.trim(), cPath.trim() || undefined, cOkf);
+      createOpen = false;
+      cName = '';
+      cPath = '';
+    } finally {
+      creating = false;
+    }
+  }
+
+  // -- new-note dialog -------------------------------------------------------------
+  let newNoteOpen = $state(false);
+  let newNoteDir = $state('');
+
+  function openNewNote(dir: string): void {
+    newNoteDir = dir;
+    newNoteOpen = true;
+  }
+
+  function vaultMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      ...vault.vaults.map((v) => ({
+        label: v.name + (v.id === vault.current?.id ? '  ✓' : ''),
+        icon: 'globe',
+        action: () => void vault.select(v.id),
+      })),
+      { separator: true },
+      { label: 'Add vault…', icon: 'plus', action: () => (createOpen = true) },
+      ...(vault.current
+        ? [
+            {
+              label: vault.current.okf ? 'Disable OKF mode' : 'Enable OKF mode',
+              icon: 'check',
+              action: () => void vault.toggleOkf(),
+            },
+            { label: 'Rescan', icon: 'refresh', action: () => void vault.rescan() },
+            {
+              label: 'Unregister vault (keeps files)',
+              icon: 'trash',
+              danger: true,
+              action: () => {
+                if (confirm(`Unregister "${vault.current?.name}"? Files on disk are untouched.`)) {
+                  void vault.unregister(vault.current!.id);
+                }
+              },
+            },
+          ]
+        : []),
+    ]);
+  }
+
+  function onKeydown(e: KeyboardEvent): void {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
+      e.preventDefault();
+      vault.switcherOpen = true;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'n' && vault.current) {
+      e.preventDefault();
+      openNewNote('');
+    }
+  }
+
+  const scanning = $derived(vault.status?.scan_state === 'scanning');
+  const scanError = $derived(vault.status?.scan_state.startsWith('error') ?? false);
+
+  onMount(() => {
+    void vault.load();
+    vault.startPolling();
+    return () => vault.stopPolling();
   });
 
-  const TABS: Array<{ id: VaultTab; label: string; icon: string }> = [
-    { id: 'knowledge', label: 'Knowledge', icon: 'note' },
-    { id: 'graph', label: 'Graph', icon: 'branch' },
-    { id: 'repos', label: 'Repos', icon: 'box' },
-    { id: 'symbols', label: 'Symbols', icon: 'command' },
-    { id: 'backends', label: 'Backends', icon: 'plug' },
-    { id: 'brain', label: 'Brain', icon: 'radar' },
-  ];
+  // Reload when the workspace changes.
+  let lastWs = $state('');
+  $effect(() => {
+    const id = ws.current?.id ?? '';
+    if (id && id !== lastWs) {
+      lastWs = id;
+      void vault.load();
+    }
+  });
 </script>
 
-<div class="vault-page">
-  <div class="vp-tabs" role="tablist" aria-label="Vault sections" data-testid="vault-tabs">
-    {#each TABS as t (t.id)}
-      <button
-        class="vp-tab"
-        class:active={vault.tab === t.id}
-        role="tab"
-        aria-selected={vault.tab === t.id}
-        data-testid={`vault-tab-${t.id}`}
-        onclick={() => (vault.tab = t.id)}
-      >
-        <Icon name={t.icon} size={13} />
-        {t.label}
-      </button>
-    {/each}
-  </div>
+<svelte:window onkeydown={onKeydown} />
 
-  <div class="vp-body" role="tabpanel" aria-label={`Vault ${vault.tab}`}>
-    {#if vault.tab === 'knowledge'}
-      <KnowledgeView />
-    {:else if vault.tab === 'graph'}
-      <CodeGraphView />
-    {:else if vault.tab === 'repos'}
-      <ReposView />
-    {:else if vault.tab === 'symbols'}
-      <SymbolsView />
-    {:else if vault.tab === 'backends'}
-      <BackendsView />
-    {:else if vault.tab === 'brain'}
-      <BrainView />
+<div class="vault-page" class:resizing>
+  <header class="topbar">
+    <button class="vault-pick" onclick={(e) => vaultMenu(e)} title="Switch vault">
+      <Icon name="globe" size={14} />
+      <span>{vault.current?.name ?? 'No vault'}</span>
+      <span class="tri">▾</span>
+    </button>
+    {#if vault.current?.okf}
+      <span class="okf-chip" title="OKF (Open Knowledge Format) vault">OKF</span>
     {/if}
-  </div>
+    {#if scanning}
+      <span class="scan-chip">Indexing vault…</span>
+    {:else if scanError}
+      <span class="scan-chip err" title={vault.status?.scan_state}>index error</span>
+    {/if}
+    <div class="spacer"></div>
+    {#if vault.current}
+      <div class="counts">
+        {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ??
+          vault.current.links} links
+        {#if (vault.status?.unresolved ?? 0) > 0}
+          · {vault.status?.unresolved} unresolved
+        {/if}
+      </div>
+      <button
+        class="tool"
+        class:active={vault.centerMode === 'graph'}
+        title="Graph view"
+        onclick={() =>
+          (vault.centerMode = vault.centerMode === 'graph' ? (vault.note ? 'note' : 'empty') : 'graph')}
+      >
+        <Icon name="share" size={14} />
+      </button>
+      <button class="tool" title="Quick switcher (⌘O)" onclick={() => (vault.switcherOpen = true)}>
+        <Icon name="search" size={14} />
+      </button>
+      <button class="tool" title="New note (⌘N)" onclick={() => openNewNote('')}>
+        <Icon name="plus" size={14} />
+      </button>
+      <button
+        class="tool"
+        title="Toggle right panel"
+        onclick={() => {
+          rightOpen = !rightOpen;
+          localStorage.setItem('otto_vault_right_open', rightOpen ? '1' : '0');
+        }}
+      >
+        <Icon name="sidebar" size={14} />
+      </button>
+    {/if}
+  </header>
+
+  {#if !vault.current && !vault.loading}
+    <div class="onboard">
+      <h2>The docs home</h2>
+      <p>
+        A vault is a folder of markdown files on disk — point Otto at an existing Obsidian vault or
+        create a fresh one. Files stay yours; Otto indexes links, tags and full text, and agents
+        read/write it over MCP in OKF.
+      </p>
+      <button class="primary" onclick={() => (createOpen = true)}>Add a vault</button>
+    </div>
+  {:else if vault.current}
+    <div class="panes">
+      <aside class="left" style="width:{leftW}px">
+        <div class="left-modes">
+          <button
+            class:active={vault.leftMode === 'files'}
+            title="Files"
+            onclick={() => (vault.leftMode = 'files')}><Icon name="folder" size={14} /></button
+          >
+          <button
+            class:active={vault.leftMode === 'search'}
+            title="Search"
+            onclick={() => (vault.leftMode = 'search')}><Icon name="search" size={14} /></button
+          >
+          <button
+            class:active={vault.leftMode === 'tags'}
+            title="Tags"
+            onclick={() => {
+              vault.leftMode = 'tags';
+              void vault.loadTags();
+            }}><Icon name="tag" size={14} /></button
+          >
+          <div class="spacer"></div>
+          {#if vault.leftMode === 'files'}
+            <button title="Collapse all" onclick={() => vault.collapseAll()}>
+              <Icon name="minimize" size={13} />
+            </button>
+            <button title="Rescan vault" onclick={() => void vault.rescan()}>
+              <Icon name="refresh" size={13} />
+            </button>
+          {/if}
+        </div>
+        {#if vault.leftMode === 'files'}
+          <FileTree onNewNote={openNewNote} />
+        {:else if vault.leftMode === 'search'}
+          <SearchPanel />
+        {:else}
+          <TagsPanel />
+        {/if}
+      </aside>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="resizer" onmousedown={(e) => startResize(e, 'left')}></div>
+
+      <main class="center">
+        {#if vault.centerMode === 'graph'}
+          <GraphView />
+        {:else if vault.centerMode === 'note' && vault.note}
+          <NoteView />
+        {:else}
+          <div class="center-empty">
+            <p>Open a note from the tree, search, or press ⌘O.</p>
+          </div>
+        {/if}
+      </main>
+
+      {#if rightOpen && vault.centerMode === 'note'}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="resizer" onmousedown={(e) => startResize(e, 'right')}></div>
+        <aside class="right-pane" style="width:{rightW}px">
+          <RightPanel />
+        </aside>
+      {/if}
+    </div>
+
+    <footer class="statusbar">
+      {#if vault.note}
+        <span>{vault.backlinks.length} backlinks</span>
+        <span>{vault.note.meta.word_count} words</span>
+        <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>
+        {#if vault.current.okf && vault.okfReport}
+          <span class:ok={vault.okfReport.conformant} class:bad={!vault.okfReport.conformant}>
+            OKF {vault.okfReport.conformant ? '✓' : `✗ ${vault.okfReport.errors.length}`}
+          </span>
+        {/if}
+      {/if}
+      <span class="grow"></span>
+      <span class="dim">{vault.current.root_path}</span>
+    </footer>
+  {/if}
 </div>
+
+{#if createOpen}
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={() => (createOpen = false)}>
+    <div class="dialog" role="dialog" tabindex="-1" aria-label="Add vault" onclick={(e) => e.stopPropagation()}>
+      <h3>Add a vault</h3>
+      <label class="fld">
+        <span>Name</span>
+        <input bind:value={cName} placeholder="Team Docs" />
+      </label>
+      <label class="fld">
+        <span>Folder (blank → create under ~/.otto/vault)</span>
+        <input bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" />
+      </label>
+      <label class="chk">
+        <input type="checkbox" bind:checked={cOkf} />
+        OKF vault (Open Knowledge Format validation + templates)
+      </label>
+      <div class="actions">
+        <button onclick={() => (createOpen = false)}>Cancel</button>
+        <button class="primary" disabled={!cName.trim() || creating} onclick={() => void submitCreate()}>
+          {creating ? 'Adding…' : 'Add vault'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<NewNoteDialog bind:open={newNoteOpen} bind:dir={newNoteDir} />
+<Switcher />
 
 <style>
   .vault-page {
@@ -77,48 +327,280 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
-    overflow: hidden;
   }
-  .vp-tabs {
+  .vault-page.resizing {
+    cursor: col-resize;
+  }
+  .topbar {
     display: flex;
-    gap: 4px;
-    padding: 8px 12px 0;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-    overflow-x: auto;
   }
-  .vp-tab {
+  .vault-pick {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    border: 1px solid transparent;
-    border-bottom: none;
-    background: transparent;
-    color: var(--text-dim);
+    gap: 7px;
+    background: var(--panel-2, #222);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 5px 10px;
     font-size: 12.5px;
-    font-weight: 600;
-    padding: 7px 13px;
-    border-radius: 8px 8px 0 0;
     cursor: pointer;
+    max-width: 260px;
+  }
+  .vault-pick span {
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .vp-tab:hover {
+  .tri {
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+  .okf-chip {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    color: var(--accent, #9ab4ff);
+    border: 1px solid var(--accent, #9ab4ff);
+    border-radius: 5px;
+    padding: 1px 6px;
+  }
+  .scan-chip {
+    font-size: 11px;
+    color: var(--accent, #9ab4ff);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .scan-chip.err {
+    color: #e88;
+    animation: none;
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.45;
+    }
+  }
+  .spacer,
+  .grow {
+    flex: 1;
+  }
+  .counts {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .tool {
+    display: inline-flex;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 7px;
     color: var(--text);
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+    padding: 5px 7px;
+    cursor: pointer;
   }
-  .vp-tab.active {
-    color: #0b0b0b;
-    background: #7ee787;
-    border-color: #7ee787;
+  .tool:hover {
+    background: var(--hover, rgba(127, 127, 127, 0.12));
   }
-  .vp-body {
+  .tool.active {
+    border-color: var(--accent, #7a9cff);
+    color: var(--accent, #9ab4ff);
+  }
+  .panes {
+    display: flex;
     flex: 1;
     min-height: 0;
+  }
+  .left {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-inline-end: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .left-modes {
+    display: flex;
+    gap: 2px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .left-modes button {
+    display: inline-flex;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-dim);
+    padding: 5px 7px;
+    cursor: pointer;
+  }
+  .left-modes button:hover {
+    background: var(--hover, rgba(127, 127, 127, 0.12));
+  }
+  .left-modes button.active {
+    color: var(--accent, #9ab4ff);
+    background: var(--accent-dim, rgba(90, 120, 255, 0.14));
+  }
+  .resizer {
+    width: 4px;
+    cursor: col-resize;
+    flex-shrink: 0;
+  }
+  .resizer:hover {
+    background: var(--accent-dim, rgba(90, 120, 255, 0.3));
+  }
+  .center {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .center > :global(*) {
+    flex: 1;
+    min-height: 0;
+  }
+  .center-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+  .right-pane {
+    border-inline-start: 1px solid var(--border);
+    flex-shrink: 0;
+    min-height: 0;
+  }
+  .statusbar {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    padding: 4px 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .statusbar .ok {
+    color: #7fc97f;
+  }
+  .statusbar .bad {
+    color: #e88;
+  }
+  .statusbar .dim {
+    opacity: 0.7;
     overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .onboard {
+    max-width: 480px;
+    margin: 12vh auto;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 0 20px;
+  }
+  .onboard h2 {
+    margin: 0;
+  }
+  .onboard p {
+    color: var(--text-dim);
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  .onboard .primary,
+  .actions .primary {
+    background: var(--accent, #4c6fff);
+    border: none;
+    color: #fff;
+    border-radius: 8px;
+    padding: 8px 18px;
+    font-size: 13px;
+    cursor: pointer;
+    align-self: center;
+  }
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    z-index: 90;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 16vh;
+  }
+  .dialog {
+    width: min(460px, 92vw);
+    background: var(--panel, #1c1c1e);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .dialog h3 {
+    margin: 0;
+    font-size: 14px;
+  }
+  .fld {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+  }
+  .fld input {
+    background: var(--panel-2, #222);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 8px 10px;
+  }
+  .chk {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 12.5px;
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .actions button {
+    border: 1px solid var(--border);
+    background: var(--panel-2, #222);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font-size: 12.5px;
+  }
+  .actions .primary:disabled {
+    opacity: 0.5;
   }
 
-  @media (max-width: 640px) {
-    .vp-tabs { padding: 6px 8px 0; }
-    .vp-tab { padding: 9px 12px; min-height: 38px; }
+  /* Mobile: stack — left pane becomes a top strip, right panel hidden. */
+  @media (max-width: 800px) {
+    .panes {
+      flex-direction: column;
+    }
+    .left {
+      width: 100% !important;
+      max-height: 40%;
+      border-inline-end: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .resizer {
+      display: none;
+    }
+    .right-pane {
+      display: none;
+    }
   }
 </style>

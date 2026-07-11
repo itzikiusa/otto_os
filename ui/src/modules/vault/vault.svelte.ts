@@ -1,632 +1,489 @@
-// Vault module store — the Obsidian-like memory browser. Talks to the memory
-// API (list / search / links / graph / governance) scoped to the current workspace.
+// Vault module store — the docs home. One class instance holds the vault
+// list + selection, the lazy file tree, the open note (edit/read), panels,
+// and status polling (only while the page is visible).
 
-import { api } from '../../lib/api/client';
+import {
+  createVault,
+  createVaultFolder,
+  deleteVault,
+  deleteVaultNote,
+  listVaults,
+  okfIndexes,
+  okfValidate,
+  patchVault,
+  renameVaultPath,
+  rescanVault,
+  vaultBacklinks,
+  vaultDir,
+  vaultNote,
+  vaultSearch,
+  vaultStatus,
+  vaultSwitcher,
+  vaultTags,
+  writeVaultNote,
+} from '../../lib/api/vault';
+import { ApiError } from '../../lib/api/client';
+import type {
+  OkfReport,
+  Vault,
+  VaultBacklink,
+  VaultDirEntry,
+  VaultNote,
+  VaultSearchHit,
+  VaultStatus,
+  VaultSwitchHit,
+  VaultTagCount,
+} from '../../lib/api/types';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
-import type {
-  Memory,
-  MemoryGraphData,
-  MemoryHit,
-  MemoryLink,
-  MemoryQuery,
-  CodeRepo,
-  CodeSymbol,
-  FullGraph,
-  IndexResult,
-  IndexRepoReq,
-  RepoBrain,
-  VaultBackend,
-  VaultBackendReq,
-  VaultDocReq,
-  VaultHealth,
-  VaultInstallPlan,
-  VaultInstallResult,
-} from '../../lib/api/types';
 
-// ---------------------------------------------------------------------------
-// Module-local governance types (mirror of crates/otto-memory/src/governance.rs)
-// ---------------------------------------------------------------------------
+export type LeftMode = 'files' | 'search' | 'tags';
+export type CenterMode = 'note' | 'graph' | 'empty';
 
-export type MemoryState = 'suggested' | 'accepted' | 'stale' | 'contradicted';
-
-export interface SetStateReq {
-  state: MemoryState;
+/** A row of the flattened, lazily-loaded file tree. */
+export interface TreeNode {
+  entry: VaultDirEntry;
+  depth: number;
+  open: boolean;
+  loaded: boolean;
+  loading: boolean;
+  children: TreeNode[];
 }
 
-export interface ForgetResp {
-  undo_token: string;
-}
-
-export interface UndoForgetReq {
-  undo_token: string;
-}
-
-export interface MergeReq {
-  ids: string[];
-  title: string;
-  body: string;
-}
-
-export interface MergeResp {
-  memory: Memory;
-}
-
-export interface SplitPart {
-  title: string;
-  body: string;
-}
-
-export interface SplitReq {
-  parts: SplitPart[];
-}
-
-export interface SplitResp {
-  memories: Memory[];
-}
-
-export type GovImportKind = 'agents-md' | 'claude-md' | 'cursorrules' | 'custom';
-
-export interface GovImportReq {
-  kind: GovImportKind;
-  content: string;
-  label?: string;
-}
-
-export interface GovImportResp {
-  imported: number;
-  import_id: string;
-}
-
-// -- Embedder configuration (mirror of crates/otto-server/src/embedder.rs) ----
-
-export type EmbedderProvider = 'local' | 'ollama' | 'openai' | 'voyage' | 'stub';
-
-export interface EmbedderStatus {
-  provider: string;
-  model: string | null;
-  dim: number | null;
-  active: boolean;
-  key_present: boolean;
-}
-
-export interface SetEmbedderReq {
-  provider: EmbedderProvider;
-  api_key?: string;
-  ollama_model?: string;
-  ollama_dim?: number;
-  ollama_url?: string;
-}
-
-/** Ollama embedding model options (model → embedding dimension). The dim is the
- * model's native output; the stored dim auto-matches the real vector anyway.
- * Pick by the machine's RAM — the ones marked "light" suit a 5–10 GB box; the
- * larger Qwen3 models are best on a 20+ GB machine. */
-export const OLLAMA_EMBED_MODELS: { model: string; dim: number; note: string }[] = [
-  { model: 'nomic-embed-text-v2-moe', dim: 768, note: 'light · ~0.9 GB · v2 MoE (recommended)' },
-  { model: 'nomic-embed-text', dim: 768, note: 'light · ~0.5 GB · v1 (older)' },
-  { model: 'qwen3-embedding:0.6b', dim: 1024, note: 'light · ~0.6 GB · great quality/size' },
-  { model: 'mxbai-embed-large', dim: 1024, note: 'light · ~1.2 GB · strong' },
-  { model: 'bge-m3', dim: 1024, note: 'medium · ~2.5 GB · multilingual + long ctx' },
-  { model: 'qwen3-embedding:4b', dim: 2560, note: 'heavy · ~3–4 GB · top quality' },
-  { model: 'qwen3-embedding:8b', dim: 4096, note: 'very heavy · ~6 GB · best (20+ GB box)' },
-  { model: 'all-minilm', dim: 384, note: 'tiny · ~0.1 GB' },
-];
-
-// ---------------------------------------------------------------------------
-// Vault v2 — top-level tabs
-// ---------------------------------------------------------------------------
-
-export type VaultTab = 'knowledge' | 'graph' | 'repos' | 'symbols' | 'backends' | 'brain';
-
-// ---------------------------------------------------------------------------
-// Store
-// ---------------------------------------------------------------------------
+const LAST_VAULT_KEY = 'otto_vault_last';
+const VIEW_MODE_KEY = 'otto_vault_view';
 
 class VaultStore {
-  items = $state<Memory[]>([]);
-  hits = $state<MemoryHit[]>([]);
-  selected = $state<Memory | null>(null);
-  links = $state<MemoryLink[]>([]);
-  graph = $state<MemoryGraphData | null>(null);
-  query = $state('');
-  collection = $state<string>('');
-  stateFilter = $state<MemoryState | ''>('');
+  vaults = $state<Vault[]>([]);
+  current = $state<Vault | null>(null);
+  status = $state<VaultStatus | null>(null);
   loading = $state(false);
-  mode = $state<'list' | 'graph'>('list');
 
-  // Merge UI state
-  mergeMode = $state(false);
-  mergeIds = $state<string[]>([]);
+  leftMode = $state<LeftMode>('files');
+  centerMode = $state<CenterMode>('empty');
 
-  // Embedder configuration state
-  embedder = $state<EmbedderStatus | null>(null);
-  embedderBusy = $state(false);
+  // File tree (roots of the current vault).
+  roots = $state<TreeNode[]>([]);
 
-  // -- Vault v2: code intelligence + remote backends ----------------------
-  // The active top-level tab. Knowledge keeps the original Obsidian-like
-  // memory browser; the rest surface the code "Repo Brain".
-  tab = $state<VaultTab>('knowledge');
+  // Open note.
+  note = $state<VaultNote | null>(null);
+  notePath = $state<string | null>(null);
+  editing = $state(false);
+  draft = $state('');
+  dirty = $state(false);
+  saving = $state(false);
+  /** 409 conflict from autosave — the banner offers Reload / Overwrite. */
+  conflict = $state(false);
+  backlinks = $state<VaultBacklink[]>([]);
 
-  // Indexed code repositories (files/symbols/edges counts + status).
-  repos = $state<CodeRepo[]>([]);
-  reposLoading = $state(false);
-  indexing = $state(false);
-  lastIndex = $state<IndexResult | null>(null);
+  // Search / tags panels.
+  searchQuery = $state('');
+  searchHits = $state<VaultSearchHit[]>([]);
+  searching = $state(false);
+  tags = $state<VaultTagCount[]>([]);
 
-  // Symbol browser.
-  symbols = $state<CodeSymbol[]>([]);
-  symbolQuery = $state('');
-  symbolRepoId = $state<string>('');
-  symbolsLoading = $state(false);
+  // Quick switcher.
+  switcherOpen = $state(false);
 
-  // Unified knowledge+code graph (the headline Obsidian-style view).
-  fullGraph = $state<FullGraph | null>(null);
-  graphRepoId = $state<string>('');
-  fullGraphLoading = $state(false);
-  /** A node id to centre/focus in the graph (bumped from the tree or a deep link). */
-  focusNodeId = $state<string | null>(null);
+  // OKF.
+  okfReport = $state<OkfReport | null>(null);
+  okfBusy = $state(false);
 
-  // Remote backends (Qdrant / SurrealDB / Ollama).
-  backends = $state<VaultBackend[]>([]);
-  backendsLoading = $state(false);
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Repo Brain (focus → assembled context).
-  brain = $state<RepoBrain | null>(null);
-  brainFocus = $state('');
-  brainBusy = $state(false);
+  get wsId(): string {
+    return ws.current?.id ?? '';
+  }
 
-  /** Search hits keyed by memory id, so the index can show "why selected" chips. */
-  hitsById = $derived.by(() => {
-    const m = new Map<string, MemoryHit>();
-    for (const h of this.hits) m.set(h.memory.id, h);
-    return m;
-  });
-
-  /** Distinct collections present, for the filter chips. */
-  collections = $derived.by(() => {
-    const set = new Set<string>();
-    for (const m of this.items) set.add(m.collection);
-    return [...set].sort();
-  });
-
-  /** What the left list shows: ranked hits when searching, else recent items. */
-  visible = $derived.by(() => {
-    const base = this.query.trim()
-      ? this.hits.map((h) => h.memory)
-      : this.items;
-    const byCollection = this.collection
-      ? base.filter((m) => m.collection === this.collection)
-      : base;
-    return this.stateFilter
-      ? byCollection.filter((m) => (m as Memory & { state?: string }).state === this.stateFilter)
-      : byCollection;
-  });
-
-  /** Notes that link TO the selected note (backlinks). */
-  backlinks = $derived.by(() => {
-    const id = this.selected?.id;
-    if (!id) return [];
-    return this.links.filter((l) => l.dst_id === id);
-  });
+  // -- lifecycle -------------------------------------------------------------
 
   async load(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
+    if (!this.wsId) return;
     this.loading = true;
     try {
-      this.items = await api.get<Memory[]>(`/workspaces/${wsId}/memories?limit=200&include_inactive=true`);
+      this.vaults = await listVaults(this.wsId);
+      const lastId = Number(localStorage.getItem(`${LAST_VAULT_KEY}:${this.wsId}`) || 0);
+      const pick = this.vaults.find((v) => v.id === lastId) ?? this.vaults[0] ?? null;
+      if (pick) await this.select(pick.id);
+      else {
+        this.current = null;
+        this.centerMode = 'empty';
+      }
+    } catch (e) {
+      toasts.error(`Vault: ${msg(e)}`);
     } finally {
       this.loading = false;
     }
   }
 
-  async search(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    if (!this.query.trim()) {
-      this.hits = [];
+  async select(id: number): Promise<void> {
+    const v = this.vaults.find((x) => x.id === id) ?? null;
+    this.current = v;
+    this.note = null;
+    this.notePath = null;
+    this.backlinks = [];
+    this.okfReport = null;
+    this.roots = [];
+    this.centerMode = 'empty';
+    if (!v) return;
+    localStorage.setItem(`${LAST_VAULT_KEY}:${this.wsId}`, String(v.id));
+    this.editing = localStorage.getItem(`${VIEW_MODE_KEY}:${v.id}`) === 'edit';
+    await Promise.all([this.loadRoot(), this.refreshStatus()]);
+    void this.loadTags();
+  }
+
+  startPolling(): void {
+    this.stopPolling();
+    this.pollTimer = setInterval(() => {
+      if (this.current && !document.hidden) void this.refreshStatus();
+    }, 5000);
+  }
+
+  stopPolling(): void {
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = null;
+  }
+
+  async refreshStatus(): Promise<void> {
+    if (!this.current) return;
+    try {
+      const prev = this.status?.scan_state;
+      this.status = await vaultStatus(this.wsId, this.current.id);
+      // A scan just finished → refresh the visible tree + note backlinks.
+      if (prev === 'scanning' && this.status.scan_state === 'idle') {
+        void this.refreshTree();
+        void this.loadTags();
+        if (this.notePath) void this.reloadBacklinks();
+      }
+    } catch {
+      /* transient — next poll retries */
+    }
+  }
+
+  // -- vault management --------------------------------------------------------
+
+  async create(name: string, rootPath: string | undefined, okf: boolean): Promise<void> {
+    const v = await createVault(this.wsId, { name, root_path: rootPath, okf });
+    this.vaults = [...this.vaults, v];
+    await this.select(v.id);
+    toasts.success(`Vault "${v.name}" registered`);
+  }
+
+  async unregister(id: number): Promise<void> {
+    await deleteVault(this.wsId, id);
+    this.vaults = this.vaults.filter((v) => v.id !== id);
+    if (this.current?.id === id) await this.load();
+    toasts.success('Vault unregistered (files untouched)');
+  }
+
+  async toggleOkf(): Promise<void> {
+    if (!this.current) return;
+    const v = await patchVault(this.wsId, this.current.id, { okf: !this.current.okf });
+    this.vaults = this.vaults.map((x) => (x.id === v.id ? v : x));
+    this.current = v;
+  }
+
+  async rescan(): Promise<void> {
+    if (!this.current) return;
+    try {
+      this.status = await rescanVault(this.wsId, this.current.id);
+      await this.refreshTree();
+      toasts.success('Vault rescanned');
+    } catch (e) {
+      toasts.error(`Rescan: ${msg(e)}`);
+    }
+  }
+
+  // -- file tree ----------------------------------------------------------------
+
+  async loadRoot(): Promise<void> {
+    if (!this.current) return;
+    const listing = await vaultDir(this.wsId, this.current.id, '');
+    this.roots = mergeLevel(this.roots, listing.entries, 0);
+  }
+
+  async toggleDir(node: TreeNode): Promise<void> {
+    node.open = !node.open;
+    if (node.open && !node.loaded && this.current) {
+      node.loading = true;
+      try {
+        const listing = await vaultDir(this.wsId, this.current.id, node.entry.path);
+        node.children = mergeLevel(node.children, listing.entries, node.depth + 1);
+        node.loaded = true;
+      } finally {
+        node.loading = false;
+      }
+    }
+  }
+
+  collapseAll(): void {
+    const visit = (nodes: TreeNode[]) => {
+      for (const n of nodes) {
+        n.open = false;
+        visit(n.children);
+      }
+    };
+    visit(this.roots);
+  }
+
+  /** Depth-first flatten of the open tree for the virtualized list. */
+  flatTree(): TreeNode[] {
+    const out: TreeNode[] = [];
+    const visit = (nodes: TreeNode[]) => {
+      for (const n of nodes) {
+        out.push(n);
+        if (n.entry.kind === 'dir' && n.open) visit(n.children);
+      }
+    };
+    visit(this.roots);
+    return out;
+  }
+
+  /** Refresh every loaded level (after create/rename/delete or a scan). */
+  async refreshTree(): Promise<void> {
+    if (!this.current) return;
+    const id = this.current.id;
+    const refresh = async (nodes: TreeNode[], path: string, depth: number): Promise<TreeNode[]> => {
+      const listing = await vaultDir(this.wsId, id, path);
+      const merged = mergeLevel(nodes, listing.entries, depth);
+      for (const n of merged) {
+        if (n.entry.kind === 'dir' && n.loaded) {
+          n.children = await refresh(n.children, n.entry.path, depth + 1);
+        }
+      }
+      return merged;
+    };
+    this.roots = await refresh(this.roots, '', 0);
+  }
+
+  // -- note open / edit / save -----------------------------------------------------
+
+  async open(path: string, opts: { edit?: boolean } = {}): Promise<void> {
+    if (!this.current) return;
+    if (this.dirty && this.notePath && !this.conflict) await this.saveNow();
+    try {
+      const n = await vaultNote(this.wsId, this.current.id, path);
+      this.note = n;
+      this.notePath = path;
+      this.draft = n.raw;
+      this.dirty = false;
+      this.conflict = false;
+      this.centerMode = 'note';
+      if (opts.edit !== undefined) this.setView(opts.edit);
+      void this.reloadBacklinks();
+    } catch (e) {
+      toasts.error(`Open ${path}: ${msg(e)}`);
+    }
+  }
+
+  async reloadBacklinks(): Promise<void> {
+    if (!this.current || !this.notePath) return;
+    try {
+      this.backlinks = await vaultBacklinks(this.wsId, this.current.id, this.notePath);
+    } catch {
+      this.backlinks = [];
+    }
+  }
+
+  setView(edit: boolean): void {
+    this.editing = edit;
+    if (this.current) {
+      localStorage.setItem(`${VIEW_MODE_KEY}:${this.current.id}`, edit ? 'edit' : 'read');
+    }
+  }
+
+  onDraftChange(content: string): void {
+    this.draft = content;
+    this.dirty = content !== (this.note?.raw ?? '');
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    if (this.dirty && !this.conflict) {
+      this.saveTimer = setTimeout(() => void this.saveNow(), 800);
+    }
+  }
+
+  async saveNow(overwrite = false): Promise<void> {
+    if (!this.current || !this.notePath || !this.note || this.saving) return;
+    if (!this.dirty && !overwrite) return;
+    this.saving = true;
+    const savedDraft = this.draft;
+    try {
+      await writeVaultNote(this.wsId, this.current.id, {
+        path: this.notePath,
+        content: savedDraft,
+        if_hash: overwrite ? undefined : this.note.meta.hash,
+      });
+      // Refresh meta + outgoing from the index (the write ran a scan).
+      const n = await vaultNote(this.wsId, this.current.id, this.notePath);
+      this.note = n;
+      this.dirty = this.draft !== savedDraft;
+      this.conflict = false;
+      void this.reloadBacklinks();
+      void this.refreshStatus();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        this.conflict = true;
+      } else {
+        toasts.error(`Save: ${msg(e)}`);
+      }
+    } finally {
+      this.saving = false;
+    }
+  }
+
+  /** Conflict banner: discard local edits and reload the disk version. */
+  async conflictReload(): Promise<void> {
+    if (this.notePath) {
+      this.dirty = false;
+      this.conflict = false;
+      await this.open(this.notePath);
+    }
+  }
+
+  /** Conflict banner: force-write the local draft over the disk version. */
+  async conflictOverwrite(): Promise<void> {
+    this.conflict = false;
+    this.dirty = true;
+    await this.saveNow(true);
+  }
+
+  // -- note operations ---------------------------------------------------------------
+
+  async createNote(path: string, content: string): Promise<void> {
+    if (!this.current) return;
+    await writeVaultNote(this.wsId, this.current.id, { path, content, if_hash: '' });
+    await this.refreshTree();
+    await this.open(path, { edit: true });
+  }
+
+  async createFolder(path: string): Promise<void> {
+    if (!this.current) return;
+    await createVaultFolder(this.wsId, this.current.id, path);
+    await this.refreshTree();
+  }
+
+  async rename(from: string, to: string): Promise<void> {
+    if (!this.current) return;
+    try {
+      const r = await renameVaultPath(this.wsId, this.current.id, from, to);
+      toasts.success(r.links_updated === 1 ? '1 link updated' : `${r.links_updated} links updated`);
+      if (this.notePath === from) {
+        await this.open(to);
+      } else if (this.notePath?.startsWith(`${from}/`)) {
+        await this.open(to + this.notePath.slice(from.length));
+      }
+      await this.refreshTree();
+    } catch (e) {
+      toasts.error(`Rename: ${msg(e)}`);
+    }
+  }
+
+  async trash(path: string): Promise<void> {
+    if (!this.current) return;
+    try {
+      await deleteVaultNote(this.wsId, this.current.id, path);
+      toasts.success(`Moved to .trash: ${path}`);
+      if (this.notePath === path) {
+        this.note = null;
+        this.notePath = null;
+        this.centerMode = 'empty';
+      }
+      await this.refreshTree();
+      void this.refreshStatus();
+    } catch (e) {
+      toasts.error(`Delete: ${msg(e)}`);
+    }
+  }
+
+  // -- search / tags / switcher ---------------------------------------------------------
+
+  async runSearch(): Promise<void> {
+    if (!this.current) return;
+    const q = this.searchQuery.trim();
+    if (!q) {
+      this.searchHits = [];
       return;
     }
-    const q: MemoryQuery = { text: this.query, mode: 'hybrid', k: 50 };
-    this.loading = true;
+    this.searching = true;
     try {
-      this.hits = await api.post<MemoryHit[]>(`/workspaces/${wsId}/memory/search`, q);
+      this.searchHits = await vaultSearch(this.wsId, this.current.id, { query: q, limit: 50 });
+    } catch (e) {
+      toasts.error(`Search: ${msg(e)}`);
     } finally {
-      this.loading = false;
+      this.searching = false;
     }
   }
 
-  async select(m: Memory): Promise<void> {
-    this.selected = m;
-    this.links = [];
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    this.links = await api.get<MemoryLink[]>(`/workspaces/${wsId}/memories/${m.id}/links`);
+  searchTag(tag: string): void {
+    this.leftMode = 'search';
+    this.searchQuery = `tag:${tag}`;
+    void this.runSearch();
   }
 
-  async loadGraph(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    this.loading = true;
+  async loadTags(): Promise<void> {
+    if (!this.current) return;
     try {
-      this.graph = await api.get<MemoryGraphData>(`/workspaces/${wsId}/memory/graph`);
-    } finally {
-      this.loading = false;
-    }
-  }
-
-  // -- embedder config -----------------------------------------------------
-
-  /** Fetch the active Vault embedder (provider/model/dim). */
-  async loadEmbedder(): Promise<void> {
-    try {
-      this.embedder = await api.get<EmbedderStatus>('/memory/embedder');
+      this.tags = await vaultTags(this.wsId, this.current.id);
     } catch {
-      // Non-fatal: the panel just stays hidden if status can't be read.
-      this.embedder = null;
+      this.tags = [];
     }
   }
 
-  /** Switch the embedder provider (optionally storing an API key or Ollama
-   * model/dim/url), then refresh. */
-  async setEmbedder(
-    provider: EmbedderProvider,
-    opts?: { apiKey?: string; ollamaModel?: string; ollamaDim?: number; ollamaUrl?: string },
-  ): Promise<void> {
-    this.embedderBusy = true;
+  async switcherQuery(q: string): Promise<VaultSwitchHit[]> {
+    if (!this.current) return [];
     try {
-      const body: SetEmbedderReq = { provider };
-      if (opts?.apiKey && opts.apiKey.trim()) body.api_key = opts.apiKey.trim();
-      if (provider === 'ollama') {
-        if (opts?.ollamaModel) body.ollama_model = opts.ollamaModel;
-        if (opts?.ollamaDim) body.ollama_dim = opts.ollamaDim;
-        if (opts?.ollamaUrl && opts.ollamaUrl.trim()) body.ollama_url = opts.ollamaUrl.trim();
-      }
-      this.embedder = await api.put<EmbedderStatus>('/memory/embedder', body);
-      toasts.info(`Embedder set to ${this.embedder.model ?? provider}`);
+      return await vaultSwitcher(this.wsId, this.current.id, q);
+    } catch {
+      return [];
+    }
+  }
+
+  // -- OKF ---------------------------------------------------------------------------
+
+  async validateOkf(): Promise<void> {
+    if (!this.current) return;
+    this.okfBusy = true;
+    try {
+      this.okfReport = await okfValidate(this.wsId, this.current.id);
     } catch (e) {
-      toasts.error('Could not set embedder', e instanceof Error ? e.message : String(e));
+      toasts.error(`OKF validate: ${msg(e)}`);
     } finally {
-      this.embedderBusy = false;
+      this.okfBusy = false;
     }
   }
 
-  /** Re-embed this workspace's memories under the active embedder. */
-  async reindex(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    this.embedderBusy = true;
+  async generateIndexes(): Promise<void> {
+    if (!this.current) return;
+    this.okfBusy = true;
     try {
-      await api.post<{ embedded: number }>(`/workspaces/${wsId}/memory/reindex`, {});
-      toasts.info('Re-embedding started', 'Running in the background; search quality improves as it completes.');
+      const r = await okfIndexes(this.wsId, this.current.id);
+      toasts.success(`${r.written} index.md files written`);
+      await this.refreshTree();
+      await this.validateOkf();
     } catch (e) {
-      toasts.error('Reindex failed', e instanceof Error ? e.message : String(e));
+      toasts.error(`OKF indexes: ${msg(e)}`);
     } finally {
-      this.embedderBusy = false;
+      this.okfBusy = false;
     }
   }
+}
 
-  // -- legacy forget (hard active=0 via DELETE) ---------------------------
-
-  async forget(m: Memory): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    await api.del(`/workspaces/${wsId}/memories/${m.id}`);
-    if (this.selected?.id === m.id) this.selected = null;
-    await this.load();
-  }
-
-  // -- governance ---------------------------------------------------------
-
-  /** Transition a memory's lifecycle state. */
-  async setState(m: Memory, state: MemoryState): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    const updated = await api.post<Memory>(
-      `/workspaces/${wsId}/memory/${m.id}/state`,
-      { state } satisfies SetStateReq,
-    );
-    this._replaceItem(updated);
-    if (this.selected?.id === m.id) this.selected = updated;
-    toasts.success('State updated', `Memory is now "${state}"`);
-  }
-
-  /** Soft-delete a memory; shows an undo toast for `ttl` seconds. */
-  async softForget(m: Memory): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    const resp = await api.post<ForgetResp>(`/workspaces/${wsId}/memory/${m.id}/forget`, {});
-    if (this.selected?.id === m.id) this.selected = null;
-    await this.load();
-    // Show a 7-second undo toast.
-    const token = resp.undo_token;
-    toasts.push('info', 'Memory forgotten', 'Undo', 7000);
-    // Store the undo callback on the window for the Undo button in the toast.
-    // (The toast system doesn't support actions, so we expose it on the store.)
-    this._pendingUndo = { token, wsId, memId: m.id };
-  }
-
-  _pendingUndo: { token: string; wsId: string; memId: string } | null = $state(null);
-
-  /** Execute the pending undo (called by the toast Undo button). */
-  async undoForget(): Promise<void> {
-    const p = this._pendingUndo;
-    if (!p) return;
-    this._pendingUndo = null;
-    const restored = await api.post<Memory>(
-      `/workspaces/${p.wsId}/memory/${p.memId}/forget/undo`,
-      { undo_token: p.token } satisfies UndoForgetReq,
-    );
-    this._replaceItem(restored);
-    toasts.success('Memory restored', restored.title);
-  }
-
-  /** Toggle a memory in the merge selection. */
-  toggleMergeSelect(m: Memory): void {
-    if (this.mergeIds.includes(m.id)) {
-      this.mergeIds = this.mergeIds.filter((id) => id !== m.id);
-    } else {
-      this.mergeIds = [...this.mergeIds, m.id];
+/** Merge a fresh dir listing into existing nodes, keeping open/loaded state. */
+function mergeLevel(prev: TreeNode[], entries: VaultDirEntry[], depth: number): TreeNode[] {
+  const old = new Map(prev.map((n) => [n.entry.path, n]));
+  return entries.map((e) => {
+    const ex = old.get(e.path);
+    if (ex) {
+      ex.entry = e;
+      ex.depth = depth;
+      return ex;
     }
-  }
+    return { entry: e, depth, open: false, loaded: false, loading: false, children: [] };
+  });
+}
 
-  /** Execute merge: create merged memory from selected ids. */
-  async executeMerge(title: string, body: string): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId || this.mergeIds.length < 2) return;
-    const resp = await api.post<MergeResp>(`/workspaces/${wsId}/memory/merge`, {
-      ids: this.mergeIds,
-      title,
-      body,
-    } satisfies MergeReq);
-    this.mergeMode = false;
-    this.mergeIds = [];
-    await this.load();
-    this.selected = resp.memory;
-    toasts.success('Merged', `Created "${resp.memory.title}"`);
-  }
-
-  /** Split the selected memory into parts. */
-  async executeSplit(parts: SplitPart[]): Promise<void> {
-    const wsId = ws.currentId;
-    const m = this.selected;
-    if (!wsId || !m || parts.length < 2) return;
-    const resp = await api.post<SplitResp>(
-      `/workspaces/${wsId}/memory/${m.id}/split`,
-      { parts } satisfies SplitReq,
-    );
-    await this.load();
-    this.selected = resp.memories[0] ?? null;
-    toasts.success('Split', `Created ${resp.memories.length} memories`);
-  }
-
-  /** Import a governance file (AGENTS.md / CLAUDE.md / .cursorrules). */
-  async importGoverned(kind: GovImportKind, content: string, label?: string): Promise<GovImportResp> {
-    const wsId = ws.currentId;
-    if (!wsId) throw new Error('no workspace');
-    const resp = await api.post<GovImportResp>(`/workspaces/${wsId}/memory/import`, {
-      kind,
-      content,
-      label,
-    } satisfies GovImportReq);
-    await this.load();
-    toasts.success('Imported', `${resp.imported} memories created`);
-    return resp;
-  }
-
-  // -- Vault v2: code repos ------------------------------------------------
-
-  /** List indexed code repositories for the current workspace. */
-  async loadRepos(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    this.reposLoading = true;
-    try {
-      this.repos = await api.get<CodeRepo[]>(`/workspaces/${wsId}/vault/repos`);
-    } finally {
-      this.reposLoading = false;
-    }
-  }
-
-  /** Index (or re-index) a repo by absolute path; returns the resulting counts. */
-  async indexRepo(root: string, name?: string): Promise<IndexResult | null> {
-    const wsId = ws.currentId;
-    if (!wsId || !root.trim()) return null;
-    this.indexing = true;
-    try {
-      const body: IndexRepoReq = { root: root.trim() };
-      if (name && name.trim()) body.name = name.trim();
-      // Indexing runs in the BACKGROUND server-side (embedding can be slow with a
-      // neural model). Returns immediately; we poll the repo status to completion.
-      const started = await api.post<IndexResult>(`/workspaces/${wsId}/vault/repos/index`, body);
-      toasts.info('Indexing started', 'Building the code graph + embeddings in the background…');
-      await this.loadRepos();
-      const id = started.repo_id;
-      for (let i = 0; i < 1800; i++) {
-        await new Promise((r) => setTimeout(r, 4000));
-        await this.loadRepos();
-        const repo = this.repos.find((r) => r.id === id);
-        if (!repo) break;
-        if (repo.status === 'ready') {
-          this.lastIndex = {
-            repo_id: id,
-            files: repo.files,
-            symbols: repo.symbols,
-            edges: repo.edges,
-            chunks: repo.chunks,
-          };
-          toasts.success('Indexed', `${repo.files} files · ${repo.symbols} symbols · ${repo.edges} edges`);
-          return this.lastIndex;
-        }
-        if (repo.status === 'error') {
-          toasts.error('Index failed', repo.message ?? 'see logs');
-          return null;
-        }
-      }
-      return started;
-    } catch (e) {
-      toasts.error('Index failed', e instanceof Error ? e.message : String(e));
-      return null;
-    } finally {
-      this.indexing = false;
-    }
-  }
-
-  // -- Vault v2: symbols ---------------------------------------------------
-
-  /** Search code symbols (name/kind/file/signature), optionally scoped to a repo. */
-  async searchSymbols(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    this.symbolsLoading = true;
-    try {
-      const p = new URLSearchParams();
-      if (this.symbolQuery.trim()) p.set('q', this.symbolQuery.trim());
-      if (this.symbolRepoId) p.set('repo_id', this.symbolRepoId);
-      p.set('limit', '200');
-      this.symbols = await api.get<CodeSymbol[]>(`/workspaces/${wsId}/vault/symbols?${p.toString()}`);
-    } finally {
-      this.symbolsLoading = false;
-    }
-  }
-
-  // -- Vault v2: full graph ------------------------------------------------
-
-  /** Load the unified knowledge+code graph (optionally scoped to a repo). */
-  async loadFullGraph(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    this.fullGraphLoading = true;
-    try {
-      const q = this.graphRepoId ? `?repo_id=${encodeURIComponent(this.graphRepoId)}` : '';
-      this.fullGraph = await api.get<FullGraph>(`/workspaces/${wsId}/vault/fullgraph${q}`);
-    } finally {
-      this.fullGraphLoading = false;
-    }
-  }
-
-  /** Jump to the Graph tab scoped to one repo and (re)load it. */
-  async openRepoGraph(repoId: string): Promise<void> {
-    this.graphRepoId = repoId;
-    this.tab = 'graph';
-    await this.loadFullGraph();
-  }
-
-  // -- Vault v2: remote backends ------------------------------------------
-
-  /** List the workspace's remote-backend configs (Qdrant / SurrealDB / Ollama). */
-  async loadBackends(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId) return;
-    this.backendsLoading = true;
-    try {
-      this.backends = await api.get<VaultBackend[]>(`/workspaces/${wsId}/vault/backends`);
-    } finally {
-      this.backendsLoading = false;
-    }
-  }
-
-  /** Create/update a backend config (secret is stored in the Keychain server-side). */
-  async saveBackend(kind: string, req: VaultBackendReq): Promise<VaultBackend | null> {
-    const wsId = ws.currentId;
-    if (!wsId) return null;
-    try {
-      const updated = await api.put<VaultBackend>(`/workspaces/${wsId}/vault/backends/${kind}`, req);
-      this.backends = this.backends.some((b) => b.kind === kind)
-        ? this.backends.map((b) => (b.kind === kind ? updated : b))
-        : [...this.backends, updated];
-      toasts.success('Saved', `${kind} backend updated`);
-      return updated;
-    } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }
-
-  /** Ping a backend; reflects the result in the matching card's status. */
-  async testBackend(kind: string): Promise<VaultHealth | null> {
-    const wsId = ws.currentId;
-    if (!wsId) return null;
-    try {
-      const h = await api.post<VaultHealth>(`/workspaces/${wsId}/vault/backends/${kind}/health`, {});
-      this.backends = this.backends.map((b) =>
-        b.kind === kind ? { ...b, status: h.status, message: h.message } : b,
-      );
-      if (h.status === 'ok') toasts.success('Healthy', `${kind} reachable`);
-      else toasts.error('Unreachable', h.message ?? `${kind} did not respond`);
-      return h;
-    } catch (e) {
-      toasts.error('Health check failed', e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }
-
-  /** Fetch the install plan (method + steps) for a backend — shown before installing. */
-  async planInstall(kind: string): Promise<VaultInstallPlan | null> {
-    const wsId = ws.currentId;
-    if (!wsId) return null;
-    try {
-      return await api.post<VaultInstallPlan>(`/workspaces/${wsId}/vault/backends/${kind}/install/plan`, {});
-    } catch (e) {
-      toasts.error('Could not plan install', e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }
-
-  /** Run a backend install (deliberate, confirmed action); refreshes the list. */
-  async installBackend(kind: string): Promise<VaultInstallResult | null> {
-    const wsId = ws.currentId;
-    if (!wsId) return null;
-    try {
-      const r = await api.post<VaultInstallResult>(`/workspaces/${wsId}/vault/backends/${kind}/install`, {});
-      if (r.ok) toasts.success('Installed', kind);
-      else toasts.error('Install failed', kind);
-      await this.loadBackends();
-      return r;
-    } catch (e) {
-      toasts.error('Install failed', e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }
-
-  // -- Vault v2: repo brain + docs ----------------------------------------
-
-  /** Assemble the Repo Brain for a focus string (markdown + the reasons used). */
-  async runBrain(): Promise<void> {
-    const wsId = ws.currentId;
-    if (!wsId || !this.brainFocus.trim()) return;
-    this.brainBusy = true;
-    try {
-      this.brain = await api.post<RepoBrain>(`/workspaces/${wsId}/vault/brain`, {
-        focus: this.brainFocus.trim(),
-      });
-    } catch (e) {
-      toasts.error('Brain failed', e instanceof Error ? e.message : String(e));
-    } finally {
-      this.brainBusy = false;
-    }
-  }
-
-  /** Add a knowledge doc (optionally linked to a repo + documented symbols). */
-  async addDoc(req: VaultDocReq): Promise<Memory | null> {
-    const wsId = ws.currentId;
-    if (!wsId) return null;
-    try {
-      const m = await api.post<Memory>(`/workspaces/${wsId}/vault/docs`, req);
-      toasts.success('Doc added', m.title);
-      await this.load();
-      return m;
-    } catch (e) {
-      toasts.error('Add doc failed', e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }
-
-  /** Replace one item in `items` in-place (after a state/patch mutation). */
-  _replaceItem(updated: Memory): void {
-    this.items = this.items.map((m) => (m.id === updated.id ? updated : m));
-  }
+function msg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 export const vault = new VaultStore();

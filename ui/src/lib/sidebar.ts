@@ -60,11 +60,8 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'proof', icon: 'check', label: 'Proof', feature: 'proof_pack' },
   { id: 'git', icon: 'branch', label: 'Git', feature: 'git' },
   { id: 'product', icon: 'note', label: 'Product', feature: 'product' },
-  // Vault temporarily disabled — bulk neural embedding of code chunks proved slow
-  // (8B: ~0.5 embeds/sec → hours for a repo) and ranked code worse than the
-  // deterministic symbol/keyword/graph layer. The page + backend + data remain
-  // intact; re-add this entry to re-enable while we redesign the retrieval approach.
-  // { id: 'vault', icon: 'globe', label: 'Vault' },
+  // Vault v3 — the file-backed docs home (Obsidian-parity markdown vaults, OKF).
+  { id: 'vault', icon: 'globe', label: 'Vault' },
   { id: 'canvas', icon: 'shapes', label: 'Canvas' },
   { id: 'api', icon: 'send', label: 'API', feature: 'api_client' },
   { id: 'mcp', icon: 'plug', label: 'MCP Control Plane', feature: 'mcp' },
