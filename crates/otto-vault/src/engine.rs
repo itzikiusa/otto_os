@@ -86,8 +86,15 @@ impl VaultEngine {
         let root_path = match root {
             Some(r) if !r.trim().is_empty() => {
                 let p = PathBuf::from(shellexpand_home(r.trim()));
-                if !p.is_dir() {
+                if p.is_file() {
                     return Err(Error::Invalid(format!("not a directory: {}", p.display())));
+                }
+                if !p.is_dir() {
+                    // A path that doesn't exist yet is a request for a fresh
+                    // vault there (Obsidian's "create vault" behavior) — never
+                    // touches existing data.
+                    std::fs::create_dir_all(&p)
+                        .map_err(|e| Error::Invalid(format!("create {}: {e}", p.display())))?;
                 }
                 p
             }

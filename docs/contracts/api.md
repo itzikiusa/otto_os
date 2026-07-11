@@ -1982,7 +1982,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{ws}/vault/vaults | ws viewer | — | `Vault[]` (with note/link counts + scan_state) |
-| POST /workspaces/{ws}/vault/vaults | ws editor | `{name, root_path?, okf?}` | `Vault` — registers an existing dir; omitted `root_path` creates `~/.otto/vault/<slug(name)>`. Kicks a full scan. |
+| POST /workspaces/{ws}/vault/vaults | ws editor | `{name, root_path?, okf?}` | `Vault` — registers an existing dir (a non-existent `root_path` is created — Obsidian "create vault" behavior); omitted `root_path` creates `~/.otto/vault/<slug(name)>`. Kicks a full scan. |
 | PATCH /workspaces/{ws}/vault/vaults/{id} | ws editor | `{name?, okf?}` | `Vault` |
 | DELETE /workspaces/{ws}/vault/vaults/{id} | ws editor | — | 204 — unregister ONLY (files on disk untouched) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rescan | ws editor | — | `VaultStatus` — full incremental rescan (awaited) |
