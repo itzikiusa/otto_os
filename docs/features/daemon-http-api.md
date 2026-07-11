@@ -324,7 +324,7 @@ resolve their owning workspace from the row and role-check against it.
 |---|---|---|
 | `GET/POST /workspaces/{wid}/api-client/collections`·`/requests`·`/environments` | viewer / editor | Saved HTTP/gRPC requests & envs |
 | `POST /workspaces/{wid}/api-client/execute`·`/grpc/invoke` | editor | Execute an HTTP request · a gRPC call |
-| `GET/POST /workspaces/{ws}/memories` · `POST .../memory/search`·`/recall` | viewer / editor | Workspace knowledge store; hybrid recall |
+| `GET/POST /workspaces/{ws}/memories` · `POST .../memory/search`·`/recall` | viewer / editor | Workspace memory store; keyword (FTS5) recall |
 | `GET/PUT /library/skills/{name}`·`/souls`·`/context` | root | The shared skill/soul/context library |
 | `GET/PUT /workspaces/{id}/context` · `POST .../context/preview` | viewer/admin | Per-workspace context selection · dry-run spawn |
 

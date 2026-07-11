@@ -490,8 +490,6 @@ For the team-deployment view (who can see/configure/run this via the
 
 - [Skills library](./skills-library.md) — the bundled, versioned skills this
   engine refines; how skills resolve from the library vs. the workspace copy.
-- [Vault / secrets](./vault.md) — where the bot tokens used by channel
-  notifications are stored.
 - [Slack & Telegram channels](./channels-slack-telegram.md) — set up the
   integration this engine's notifier delivers through.
 - `docs/contracts/api.md`, `docs/contracts/ws.md` — authoritative API + event

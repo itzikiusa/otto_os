@@ -228,7 +228,7 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Database** | ✅ list_connections / *query_db_readonly*¹ | — |
 | **Issues** | ✅ search_issues / get_issue / search_confluence | ⚠ comment_issue, transition_issue |
 | **Swarm** | ✅ list / get / list_runs / get_board / create_work_item² | ⚠ post_swarm_board |
-| **Memory/Vault** | ✅ list_memory / *search_memory*¹ | — |
+| **Vault (docs home)** | ✅ vault_list / vault_dir / vault_read / vault_search / vault_backlinks / vault_tags / vault_graph / vault_okf_validate | ⚠ vault_write, vault_rename, vault_delete (delete = soft move to `.trash/`) |
 | **Sessions** | ✅ list / get | ⚠ broadcast_message |
 | **Code Review** | ✅ list_findings / get_finding | ⚠ start_pr_review |
 | **Product** | ✅ list_stories / get_story | — |
@@ -246,11 +246,14 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 (surfaced when the server is on) or the opt-in set; every mutating tool is in
 `DANGEROUS` (off by default, approval-gated). A unit test enforces this invariant.
 
-The same feature **reads** (no writes) are also injected into Otto's *own* agent
+The same feature **reads** are also injected into Otto's *own* agent
 sessions through the inward `ottod mcp-tools` server (§5) as `otto_list_workflows`,
-`otto_list_broker_clusters`, `otto_search_memory`, `otto_list_findings`,
-`otto_list_improvement_edits`, … so an Otto session can inspect every feature while
-keeping that server's strict read-only invariant.
+`otto_list_broker_clusters`, `otto_search_memory` (keyword memory search),
+`otto_list_findings`, `otto_list_improvement_edits`, `otto_vault_read`, … so an
+Otto session can inspect every feature. That server stays read-only with named
+exceptions: the two canvas tools and the three Vault v3 doc writers
+(`otto_vault_write`/`_rename`/`_delete` — Editor-gated as the session owner;
+delete only trashes).
 
 ---
 
@@ -429,10 +432,14 @@ routes** the restricted token may reach (see §10).
 
 **Inward — `ottod mcp-tools`** (`mcp_tools.rs`): the per-session server Otto injects
 into its own agents' `.mcp.json` (read-only by construction — GETs or read-only-enforced
-viewer POSTs only; 20 s timeout, 1 MiB body cap, 500-row cap, redacted, audited). It
+viewer POSTs only, with the canvas + vault writers as the named Editor-gated
+exceptions; 20 s timeout, 1 MiB body cap, 500-row cap, redacted, audited). It
 serves the first-party **read-only** tools: the DB connection tools
 (`otto_list_connections`, `otto_db_schema`/`_children`/`_object`, `otto_db_query`),
 `otto_git_pr_review`, `otto_product_story`, `canvas_list_scenes`/`canvas_get_scene`,
+the Vault v3 doc tools (`otto_vault_list`/`_dir`/`_read`/`_search`/`_backlinks`/
+`_tags`/`_graph`/`_okf_validate`, plus the write trio `otto_vault_write`/
+`_rename`/`_delete` — see [vault](./vault.md)),
 **plus per-feature reads** — `otto_list_workflows`, `otto_get_workflow_run`,
 `otto_list_broker_clusters`/`_topics`, `otto_search_issues`, `otto_list_swarms`,
 `otto_search_memory`, `otto_list_repos`, `otto_list_sessions`,

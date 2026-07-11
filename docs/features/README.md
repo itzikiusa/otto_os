@@ -59,12 +59,12 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 
 | Guide | What it covers | Quick-start note |
 |-------|----------------|------------------|
-| [Vault](./vault.md) | The workspace knowledge store (`otto-memory`): notes with backlinks, collections + graph, and **keyword + vector hybrid recall** that other features (e.g. Product) read from instead of re-fetching context. | Local-first; ships with a dependency-free stub embedder. |
+| [Vault](./vault.md) | The **docs home** (`otto-vault`): register a local folder of markdown files (incl. a live Obsidian vault) and get Obsidian-parity browsing/editing — file tree, editor ⇄ reading view, wikilinks + backlinks, tags, FTS5 search, quick switcher, a scalable graph — plus the **OKF** documentation standard (deterministic validator + templates) and full agent access over MCP. Files are the source of truth; SQLite holds only a derived, rebuildable index. | Local-first, dependency-free; point it at an existing Obsidian vault. |
 | [Skills library](./skills-library.md) | The bundled, versioned first-party skill catalog you browse and install/update from Settings; how installed skills drive Review lenses, Product analysis, and Insights. | Installs to `<data_dir>/library/skills/`. |
 | [Skills evaluator](./skills-evaluator.md) | Benchmark a skill: run implement → validate → score → improve across iterations/providers, view a run report, and compare runs side-by-side. | Settings → Skill Eval for defaults. |
 | [Self-improvement](./self-improvement.md) | The optional, gated engine that reflects on recent sessions and proposes edits to **skills (`SKILL.md`) and memory (`*.md`) only** — never repo code — with tiered autonomy (auto-apply vs. approval queue) and optional channel notifications. | Off by default; enable in Settings. |
 | [Proof Packs](./proof-packs.md) | The evidence layer — "no done without evidence": every work item carries a pack whose `status`/`risk_score`/badges are **derived** (pure `otto-core` functions) from inspectable artifacts. Five enforcement gates (sessions, goal loops, AI review, PR creation, workflows), redaction + a 2 MiB cap, and the `OTTO_PROOF_*` env knobs. | In-app **Proof** module; gates configured via env. |
-| [Review Findings Workflow](./review-findings.md) | Turns AI-review findings into tracked records — an 11-field `Finding`, a 6-state disposition machine, an immutable timeline, seven agent-backed actions (fix/verify/Jira/repo-rule/…), durable repo rules, and an exportable evidence bundle that ingests verified findings into Vault. | Sits on top of [AI code review](./code-review.md). |
+| [Review Findings Workflow](./review-findings.md) | Turns AI-review findings into tracked records — an 11-field `Finding`, a 6-state disposition machine, an immutable timeline, seven agent-backed actions (fix/verify/Jira/repo-rule/…), durable repo rules, and an exportable evidence bundle that ingests verified findings into workspace memory. | Sits on top of [AI code review](./code-review.md). |
 
 ## API & integration surface
 
@@ -127,10 +127,10 @@ contract owners.
 - **`docs/contracts/product.md`** — still says analysis agents are "claude-backed
   (v1)", but each lens × provider now runs as a real openable session
   (multi-provider is live). See [product](./product.md).
-- **Vault recall** — README/contract frame it as "FTS5 + sqlite-vec hybrid", but
-  the shipped path is a SQL `LIKE` prefilter + brute-force cosine over a local,
-  dependency-free **stub embedder**; OpenAI/Voyage/`fastembed` are unwired seams.
-  See [vault](./vault.md).
+- **Vault** — rebuilt as **Vault v3, the docs home** (file-backed markdown
+  vaults + OKF): the old embedder/vector-recall drift item is obsolete — all
+  embeddings/vector search were removed, and the memory layer is keyword-only
+  (`semantic`/`hybrid` accepted as coercing aliases). See [vault](./vault.md).
 - **Skill catalog** — `otto-skills/SKILL_AUTHORING.md` describes a five-category
   catalog, but the crate currently ships only `review` (7) + `insights` (1); the
   seven `product` skills are auto-seeded from `otto-product`. See [skills library](./skills-library.md).
