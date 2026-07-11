@@ -254,7 +254,11 @@ class WorkspaceStore {
   );
 
   /** Agent sessions started locally (not from a channel or PR review) —
-   *  sidebar "Agents" group. Review agents are reached via the Review panel. */
+   *  sidebar "Agents" group. Review agents are reached via the Review panel.
+   *  KEEP IN SYNC with `BACKGROUND_SESSION_SOURCES` in
+   *  crates/otto-core/src/domain.rs — the daemon exempts exactly this set's
+   *  complement (foreground sessions) from auto-pruning, so what the Agents
+   *  tab shows is what retention protects. */
   plainAgentSessions: Session[] = $derived(
     this.agentSessions.filter(
       (s) =>
