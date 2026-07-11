@@ -9,7 +9,7 @@
 //!   - workflows (`WorkflowsRepo`)
 //!   - API-client saved requests (`ApiClientRepo`)
 //!   - swarm projects + tasks (`ctx.swarm_repo`)
-//!   - vault memories (`MemoriesRepo` keyword search)
+//!   - memories (`MemoriesRepo` keyword search)
 //!   - git repos (`ctx.git_store`)
 //!   - broker clusters (`BrokerClustersRepo`)
 //!   - canvas scenes (`ctx.canvas_repo`)

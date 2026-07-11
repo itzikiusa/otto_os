@@ -531,23 +531,25 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // produced and consumed by the Product workflows (the per-story ingest route
     // is mounted under `/product/…` and already covered above). We gate the
     // standalone memory API on Product: read=View, mutate=Edit. Root bypasses.
-    if p == "/memory/embedder" {
-        // Global daemon embedder config (provider/model/key). Reading the active
-        // model = View; switching the embedder rebuilds vector search for every
-        // workspace and stores a provider key, so it is an Admin operation —
-        // gated on Settings like the other daemon-wide config.
-        return Require(Settings, if get { View } else { Admin });
-    }
     if p.starts_with("/workspaces/{ws}/memories")
         || p.starts_with("/workspaces/{ws}/memory/")
     {
+        // Search is a read that travels as POST (query body) — gate it View,
+        // mirroring the `/db/test` precedent.
+        if p == "/workspaces/{ws}/memory/search" {
+            return Require(Product, View);
+        }
         return Require(Product, if get { View } else { Edit });
     }
-    // ---- Vault v2 (code intelligence: repos / symbols / graph / brain / docs /
-    // remote backends). Same knowledge layer as memory → gated on Product:
-    // read=View, write=Edit. Backend config/install additionally require Admin/
-    // root at the handler (the feature axis stays Edit here). Root bypasses.
+    // ---- Vault v3 (the docs home: registered markdown vaults — notes, links,
+    // tags, search, graph, OKF validation). Same knowledge layer as memory →
+    // gated on Product: read=View, write=Edit. Read-shaped POSTs (search /
+    // validate carry a query body, mutate nothing) are explicitly View. Root
+    // bypasses.
     if p.starts_with("/workspaces/{ws}/vault/") {
+        if p.ends_with("/search") || p.ends_with("/okf/validate") {
+            return Require(Product, View);
+        }
         return Require(Product, if get { View } else { Edit });
     }
 

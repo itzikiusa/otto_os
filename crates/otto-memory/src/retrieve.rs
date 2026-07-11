@@ -1,21 +1,4 @@
-//! Pure retrieval helpers: Reciprocal Rank Fusion + light re-rank signals.
-
-use std::collections::HashMap;
-
-/// Reciprocal Rank Fusion over two id-rankings (best-first). Returns (id, score)
-/// descending. `k0` is the standard RRF damping constant (≈60).
-pub fn rrf_fuse(keyword: &[String], semantic: &[String], k0: f32) -> Vec<(String, f32)> {
-    let mut acc: HashMap<String, f32> = HashMap::new();
-    for (rank, id) in keyword.iter().enumerate() {
-        *acc.entry(id.clone()).or_default() += 1.0 / (k0 + rank as f32 + 1.0);
-    }
-    for (rank, id) in semantic.iter().enumerate() {
-        *acc.entry(id.clone()).or_default() += 1.0 / (k0 + rank as f32 + 1.0);
-    }
-    let mut v: Vec<(String, f32)> = acc.into_iter().collect();
-    v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    v
-}
+//! Pure retrieval helpers: light re-rank signals over the keyword ranking.
 
 pub struct RerankSignals {
     pub recency_days: f32,

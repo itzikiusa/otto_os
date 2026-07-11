@@ -1,19 +1,14 @@
-//! otto-memory — a workspace-scoped knowledge store with keyword + semantic
-//! (vector) hybrid recall. First consumer: the Product section; the core is
-//! domain-agnostic (collections), so other areas can adopt it later.
+//! otto-memory — a workspace-scoped agent knowledge store with keyword (FTS5)
+//! recall. First consumer: the Product section; the core is domain-agnostic
+//! (collections), so other areas can adopt it later. The file-backed docs home
+//! (Obsidian-style markdown vaults, OKF) lives in the `otto-vault` crate.
 
-pub mod backends;
-pub mod code_scan;
-pub mod embed;
-pub mod git_context;
 pub mod governance;
 pub mod http;
-pub mod index;
 pub mod ingest;
 pub mod remote;
 pub mod retrieve;
 pub mod service;
-pub mod test_map;
 pub mod test_support;
 pub mod types;
 pub mod vault;
