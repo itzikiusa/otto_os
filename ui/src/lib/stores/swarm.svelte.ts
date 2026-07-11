@@ -94,6 +94,17 @@ class SwarmStore {
         this.loadBoard(),
         this.loadGraph(sid),
       ]);
+      // Projects[0] can be an empty shell (e.g. a Discovery project) while all
+      // the work lives in a sibling — a blind first-project pin then renders an
+      // EMPTY board even though agents are visibly running. Once tasks are
+      // loaded, prefer the project that actually has some.
+      const cur = this.selectedProjectId;
+      if (!cur || (this.tasksByProject[cur] ?? []).length === 0) {
+        const busiest = this.detail.projects
+          .map((p) => ({ id: p.id, n: (this.tasksByProject[p.id] ?? []).length }))
+          .sort((a, b) => b.n - a.n)[0];
+        if (busiest && busiest.n > 0) this.selectedProjectId = busiest.id;
+      }
     } finally {
       this.loading = false;
     }
@@ -304,11 +315,16 @@ class SwarmStore {
   }
 
   async loadTasks(pid: string): Promise<void> {
-    try {
-      this.tasksByProject[pid] = await api.get<SwarmTask[]>(`/swarm/projects/${pid}/tasks`);
-      this.tasksByProject = { ...this.tasksByProject };
-    } catch {
-      /* best-effort */
+    // One retry: a transient failure (daemon mid-restart, pool contention)
+    // used to silently leave the board EMPTY until the next full reload.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        this.tasksByProject[pid] = await api.get<SwarmTask[]>(`/swarm/projects/${pid}/tasks`);
+        this.tasksByProject = { ...this.tasksByProject };
+        return;
+      } catch {
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
+      }
     }
   }
 
