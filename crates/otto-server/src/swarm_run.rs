@@ -606,6 +606,12 @@ async fn run_attempt(
     // means the brief was NEVER sent — fail the attempt so recovery respawns,
     // instead of silently watching a promptless session until the stuck window
     // (the operator sees "a session opened but nothing was sent to it").
+    // Transcript length BEFORE injection: claude_prompt_landed only scans what
+    // this turn appends (a reused session has older user records).
+    let transcript_offset = match ctx.manager.get(&sid).await.ok().and_then(|s| s.provider_session_id) {
+        Some(psid) => crate::review_session::transcript_len(cwd, &psid),
+        None => 0,
+    };
     if wait_for_tui(&ctx.manager, &sid).await {
         let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
         tokio::time::sleep(PASTE_TO_ENTER).await;
@@ -617,6 +623,29 @@ async fn run_attempt(
     } else {
         tracing::warn!("swarm: TUI never settled for session {sid} — brief not injected");
         return RunOutcome::failed(Some(sid), FailReason::Exited);
+    }
+    // For claude, confirm the brief actually LANDED (a "user" record appended to
+    // the transcript): TUI echo alone can be redraw noise around a swallowed
+    // paste. One re-injection round, then fail the attempt so recovery respawns
+    // — a live-but-promptless session used to sit until someone stopped it by hand.
+    if provider == "claude"
+        && !crate::review_session::claude_prompt_landed(
+            &ctx.manager, &sid, cwd, transcript_offset, crate::review_session::PROMPT_LAND_WAIT,
+        )
+        .await
+    {
+        tracing::warn!("swarm: brief didn't land in session {sid} — re-injecting once");
+        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
+        tokio::time::sleep(PASTE_TO_ENTER).await;
+        let _ = ctx.manager.input(&sid, b"\r").await;
+        if !crate::review_session::claude_prompt_landed(
+            &ctx.manager, &sid, cwd, transcript_offset, crate::review_session::PROMPT_LAND_WAIT,
+        )
+        .await
+        {
+            tracing::warn!("swarm: brief never landed in session {sid} — failing the attempt");
+            return RunOutcome::failed(Some(sid), FailReason::Stuck);
+        }
     }
 
     let provider_session_id = ctx

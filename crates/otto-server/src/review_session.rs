@@ -460,6 +460,54 @@ pub fn bracketed_paste(text: &str) -> Vec<u8> {
     v
 }
 
+/// How long an injected claude prompt gets to LAND in the transcript before the
+/// caller re-injects (first window) or fails the attempt (second window).
+pub const PROMPT_LAND_WAIT: Duration = Duration::from_secs(45);
+
+/// Byte length of claude's transcript for (cwd, provider session id) — 0 when
+/// the file doesn't exist yet. Callers capture this BEFORE injecting so
+/// [`claude_prompt_landed`] only scans what THIS turn appended (a reused agent
+/// session already has older user records).
+pub fn transcript_len(cwd: &str, psid: &str) -> u64 {
+    std::fs::metadata(otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid))
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// Wait until the injected prompt actually LANDED in claude's transcript — a
+/// `"type":"user"` record appended past `offset`. TUI output alone is redraw
+/// noise: a paste can be swallowed (or the Enter ignored) while the terminal
+/// keeps repainting, leaving a LIVE session that was never told to do anything
+/// (the operator had to stop it by hand). The provider session id is re-read
+/// each poll — fresh sessions only adopt it once claude writes the file.
+pub async fn claude_prompt_landed(
+    manager: &Arc<SessionManager>,
+    sid: &otto_core::Id,
+    cwd: &str,
+    offset: u64,
+    wait: Duration,
+) -> bool {
+    const NEEDLE: &[u8] = b"\"type\":\"user\"";
+    let deadline = Instant::now() + wait;
+    loop {
+        if let Ok(s) = manager.get(sid).await {
+            if let Some(psid) = s.provider_session_id.as_deref() {
+                let path = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
+                if let Ok(raw) = std::fs::read(&path) {
+                    let tail = &raw[raw.len().min(offset as usize)..];
+                    if tail.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+    }
+}
+
 pub async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
     let deadline = Instant::now() + TUI_STARTUP_WAIT;
     loop {

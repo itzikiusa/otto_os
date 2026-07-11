@@ -237,6 +237,30 @@ pub async fn run_swarm_agent(
             let _ = ctx.manager.kill_session(&sid).await;
             continue;
         }
+        // For claude, confirm the prompt LANDED (a "user" record in the fresh
+        // session's transcript) — TUI echo can be redraw noise around a
+        // swallowed paste. Re-inject once, else kill + retry this attempt.
+        if provider == "claude"
+            && !crate::review_session::claude_prompt_landed(
+                &ctx.manager, &sid, cwd, 0, crate::review_session::PROMPT_LAND_WAIT,
+            )
+            .await
+        {
+            tracing::warn!("swarm_agent_run: prompt didn't land in session {sid} — re-injecting once");
+            let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
+            tokio::time::sleep(PASTE_TO_ENTER).await;
+            let _ = ctx.manager.input(&sid, b"\r").await;
+            if !crate::review_session::claude_prompt_landed(
+                &ctx.manager, &sid, cwd, 0, crate::review_session::PROMPT_LAND_WAIT,
+            )
+            .await
+            {
+                tracing::warn!("swarm_agent_run: prompt never landed in session {sid} — retrying attempt");
+                last_reason = Some(FailReason::Stuck);
+                let _ = ctx.manager.kill_session(&sid).await;
+                continue;
+            }
+        }
 
         let cb_run_id = run_id.clone();
         let outcome = watch_for_result(
