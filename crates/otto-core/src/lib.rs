@@ -13,6 +13,7 @@ pub mod expr;
 pub mod finding;
 pub mod hooks;
 pub mod id;
+pub mod paths;
 pub mod proof;
 pub mod provider;
 pub mod redact;

@@ -130,9 +130,12 @@ pub async fn ensure_integration_worktree(
     swarm: &Swarm,
     project: &SwarmProject,
 ) -> Result<(String, String)> {
+    // Expand tilde-form paths (older projects persisted them raw) — a literal
+    // `~` never resolves as a git dir.
     let repo_path = project
         .repo_path
-        .clone()
+        .as_deref()
+        .map(otto_core::paths::expand_tilde)
         .ok_or_else(|| otto_core::Error::Invalid("project has no repo_path".into()))?;
     let branch = integration_branch_name(swarm, project);
     let wt = integration_worktree_path(ctx, &swarm.id, &project.id);
@@ -187,7 +190,12 @@ pub async fn ensure_cwd_info(
     agent: &SwarmAgent,
     project: Option<&SwarmProject>,
 ) -> Result<CwdInfo> {
-    let repo = project.and_then(|p| p.repo_path.clone());
+    // Expand tilde-form repo paths (older projects persisted them raw): a
+    // literal `~` cwd makes the session spawn fall back to $HOME and breaks
+    // transcript polling, which derives its directory from this string.
+    let repo = project
+        .and_then(|p| p.repo_path.as_deref())
+        .map(otto_core::paths::expand_tilde);
     let mode = cwd_mode(swarm, agent, repo.is_some());
 
     if mode == "repo" {

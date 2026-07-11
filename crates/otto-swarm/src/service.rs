@@ -218,7 +218,9 @@ impl SwarmService {
                 workspace_id: swarm.workspace_id.clone(),
                 name: req.name,
                 description: req.description.unwrap_or_default(),
-                repo_path: req.repo_path,
+                // Tilde-form paths break session cwds + transcript polling
+                // downstream — normalize before persisting.
+                repo_path: req.repo_path.map(|p| otto_core::paths::expand_tilde(&p)),
                 goal_md: req.goal_md,
                 story_id: None,
                 order_idx: 0,
@@ -234,7 +236,7 @@ impl SwarmService {
                 ProjectPatch {
                     name: req.name,
                     description: req.description,
-                    repo_path: req.repo_path.map(Some),
+                    repo_path: req.repo_path.map(|p| Some(otto_core::paths::expand_tilde(&p))),
                     goal_md: req.goal_md.map(Some),
                     // story_id is an internal Plan → Swarm back-link, not editable
                     // via the project PATCH endpoint — leave it unchanged.

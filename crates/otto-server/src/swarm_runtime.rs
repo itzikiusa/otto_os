@@ -1435,9 +1435,14 @@ async fn plan(
             specialization: a.specialization.clone(),
         })
         .collect();
+    // Expand tilde-form repo paths (older projects persisted them raw): a
+    // literal `~` cwd makes the planner session spawn fall back to $HOME while
+    // watch_for_result polls a transcript dir derived from the raw string — the
+    // completed turn is never seen and the plan run churns until stuck.
     let cwd = project
         .repo_path
-        .clone()
+        .as_deref()
+        .map(otto_core::paths::expand_tilde)
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
     let ws_obj = ctx.workspaces.get(&ws).await.map_err(ApiError)?;
     // The provider the planner/summarizer meta-agents run on — the configured

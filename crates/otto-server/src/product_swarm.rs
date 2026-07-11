@@ -234,7 +234,8 @@ pub(crate) async fn seed_tasks(
     let prompt = otto_swarm::recruiter::planner_prompt(&project.name, goal_md, &preset_agents, "");
     let cwd = project
         .repo_path
-        .clone()
+        .as_deref()
+        .map(otto_core::paths::expand_tilde)
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
     // Planning is structured-extraction work — run it on the fast/cheap model
     // rather than the default, matching the other planner/recruiter paths.
@@ -377,7 +378,7 @@ pub async fn story_to_swarm(
             workspace_id: story.workspace_id.clone(),
             name,
             description: format!("From Product story {}", story.source_key),
-            repo_path: story.cwd.clone(),
+            repo_path: story.cwd.as_deref().map(otto_core::paths::expand_tilde),
             goal_md: Some(goal_md.clone()),
             story_id: Some(story.id.clone()),
             order_idx,
@@ -707,7 +708,8 @@ pub(crate) async fn seed_discovery_tasks(
         otto_swarm::recruiter::discovery_planner_prompt(&project.name, brief, &preset_agents, "");
     let cwd = project
         .repo_path
-        .clone()
+        .as_deref()
+        .map(otto_core::paths::expand_tilde)
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
     let parsed = match ctx
         .orchestrator
@@ -811,7 +813,7 @@ pub async fn discover_story(
             workspace_id: story.workspace_id.clone(),
             name: name.clone(),
             description: format!("Discovery for Product story {}", story.source_key),
-            repo_path: story.cwd.clone(),
+            repo_path: story.cwd.as_deref().map(otto_core::paths::expand_tilde),
             goal_md: Some(brief.clone()),
             story_id: None,
             order_idx,
