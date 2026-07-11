@@ -25,6 +25,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # No debuginfo in CI builds. Each otto-server integration-test binary links
+  # the full workspace; with debuginfo the parallel link step exhausts the
+  # 14 GB runner disk and ld dies with SIGBUS ("ld terminated with signal 7").
+  # CI never reads the debuginfo anyway — a backtrace still has symbol names.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   rust:
@@ -32,6 +38,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      # The workspace's debug target (clippy artifacts + every test binary) has
+      # outgrown the ~14 GB free on a stock ubuntu runner. Drop the huge
+      # preinstalled toolchains we never use so the link step has headroom.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
