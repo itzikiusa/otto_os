@@ -357,6 +357,9 @@ async fn run(cfg: Config) -> Result<(), String> {
         }
         _ => memory,
     };
+    // Vault v3 — the file-backed docs home (markdown vaults on disk, derived
+    // SQLite index, OKF validation). No embeddings anywhere.
+    let vault = Arc::new(otto_vault::VaultEngine::new(pool.clone()));
 
     // One shared auth-lookup cache: the authenticator fills it, the grants route
     // (via ServerCtx.auth_cache) evicts from it on set_grants. Clones share the
@@ -456,6 +459,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         canvas_repo,
         product_agent_cancels: otto_server::product_run::new_cancel_registry(),
         memory,
+        vault,
         swarm,
         swarm_repo,
         swarm_coords: otto_server::swarm_runtime::new_registry(),

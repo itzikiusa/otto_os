@@ -5026,156 +5026,150 @@ export interface IngestTextReq {
 }
 
 // ---------------------------------------------------------------------------
-// Vault v2 — code intelligence + remote backends
-// (mirror of crates/otto-memory + crates/otto-state code_index/vault_backends)
+// Vault v3 — the docs home (mirror of crates/otto-vault/src/types.rs)
 // ---------------------------------------------------------------------------
 
-export interface CodeRepo {
-  id: string;
-  workspace_id: string;
-  root: string;
+/** A registered vault: a local directory of markdown files (source of truth). */
+export interface Vault {
+  id: number;
+  ws_id: string;
   name: string;
-  head: string | null;
-  files: number;
-  symbols: number;
-  edges: number;
-  chunks: number;
-  status: string; // idle|indexing|ready|error
-  message: string | null;
-  indexed_at: string | null;
+  root_path: string;
+  okf: boolean;
   created_at: string;
+  last_scan_at: string | null;
+  scan_state: string; // idle | scanning | error: <msg>
+  notes: number;
+  links: number;
 }
 
-export interface CodeSymbol {
-  id: string;
-  workspace_id: string;
-  repo_id: string;
+export interface VaultStatus {
+  id: number;
+  scan_state: string;
+  last_scan_at: string | null;
+  notes: number;
+  links: number;
+  unresolved: number;
+  tags: number;
+  attachments: number;
+}
+
+export interface VaultDirEntry {
   name: string;
-  kind: string;
-  lang: string;
-  file: string;
+  path: string;
+  kind: 'dir' | 'note' | 'file';
+  children: number;
+  title: string | null;
+  okf_type: string | null;
+  reserved: boolean;
+}
+
+export interface VaultDirListing {
+  path: string;
+  entries: VaultDirEntry[];
+}
+
+export interface VaultHeading {
+  level: number;
+  text: string;
   line: number;
-  signature: string;
 }
 
-export interface CodeNode {
-  id: string;
-  workspace_id: string;
-  repo_id: string | null;
-  kind: string; // file|symbol|service|db_table|endpoint|doc|external
-  key: string;
-  label: string;
-  file: string | null;
-  line: number | null;
-  meta_json: string;
-}
-
-export interface CodeEdge {
-  id: string;
-  workspace_id: string;
-  repo_id: string | null;
-  src_id: string;
-  dst_id: string;
-  rel: string; // calls|imports|http_call|db_call|test_of|documents|defined_in|depends_on
-  detail: string;
-  weight: number;
-  file: string | null;
-  line: number | null;
-}
-
-export interface CodeGraph {
-  nodes: CodeNode[];
-  edges: CodeEdge[];
-}
-
-export interface IndexResult {
-  repo_id: string;
-  files: number;
-  symbols: number;
-  edges: number;
-  chunks: number;
-}
-
-/** Unified Vault graph (knowledge + code) for the full graph view. */
-export interface FullGraphNode {
-  id: string;
-  label: string;
-  kind: string;
-  group: string; // knowledge|code
-  file: string | null;
-  line: number | null;
-}
-export interface FullGraphEdge {
-  src: string;
-  dst: string;
-  rel: string;
-  detail?: string;
-}
-export interface FullGraph {
-  nodes: FullGraphNode[];
-  edges: FullGraphEdge[];
-}
-
-export interface RepoBrain {
-  focus: string;
-  sections: BriefSection[];
-  reasons: ContextReason[];
-  token_estimate: number;
-  markdown: string;
-}
-
-export interface IndexRepoReq {
-  root: string;
-  name?: string;
-}
-
-export interface VaultDocReq {
-  repo_id?: string;
+export interface VaultNoteMeta {
+  path: string;
   title: string;
-  body: string;
-  documents?: string[];
+  okf_type: string | null;
+  description: string | null;
+  frontmatter: unknown;
+  tags: string[];
+  aliases: string[];
+  headings: VaultHeading[];
+  word_count: number;
+  size: number;
+  hash: string;
+  reserved: boolean;
+  has_frontmatter: boolean;
+  parse_error: boolean;
 }
 
-/** Per-workspace remote backend config (Qdrant/SurrealDB/Ollama). */
-export interface VaultBackend {
-  id: string;
-  workspace_id: string;
-  kind: string; // qdrant|surreal|ollama
-  enabled: boolean;
-  url: string;
-  role: string; // vector|graph|embed
-  config_json: string;
-  status: string; // unknown|ok|error|installing
-  message: string | null;
-  updated_at: string;
+export interface VaultOutgoingLink {
+  raw_target: string;
+  dst_path: string | null;
+  kind: 'wiki' | 'md' | 'embed';
+  anchor: string | null;
+  alias: string | null;
 }
 
-export interface VaultBackendReq {
-  enabled: boolean;
-  url: string;
-  role: string;
-  config_json?: string;
-  /** secret (api key / password) — stored in the Keychain, never echoed back. */
-  secret?: string;
+export interface VaultNote {
+  meta: VaultNoteMeta;
+  raw: string;
+  outgoing: VaultOutgoingLink[];
 }
 
-export interface VaultInstallPlan {
+export interface VaultBacklink {
+  path: string;
+  title: string;
+  context: string;
   kind: string;
-  method: string; // docker|brew|script|none
-  steps: string[];
-  health_url: string;
-  ready: boolean;
-  notes: string;
 }
 
-export interface VaultInstallResult {
-  ok: boolean;
-  log: string;
+export interface VaultRenameResult {
+  from: string;
+  to: string;
+  links_updated: number;
 }
 
-export interface VaultHealth {
-  status: string; // ok|error
-  message: string | null;
+export interface VaultSearchReq {
+  query: string;
+  tag?: string;
+  path_prefix?: string;
+  okf_type?: string;
+  limit?: number;
+}
+
+export interface VaultSearchHit {
+  path: string;
+  title: string;
+  snippet: string;
+  score: number;
+  reserved: boolean;
+}
+
+export interface VaultSwitchHit {
+  path: string;
+  title: string;
+  alias: string | null;
+  score: number;
+}
+
+export interface VaultTagCount {
+  tag: string;
+  count: number;
+}
+
+/** Compact graph wire format: parallel node arrays + flat [src,dst,…] pairs.
+ * flags bits: 1=ghost (unresolved target), 2=tag node, 4=reserved file. */
+export interface VaultGraphPayload {
+  paths: string[];
+  titles: string[];
+  groups: number[];
+  group_labels: string[];
+  flags: number[];
+  edges: number[];
+  truncated: boolean;
+}
+
+export interface OkfFinding {
+  rule: string; // E1|E2|E3|W1|W2|W3|W4|W5
+  path: string;
+  message: string;
+}
+
+export interface OkfReport {
+  conformant: boolean;
+  errors: OkfFinding[];
+  warnings: OkfFinding[];
+  checked_notes: number;
 }
 
 // ---------------------------------------------------------------------------

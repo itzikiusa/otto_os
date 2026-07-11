@@ -1936,7 +1936,7 @@ Notes:
 ## Memory layer (workspace-scoped knowledge store)
 
 A workspace-scoped store of distilled knowledge (`item`) and raw evidence (`chunk`) with
-keyword + vector hybrid recall. Reads require `ws viewer`, mutations `ws editor`. `Memory`,
+keyword (FTS5) recall. Reads require `ws viewer`, mutations `ws editor`. `Memory`,
 `NewMemory`, `MemoryPatch`, `MemoryQuery`, `MemoryHit`, `RecallBrief`, `MemoryLink`,
 `GraphData` are mirrored in `ui/src/lib/api/types.ts`.
 
@@ -1948,65 +1948,70 @@ keyword + vector hybrid recall. Reads require `ws viewer`, mutations `ws editor`
 | PATCH /workspaces/{ws}/memories/{id} | ws editor | `MemoryPatch` | `Memory` |
 | DELETE /workspaces/{ws}/memories/{id} | ws editor | — | 204 (soft-delete: `active=false`) |
 | GET /workspaces/{ws}/memories/{id}/links | ws viewer | — | `MemoryLink[]` |
-| POST /workspaces/{ws}/memory/search | ws viewer | `MemoryQuery` | `MemoryHit[]` (hybrid keyword⊕vector, RRF-fused, re-ranked) |
+| POST /workspaces/{ws}/memory/search | ws viewer | `MemoryQuery` | `MemoryHit[]` (keyword FTS5 → LIKE fallback, re-ranked) |
 | POST /workspaces/{ws}/memory/recall | ws viewer | `{story_id, focus?, token_budget?}` | `RecallBrief` (token-budgeted background brief) |
-| GET /workspaces/{ws}/memory/graph | ws viewer | query: `collection?` | `GraphData{nodes,edges}` (for the vault graph view) |
+| GET /workspaces/{ws}/memory/graph | ws viewer | query: `collection?` | `GraphData{nodes,edges}` (memory link graph) |
 | POST /workspaces/{ws}/memory/ingest-text | ws editor | `{collection?, path, content}` | `{chunks}` (chunk text into a collection) |
 | POST /workspaces/{ws}/memory/import-graph | ws editor | `{collection?, graph:{nodes,edges}}` | `ImportStats{nodes,edges}` (graphify graph.json) |
 | GET /workspaces/{ws}/memory/entities/{id}/graph | ws viewer | — | `{links, neighbors}` (entity neighborhood) |
 | POST /workspaces/{ws}/product/stories/{sid}/memory/ingest | ws editor | — | `{ingested}` (extract a story's artifacts into memory) |
-| POST /workspaces/{ws}/memory/reindex | ws editor | — | `{embedded}` — re-embed the workspace's memories under the active embedder (idempotent: skips rows already at the active model; batched) |
-| GET /memory/embedder | settings view | — | `{provider, model?, dim?, active, key_present}` — the active Vault embedder |
-| PUT /memory/embedder | settings admin (root) | `{provider:"local"\|"ollama"\|"openai"\|"voyage"\|"stub", api_key?, ollama_model?, ollama_dim?, ollama_url?}` | switch the embedder live; stores `api_key` in the Keychain (never the DB). `400` for openai/voyage with no resolvable key. After switching providers, `POST …/memory/reindex` re-embeds existing memories. |
-
-### Vault v2 — code intelligence (Repo Brain)
-
-Workspace-scoped. Reads = ws viewer (feature `Product:View`); writes = ws editor
-(`Product:Edit`). Backend config = ws admin; install = root.
-
-| Method/Path | Auth | Body | Returns |
-| --- | --- | --- | --- |
-| GET /workspaces/{ws}/vault/repos | ws viewer | — | `CodeRepo[]` (indexed repos + symbol/edge/chunk counts + status) |
-| POST /workspaces/{ws}/vault/repos/index | ws editor | `{root, name?}` | `IndexResult{repo_id, files, symbols, edges, chunks}` — tree-sitter symbol + dependency-graph scan + embeddings of a repo on disk |
-| GET /workspaces/{ws}/vault/symbols | ws viewer | `?q=&repo_id=&limit=` | `CodeSymbol[]` (symbol index search) |
-| GET /workspaces/{ws}/vault/graph | ws viewer | `?repo_id=` | `CodeGraph{nodes, edges}` — code dependency graph (calls/imports/http_call/db_call/test_of/documents) |
-| GET /workspaces/{ws}/vault/graph/{node_id} | ws viewer | `?depth=` | `CodeGraph` — BFS neighborhood of a node |
-| GET /workspaces/{ws}/vault/fullgraph | ws viewer | `?repo_id=` | `FullGraph{nodes, edges}` — unified knowledge + code graph (Obsidian-style full graph view) |
-| POST /workspaces/{ws}/vault/brain | ws viewer | `{focus, cwd?, budget?}` | `RepoBrain{focus, sections, reasons, token_estimate, markdown}` — assembled context with per-item "why selected" |
-| POST /workspaces/{ws}/vault/docs | ws editor | `{repo_id?, title, body, documents?:[node_id]}` | `Memory` — a doc note linked into the code graph (`documents` edges) |
-| GET /workspaces/{ws}/vault/backends | ws viewer | — | `VaultBackend[]` (qdrant/surreal/ollama config + status) |
-| PUT /workspaces/{ws}/vault/backends/{kind} | ws admin | `{enabled, url, role, config_json?, secret?}` | `VaultBackend` — secret stored in Keychain; registers the backend live |
-| POST /workspaces/{ws}/vault/backends/{kind}/health | ws editor | — | `{status, message}` — health-check + status refresh |
-| POST /workspaces/{ws}/vault/backends/{kind}/install/plan | ws editor | — | `VaultInstallPlan{kind, method, steps, health_url, ready, notes}` (preview — no side effects) |
-| POST /workspaces/{ws}/vault/backends/{kind}/install | root + ws admin | — | `VaultInstallResult{ok, log}` — **DANGEROUS**: runs Docker/brew to install the backend locally |
 
 Notes:
-- `MemoryHit` now carries `reasons: ContextReason[]` (structured `{kind, detail, score}`)
-  alongside `why: string[]`. Keyword search uses **FTS5** when available (→ `LIKE`
-  fallback); vector search uses an **HNSW** ANN (exact below a size threshold), or the
-  workspace's **Qdrant** layer when configured.
-- DB layering: **SQLite** is always the system of record (metadata + FTS5 + vectors +
-  in-proc HNSW + graph rows); **Qdrant** is the optional remote vector engine;
-  **SurrealDB** is the optional remote graph engine. Unconfigured backends fall back
-  to SQLite. Backend URLs are admin-configured trusted endpoints (commonly localhost
-  Docker) and are NOT SSRF-guarded, unlike user/agent-supplied embedder URLs.
-- The Repo Brain is injected into EVERY agent session's context at spawn (the
-  `otto-context` provisioner hook), not just Product.
-
-Notes:
-- `MemoryQuery.mode` ∈ `{hybrid (default), semantic, keyword}`; `k` defaults to 20.
+- `MemoryQuery.mode` ∈ `{hybrid (default), semantic, keyword}` — ALL execute the
+  keyword path since Vault v3 removed embeddings; the legacy values remain accepted
+  aliases so existing callers keep working. `k` defaults to 20.
+- `MemoryHit` carries `reasons: ContextReason[]` (`{kind, detail, score}`,
+  `kind ∈ {keyword, scope}`) alongside `why: string[]`.
 - `visibility` ∈ `{shared (default — all workspace members), private (creator-only)}`.
 - Sharing across machines: set `OTTO_MEMORY_REMOTE_URL`/`OTTO_MEMORY_REMOTE_TOKEN`
   to point an instance at a shared host, or sync an `OTTO_MEMORY_VAULT_DIR` vault
   folder (git) and re-index. A shared SQLite *file* over a network is unsupported.
-- Vectors are embedded on write. The default embedder is the **code-aware local**
-  embedder (deterministic, offline); real *neural* embeddings come from **Ollama**
-  (local) or **OpenAI/Voyage** (remote), wired by `PUT /memory/embedder` (provider +
-  Keychain key) or the `embedder` setting at boot, resolving the key from the
-  Keychain (`<provider>_api_key`) or `<PROVIDER>_API_KEY`. The active embedder
-  swaps in live behind the `Embedder` trait; a model/dim change is reconciled by
-  `POST …/memory/reindex`. Outbound embed requests are SSRF-guarded (netguard),
-  time-bounded (20s) and size-capped.
+
+## Vault v3 — the docs home (file-backed markdown vaults, OKF)
+
+A **vault** is a registered local directory of markdown files (it may be a live
+Obsidian vault). Files are the source of truth; SQLite holds a derived, rebuildable
+index (notes, wikilinks/markdown links, tags, FTS5). No embeddings anywhere.
+Workspace-scoped: reads = ws viewer (`Product:View`), writes = ws editor
+(`Product:Edit`); the read-shaped POSTs `search` and `okf/validate` are View-gated.
+DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
+`VaultBacklink`, `VaultSearchHit`, `VaultSwitchHit`, `VaultTagCount`,
+`VaultGraphPayload`, `VaultRenameResult`, `OkfReport`) are mirrored in
+`ui/src/lib/api/types.ts`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /workspaces/{ws}/vault/vaults | ws viewer | — | `Vault[]` (with note/link counts + scan_state) |
+| POST /workspaces/{ws}/vault/vaults | ws editor | `{name, root_path?, okf?}` | `Vault` — registers an existing dir; omitted `root_path` creates `~/.otto/vault/<slug(name)>`. Kicks a full scan. |
+| PATCH /workspaces/{ws}/vault/vaults/{id} | ws editor | `{name?, okf?}` | `Vault` |
+| DELETE /workspaces/{ws}/vault/vaults/{id} | ws editor | — | 204 — unregister ONLY (files on disk untouched) |
+| POST /workspaces/{ws}/vault/vaults/{id}/rescan | ws editor | — | `VaultStatus` — full incremental rescan (awaited) |
+| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, notes, links, unresolved, tags, attachments}`; stale (>5s) probes kick a background incremental scan |
+| GET /workspaces/{ws}/vault/vaults/{id}/dir | ws viewer | `?path=` | `VaultDirListing` — one level: dirs (with child counts), notes, attachments |
+| GET /workspaces/{ws}/vault/vaults/{id}/note | ws viewer | `?path=` | `VaultNote{meta, raw, outgoing}` |
+| PUT /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `{path, content, if_hash?}` | `VaultNoteMeta` — create/update; parent folders auto-created; `if_hash` mismatch → 409 (optimistic concurrency; `""` = must-not-exist) |
+| DELETE /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `?path=` | 204 — soft delete → `<vault>/.trash/` (never destroys files) |
+| POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{links_updated}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move |
+| POST /workspaces/{ws}/vault/vaults/{id}/folder | ws editor | `{path}` | 204 |
+| GET /workspaces/{ws}/vault/vaults/{id}/backlinks | ws viewer | `?path=` | `VaultBacklink[]` (linked mentions with a context snippet) |
+| POST /workspaces/{ws}/vault/vaults/{id}/search | ws viewer | `{query, tag?, path_prefix?, okf_type?, limit?}` | `VaultSearchHit[]` — FTS5 bm25 + snippets; `tag:`/`path:`/`type:` operators inside `query` |
+| GET /workspaces/{ws}/vault/vaults/{id}/switcher | ws viewer | `?q=` | `VaultSwitchHit[]` — server-side fuzzy over title/aliases/path (quick switcher + `[[` completion) |
+| GET /workspaces/{ws}/vault/vaults/{id}/tags | ws viewer | — | `VaultTagCount[]` |
+| GET /workspaces/{ws}/vault/vaults/{id}/graph | ws viewer | `?mode=full\|local&path=&depth=&tags=&orphans=&reserved=&ghosts=&edge_budget=&group_by=folder\|type` | `VaultGraphPayload` — compact parallel arrays (`paths,titles,groups,group_labels,flags,edges`) with a flat `[src,dst,…]` edge index list; `flags` bits: 1=ghost, 2=tag, 4=reserved; full mode enforces a degree-prioritized edge budget (default 2M) with `truncated` |
+| POST /workspaces/{ws}/vault/vaults/{id}/okf/validate | ws viewer | — | `OkfReport{conformant, errors[], warnings[], checked_notes}` — deterministic OKF v0.1 conformance: E1 no/unparseable frontmatter, E2 missing `type`, E3 reserved-file structure; W1 title/description, W2 broken link, W3 timestamp, W4 dir missing index.md, W5 log dates |
+| POST /workspaces/{ws}/vault/vaults/{id}/okf/indexes | ws editor | — | `{written}` — regenerate per-directory `index.md` files (frontmatter descriptions; root index carries `okf_version`) |
+| GET /workspaces/{ws}/vault/vaults/{id}/asset | ws viewer | `?path=` | attachment bytes with sniffed content type (traversal-guarded) |
+
+Notes:
+- Every file op canonicalizes and guards paths (no `..`, absolutes, hidden or
+  `.trash/` segments; symlink escapes rejected).
+- Wikilink resolution follows Obsidian shortest-path rules: exact relative →
+  vault-root-relative → unique basename (case-insensitive, `.md` optional);
+  OKF `/`-bundle-absolute links also resolve. Ambiguous basenames stay
+  UNRESOLVED (surfaced, never silently picked). Broken links are legal (OKF).
+- `index.md`/`log.md` are OKF reserved files: flagged `reserved`, excluded from
+  the switcher and (by default) the graph.
+- Notes >4 MiB are indexed metadata-only (no FTS body).
 
 ## Message Brokers (Kafka viewer)
 
