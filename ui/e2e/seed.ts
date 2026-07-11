@@ -51,6 +51,66 @@ export async function seedWorkspace(ctx: APIRequestContext, base: string): Promi
  *  with [[backlinks]] so the reader/editor overflows and is scroll-testable — and
  *  import a small knowledge graph (nodes + edges) so the Graph view has content.
  *  Returns the created memory ids (first is the long "hub" note). */
+
+/** Write a small OKF-ish markdown bundle to a temp dir and register it as a
+ *  Vault v3 vault (files on disk are the truth). Waits for the initial scan.
+ *  Returns the vault id + the on-disk root so specs can assert file effects
+ *  (rename link-rewrites, trash). */
+export async function seedVaultDir(
+  ctx: APIRequestContext,
+  base: string,
+  workspaceId: string,
+  opts: { notes?: number } = {},
+): Promise<{ vaultId: number; dir: string }> {
+  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-vault-'));
+  const fs = await import('node:fs');
+  fs.mkdirSync(join(dir, 'services'), { recursive: true });
+  fs.mkdirSync(join(dir, 'runbooks'), { recursive: true });
+  writeFileSync(
+    join(dir, 'index.md'),
+    '---\nokf_version: "0.1"\n---\n\n# Bundle\n\n* [Auth API](services/auth-api.md) - Issues JWTs.\n',
+  );
+  writeFileSync(
+    join(dir, 'services', 'auth-api.md'),
+    '---\ntype: Service\ntitle: Auth API\ndescription: Issues and verifies JWTs.\ntags: [auth, security]\naliases: [The Auth Service]\ntimestamp: 2026-07-10T10:00:00Z\n---\n\n# Overview\n\nTrust root for [Orders API](/services/orders-api.md) and [[deploy|the deploy runbook]].\nBroken link: [[Missing Note]]. Inline tag #jwt.\n\n## Claims\n\nTokens live 15 minutes.\n',
+  );
+  writeFileSync(
+    join(dir, 'services', 'orders-api.md'),
+    '---\ntype: Service\ntitle: Orders API\ndescription: Takes orders.\ntags: [orders]\ntimestamp: 2026-07-10T10:00:00Z\n---\n\nCalls [auth](auth-api.md) before charging the customer card.\n',
+  );
+  writeFileSync(
+    join(dir, 'runbooks', 'deploy.md'),
+    '---\ntype: Runbook\ntitle: Deploy Runbook\ndescription: How we ship.\ntimestamp: 2026-07-10T10:00:00Z\n---\n\nShip [[auth-api]] carefully. #oncall\n',
+  );
+  // Optional synthetic bulk for graph-scale specs: chained + hub-linked notes.
+  const extra = opts.notes ?? 0;
+  if (extra > 0) {
+    fs.mkdirSync(join(dir, 'bulk'), { recursive: true });
+    for (let i = 0; i < extra; i++) {
+      const next = (i + 1) % extra;
+      writeFileSync(
+        join(dir, 'bulk', `note-${i}.md`),
+        `---\ntype: Reference\ntitle: Note ${i}\ndescription: Synthetic note ${i}.\n---\n\nLinks [[note-${next}]] and [[auth-api]].\n`,
+      );
+    }
+  }
+  const v = await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/vault/vaults`, {
+    name: 'E2E Vault',
+    root_path: dir,
+    okf: true,
+  });
+  const vaultId = v.id as number;
+  // Wait until the initial scan lands (status kicks + reports).
+  for (let i = 0; i < 60; i++) {
+    const st = await (
+      await ctx.get(`${base}/api/v1/workspaces/${workspaceId}/vault/vaults/${vaultId}/status`)
+    ).json();
+    if (st.scan_state === 'idle' && st.notes >= 4 + extra) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return { vaultId, dir };
+}
+
 export async function seedVaultNotes(
   ctx: APIRequestContext,
   base: string,

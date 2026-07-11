@@ -267,14 +267,14 @@
 
       {#if rightOpen && vault.centerMode === 'note'}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="resizer" onmousedown={(e) => startResize(e, 'right')}></div>
+        <div class="resizer resizer-right" onmousedown={(e) => startResize(e, 'right')}></div>
         <aside class="right-pane" style="width:{rightW}px">
           <RightPanel />
         </aside>
       {/if}
     </div>
 
-    <footer class="statusbar">
+    <footer class="vault-statusbar">
       {#if vault.note}
         <span>{vault.backlinks.length} backlinks</span>
         <span>{vault.note.meta.word_count} words</span>
@@ -473,7 +473,7 @@
     flex-shrink: 0;
     min-height: 0;
   }
-  .statusbar {
+  .vault-statusbar {
     display: flex;
     gap: 14px;
     align-items: center;
@@ -482,13 +482,13 @@
     font-size: 11px;
     color: var(--text-dim);
   }
-  .statusbar .ok {
+  .vault-statusbar .ok {
     color: #7fc97f;
   }
-  .statusbar .bad {
+  .vault-statusbar .bad {
     color: #e88;
   }
-  .statusbar .dim {
+  .vault-statusbar .dim {
     opacity: 0.7;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -583,6 +583,15 @@
   }
   .actions .primary:disabled {
     opacity: 0.5;
+  }
+
+  /* Mid widths (narrow desktop / tablet portrait / phone landscape): the
+   * fixed side panes would crush the note pane — drop the right panel. */
+  @media (max-width: 1100px) {
+    .right-pane,
+    .resizer-right {
+      display: none;
+    }
   }
 
   /* Mobile: stack — left pane becomes a top strip, right panel hidden. */
