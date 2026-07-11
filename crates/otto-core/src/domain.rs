@@ -156,6 +156,42 @@ pub struct Session {
     pub meta: Value,
 }
 
+/// Meta `source` values stamped on **background/automation** agent sessions —
+/// ones owned by an engine (channel tickets, review agents, skill eval/review,
+/// product analysis, swarm roles, canvas/mockup/db assist panels, workflow
+/// steps) rather than opened by the user. Any other value — or no `source` at
+/// all — marks a **foreground** session: one listed in the sidebar's "Agents"
+/// group. MUST stay in sync with the UI filter (`plainAgentSessions` in
+/// `ui/src/lib/stores/workspace.svelte.ts`).
+pub const BACKGROUND_SESSION_SOURCES: [&str; 10] = [
+    "channel",
+    "review",
+    "skilleval",
+    "skillreview",
+    "product-analysis",
+    "swarm",
+    "canvas_assist",
+    "mockup_assist",
+    "db_assist",
+    "workflow",
+];
+
+impl Session {
+    /// Whether this is a **foreground** agent session — one the user sees in
+    /// the sidebar's "Agents" group. Foreground sessions are DURABLE: no
+    /// daemon sweep may auto-delete them (they can sit idle for 30+ days and
+    /// must still be there); only an explicit archive/delete removes them.
+    /// Background sessions keep their volume-driven cleanup.
+    pub fn is_foreground_agent(&self) -> bool {
+        self.kind == SessionKind::Agent
+            && !self
+                .meta
+                .get("source")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| BACKGROUND_SESSION_SOURCES.contains(&s))
+    }
+}
+
 /// Supported connection kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2430,5 +2466,43 @@ mod tests {
         // Existing variants unaffected.
         assert_eq!(ReviewStatus::parse("running"), Some(ReviewStatus::Running));
         assert_eq!(ReviewStatus::parse("nope"), None);
+    }
+
+    #[test]
+    fn foreground_agent_detection_mirrors_the_agents_tab_filter() {
+        use super::{Session, SessionKind, SessionStatus, BACKGROUND_SESSION_SOURCES};
+        let session = |kind: SessionKind, meta: serde_json::Value| Session {
+            id: "s1".into(),
+            workspace_id: "w1".into(),
+            kind,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: SessionStatus::Reconnectable,
+            cwd: "/tmp".into(),
+            provider_session_id: Some("psid".into()),
+            connection_id: None,
+            created_by: "u1".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta,
+        };
+        // No source at all → the user's own session → foreground.
+        assert!(session(SessionKind::Agent, serde_json::json!({})).is_foreground_agent());
+        // An UNKNOWN source also shows in the Agents tab (blacklist filter) → foreground.
+        assert!(session(SessionKind::Agent, serde_json::json!({"source": "someday-new"}))
+            .is_foreground_agent());
+        // Every background source is excluded.
+        for src in BACKGROUND_SESSION_SOURCES {
+            assert!(
+                !session(SessionKind::Agent, serde_json::json!({"source": src}))
+                    .is_foreground_agent(),
+                "{src} must classify as background"
+            );
+        }
+        // Non-agent kinds are never foreground *agent* sessions.
+        assert!(!session(SessionKind::Connection, serde_json::json!({})).is_foreground_agent());
+        // Malformed meta (source not a string) reads as no source → foreground.
+        assert!(session(SessionKind::Agent, serde_json::json!({"source": 7})).is_foreground_agent());
     }
 }
