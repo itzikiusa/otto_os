@@ -7,6 +7,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import DocsAgentsView from './DocsAgentsView.svelte';
   import FileTree from './FileTree.svelte';
   import GraphView from './GraphView.svelte';
   import NewNoteDialog from './NewNoteDialog.svelte';
@@ -190,6 +191,17 @@
       >
         <Icon name="share" size={14} />
       </button>
+      <button
+        class="tool"
+        class:active={vault.centerMode === 'docs-agents'}
+        title="Docs agent — have agents write documentation into this vault"
+        onclick={() =>
+          vault.centerMode === 'docs-agents'
+            ? (vault.centerMode = vault.note ? 'note' : 'empty')
+            : vault.openDocsAgents('')}
+      >
+        <Icon name="zap" size={14} />
+      </button>
       <button class="tool" title="Quick switcher (⌘O)" onclick={() => (vault.switcherOpen = true)}>
         <Icon name="search" size={14} />
       </button>
@@ -265,6 +277,8 @@
       <main class="center">
         {#if vault.centerMode === 'graph'}
           <GraphView />
+        {:else if vault.centerMode === 'docs-agents'}
+          <DocsAgentsView />
         {:else if vault.centerMode === 'note' && vault.note}
           <NoteView />
         {:else}

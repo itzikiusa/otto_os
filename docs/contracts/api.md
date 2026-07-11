@@ -2013,6 +2013,32 @@ Notes:
   the switcher and (by default) the graph.
 - Notes >4 MiB are indexed metadata-only (no FTS body).
 
+### Docs agents (AI writers into a vault)
+
+Launch 1–4 WRITER agents (per-agent provider/model) as REAL managed sessions that
+write notes into a vault through the session-injected otto MCP vault tools
+(`otto_vault_write` etc.). A single writer writes final notes directly into
+`target_dir`; with >1 writers each drafts under `_drafts/docs-run-<run8>/agent-<n>/`
+and a SUMMARIZER session consolidates the drafts into `target_dir`, after which the
+server moves the whole drafts dir into `<vault>/.trash/` and rescans. Run state is
+IN-MEMORY and poll-only — runs do NOT survive a daemon restart (the agent sessions
+themselves persist as ordinary managed sessions). Cancel stops orchestrating between
+stages; it never kills the agent sessions. `written` = the final agent's reported
+results (a temp JSON file), falling back to a server-side before/after diff of note
+paths under `target_dir`. OKF vaults: agents are REQUIRED to produce OKF-conformant
+notes — claude gets the staged `okf-authoring` skill via `meta.extra_dirs`
+(`--add-dir`), codex/agy get the SKILL.md text inlined in the prompt. DTOs
+(`VaultDocsRun`, `VaultDocsAgent`, `VaultDocsSummarizer`) are mirrored in
+`ui/src/lib/api/types.ts`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/run | ws editor | `{prompt, target_dir?, agents: [{provider, model?}] (1..=4), summarizer?: {provider?, model?}}` | `VaultDocsRun` — initial snapshot, `state:"running"`; `summarizer.state:"skipped"` when 1 writer |
+| GET /vault/docs-agents/runs/{run_id} | ws viewer (the run's ws, re-checked) | — | `VaultDocsRun` — the UI polls every 1500ms while `running\|summarizing`; 404 after a daemon restart |
+| POST /vault/docs-agents/runs/{run_id}/cancel | ws editor (the run's ws, re-checked) | — | 204 — marks the run `cancelled` + stops orchestrating (agent sessions stay open) |
+| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — LONG request (returns when the turn completes); ONE resumed session per (vault, note); `provider` honored on the FIRST turn only |
+| GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws viewer | `?path=` | `{session_id: string\|null, running: boolean}` — poll right after POSTing refine to attach the live shell |
+
 ## Message Brokers (Kafka viewer)
 
 A Conduktor/Confluent-class Kafka viewer: cluster connection profiles, cluster

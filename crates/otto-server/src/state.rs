@@ -123,6 +123,13 @@ pub struct ServerCtx {
     pub memory: std::sync::Arc<otto_memory::MemoryService>,
     /// Vault v3 — the file-backed docs home (markdown vaults, OKF).
     pub vault: std::sync::Arc<otto_vault::VaultEngine>,
+    /// Vault docs-agents: in-memory run registry (poll snapshots + cancel
+    /// flags). Runs do NOT survive a daemon restart — poll-only by design;
+    /// the agent sessions themselves persist as ordinary managed sessions.
+    pub vault_docs_runs: crate::vault_docs_agent::RunRegistry,
+    /// Vault docs-agents: the resumable refine session per (vault, note),
+    /// mirroring canvas_assist's one-session-per-artifact registry.
+    pub vault_docs_refine: crate::vault_docs_agent::RefineRegistry,
     // -- Agent Swarm -------------------------------------------------------
     pub swarm: Arc<otto_swarm::SwarmService>,
     pub swarm_repo: otto_state::SwarmRepo,

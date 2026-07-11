@@ -55,6 +55,11 @@
         ? [
             { label: 'New note here', icon: 'note', action: () => onNewNote(n.entry.path) },
             {
+              label: 'Docs agent here',
+              icon: 'zap',
+              action: () => vault.openDocsAgents(n.entry.path),
+            },
+            {
               label: 'New folder here',
               icon: 'folder',
               action: () => {

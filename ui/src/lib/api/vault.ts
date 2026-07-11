@@ -7,6 +7,7 @@ import type {
   Vault,
   VaultBacklink,
   VaultDirListing,
+  VaultDocsRun,
   VaultGraphPayload,
   VaultNote,
   VaultNoteMeta,
@@ -121,4 +122,45 @@ export function okfIndexes(ws: string, id: number) {
 /** URL of an attachment (needs the bearer — use with authedBlobUrl). */
 export function assetPath(ws: string, id: number, path: string) {
   return `${base(ws)}/${id}/asset?path=${enc(path)}`;
+}
+
+// -- Docs agents — multi-writer documentation runs + per-note refine ---------
+
+export interface VaultDocsRunReq {
+  prompt: string;
+  target_dir?: string; // vault-relative folder ("" = root)
+  agents: { provider: string; model?: string }[]; // 1..=4
+  summarizer?: { provider?: string; model?: string };
+}
+
+export function runDocsAgents(ws: string, id: number, body: VaultDocsRunReq) {
+  return api.post<VaultDocsRun>(`${base(ws)}/${id}/docs-agents/run`, body);
+}
+
+/** NOT ws-scoped — the run carries its ws and is checked server-side. */
+export function docsRun(runId: string) {
+  return api.get<VaultDocsRun>(`/vault/docs-agents/runs/${enc(runId)}`);
+}
+
+export function cancelDocsRun(runId: string) {
+  return api.post<void>(`/vault/docs-agents/runs/${enc(runId)}/cancel`, {});
+}
+
+/** LONG request — resolves when the refine turn completes. */
+export function refineNote(
+  ws: string,
+  id: number,
+  body: { path: string; prompt: string; provider?: string; model?: string },
+) {
+  return api.post<{ session_id: string; reply: string }>(
+    `${base(ws)}/${id}/docs-agents/refine`,
+    body,
+  );
+}
+
+/** Poll right after POSTing refine to attach the live shell. */
+export function refineSession(ws: string, id: number, path: string) {
+  return api.get<{ session_id: string | null; running: boolean }>(
+    `${base(ws)}/${id}/docs-agents/refine-session?path=${enc(path)}`,
+  );
 }

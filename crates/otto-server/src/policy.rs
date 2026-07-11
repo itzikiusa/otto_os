@@ -552,6 +552,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         }
         return Require(Product, if get { View } else { Edit });
     }
+    // Vault docs-agents run poll/cancel live OUTSIDE the ws prefix (the run id
+    // carries its ws; the handlers re-check the caller's role against it —
+    // same double-gate as `/proof-packs/{id}`). Same Product ladder: poll
+    // (GET) = View, cancel (POST) = Edit. Root bypasses.
+    if p.starts_with("/vault/docs-agents/") {
+        return Require(Product, if get { View } else { Edit });
+    }
 
     // ---- Message Brokers (Kafka viewer: clusters / topics / groups / schema) --
     // The brokers layer has no dedicated Feature key; it is data-infrastructure
@@ -879,6 +886,34 @@ mod tests {
     // Helper: every test path carries the `/api/v1` nest prefix the guard sees.
     fn pol(m: Method, path: &str) -> PolicyDecision {
         policy_for(&m, path)
+    }
+
+    // ---- Vault docs-agents ---------------------------------------------------
+
+    #[test]
+    fn vault_docs_agent_routes_ride_the_product_feature() {
+        // ws-scoped launch/refine routes ride the existing vault prefix rule.
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/run"),
+            Require(Product, Edit),
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine"),
+            Require(Product, Edit),
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session"),
+            Require(Product, View),
+        );
+        // Non-ws run poll/cancel (the handlers re-check the run's ws role).
+        assert_eq!(
+            pol(Method::GET, "/api/v1/vault/docs-agents/runs/{run_id}"),
+            Require(Product, View),
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/vault/docs-agents/runs/{run_id}/cancel"),
+            Require(Product, Edit),
+        );
     }
 
     // ---- Snips --------------------------------------------------------------

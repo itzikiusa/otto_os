@@ -5172,6 +5172,40 @@ export interface OkfReport {
   checked_notes: number;
 }
 
+// Docs agents — multi-writer documentation runs + per-note refine sessions.
+
+export interface VaultDocsAgent {
+  index: number;
+  name: string; // "writer-1 · claude"
+  provider: string;
+  model: string | null;
+  state: 'pending' | 'running' | 'done' | 'error';
+  session_id: string | null;
+  error: string | null;
+  drafts: string[]; // vault-relative draft note paths this agent produced
+}
+export interface VaultDocsSummarizer {
+  provider: string;
+  model: string | null;
+  state: 'pending' | 'running' | 'done' | 'error' | 'skipped'; // skipped when 1 writer
+  session_id: string | null;
+  error: string | null;
+}
+export interface VaultDocsRun {
+  id: string;
+  ws_id: string;
+  vault_id: number;
+  prompt: string;
+  target_dir: string;
+  state: 'running' | 'summarizing' | 'done' | 'error' | 'cancelled';
+  agents: VaultDocsAgent[];
+  summarizer: VaultDocsSummarizer;
+  written: string[]; // final note paths in the vault
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Message Brokers (Kafka) — mirror of crates/otto-brokers/src/types.rs
 // ---------------------------------------------------------------------------

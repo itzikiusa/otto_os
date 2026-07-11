@@ -173,7 +173,7 @@ test('ui: edit + autosave persists to disk', async ({ page }) => {
   await tree.getByText('deploy', { exact: true }).click();
 
   // Switch to edit mode and type at the end of the doc.
-  await page.locator('.mode-btn').click();
+  await page.locator('.mode-btn[title^="Edit"]').click();
   const editor = page.locator('.cm-content');
   await expect(editor).toBeVisible();
   await editor.click();

@@ -365,6 +365,38 @@ classified **DANGEROUS** — off by default and approval-gated by the control
 plane like every other write. See
 [`./mcp-control-plane.md`](./mcp-control-plane.md).
 
+## 6b. Docs agents — AI writes the documentation
+
+Two agent surfaces live directly in the vault, reusing the standard agent
+infrastructure (managed sessions with the otto MCP tools, provider/model
+selection from the shared registry, inline live terminals):
+
+- **Docs agent (create)** — the ✨ toolbar button (or a folder's context menu →
+  "Docs agent here"). Configure 1–4 writer agents (per-agent provider + model)
+  and a summarizer, describe what to document, Run. Writers fan out as REAL
+  sessions (each row has an Open toggle mounting its live terminal, multiple at
+  once). With one writer it writes final notes straight into the target folder;
+  with several, each drafts under `_drafts/docs-run-*/agent-N/` and the
+  summarizer consolidates into final notes, after which drafts are moved to
+  `.trash/`. Finished runs list every written note as a link. Runs are
+  in-memory (poll-based; they don't survive a daemon restart — the sessions do).
+- **Refine with AI (edit)** — the ✨ button in an open note's header opens a
+  drawer: one resumable session per note; each Send applies an instruction to
+  the note via `otto_vault_write` with optimistic `if_hash` (conflicts re-read
+  and re-apply). The note view reloads after each turn unless you have unsaved
+  edits.
+
+**OKF enforcement**: on OKF vaults every agent is instructed to produce
+conformant notes (frontmatter `type` + one-sentence `description`, markdown
+links, index/log conventions) — claude sessions get the bundled `okf-authoring`
+skill via `--add-dir`, codex/agy get the skill text inlined — and the
+summarizer must run `otto_vault_okf_validate` and fix every error before
+finishing.
+
+Routes: `POST …/vault/vaults/{id}/docs-agents/run`, `GET /vault/docs-agents/runs/{run_id}`,
+`POST /vault/docs-agents/runs/{run_id}/cancel`, `POST …/docs-agents/refine`,
+`GET …/docs-agents/refine-session?path=` (see `docs/contracts/api.md`).
+
 ## 7. The memories layer (what remains of v1/v2)
 
 The **workspace memory store** (`otto-memory`: `memories` / `memory_links`,
