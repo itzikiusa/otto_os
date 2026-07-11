@@ -4,6 +4,10 @@
 //! `otto_server::build_router`, and serves on 127.0.0.1:<port> (plus an
 //! optional 0.0.0.0 listener controlled by the `network_listener` setting).
 
+// The MCP tool catalog (`mcp_tools::tool_catalog`) is one large `json!` literal;
+// it outgrew the default macro recursion limit as tools were added.
+#![recursion_limit = "512"]
+
 mod config;
 mod mcp_server;
 mod mcp_tools;

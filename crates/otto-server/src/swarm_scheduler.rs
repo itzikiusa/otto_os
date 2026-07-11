@@ -4,12 +4,13 @@
 //! `otto-improve::Scheduler`: 60s tick, responsive cancel slices, DB-cursor
 //! idempotency (the agent's `schedule_json.last_run`).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
-use otto_state::{AgentPatch, NewRun};
+use otto_state::{AgentPatch, NewRun, RunPatch, TaskPatch};
 use serde_json::{json, Value};
 
 use crate::state::ServerCtx;
@@ -45,6 +46,8 @@ async fn supervise(ctx: ServerCtx, cancel: Arc<AtomicBool>) {
 }
 
 async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
+    // Board-utilization watchdog rides the same 60s scan (its own 5-min gate).
+    utilization_pass(ctx).await;
     let now = Utc::now();
     for agent in ctx.swarm_repo.list_scheduled_agents().await? {
         let Some(sched) = agent.schedule.clone() else { continue };
@@ -105,6 +108,213 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             Err(e) => tracing::warn!("swarm scheduler: create run: {e}"),
         }
     }
+    Ok(())
+}
+
+// --- Board-utilization watchdog (every 5 min per active swarm) --------------
+//
+// "The manager keeps everyone in line": every UTIL_EVERY the watchdog checks
+// each ACTIVE swarm for wasted capacity (live runs below the parallel cap).
+// The cheap structural fix runs first and costs no tokens — ready tasks stuck
+// behind a busy/inactive assignee are reassigned to idle teammates, and the 5s
+// coordinator tick dispatches them. Only when work exists but NOTHING is
+// schedulable (everything blocked/in review) does it wake the MANAGER with a
+// directive run — rate-limited to one per UTIL_ESCALATE_EVERY — so the check
+// itself stays free and the LLM only runs when a human-shaped decision is due.
+
+const UTIL_EVERY: Duration = Duration::from_secs(300);
+const UTIL_ESCALATE_EVERY: Duration = Duration::from_secs(1800);
+
+/// Per-swarm `(last_check, last_escalation)` watchdog cursors. In-memory: a
+/// daemon restart simply re-checks early, which is harmless.
+type UtilCursors = HashMap<String, (Option<Instant>, Option<Instant>)>;
+
+fn util_cursor() -> &'static Mutex<UtilCursors> {
+    static CUR: OnceLock<Mutex<UtilCursors>> = OnceLock::new();
+    CUR.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn utilization_pass(ctx: &ServerCtx) {
+    // Active swarms = the ones with a live coordinator (start/resume register it).
+    let swarm_ids: Vec<String> = ctx.swarm_coords.lock().unwrap().keys().cloned().collect();
+    let now = Instant::now();
+    for sid in swarm_ids {
+        {
+            let mut cur = util_cursor().lock().unwrap();
+            let e = cur.entry(sid.clone()).or_insert((None, None));
+            if e.0.is_some_and(|t| now.duration_since(t) < UTIL_EVERY) {
+                continue;
+            }
+            e.0 = Some(now);
+        }
+        if let Err(e) = check_utilization(ctx, &sid).await {
+            tracing::warn!(swarm = %sid, "swarm utilization check: {e}");
+        }
+    }
+}
+
+async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> {
+    let repo = &ctx.swarm_repo;
+    let swarm = repo.get_swarm(&sid.to_string()).await?;
+    if swarm.status != "active" {
+        return Ok(());
+    }
+    let cap = swarm
+        .config
+        .get("max_parallel_sessions")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(4)
+        .max(1);
+    let active = repo.active_run_count(&swarm.id).await?;
+    if active >= cap {
+        return Ok(()); // fully utilized
+    }
+
+    let agents = repo.list_agents(&swarm.id).await?;
+    let mut idle: Vec<otto_state::SwarmAgent> = Vec::new();
+    for a in agents.iter().filter(|a| a.status == "active") {
+        if !repo.agent_has_active_run(&a.id).await.unwrap_or(false)
+            && !crate::swarm_verify::agent_under_verification(&a.id)
+        {
+            idle.push(a.clone());
+        }
+    }
+    if idle.is_empty() {
+        return Ok(()); // every active agent is already busy — cap is aspirational
+    }
+
+    // Structural rebalance (free): ready tasks whose assignee is busy or
+    // inactive move to the best-fitting idle teammate.
+    let ready = repo.ready_tasks(&swarm.id).await?;
+    let mut slots = (cap - active).max(0) as usize;
+    let mut moved: Vec<String> = Vec::new();
+    for t in &ready {
+        if slots == 0 || idle.is_empty() {
+            break;
+        }
+        let assignee_is_idle = t
+            .assignee_agent_id
+            .as_ref()
+            .is_some_and(|aid| idle.iter().any(|a| &a.id == aid));
+        if assignee_is_idle {
+            slots -= 1; // will be dispatched by the next coordinator tick as-is
+            continue;
+        }
+        let hay = format!("{} {}", t.title, t.description).to_lowercase();
+        let Some(pos) = idle
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, a)| crate::swarm_runtime::agent_fit_score(a, &hay))
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        let agent = idle.remove(pos);
+        let _ = repo
+            .update_task(
+                &t.id,
+                TaskPatch { assignee_agent_id: Some(Some(agent.id.clone())), ..Default::default() },
+            )
+            .await;
+        crate::swarm_runtime::emit_task_pub(ctx, &t.id).await;
+        moved.push(format!("“{}” → {}", t.title, agent.name));
+        slots -= 1;
+    }
+    if !moved.is_empty() {
+        crate::swarm_runtime::system_post_meta(
+            ctx,
+            &swarm.id,
+            None,
+            None,
+            "status",
+            &format!(
+                "⚖️ Utilization check: {}/{} sessions busy — rebalanced {} ready task(s): {}.",
+                active, cap, moved.len(), moved.join("; ")
+            ),
+            json!({ "event": "utilization_rebalance", "moved": moved.len() }),
+        )
+        .await;
+        return Ok(()); // the coordinator tick will dispatch the moved work
+    }
+
+    // Nothing schedulable. If open work exists (blocked / stuck in review), wake
+    // the manager to make the call — rate-limited so a stuck board doesn't burn
+    // a manager turn every 5 minutes.
+    if !ready.is_empty() {
+        return Ok(()); // ready work is on idle agents; the tick handles it
+    }
+    let open = repo
+        .list_tasks_for_swarm(&swarm.id)
+        .await?
+        .into_iter()
+        .filter(|t| !matches!(t.status.as_str(), "done" | "cancelled"))
+        .count();
+    if open == 0 {
+        return Ok(()); // board is simply finished
+    }
+    {
+        let mut cur = util_cursor().lock().unwrap();
+        let e = cur.entry(sid.to_string()).or_insert((None, None));
+        if e.1.is_some_and(|t| Instant::now().duration_since(t) < UTIL_ESCALATE_EVERY) {
+            return Ok(());
+        }
+        e.1 = Some(Instant::now());
+    }
+    // The manager: an ACTIVE agent someone reports to, itself idle right now.
+    let Some(leader) = agents
+        .iter()
+        .find(|a| {
+            a.status == "active"
+                && agents.iter().any(|b| b.reports_to.as_deref() == Some(a.id.as_str()))
+                && idle.iter().any(|i| i.id == a.id)
+        })
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let mut run = repo
+        .create_run(NewRun {
+            swarm_id: swarm.id.clone(),
+            workspace_id: swarm.workspace_id.clone(),
+            project_id: None,
+            task_id: None,
+            agent_id: leader.id.clone(),
+            kind: "scheduled".into(),
+            trigger: "utilization".into(),
+        })
+        .await?;
+    let directive = format!(
+        "UTILIZATION CHECK — the board is under-utilized: {active}/{cap} sessions busy, 0 ready \
+         tasks, {open} open task(s) stuck (blocked / in review / waiting). You are the manager: \
+         use the otto MCP tools to fix it — `swarm_utilization` for the live picture, \
+         `swarm_list_projects` + `swarm_list_tasks` to inspect, `swarm_update_task` to unblock, \
+         reprioritize, reassign or close stale items, `swarm_create_task` for genuinely missing \
+         work, `swarm_run_task` to dispatch, `swarm_stop_run` to kill a wedged run. Get the team \
+         back to full capacity, then post a one-paragraph summary with `./otto-post`."
+    );
+    let _ = repo
+        .update_run(&run.id, RunPatch { result: Some(Some(json!({ "directive": directive }))), ..Default::default() })
+        .await;
+    run.result = Some(json!({ "directive": directive }));
+    swarm_run::emit_run(ctx, &run.id).await;
+    crate::swarm_runtime::system_post_meta(
+        ctx,
+        &swarm.id,
+        None,
+        None,
+        "status",
+        &format!(
+            "🕒 Utilization check: {active}/{cap} sessions busy with {open} open task(s) and \
+             nothing schedulable — waking {} to triage.",
+            leader.name
+        ),
+        json!({ "event": "utilization_escalation", "agent_id": leader.id }),
+    )
+    .await;
+    let ctx2 = ctx.clone();
+    tokio::spawn(async move {
+        let _ = swarm_run::run_turn(ctx2, run).await;
+    });
     Ok(())
 }
 

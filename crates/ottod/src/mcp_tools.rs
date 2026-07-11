@@ -1,12 +1,15 @@
 //! `ottod mcp-tools` — the first-party Otto MCP tool server (Task B2b).
 //! Nearly every tool here is **read-only**; the exceptions are
-//! `canvas_create_scene` / `canvas_update_scene` (Task B5) and the Vault v3
+//! `canvas_create_scene` / `canvas_update_scene` (Task B5), the Vault v3
 //! doc writers `otto_vault_write` / `otto_vault_rename` / `otto_vault_delete`,
+//! and the swarm board tools `swarm_create_task` / `swarm_update_task` /
+//! `swarm_run_task` / `swarm_stop_run` (the manager's utilization levers),
 //! which call the normal governed HTTP endpoints AS THE SESSION OWNER — the
 //! same workspace-role check (`Editor`) a human gets, no more. Canvas is meant
-//! to be agent-drawable and the vault is the agents' documentation home
-//! (delete is a soft move to `.trash/`); every other tool stays strictly
-//! read-only (see "Safety properties" below).
+//! to be agent-drawable, the vault is the agents' documentation home
+//! (delete is a soft move to `.trash/`), and the swarm board is how a manager
+//! agent keeps its team utilized; every other tool stays strictly read-only
+//! (see "Safety properties" below).
 //!
 //! Otto exposes a slice of its own data to an agent session as MCP tools. When
 //! `otto_mcp_enabled` is on (default), `otto-sessions` injects an `otto` server
@@ -183,6 +186,46 @@ impl Ctx {
             CALL_TIMEOUT,
             self.http
                 .put(&url)
+                .bearer_auth(&self.token)
+                .header("X-Otto-Session", self.session_id.clone().unwrap_or_default())
+                .json(body)
+                .send(),
+        )
+        .await
+        .map_err(|_| "upstream timeout".to_string())?
+        .map_err(|e| format!("request failed: {e}"))?;
+        let status = resp.status();
+        if let Some(len) = resp.content_length() {
+            if len as usize > MAX_BODY_BYTES {
+                return Err(format!("response too large ({len} bytes > {MAX_BODY_BYTES} cap)"));
+            }
+        }
+        let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
+        if bytes.len() > MAX_BODY_BYTES {
+            return Err(format!(
+                "response too large ({} bytes > {MAX_BODY_BYTES} cap)",
+                bytes.len()
+            ));
+        }
+        if !status.is_success() {
+            let snippet = String::from_utf8_lossy(&bytes);
+            return Err(format!(
+                "daemon returned {status}: {}",
+                snippet.chars().take(300).collect::<String>()
+            ));
+        }
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
+    }
+
+    /// PATCH an `/api/v1` path with the bearer token. Used by the swarm write
+    /// tools (`swarm_update_task`) — same governed Editor-gated routes the UI
+    /// hits; same timeout/size handling as [`Self::put_json`].
+    async fn patch_json(&self, path: &str, body: &Value) -> Result<Value, String> {
+        let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
+        let resp = tokio::time::timeout(
+            CALL_TIMEOUT,
+            self.http
+                .patch(&url)
                 .bearer_auth(&self.token)
                 .header("X-Otto-Session", self.session_id.clone().unwrap_or_default())
                 .json(body)
@@ -480,6 +523,41 @@ fn tool_catalog() -> Value {
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
+                "name": "swarm_list_projects",
+                "description": "Read-only: list a swarm's projects (id, name, repo, goal). Project ids feed swarm_list_tasks / swarm_create_task.",
+                "inputSchema": { "type": "object", "properties": { "swarm_id": { "type": "string" } }, "required": ["swarm_id"] }
+            },
+            {
+                "name": "swarm_list_tasks",
+                "description": "Read-only: list a project's board tasks (id, title, status, assignee, priority, depends_on).",
+                "inputSchema": { "type": "object", "properties": { "project_id": { "type": "string" } }, "required": ["project_id"] }
+            },
+            {
+                "name": "swarm_utilization",
+                "description": "Read-only: a swarm's board-utilization snapshot — parallel cap vs live runs, ready vs open tasks by status, and which agents are busy/idle. Use it to spot wasted capacity before dispatching.",
+                "inputSchema": { "type": "object", "properties": { "swarm_id": { "type": "string" } }, "required": ["swarm_id"] }
+            },
+            {
+                "name": "swarm_create_task",
+                "description": "Create a task on a project board (Editor-gated). Unassigned tasks are auto-assigned to the best-fitting agent when scheduled. Managers: prefer editing the plan over piling on new tasks.",
+                "inputSchema": { "type": "object", "properties": { "project_id": { "type": "string" }, "title": { "type": "string" }, "description": { "type": "string" }, "assignee_agent_id": { "type": "string" }, "priority": { "type": "string", "description": "low|medium|high|urgent" } }, "required": ["project_id", "title"] }
+            },
+            {
+                "name": "swarm_update_task",
+                "description": "Update a board task (Editor-gated): status (backlog|todo|in_progress|in_review|blocked|done|cancelled), assignee_agent_id, priority, title, description. Use to unblock, reassign, reprioritize or close stale items.",
+                "inputSchema": { "type": "object", "properties": { "task_id": { "type": "string" }, "status": { "type": "string" }, "assignee_agent_id": { "type": "string" }, "priority": { "type": "string" }, "title": { "type": "string" }, "description": { "type": "string" } }, "required": ["task_id"] }
+            },
+            {
+                "name": "swarm_run_task",
+                "description": "Dispatch a board task now (Editor-gated): creates a run and launches the assignee's agent session immediately instead of waiting for the coordinator tick.",
+                "inputSchema": { "type": "object", "properties": { "task_id": { "type": "string" } }, "required": ["task_id"] }
+            },
+            {
+                "name": "swarm_stop_run",
+                "description": "Stop an in-flight swarm run (Editor-gated): cancels the turn and marks the run stopped. Use on wedged or duplicate dispatches.",
+                "inputSchema": { "type": "object", "properties": { "run_id": { "type": "string" } }, "required": ["run_id"] }
+            },
+            {
                 "name": "otto_search_memory",
                 "description": "Read-only: keyword (FTS) search of this workspace's agent memories for a free-text query; returns the top hits.",
                 "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "k": { "type": "integer" } }, "required": ["query"] }
@@ -588,6 +666,9 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "otto_list_broker_topics",
     "otto_search_issues",
     "otto_list_swarms",
+    "swarm_list_projects",
+    "swarm_list_tasks",
+    "swarm_utilization",
     "otto_search_memory",
     "otto_list_repos",
     "otto_list_sessions",
@@ -657,6 +738,15 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             ReadCall::get(path)
         }
         "otto_list_swarms" => ReadCall::get(format!("/workspaces/{}/swarm/swarms", seg(ws_req()?))),
+        "swarm_list_projects" => {
+            ReadCall::get(format!("/swarm/swarms/{}/projects", seg(&arg_str(args, "swarm_id")?)))
+        }
+        "swarm_list_tasks" => {
+            ReadCall::get(format!("/swarm/projects/{}/tasks", seg(&arg_str(args, "project_id")?)))
+        }
+        "swarm_utilization" => {
+            ReadCall::get(format!("/swarm/swarms/{}/utilization", seg(&arg_str(args, "swarm_id")?)))
+        }
         "otto_search_memory" => {
             // `k` defaults to 0 server-side (MemoryQuery) → no hits; supply a useful default.
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(20);
@@ -1008,6 +1098,41 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         }
         // Vault v3 doc writers — Editor-gated by the daemon route; the delete is
         // a soft move into `.trash/`.
+        "swarm_create_task" => {
+            let pid = arg_str(args, "project_id")?;
+            let mut body = json!({ "title": arg_str(args, "title")? });
+            for k in ["description", "assignee_agent_id", "priority"] {
+                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    body[k] = json!(v);
+                }
+            }
+            let task = ctx.post_json(&format!("/swarm/projects/{}/tasks", seg(&pid)), &body).await?;
+            Ok(finalize(json!({ "ok": true, "task": task })))
+        }
+        "swarm_update_task" => {
+            let tid = arg_str(args, "task_id")?;
+            let mut body = json!({});
+            for k in ["status", "assignee_agent_id", "priority", "title", "description"] {
+                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    body[k] = json!(v);
+                }
+            }
+            if body.as_object().is_some_and(|o| o.is_empty()) {
+                return Err("nothing to update — pass at least one of status/assignee_agent_id/priority/title/description".into());
+            }
+            let task = ctx.patch_json(&format!("/swarm/tasks/{}", seg(&tid)), &body).await?;
+            Ok(finalize(json!({ "ok": true, "task": task })))
+        }
+        "swarm_run_task" => {
+            let tid = arg_str(args, "task_id")?;
+            let run = ctx.post_json(&format!("/swarm/tasks/{}/run", seg(&tid)), &json!({})).await?;
+            Ok(finalize(json!({ "ok": true, "run": run })))
+        }
+        "swarm_stop_run" => {
+            let rid = arg_str(args, "run_id")?;
+            let run = ctx.post_json(&format!("/swarm/runs/{}/stop", seg(&rid)), &json!({})).await?;
+            Ok(finalize(json!({ "ok": true, "run": run })))
+        }
         "otto_vault_write" => {
             let ws = ctx.workspace_id.clone().ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
             let v = arg_i64(args, "vault_id")?;
@@ -1693,6 +1818,24 @@ mod tests {
         assert!(read_route("otto_vault_graph", &json!({"vault_id":3}), ws).unwrap().path.contains("mode=full"));
         let c = read_route("otto_vault_okf_validate", &json!({"vault_id":3}), ws).unwrap();
         assert!(c.post);
+        // Swarm board reads: explicit-id tools, no workspace needed.
+        assert_eq!(read_route("swarm_list_projects", &json!({"swarm_id":"s1"}), ws).unwrap().path, "/swarm/swarms/s1/projects");
+        assert_eq!(read_route("swarm_list_tasks", &json!({"project_id":"p1"}), ws).unwrap().path, "/swarm/projects/p1/tasks");
+        assert_eq!(read_route("swarm_utilization", &json!({"swarm_id":"s1"}), ws).unwrap().path, "/swarm/swarms/s1/utilization");
+    }
+
+    #[test]
+    fn catalog_lists_the_swarm_board_tools() {
+        let tools = tool_catalog();
+        let names: Vec<&str> = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for t in ["swarm_create_task", "swarm_update_task", "swarm_run_task", "swarm_stop_run"] {
+            assert!(names.contains(&t), "catalog missing swarm write tool {t}");
+        }
     }
 
     #[test]

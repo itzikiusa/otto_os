@@ -185,6 +185,7 @@ workspace from the row.
 | 73 | DELETE /api/v1/swarm/projects/{pid} | ws editor | — | 204 |
 | 74 | POST /api/v1/workspaces/{id}/swarm/projects/{pid}/plan | ws editor | PlanReq | `SwarmTask[]` |
 | 74b | POST /api/v1/swarm/projects/{pid}/clear | ws editor | — | `{ok, runs_stopped, tasks_deleted, messages_deleted}` — stops the project's in-flight runs, deletes ALL its tasks + project-scoped feed messages (runs/spend history kept), emits `swarm_project_cleared` |
+| 74c | GET /api/v1/swarm/swarms/{sid}/utilization | ws viewer | — | `{parallel_cap, active_runs, ready_tasks, tasks_by_status, agents:[{id,name,title,status,active_run}]}` — board-utilization snapshot (drives the 5-min manager utilization watchdog + the `swarm_utilization` MCP tool) |
 | 75 | GET /api/v1/swarm/projects/{pid}/tasks | ws viewer | — | `SwarmTask[]` |
 | 76 | POST /api/v1/swarm/projects/{pid}/tasks | ws editor | CreateTaskReq | SwarmTask |
 | 77 | PATCH /api/v1/swarm/tasks/{tid} | ws editor | UpdateTaskReq | SwarmTask |

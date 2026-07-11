@@ -328,7 +328,7 @@ async fn pause_for_budget(ctx: &ServerCtx, swarm: &Swarm, reason: &str) {
 }
 
 /// Keyword-overlap score of an agent's title+specialization against task text.
-fn agent_fit_score(a: &SwarmAgent, hay: &str) -> i32 {
+pub(crate) fn agent_fit_score(a: &SwarmAgent, hay: &str) -> i32 {
     let mut s = 0;
     for tok in format!("{} {}", a.title, a.specialization).to_lowercase().split_whitespace() {
         if tok.len() >= 4 && hay.contains(tok) {
@@ -931,6 +931,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/workspaces/{id}/swarm/recruit", post(recruit))
         .route("/workspaces/{id}/swarm/projects/{pid}/plan", post(plan))
         .route("/swarm/projects/{pid}/clear", post(clear_project_h))
+        .route("/swarm/swarms/{sid}/utilization", get(utilization_h))
         .route("/workspaces/{id}/swarm/swarms/{sid}/agent-stop", post(agent_stop))
         // Goals (requirement 3)
         .route("/swarm/tasks/{tid}/goals", get(list_task_goals).post(create_task_goal))
@@ -1459,6 +1460,48 @@ pub(crate) fn emit_status(ctx: &ServerCtx, ws: &Id, sid: &str, status: &str) {
         swarm_id: sid.to_string(),
         status: status.to_string(),
     });
+}
+
+/// Board-utilization snapshot: parallel cap vs live runs, schedulable (ready)
+/// vs open work, and which agents are busy/idle. The manager's 5-minute
+/// utilization check (and the `swarm_utilization` MCP tool) read this to
+/// decide whether capacity is being wasted.
+async fn utilization_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(sid): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
+    check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
+    let cap = swarm
+        .config
+        .get("max_parallel_sessions")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(4)
+        .max(1);
+    let active = ctx.swarm_repo.active_run_count(&sid).await.map_err(ApiError)?;
+    let ready = ctx.swarm_repo.ready_tasks(&sid).await.map_err(ApiError)?.len();
+    let mut by_status: HashMap<String, i64> = HashMap::new();
+    for t in ctx.swarm_repo.list_tasks_for_swarm(&sid).await.map_err(ApiError)? {
+        *by_status.entry(t.status).or_insert(0) += 1;
+    }
+    let mut agents_out = Vec::new();
+    for a in ctx.swarm_repo.list_agents(&sid).await.map_err(ApiError)? {
+        let busy = ctx.swarm_repo.agent_has_active_run(&a.id).await.unwrap_or(false);
+        agents_out.push(json!({
+            "id": a.id, "name": a.name, "title": a.title,
+            "status": a.status, "active_run": busy,
+        }));
+    }
+    Ok(Json(json!({
+        "swarm_id": sid,
+        "status": swarm.status,
+        "parallel_cap": cap,
+        "active_runs": active,
+        "ready_tasks": ready,
+        "tasks_by_status": by_status,
+        "agents": agents_out,
+    })))
 }
 
 /// Clear a project's board: stop + cancel every in-flight run for the project
