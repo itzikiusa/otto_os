@@ -3748,6 +3748,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-vault"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "chrono",
+ "dirs",
+ "mime_guess",
+ "otto-core",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "otto-workgraph"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,24 @@
+[package]
+name = "otto-vault"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-core.workspace = true
+otto-state.workspace = true
+axum.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+serde_yaml.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+mime_guess.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }

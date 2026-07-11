@@ -32,6 +32,7 @@ CREATE TABLE vault_notes (
     mtime_ns         INTEGER NOT NULL DEFAULT 0,
     hash             TEXT NOT NULL DEFAULT '',
     reserved         INTEGER NOT NULL DEFAULT 0,  -- index.md / log.md (OKF)
+    has_frontmatter  INTEGER NOT NULL DEFAULT 0,  -- a `---` YAML block exists
     parse_error      INTEGER NOT NULL DEFAULT 0,  -- fail-soft scan flag
     PRIMARY KEY (vault_id, path)
 );

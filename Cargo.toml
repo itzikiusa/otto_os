@@ -22,6 +22,7 @@ members = [
     "crates/otto-skills",
     "crates/otto-swarm",
     "crates/otto-memory",
+    "crates/otto-vault",
     "crates/otto-brokers",
     "crates/otto-netguard",
     "crates/otto-ssh",
@@ -60,6 +61,7 @@ otto-server = { path = "crates/otto-server" }
 otto-product = { path = "crates/otto-product" }
 otto-swarm = { path = "crates/otto-swarm" }
 otto-memory = { path = "crates/otto-memory" }
+otto-vault = { path = "crates/otto-vault" }
 otto-brokers = { path = "crates/otto-brokers" }
 otto-netguard = { path = "crates/otto-netguard" }
 otto-ssh = { path = "crates/otto-ssh" }
@@ -91,6 +93,8 @@ ulid = "1"
 uuid = { version = "1", features = ["v4"] }
 argon2 = "0.5"
 sha2 = "0.10"
+# YAML frontmatter (Vault v3 / OKF). Already in the lockfile via otto-swarm.
+serde_yaml = "0.9"
 rand = "0.8"
 hex = "0.4"
 base64 = "0.22"
