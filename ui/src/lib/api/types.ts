@@ -883,6 +883,7 @@ export type OttoEvent =
       project_id: Id;
       task: Record<string, unknown>;
     }
+  | { type: 'swarm_project_cleared'; workspace_id: Id; swarm_id: Id; project_id: Id }
   | {
       type: 'swarm_message_posted';
       workspace_id: Id;

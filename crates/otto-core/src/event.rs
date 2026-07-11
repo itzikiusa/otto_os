@@ -96,6 +96,14 @@ pub enum Event {
         project_id: Id,
         task: serde_json::Value,
     },
+    /// A project's board was cleared (all tasks + project-scoped feed deleted,
+    /// in-flight runs stopped). Clients drop their local task/board state for
+    /// the project instead of waiting for per-row updates that won't come.
+    SwarmProjectCleared {
+        workspace_id: Id,
+        swarm_id: Id,
+        project_id: Id,
+    },
     /// A new message was posted to a swarm's shared board. `message` is the
     /// serialized SwarmMessage row.
     SwarmMessagePosted {

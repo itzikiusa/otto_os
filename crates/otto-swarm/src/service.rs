@@ -251,6 +251,9 @@ impl SwarmService {
     }
 
     pub async fn delete_project(&self, id: &Id) -> Result<()> {
+        // Stop in-flight runs first: agents must not keep working (and later
+        // report into) a project that no longer exists.
+        let _ = self.repo.stop_active_runs_for_project(id).await;
         self.repo.delete_project(id).await
     }
 

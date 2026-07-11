@@ -1068,17 +1068,68 @@ impl SwarmRepo {
     }
 
     pub async fn delete_project(&self, id: &Id) -> Result<()> {
+        // A removed project takes its board history with it: tasks AND the
+        // project-scoped feed. Runs stay — they are the spend/audit record.
         sqlx::query("DELETE FROM swarm_tasks WHERE project_id = ?")
             .bind(id)
             .execute(&self.pool)
             .await
             .map_err(dberr("delete project tasks"))?;
+        sqlx::query("DELETE FROM swarm_messages WHERE project_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete project messages"))?;
         sqlx::query("DELETE FROM swarm_projects WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await
             .map_err(dberr("delete project"))?;
         Ok(())
+    }
+
+    /// Clear a project's board: delete every task and every project-scoped feed
+    /// message, keeping the project itself (and the runs — spend history).
+    /// Returns (tasks_deleted, messages_deleted).
+    pub async fn clear_project_board(&self, project_id: &Id) -> Result<(u64, u64)> {
+        let tasks = sqlx::query("DELETE FROM swarm_tasks WHERE project_id = ?")
+            .bind(project_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("clear project tasks"))?
+            .rows_affected();
+        let msgs = sqlx::query("DELETE FROM swarm_messages WHERE project_id = ?")
+            .bind(project_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("clear project messages"))?
+            .rows_affected();
+        Ok((tasks, msgs))
+    }
+
+    /// Stop every queued/running/waiting run tied to `project_id` (board clear /
+    /// project delete): agents must not keep working — and later repopulate —
+    /// a board the operator just wiped. Returns the stopped run ids.
+    pub async fn stop_active_runs_for_project(&self, project_id: &Id) -> Result<Vec<Id>> {
+        let rows = sqlx::query(
+            "SELECT id FROM swarm_runs WHERE project_id = ? AND status IN ('queued','running','waiting')",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("select active project runs"))?;
+        let ids: Vec<Id> = rows.iter().map(|r| r.get::<Id, _>("id")).collect();
+        let now = fmt(Utc::now());
+        sqlx::query(
+            "UPDATE swarm_runs SET status = 'stopped', finished_at = ?
+             WHERE project_id = ? AND status IN ('queued','running','waiting')",
+        )
+        .bind(&now)
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("stop active project runs"))?;
+        Ok(ids)
     }
 
     // -- Tasks --------------------------------------------------------------

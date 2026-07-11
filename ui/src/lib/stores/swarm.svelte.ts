@@ -354,6 +354,20 @@ class SwarmStore {
     await this.refreshGraph();
   }
 
+  /** Clear a project's board server-side: stops the project's in-flight runs,
+   *  deletes ALL its tasks and the project-scoped feed in one call (so nothing
+   *  can trickle back), then refreshes the local surfaces. */
+  async clearProject(pid: string): Promise<void> {
+    await api.post(`/swarm/projects/${pid}/clear`, {});
+    this.tasksByProject[pid] = [];
+    this.tasksByProject = { ...this.tasksByProject };
+    await Promise.all([
+      this.loadBoard(),
+      this.detail ? this.loadRuns({ swarm_id: this.detail.id }) : Promise.resolve(),
+    ]);
+    await this.refreshGraph();
+  }
+
   /** Apply the same patch to many tasks (bulk move/assign), reloading once. */
   async bulkUpdateTasks(tasks: SwarmTask[], patch: Partial<SwarmTask>): Promise<void> {
     if (!tasks.length) return;
@@ -646,6 +660,16 @@ class SwarmStore {
         const next = idx >= 0 ? list.map((t) => (t.id === task.id ? task : t)) : [...list, task];
         this.tasksByProject[ev.project_id] = next;
         this.tasksByProject = { ...this.tasksByProject };
+        this.scheduleGraphRefresh();
+        return true;
+      }
+      case 'swarm_project_cleared': {
+        if (this.detail?.id !== ev.swarm_id) return true;
+        // The server wiped the project's tasks + feed — drop local state at
+        // once instead of waiting for per-row events that will never come.
+        this.tasksByProject[ev.project_id] = [];
+        this.tasksByProject = { ...this.tasksByProject };
+        void this.loadBoard();
         this.scheduleGraphRefresh();
         return true;
       }

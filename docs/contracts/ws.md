@@ -173,6 +173,7 @@ otto-state, so the row is embedded as `serde_json::Value`):
 {"type":"swarm_status","workspace_id":"…","swarm_id":"…","status":"active|paused|aborted"}
 {"type":"swarm_run_updated","workspace_id":"…","swarm_id":"…","run":{…SwarmRun…}}
 {"type":"swarm_task_updated","workspace_id":"…","swarm_id":"…","project_id":"…","task":{…SwarmTask…}}
+{"type":"swarm_project_cleared","workspace_id":"…","swarm_id":"…","project_id":"…"}
 {"type":"swarm_message_posted","workspace_id":"…","swarm_id":"…","message":{…SwarmMessage…}}
 {"type":"swarm_goal_updated","workspace_id":"…","swarm_id":"…","task_id":"…|null","goal":{…SwarmGoal…}}
 ```
@@ -180,6 +181,9 @@ otto-state, so the row is embedded as `serde_json::Value`):
 - `swarm_status` — a swarm's lifecycle status changed (`active|paused|aborted`).
 - `swarm_run_updated` — a swarm run was created or changed.
 - `swarm_task_updated` — a swarm task was created or changed.
+- `swarm_project_cleared` — a project's board was cleared (all tasks + project-scoped
+  feed deleted, in-flight runs stopped). Clients drop local task/board state for the
+  project instead of waiting for per-row updates that won't come.
 - `swarm_message_posted` — a new message was posted to a swarm's shared board. New
   Coordinator-lifecycle message kinds — `worktree`, `shared`, `merge`, `verify`,
   `escalation` — arrive on this same event.

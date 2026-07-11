@@ -250,6 +250,25 @@
     }
   }
 
+  async function deleteProject() {
+    if (!projEditId) return;
+    const p = detail?.projects.find((x) => x.id === projEditId);
+    if (
+      await confirmer.ask(
+        `Delete project "${p?.name ?? projName}"? All its tasks and feed are removed and in-flight runs are stopped. This cannot be undone.`,
+        { title: 'Delete project', confirmLabel: 'Delete', danger: true },
+      )
+    ) {
+      try {
+        await swarm.deleteProject(projEditId);
+        projModal = false;
+        toasts.success('Project deleted');
+      } catch (e) {
+        toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      }
+    }
+  }
+
   async function deleteSwarm() {
     if (!detail) return;
     if (await confirmer.ask(`Delete swarm "${detail.name}" and all its agents/projects?`, { title: 'Delete swarm?' })) {
@@ -524,6 +543,11 @@
     <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
     <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}
+      {#if projEditId}
+        <button class="btn danger" style="margin-right:auto" onclick={deleteProject} title="Delete this project, its tasks and feed">
+          Delete project…
+        </button>
+      {/if}
       <button class="btn" class:ghost={true} onclick={() => (projModal = false)}>Cancel</button>
       <button class="btn" class:primary={true} onclick={saveProject} disabled={!projName.trim() || projSaving}>
         {projSaving ? 'Saving…' : projEditId ? 'Save' : 'Create'}

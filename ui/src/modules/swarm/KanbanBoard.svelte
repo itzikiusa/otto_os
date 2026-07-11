@@ -120,8 +120,13 @@
   }
   async function clearBoard() {
     if (!pid || !tasks.length) return;
-    if (await confirmer.ask(`Delete ALL ${tasks.length} tasks on this board? This cannot be undone.`, { title: 'Clear board' })) {
-      await swarm.bulkDeleteTasks(tasks);
+    if (
+      await confirmer.ask(
+        `Delete ALL ${tasks.length} tasks on this board? In-flight agent runs are stopped and the project's feed is cleared too. This cannot be undone.`,
+        { title: 'Clear board' },
+      )
+    ) {
+      await swarm.clearProject(pid);
       clearSelection();
     }
   }

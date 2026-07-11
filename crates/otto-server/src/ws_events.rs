@@ -226,6 +226,7 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // Agent-swarm events are workspace-scoped, like the improvement events.
         | Event::SwarmRunUpdated { workspace_id, .. }
         | Event::SwarmTaskUpdated { workspace_id, .. }
+        | Event::SwarmProjectCleared { workspace_id, .. }
         | Event::SwarmMessagePosted { workspace_id, .. }
         | Event::SwarmStatus { workspace_id, .. }
         | Event::SwarmGoalUpdated { workspace_id, .. }

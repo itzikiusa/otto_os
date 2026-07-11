@@ -370,6 +370,12 @@ async fn route_result(
     result: Option<SwarmTurnResult>,
 ) {
     let repo = &ctx.swarm_repo;
+    // The board may have been cleared (or the task deleted) while this turn ran.
+    // A finished turn for a deleted task must do NOTHING — no retries, no
+    // handoffs, no feed posts — or a cleared board immediately repopulates.
+    if repo.get_task(&task.id).await.is_err() {
+        return;
+    }
     let Some(res) = result else {
         // Turn failed/stopped. Retry on the next tick up to the attempt ceiling
         // (D8); once exhausted, block the task so it isn't retried forever.
@@ -881,6 +887,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/swarm/runs/{rid}/stop", post(stop_run))
         .route("/workspaces/{id}/swarm/recruit", post(recruit))
         .route("/workspaces/{id}/swarm/projects/{pid}/plan", post(plan))
+        .route("/swarm/projects/{pid}/clear", post(clear_project_h))
         .route("/workspaces/{id}/swarm/swarms/{sid}/agent-stop", post(agent_stop))
         // Goals (requirement 3)
         .route("/swarm/tasks/{tid}/goals", get(list_task_goals).post(create_task_goal))
@@ -1409,6 +1416,42 @@ pub(crate) fn emit_status(ctx: &ServerCtx, ws: &Id, sid: &str, status: &str) {
         swarm_id: sid.to_string(),
         status: status.to_string(),
     });
+}
+
+/// Clear a project's board: stop + cancel every in-flight run for the project
+/// (so finishing turns can't repopulate it), delete all its tasks and the
+/// project-scoped feed, and broadcast one `SwarmProjectCleared` so every open
+/// client drops its local state. The project itself (and the run history —
+/// spend accounting) stays.
+async fn clear_project_h(
+    State(ctx): State<ServerCtx>,
+    Extension(user): Extension<AuthUser>,
+    Path(pid): Path<Id>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let project = ctx.swarm_repo.get_project(&pid).await.map_err(ApiError)?;
+    check(&ctx, &user, &project.workspace_id, WorkspaceRole::Editor).await?;
+    let stopped = ctx
+        .swarm_repo
+        .stop_active_runs_for_project(&pid)
+        .await
+        .map_err(ApiError)?;
+    for rid in &stopped {
+        swarm_run::signal_cancel(&ctx.swarm_run_cancels, rid);
+        swarm_run::emit_run(&ctx, rid).await;
+    }
+    let (tasks_deleted, messages_deleted) =
+        ctx.swarm_repo.clear_project_board(&pid).await.map_err(ApiError)?;
+    let _ = ctx.events.send(Event::SwarmProjectCleared {
+        workspace_id: project.workspace_id.clone(),
+        swarm_id: project.swarm_id.clone(),
+        project_id: pid.clone(),
+    });
+    Ok(Json(json!({
+        "ok": true,
+        "runs_stopped": stopped.len(),
+        "tasks_deleted": tasks_deleted,
+        "messages_deleted": messages_deleted,
+    })))
 }
 
 async fn run_task(
