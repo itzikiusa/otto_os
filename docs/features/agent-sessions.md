@@ -294,11 +294,19 @@ A session is **resumable** iff it is an `agent` kind, has a
 `provider_session_id` and are not resumed; reopening them after suspend/restart
 starts a fresh process (no lost-work risk is taken — see suspend below).
 
-> **Transcript pruning.** For non-live `claude` sessions, the daemon checks
-> whether the on-disk transcript (`~/.claude/projects/<encoded-cwd>/<sid>.jsonl`,
-> with a directory-scan fallback) still exists; a row is pruned only when the
-> transcript is *positively confirmed gone*. Unknowable cases (other providers,
-> no `$HOME`) are always kept (`lifecycle.rs`).
+> **Transcript pruning (background sessions only).** For non-live `claude`
+> sessions, the daemon checks whether the on-disk transcript
+> (`~/.claude/projects/<encoded-cwd>/<sid>.jsonl`, with a directory-scan
+> fallback) still exists; a row is pruned only when the transcript is
+> *positively confirmed gone* — and only for **background/automation**
+> sessions (channel tickets, review agents, workflow steps, …; the
+> `BACKGROUND_SESSION_SOURCES` list in `otto-core`). **Foreground sessions —
+> everything listed under the sidebar's Agents group — are never auto-pruned:
+> they stay listed indefinitely (30+ days idle is fine) until you archive or
+> delete them.** If the provider CLI has meanwhile cleaned its transcript
+> (claude's `cleanupPeriodDays`), reopening such a session cannot restore the
+> conversation — the row and its trail survive either way. Unknowable cases
+> (other providers, no `$HOME`) are always kept (`lifecycle.rs`).
 
 ### Idle-suspend (save memory)
 
@@ -344,6 +352,11 @@ the updated `Session`.
   long idleness.
 - **Delete** — `DELETE /api/v1/sessions/{id}` kills the PTY and removes the row.
   The UI marks this action as danger.
+- **Retention** — sessions in the **Agents** group are durable: no background
+  sweep archives or deletes them, ever. Archive and delete (above) are the
+  only ways they leave the list. Channel-spawned (ticket/chat) sessions keep
+  their own lifecycle: auto-archive after 1 h idle, purge 30 days after
+  archival.
 - **Quit hook** — `POST /api/v1/app/kill-sessions` terminates every live PTY
   (the desktop app's quit hook).
 
