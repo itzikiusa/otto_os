@@ -126,6 +126,12 @@ reqwest_cookie_store = "0.8"
 rdkafka = { version = "0.39", default-features = false, features = ["cmake-build", "ssl-vendored", "libz", "zstd", "tokio"] }
 apache-avro = "0.21"
 
+# Build speed over the last few % of runtime/binary size: this app is built +
+# deployed locally many times a day, and thin-LTO's cross-module phase capped
+# the final ottod compile at ~2-3 cores (observed 5+ min alone). No LTO keeps
+# all 16 codegen units compiling in parallel. NOTE: changing this profile
+# invalidates the whole release cache — the FIRST deploy after this commit
+# rebuilds everything (slower once), subsequent ones are faster.
 [profile.release]
-lto = "thin"
+lto = false
 strip = true
