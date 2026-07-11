@@ -197,8 +197,21 @@ async fn tick(ctx: &ServerCtx, swarm_id: &Id) -> otto_core::Result<()> {
         // non-terminal status, so the work still happens this tick.
         let _ = repo.bump_task_attempt(&task.id).await;
         // Claim: move the task to in_progress so it isn't re-selected next tick.
+        // Persist the picked agent on a previously-unassigned task — the board
+        // must always show WHO owns the work, not an unassigned card mid-run.
+        let claim_assignee = task
+            .assignee_agent_id
+            .is_none()
+            .then(|| Some(agent.id.clone()));
         let _ = repo
-            .update_task(&task.id, TaskPatch { status: Some("in_progress".into()), ..Default::default() })
+            .update_task(
+                &task.id,
+                TaskPatch {
+                    status: Some("in_progress".into()),
+                    assignee_agent_id: claim_assignee,
+                    ..Default::default()
+                },
+            )
             .await;
         emit_task(ctx, &task.id).await;
 
@@ -314,6 +327,31 @@ async fn pause_for_budget(ctx: &ServerCtx, swarm: &Swarm, reason: &str) {
     });
 }
 
+/// Keyword-overlap score of an agent's title+specialization against task text.
+fn agent_fit_score(a: &SwarmAgent, hay: &str) -> i32 {
+    let mut s = 0;
+    for tok in format!("{} {}", a.title, a.specialization).to_lowercase().split_whitespace() {
+        if tok.len() >= 4 && hay.contains(tok) {
+            s += 1;
+        }
+    }
+    s
+}
+
+/// Best-fit ACTIVE agent for free task text, else any active agent. Creation-
+/// time fallback so a task whose `assignee_title` didn't resolve still lands
+/// ASSIGNED — unassigned board items are a bug, not a state.
+async fn best_fit_agent_id(ctx: &ServerCtx, swarm_id: &str, hay: &str) -> Option<Id> {
+    let agents = ctx.swarm_repo.list_agents(&swarm_id.to_string()).await.ok()?;
+    let active: Vec<SwarmAgent> = agents.into_iter().filter(|a| a.status == "active").collect();
+    let hay = hay.to_lowercase();
+    active
+        .iter()
+        .max_by_key(|a| agent_fit_score(a, &hay))
+        .or_else(|| active.first())
+        .map(|a| a.id.clone())
+}
+
 /// Pick the agent to run a task: the explicit assignee, else best-fit by title/
 /// specialization keyword overlap, else any active agent.
 async fn pick_agent(ctx: &ServerCtx, swarm: &Swarm, task: &SwarmTask) -> Option<SwarmAgent> {
@@ -331,16 +369,11 @@ async fn pick_agent(ctx: &ServerCtx, swarm: &Swarm, task: &SwarmTask) -> Option<
         return None;
     }
     let hay = format!("{} {}", task.title, task.description).to_lowercase();
-    let score = |a: &SwarmAgent| -> i32 {
-        let mut s = 0;
-        for tok in format!("{} {}", a.title, a.specialization).to_lowercase().split_whitespace() {
-            if tok.len() >= 4 && hay.contains(tok) {
-                s += 1;
-            }
-        }
-        s
-    };
-    active.iter().cloned().max_by_key(|a| score(a)).or_else(|| active.into_iter().next())
+    active
+        .iter()
+        .cloned()
+        .max_by_key(|a| agent_fit_score(a, &hay))
+        .or_else(|| active.into_iter().next())
 }
 
 async fn has_reports(ctx: &ServerCtx, swarm_id: &str, agent_id: &str) -> bool {
@@ -615,6 +648,11 @@ async fn create_agent_task(
             )).await;
         return;
     }
+    // Never create an unassigned card: fall back to the best-fitting agent.
+    let assignee = match assignee {
+        Some(a) => Some(a),
+        None => best_fit_agent_id(ctx, &origin.swarm_id, &format!("{title} {description}")).await,
+    };
     if let Ok(task) = repo
         .create_task(NewTask {
             project_id: origin.project_id.clone(),
@@ -717,10 +755,15 @@ async fn create_subtasks(ctx: &ServerCtx, parent: &SwarmTask, subs: &[swarm_run:
                 )).await;
             break;
         }
-        let assignee = match &st.assignee_role {
+        let mut assignee = match &st.assignee_role {
             Some(role) if !role.is_empty() => resolve_agent_by_title(ctx, &parent.swarm_id, role).await,
             _ => None,
         };
+        if assignee.is_none() {
+            // A role that didn't resolve (or none given) must not land unassigned.
+            assignee =
+                best_fit_agent_id(ctx, &parent.swarm_id, &format!("{} {}", st.title, st.description)).await;
+        }
         let priority = st.priority.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| "medium".into());
         let labels = if hops > 0 { json!([format!("hops:{hops}")]) } else { json!([]) };
         if let Ok(task) = repo.create_task(NewTask {
@@ -1482,7 +1525,15 @@ async fn run_task(
         .map_err(ApiError)?;
     let _ = ctx
         .swarm_repo
-        .update_task(&tid, TaskPatch { status: Some("in_progress".into()), ..Default::default() })
+        .update_task(
+            &tid,
+            TaskPatch {
+                status: Some("in_progress".into()),
+                // Persist the pick on an unassigned task (see coordinator claim).
+                assignee_agent_id: task.assignee_agent_id.is_none().then(|| Some(agent.id.clone())),
+                ..Default::default()
+            },
+        )
         .await;
     emit_task(&ctx, &tid).await;
     let ctx2 = ctx.clone();
@@ -1721,8 +1772,13 @@ async fn plan(
         }
         let description = t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let priority = t.get("priority").and_then(|v| v.as_str()).unwrap_or("medium").to_string();
-        let assignee = t.get("assignee_title").and_then(|v| v.as_str())
+        let mut assignee = t.get("assignee_title").and_then(|v| v.as_str())
             .and_then(|title| agents.iter().find(|a| a.title.eq_ignore_ascii_case(title.trim())).map(|a| a.id.clone()));
+        if assignee.is_none() {
+            // Planner named a role that doesn't exist (or none) — best-fit instead
+            // of leaving the card unassigned.
+            assignee = best_fit_agent_id(&ctx, &project.swarm_id, &format!("{title} {description}")).await;
+        }
         if let Ok(task) = ctx.swarm_repo.create_task(NewTask {
             project_id: project.id.clone(),
             swarm_id: project.swarm_id.clone(),
