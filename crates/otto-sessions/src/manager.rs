@@ -1771,8 +1771,16 @@ impl SessionManager {
     /// exists. If it is positively gone (un-resumable) → delete the row. If it
     /// still exists, or existence cannot be determined → keep the session.
     ///
-    /// We only ever delete what we can positively confirm is gone. `home` is
-    /// the user's home dir ($HOME); when unset we keep everything.
+    /// **Foreground (Agents-tab) sessions are exempt**: the user's own
+    /// sessions are durable — they stay listed until explicitly archived or
+    /// deleted, even after the provider CLI cleans its transcript (claude's
+    /// `cleanupPeriodDays`). Only background/automation sessions (see
+    /// [`otto_core::domain::BACKGROUND_SESSION_SOURCES`]) are pruned; they
+    /// arrive at volume (tickets, review agents, workflow steps) and going
+    /// stale is their normal end state.
+    ///
+    /// We only ever delete what we can positively confirm is gone. `$HOME`
+    /// locates the transcripts; when unset we keep everything.
     ///
     /// Resilient: per-session failures are logged and skipped. Returns the
     /// number of rows pruned.
@@ -1784,6 +1792,11 @@ impl SessionManager {
                 return 0;
             }
         };
+        self.prune_dead_sessions_with_home(&home).await
+    }
+
+    /// [`Self::prune_dead_sessions`] with an explicit home dir (test seam).
+    pub async fn prune_dead_sessions_with_home(&self, home: &std::path::Path) -> usize {
         let candidates = match self.repo.list_prunable_agent_sessions().await {
             Ok(v) => v,
             Err(e) => {
@@ -1793,6 +1806,11 @@ impl SessionManager {
         };
         let mut pruned = 0;
         for s in candidates {
+            // Foreground (Agents-tab) sessions are durable — never auto-delete
+            // them, whatever the transcript says (see the method doc).
+            if s.is_foreground_agent() {
+                continue;
+            }
             // Never prune a session that became live again between the query
             // and now (e.g. someone reopened it).
             if self.is_live(&s.id) {
@@ -1801,7 +1819,7 @@ impl SessionManager {
             let Some(psid) = s.provider_session_id.as_deref() else {
                 continue;
             };
-            let verdict = crate::lifecycle::check_resumability(&home, &s.provider, &s.cwd, psid);
+            let verdict = crate::lifecycle::check_resumability(home, &s.provider, &s.cwd, psid);
             match verdict {
                 crate::lifecycle::Resumability::Gone => {
                     match self.remove(&s.id).await {
@@ -2718,5 +2736,58 @@ mod tests {
             sandbox_decision(&serde_json::json!({"enabled": true, "network": "none"}), SessionKind::Agent, "shell"),
             Some(NetworkPolicy::None)
         );
+    }
+
+    /// A FOREGROUND (Agents-tab) session survives the pruner even when its
+    /// provider transcript is positively gone — only archive/delete may remove
+    /// it. Background sessions keep the existence-check prune.
+    #[tokio::test]
+    async fn prune_keeps_foreground_sessions_and_prunes_background_ones() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let home = tempfile::tempdir().unwrap();
+
+        let mk = |title: &str, psid: &str, meta: serde_json::Value| NewSession {
+            workspace_id: ws.id.clone(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: title.into(),
+            cwd: "/tmp/proj".into(),
+            provider_session_id: Some(psid.into()),
+            connection_id: None,
+            created_by: user.clone(),
+            meta,
+        };
+
+        // Foreground (no meta.source), transcript GONE → must be KEPT.
+        let fg = repo.create(mk("Messi", "psid-fg", serde_json::json!({}))).await.unwrap();
+        repo.update_status(&fg.id, SessionStatus::Reconnectable).await.unwrap();
+        // Foreground with an unknown source, transcript GONE → also KEPT.
+        let fg2 = repo
+            .create(mk("Ronaldo", "psid-fg2", serde_json::json!({"source": "someday-new"})))
+            .await
+            .unwrap();
+        repo.update_status(&fg2.id, SessionStatus::Exited).await.unwrap();
+        // Background (channel ticket), transcript GONE → pruned as before.
+        let bg = repo
+            .create(mk("ticket", "psid-bg", serde_json::json!({"source": "channel"})))
+            .await
+            .unwrap();
+        repo.update_status(&bg.id, SessionStatus::Exited).await.unwrap();
+        // Background whose transcript still EXISTS → kept (unchanged behavior).
+        let bg_live = repo
+            .create(mk("review", "psid-live", serde_json::json!({"source": "review"})))
+            .await
+            .unwrap();
+        repo.update_status(&bg_live.id, SessionStatus::Exited).await.unwrap();
+        let proj = home.path().join(".claude").join("projects").join("-tmp-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("psid-live.jsonl"), "{}\n").unwrap();
+
+        let pruned = mgr.prune_dead_sessions_with_home(home.path()).await;
+        assert_eq!(pruned, 1, "exactly the gone-transcript background session");
+        assert!(repo.get(&fg.id).await.is_ok(), "foreground survives a gone transcript");
+        assert!(repo.get(&fg2.id).await.is_ok(), "unknown-source foreground survives too");
+        assert!(repo.get(&bg.id).await.is_err(), "channel session with gone transcript is pruned");
+        assert!(repo.get(&bg_live.id).await.is_ok(), "existing transcript keeps a background session");
     }
 }
