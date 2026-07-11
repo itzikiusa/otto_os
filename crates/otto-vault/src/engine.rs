@@ -426,8 +426,8 @@ impl VaultEngine {
                 reserved: false,
             })
             .collect();
-        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        out.sort_by_key(|e| e.name.to_lowercase());
+        entries.sort_by_key(|e| e.name.to_lowercase());
         out.extend(entries);
         Ok(DirListing { path: rel, entries: out })
     }
@@ -545,7 +545,7 @@ impl VaultEngine {
         let from_abs = Self::abs_guarded(&root, &from_rel)?;
         let to_abs = Self::abs_guarded(&root, &to_rel)?;
         if !from_abs.exists() {
-            return Err(Error::NotFound(format!("{from_rel}")));
+            return Err(Error::NotFound(from_rel));
         }
         let is_dir = from_abs.is_dir();
         let case_only = from_rel.to_lowercase() == to_rel.to_lowercase();
@@ -1092,7 +1092,7 @@ fn relative_path(from_dir: &str, to: &str) -> String {
         .take_while(|(a, b)| a == b)
         .count();
     let ups = from_parts.len() - common;
-    let mut out: Vec<String> = std::iter::repeat("..".to_string()).take(ups).collect();
+    let mut out: Vec<String> = std::iter::repeat_n("..".to_string(), ups).collect();
     out.extend(to_parts[common..].iter().map(|s| s.to_string()));
     out.join("/")
 }
