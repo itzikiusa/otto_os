@@ -418,32 +418,80 @@ async fn route_result(
         return;
     }
 
-    // Subtasks from a normal task (rare but allowed).
+    // The MANAGER owns the plan. Agent-originated divergence (subtasks from an
+    // IC, handoffs) must not grow the board directly — an unmanaged A↔B handoff
+    // loop once inflated a 28-task plan to 150 mostly-blocked tasks. ICs with a
+    // manager get their proposals routed to that manager as ONE triage task
+    // (the manager's turn runs as `planning` and delegates properly, or drops
+    // it); only manager-less agents keep direct creation. Every chain carries a
+    // `hops:N` label — past MAX_HANDOFF_HOPS it escalates to a human instead of
+    // creating yet another task.
+    let run_agent = repo.get_agent(&run.agent_id).await.ok();
+    let manager_id = run_agent.as_ref().and_then(|a| a.reports_to.clone());
+    let agent_name = run_agent.as_ref().map(|a| a.name.clone()).unwrap_or_else(|| "an agent".into());
+    let hops = task_hops(task) + 1;
+
+    // Subtasks from a normal task: managed ICs propose to their manager.
     if !res.subtasks.is_empty() {
-        create_subtasks(ctx, task, &res.subtasks).await;
+        match &manager_id {
+            Some(mid) if hops <= MAX_HANDOFF_HOPS => {
+                let listing: String = res
+                    .subtasks
+                    .iter()
+                    .map(|s| format!("- {}: {}\n", s.title, clip(&s.description, 160)))
+                    .collect();
+                create_agent_task(
+                    ctx, task, run, hops,
+                    &format!("Triage proposal from {}: {}", agent_name, clip(&task.title, 50)),
+                    &format!(
+                        "While working “{}”, an IC proposed new subtasks. As the manager, \
+                         delegate the ones that serve the plan and DROP the rest.\n\n{listing}",
+                        task.title
+                    ),
+                    Some(mid.clone()),
+                    "proposal",
+                ).await;
+            }
+            Some(_) => escalate_chain(ctx, task, "subtask proposal").await,
+            None => create_subtasks(ctx, task, &res.subtasks).await,
+        }
     }
 
-    // Handoffs → a follow-up task for the named role, dependent on this one.
+    // Handoffs → one follow-up each, manager-gated and chain-capped.
     for h in &res.handoffs {
         if h.to_role.trim().is_empty() {
             continue;
         }
-        let assignee = resolve_agent_by_title(ctx, &task.swarm_id, &h.to_role).await;
-        let _ = repo.create_task(NewTask {
-            project_id: task.project_id.clone(),
-            swarm_id: task.swarm_id.clone(),
-            workspace_id: task.workspace_id.clone(),
-            title: format!("Handoff: {}", clip(&h.brief, 60)),
-            description: h.brief.clone(),
-            assignee_agent_id: assignee,
-            status: "todo".into(),
-            priority: "medium".into(),
-            parent_task_id: None,
-            depends_on: json!([]),
-            labels: json!(["handoff"]),
-            order_idx: 0,
-            created_by: run.agent_id.clone(),
-        }).await;
+        if hops > MAX_HANDOFF_HOPS {
+            escalate_chain(ctx, task, &format!("handoff to {}", h.to_role)).await;
+            continue;
+        }
+        match &manager_id {
+            Some(mid) => {
+                create_agent_task(
+                    ctx, task, run, hops,
+                    &format!("Triage handoff → {}: {}", h.to_role, clip(&h.brief, 50)),
+                    &format!(
+                        "Handoff raised from “{}” aimed at “{}”. As the manager, decide: \
+                         delegate it (as a subtask, to the right report) if it serves the \
+                         plan, or close this task with status done to drop it.\n\n{}",
+                        task.title, h.to_role, h.brief
+                    ),
+                    Some(mid.clone()),
+                    "handoff",
+                ).await;
+            }
+            None => {
+                let assignee = resolve_agent_by_title(ctx, &task.swarm_id, &h.to_role).await;
+                create_agent_task(
+                    ctx, task, run, hops,
+                    &format!("Handoff: {}", clip(&h.brief, 60)),
+                    &h.brief.clone(),
+                    assignee,
+                    "handoff",
+                ).await;
+            }
+        }
     }
 
     // Apply the reported status to the task.
@@ -506,6 +554,98 @@ async fn route_result(
     }
 }
 
+/// Max agent-originated chain length (handoff → triage → handoff …). Past this
+/// the swarm escalates to a human instead of creating another task — the cap
+/// that kills A↔B ping-pong.
+const MAX_HANDOFF_HOPS: i64 = 3;
+/// Backstop: agent-originated creation (handoffs/proposals) may not grow a
+/// project past this many open tasks. The plan itself and the human UI are
+/// exempt — this only bounds runaway self-inflation.
+const MAX_OPEN_TASKS_PER_PROJECT: usize = 60;
+
+/// Chain depth carried on a task's labels as `hops:N` (0 for plan/human tasks).
+fn task_hops(task: &SwarmTask) -> i64 {
+    task.labels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l.as_str())
+        .find_map(|l| l.strip_prefix("hops:").and_then(|n| n.parse().ok()))
+        .unwrap_or(0)
+}
+
+/// Create one agent-originated task (handoff / triage proposal): dedups against
+/// open tasks with the same title, enforces the per-project open-task backstop,
+/// stamps the `hops:N` chain label, and emits the board update.
+#[allow(clippy::too_many_arguments)]
+async fn create_agent_task(
+    ctx: &ServerCtx,
+    origin: &SwarmTask,
+    run: &otto_state::SwarmRun,
+    hops: i64,
+    title: &str,
+    description: &str,
+    assignee: Option<Id>,
+    label: &str,
+) {
+    let repo = &ctx.swarm_repo;
+    let open: Vec<SwarmTask> = repo
+        .list_tasks(&origin.project_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !matches!(t.status.as_str(), "done" | "cancelled"))
+        .collect();
+    // Dedup: an identical open item means the loop is repeating itself.
+    let want = title.trim().to_lowercase();
+    if open.iter().any(|t| t.title.trim().to_lowercase() == want) {
+        return;
+    }
+    if open.len() >= MAX_OPEN_TASKS_PER_PROJECT {
+        system_post(ctx, &origin.swarm_id, Some(&origin.project_id), Some(&origin.id), "escalation",
+            &format!(
+                "Board full ({} open tasks) — dropping agent-created “{}”. Close or prune tasks to resume.",
+                open.len(), clip(title, 60)
+            )).await;
+        return;
+    }
+    if let Ok(task) = repo
+        .create_task(NewTask {
+            project_id: origin.project_id.clone(),
+            swarm_id: origin.swarm_id.clone(),
+            workspace_id: origin.workspace_id.clone(),
+            title: title.to_string(),
+            description: description.to_string(),
+            assignee_agent_id: assignee,
+            status: "todo".into(),
+            priority: "medium".into(),
+            parent_task_id: None,
+            depends_on: json!([]),
+            labels: json!([label, format!("hops:{hops}")]),
+            order_idx: 0,
+            created_by: run.agent_id.clone(),
+        })
+        .await
+    {
+        emit_task(ctx, &task.id).await;
+    }
+}
+
+/// A chain hit MAX_HANDOFF_HOPS: stop creating tasks, tell the humans.
+async fn escalate_chain(ctx: &ServerCtx, task: &SwarmTask, what: &str) {
+    let body = format!(
+        "Handoff chain from “{}” exceeded {MAX_HANDOFF_HOPS} hops ({what}) — not creating \
+         another task. A human (or the manager) should decide how to proceed.",
+        task.title
+    );
+    system_post(ctx, &task.swarm_id, Some(&task.project_id), Some(&task.id), "escalation", &body).await;
+    let _ = ctx.events.send(Event::Notice {
+        level: "warn".into(),
+        title: "Swarm handoff chain capped".into(),
+        body: clip(&body, 160),
+    });
+}
+
 /// Has a task exhausted its swarm's per-task attempt ceiling? Re-reads the task
 /// for the up-to-date attempt counter (the Coordinator bumps it when it queues
 /// each turn) and compares against the swarm's `max_attempts` (default 3, min 1).
@@ -540,16 +680,44 @@ async fn block_for_attempts(ctx: &ServerCtx, task: &SwarmTask) {
 
 async fn create_subtasks(ctx: &ServerCtx, parent: &SwarmTask, subs: &[swarm_run::TurnSubtask]) {
     let repo = &ctx.swarm_repo;
+    // Open-title set for dedup + the backstop count: delegation must not
+    // re-create board items that already exist (a repeated planning turn used
+    // to double every subtask), nor inflate the project past the cap.
+    let open: Vec<SwarmTask> = repo
+        .list_tasks(&parent.project_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| !matches!(t.status.as_str(), "done" | "cancelled"))
+        .collect();
+    let mut titles: std::collections::HashSet<String> =
+        open.iter().map(|t| t.title.trim().to_lowercase()).collect();
+    let mut open_count = open.len();
+    // Subtasks inherit the parent's chain depth so a triage-spawned subtask
+    // that hands off again still walks toward the MAX_HANDOFF_HOPS cap.
+    let hops = task_hops(parent);
     for (i, st) in subs.iter().enumerate() {
         if st.title.trim().is_empty() {
             continue;
+        }
+        if !titles.insert(st.title.trim().to_lowercase()) {
+            continue; // already on the board
+        }
+        if open_count >= MAX_OPEN_TASKS_PER_PROJECT {
+            system_post(ctx, &parent.swarm_id, Some(&parent.project_id), Some(&parent.id), "escalation",
+                &format!(
+                    "Board full ({open_count} open tasks) — dropping remaining subtasks of “{}”.",
+                    parent.title
+                )).await;
+            break;
         }
         let assignee = match &st.assignee_role {
             Some(role) if !role.is_empty() => resolve_agent_by_title(ctx, &parent.swarm_id, role).await,
             _ => None,
         };
         let priority = st.priority.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| "medium".into());
-        let _ = repo.create_task(NewTask {
+        let labels = if hops > 0 { json!([format!("hops:{hops}")]) } else { json!([]) };
+        if let Ok(task) = repo.create_task(NewTask {
             project_id: parent.project_id.clone(),
             swarm_id: parent.swarm_id.clone(),
             workspace_id: parent.workspace_id.clone(),
@@ -560,10 +728,13 @@ async fn create_subtasks(ctx: &ServerCtx, parent: &SwarmTask, subs: &[swarm_run:
             priority,
             parent_task_id: Some(parent.id.clone()),
             depends_on: json!([]),
-            labels: json!([]),
+            labels,
             order_idx: i as i64,
             created_by: parent.created_by.clone(),
-        }).await;
+        }).await {
+            open_count += 1;
+            emit_task(ctx, &task.id).await;
+        }
     }
 }
 
