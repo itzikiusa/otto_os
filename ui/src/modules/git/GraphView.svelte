@@ -1115,7 +1115,15 @@
     label: string; // text shown on the chip
     current: boolean; // the checked-out branch (most prominent)
     onRemote?: boolean; // local/head chip whose same-named origin twin lives on this commit
+    worktree?: boolean; // branch checked out in a LINKED worktree (not this checkout)
   }
+
+  // Branches checked out in LINKED worktrees (main checkout excluded — that one
+  // already carries the check pip). Chips + ref rows mark them so a branch that
+  // "lives elsewhere" is self-explaining at a glance.
+  const worktreeBranches = $derived(
+    new Set(worktrees.filter((w) => !w.is_main && w.branch).map((w) => w.branch as string)),
+  );
 
   // Set of remote-branch names (e.g. "origin/main") from the refs response, used
   // to classify a decoration token that isn't obviously a tag/HEAD.
@@ -1141,7 +1149,10 @@
     if (isTagRef(ref)) return { kind: 'tag', label: refLabel(ref), current: false };
     // "HEAD -> branch": the checked-out branch — the most prominent chip.
     const arrow = ref.match(/^HEAD\s*->\s*(.+)$/);
-    if (arrow) return { kind: 'head', label: arrow[1].trim(), current: true };
+    if (arrow) {
+      const label = arrow[1].trim();
+      return { kind: 'head', label, current: true, worktree: worktreeBranches.has(label) };
+    }
     // A bare "HEAD" decoration = detached HEAD (no branch).
     if (ref === 'HEAD') return { kind: 'detached', label: 'HEAD', current: false };
     // Remote-tracking ref (origin/…): match the refs response, else fall back to
@@ -1151,7 +1162,12 @@
       return { kind: 'remote', label: ref, current: false };
     }
     // Otherwise a local branch; it's "current" if it's the checked-out branch.
-    return { kind: 'local', label: ref, current: ref === currentBranch };
+    return {
+      kind: 'local',
+      label: ref,
+      current: ref === currentBranch,
+      worktree: worktreeBranches.has(ref),
+    };
   }
 
   // Chips for one commit row, ordered head → local → remote → tag → stash for a
@@ -1383,9 +1399,12 @@
       ? `Stash · ${label}`
       : chip.current
         ? `Checked out · ${chip.label}`
-        : chip.label}
+        : chip.worktree
+          ? `Checked out in a worktree · ${chip.label}`
+          : chip.label}
   >
     {#if chip.current}<Icon name="check" size={8} />{/if}
+    {#if chip.worktree}<Icon name="worktree" size={8} />{/if}
     {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
     {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
     {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
@@ -1445,6 +1464,8 @@
         >
           {#if b.is_current}
             <span class="cur-pip" title="Checked out"><Icon name="check" size={9} /></span>
+          {:else if worktreeBranches.has(b.name)}
+            <span class="cur-pip" title="Checked out in a worktree"><Icon name="worktree" size={9} /></span>
           {:else}
             <Icon name="dot" size={10} />
           {/if}
