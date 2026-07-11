@@ -374,11 +374,12 @@ Preview** shows it; **Open in agent** (`POST
 …/inject-session`, `InjectSessionReq { provider?, model?, cwd? }`) spawns a new
 agent session preloaded with the bundle.
 
-### 4.11 Recall from the Vault / memory layer
+### 4.11 Recall from the memory layer
 
 Product can push a story's structured artifacts into Otto's domain-agnostic
-memory layer (`otto-memory`, the engine behind [`./vault.md`](./vault.md)) so they
-become semantically recallable instead of re-fetched raw each turn:
+memory layer (`otto-memory` — keyword/FTS5 recall; distinct from the
+file-backed docs [Vault](./vault.md)) so they become recallable instead of
+re-fetched raw each turn:
 
 - **Ingest (wired):** `POST /workspaces/{ws}/product/stories/{sid}/memory/ingest`
   runs `ProductMemory::ingest_story`, which uses the deterministic extractors in
@@ -386,7 +387,7 @@ become semantically recallable instead of re-fetched raw each turn:
   `learning`), the **latest analysis summary** (one classified memory per
   bullet — decision / constraint / requirement / fact), and the **newest version**
   (→ `summary`) into atomic memories saved through `MemoryService::save`
-  (dedup + embeddings happen inside `save`).
+  (exact-duplicate dedup happens inside `save`).
 - **Recall (implemented, not yet auto-used):** `ProductMemory::recall_brief`
   exists (a compact, token-budgeted brief grouped by kind) but the orchestrator
   does **not** yet call it — today the AI runs build context via
@@ -506,7 +507,7 @@ and resolve the workspace from the owning row.
   `jira`; Confluence rides the same Atlassian account.
 - Choose a comment **format** when posting questions — markdown only (the `format`
   field is a no-op).
-- Rely on **automatic Vault recall** in AI runs — ingestion is wired and
+- Rely on **automatic memory recall** in AI runs — ingestion is wired and
   `recall_brief` exists, but the orchestrator still builds context from fresh DB
   reads + a live-Jira cache, not from memory recall.
 - Silo stories or learnings **per-workspace** — both are a single global library
@@ -564,8 +565,9 @@ and resolve the workspace from the owning row.
   Confluence accounts (the prerequisite for Product).
 - [`./agent-swarm.md`](./agent-swarm.md) — the Agent Swarm that **Send to Swarm**
   hands a plan off to.
-- [`./vault.md`](./vault.md) — the `otto-memory` knowledge store Product ingests
-  into (and will recall from).
+- `docs/contracts/api.md` (§ Memory layer) — the `otto-memory` keyword store
+  Product ingests into (and will recall from). The [Vault](./vault.md) is now
+  the separate file-backed docs home.
 - [`./channels-slack-telegram.md`](./channels-slack-telegram.md) — bridging agent
   sessions (including Product's) to Slack / Telegram.
 - [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md) — the feature/workspace/ownership

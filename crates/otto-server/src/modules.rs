@@ -319,6 +319,15 @@ impl otto_memory::MemoryCtx for ServerCtx {
     }
 }
 
+impl otto_vault::VaultCtx for ServerCtx {
+    fn vault(&self) -> &Arc<otto_vault::VaultEngine> {
+        &self.vault
+    }
+    fn roles(&self) -> &Arc<dyn RoleChecker> {
+        &self.roles
+    }
+}
+
 impl otto_canvas::CanvasCtx for ServerCtx {
     fn canvas_repo(&self) -> &otto_state::CanvasRepo {
         &self.canvas_repo
@@ -5589,9 +5598,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_product::router::<ServerCtx>(),
         otto_canvas::router::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
+        otto_vault::router::<ServerCtx>(),
         crate::memory_gov::memory_gov_routes(),
-        crate::embedder::routes(),
-        crate::vault_routes::routes(),
         otto_git::router::<ServerCtx>(),
         otto_issues::router::<ServerCtx>(),
         otto_channels::router::<ServerCtx>(),

@@ -177,11 +177,14 @@ pub fn resume_injection(ctx_root: &Path, cwd: &str, provider: &str) -> SpawnInje
     }
 }
 
-/// Append an extra markdown block (e.g. the Vault "Repo Brain") to the bundle's
-/// context file for `provider`, then return the (re-read) launch injection so
-/// inline-context providers (codex) pick the addition up. Best-effort: if the
-/// bundle isn't there yet, returns the resume injection unchanged. Idempotent
-/// per spawn — the block is delimited so a re-provision doesn't stack copies.
+/// Generic delimited-append helper: add one extra markdown block to the
+/// bundle's context file for `provider`, then return the (re-read) launch
+/// injection so inline-context providers (codex) pick the addition up.
+/// Best-effort: if the bundle isn't there yet, returns the resume injection
+/// unchanged. Idempotent per spawn — the block is delimited so a re-provision
+/// doesn't stack copies. Currently unused: its one caller was the Vault v2
+/// "Repo Brain" spawn injection, removed in Vault v3 (the docs home); the
+/// legacy `OTTO:VAULT-BRAIN` markers are kept so old bundles still de-dup.
 pub fn append_context_block(ctx_root: &Path, cwd: &str, provider: &str, block: &str) -> SpawnInjection {
     let dir = bundle_dir(ctx_root, provider, cwd);
     if !dir.is_dir() {
@@ -191,7 +194,7 @@ pub fn append_context_block(ctx_root: &Path, cwd: &str, provider: &str, block: &
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     const START: &str = "<!-- OTTO:VAULT-BRAIN:START -->";
     const END: &str = "<!-- OTTO:VAULT-BRAIN:END -->";
-    // Strip any previous brain block (delimited), then re-append the fresh one.
+    // Strip any previous delimited block, then re-append the fresh one.
     let base = match (existing.find(START), existing.find(END)) {
         (Some(s), Some(e)) if e > s => {
             let mut t = existing[..s].to_string();

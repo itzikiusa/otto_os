@@ -1,10 +1,12 @@
 //! `ottod mcp-tools` — the first-party Otto MCP tool server (Task B2b).
-//! Nearly every tool here is **read-only**; the two exceptions are
-//! `canvas_create_scene` / `canvas_update_scene` (Task B5), which post to
-//! Canvas Studio's normal governed HTTP endpoints AS THE SESSION OWNER — the
-//! same workspace-role check (`Editor`) a human editing Canvas gets, no more.
-//! They exist because Canvas is meant to be agent-drawable; every other tool
-//! stays strictly read-only (see "Safety properties" below).
+//! Nearly every tool here is **read-only**; the exceptions are
+//! `canvas_create_scene` / `canvas_update_scene` (Task B5) and the Vault v3
+//! doc writers `otto_vault_write` / `otto_vault_rename` / `otto_vault_delete`,
+//! which call the normal governed HTTP endpoints AS THE SESSION OWNER — the
+//! same workspace-role check (`Editor`) a human gets, no more. Canvas is meant
+//! to be agent-drawable and the vault is the agents' documentation home
+//! (delete is a soft move to `.trash/`); every other tool stays strictly
+//! read-only (see "Safety properties" below).
 //!
 //! Otto exposes a slice of its own data to an agent session as MCP tools. When
 //! `otto_mcp_enabled` is on (default), `otto-sessions` injects an `otto` server
@@ -24,12 +26,14 @@
 //!   `POST`s to a hard-coded allow-list of **read-only-enforced** endpoints. The
 //!   DB query path, `…/db/mcp-query`, refuses any write/DDL server-side
 //!   (`run_read_only`) before a driver runs, independent of the connection's
-//!   write-guard; the only other read POST is the vault `…/memory/search` (a
-//!   Viewer-gated search that never mutates). `canvas_create_scene` and
-//!   `canvas_update_scene` are the ONLY tools that mutate: they POST/PUT to
-//!   Canvas Studio's normal `otto-canvas` HTTP routes, which apply the same
-//!   `WorkspaceRole::Editor` gate a human caller hits — the token can only do
-//!   what the session's owner is already allowed to do.
+//!   write-guard; the other read POSTs are `…/memory/search`, the vault
+//!   `…/vault/vaults/{id}/search` and `…/okf/validate` (Viewer-gated reads
+//!   that never mutate). `canvas_create_scene`/`canvas_update_scene` and
+//!   `otto_vault_write`/`otto_vault_rename`/`otto_vault_delete` are the ONLY
+//!   tools that mutate: they hit the normal governed HTTP routes, which apply
+//!   the same `WorkspaceRole::Editor` gate a human caller hits — the token can
+//!   only do what the session's owner is already allowed to do (and vault
+//!   delete only trashes, never destroys).
 //! - **Capped** — each upstream call has a wall-clock timeout; the response body
 //!   is size-capped before parsing, and JSON arrays are row-capped.
 //! - **Redacted** — every tool result is passed through `otto_core::redact` so
@@ -208,6 +212,35 @@ impl Ctx {
             ));
         }
         serde_json::from_slice(&bytes).map_err(|e| format!("parse json: {e}"))
+    }
+
+    /// DELETE an `/api/v1` path with the bearer token. Used ONLY by
+    /// `otto_vault_delete` — a soft delete (the daemon moves the note into the
+    /// vault's `.trash/`, never destroying files). Same error handling as
+    /// [`Self::post_json`]; tolerates an empty (204) body.
+    async fn delete_ok(&self, path: &str) -> Result<(), String> {
+        let url = format!("{}/api/v1{}", self.base.trim_end_matches('/'), path);
+        let resp = tokio::time::timeout(
+            CALL_TIMEOUT,
+            self.http
+                .delete(&url)
+                .bearer_auth(&self.token)
+                .header("X-Otto-Session", self.session_id.clone().unwrap_or_default())
+                .send(),
+        )
+        .await
+        .map_err(|_| "upstream timeout".to_string())?
+        .map_err(|e| format!("request failed: {e}"))?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let bytes = resp.bytes().await.unwrap_or_default();
+        let snippet = String::from_utf8_lossy(&bytes);
+        Err(format!(
+            "daemon returned {status}: {}",
+            snippet.chars().take(300).collect::<String>()
+        ))
     }
 
     /// The governed downstream tools the live-agent **gateway** exposes for this
@@ -448,7 +481,7 @@ fn tool_catalog() -> Value {
             },
             {
                 "name": "otto_search_memory",
-                "description": "Read-only: semantic/keyword search of this workspace's vault for a free-text query; returns the top hits.",
+                "description": "Read-only: keyword (FTS) search of this workspace's agent memories for a free-text query; returns the top hits.",
                 "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "k": { "type": "integer" } }, "required": ["query"] }
             },
             {
@@ -487,24 +520,59 @@ fn tool_catalog() -> Value {
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
-                "name": "otto_vault_list_repos",
-                "description": "Read-only: list repositories indexed into the Vault (symbol/edge/chunk counts + status).",
+                "name": "otto_vault_list",
+                "description": "Read-only: list this workspace's markdown doc vaults (id, name, root_path, okf, note/link counts, scan state). Vault ids feed every other otto_vault_* tool.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
-                "name": "otto_vault_search_symbols",
-                "description": "Read-only: search the Vault's tree-sitter symbol index by name; returns name/kind/file:line/signature.",
-                "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "repo_id": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["query"] }
+                "name": "otto_vault_dir",
+                "description": "Read-only: one level of a vault's folder tree — subfolders (with child counts), notes and attachments. Empty `path` = vault root. Read `index.md` first in OKF vaults (progressive disclosure).",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative folder path; empty for root." } }, "required": ["vault_id"] }
             },
             {
-                "name": "otto_vault_code_graph",
-                "description": "Read-only: the code dependency graph (nodes + typed edges) for this workspace, optionally scoped to one repo.",
-                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string" } } }
+                "name": "otto_vault_read",
+                "description": "Read-only: a note's raw markdown + indexed metadata (frontmatter, tags, aliases, headings, word count, hash for optimistic writes) + outgoing links (resolved).",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative note path incl. .md" } }, "required": ["vault_id", "path"] }
             },
             {
-                "name": "otto_vault_brain",
-                "description": "Read-only: assemble the Repo Brain for a focus — relevant knowledge/symbols/dependencies/git, each annotated with why it was selected.",
-                "inputSchema": { "type": "object", "properties": { "focus": { "type": "string" }, "cwd": { "type": "string" }, "budget": { "type": "integer" } }, "required": ["focus"] }
+                "name": "otto_vault_search",
+                "description": "Read-only: full-text (FTS5) search over a vault's notes with snippets; supports tag:/path:/type: operators inside the query.",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "query": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["vault_id", "query"] }
+            },
+            {
+                "name": "otto_vault_backlinks",
+                "description": "Read-only: notes that link TO a given note (linked mentions), each with a context snippet.",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string" } }, "required": ["vault_id", "path"] }
+            },
+            {
+                "name": "otto_vault_tags",
+                "description": "Read-only: every tag in a vault with its note count.",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" } }, "required": ["vault_id"] }
+            },
+            {
+                "name": "otto_vault_graph",
+                "description": "Read-only: the vault link graph in a compact form (parallel node arrays + flat [src,dst,...] edge index pairs). Defaults to the LOCAL neighborhood of `path` (depth 1-3); mode=full returns the whole graph (edge-budgeted).",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "mode": { "type": "string", "description": "local (default when path given) | full" }, "path": { "type": "string" }, "depth": { "type": "integer" } }, "required": ["vault_id"] }
+            },
+            {
+                "name": "otto_vault_okf_validate",
+                "description": "Read-only: deterministic OKF v0.1 conformance report for a vault — errors E1 (no/unparseable frontmatter), E2 (missing type), E3 (reserved-file structure); warnings W1-W5. Never eyeball conformance: run this.",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" } }, "required": ["vault_id"] }
+            },
+            {
+                "name": "otto_vault_write",
+                "description": "Create or update a markdown note in a doc vault (Editor-gated; parent folders auto-created). Pass `if_hash` from otto_vault_read for optimistic concurrency (\"\" = must-not-exist). Prefer OKF format: YAML frontmatter with `type` (+ one-sentence description), markdown links, then otto_vault_okf_validate.",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative note path incl. .md" }, "content": { "type": "string" }, "if_hash": { "type": "string" } }, "required": ["vault_id", "path", "content"] }
+            },
+            {
+                "name": "otto_vault_rename",
+                "description": "Rename/move a note or folder (Editor-gated). Every referencing wikilink/markdown link across the vault is rewritten on disk; returns links_updated.",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["vault_id", "from", "to"] }
+            },
+            {
+                "name": "otto_vault_delete",
+                "description": "Soft-delete a note (Editor-gated): moves it into the vault's .trash/ folder — never destroys files. Prefer an OKF **Deprecation** log entry over deletion for knowledge that aged out.",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string" } }, "required": ["vault_id", "path"] }
             }
         ]
     })
@@ -528,10 +596,14 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "otto_usage_summary",
     "otto_list_improvement_runs",
     "otto_list_improvement_edits",
-    "otto_vault_list_repos",
-    "otto_vault_search_symbols",
-    "otto_vault_code_graph",
-    "otto_vault_brain",
+    "otto_vault_list",
+    "otto_vault_dir",
+    "otto_vault_read",
+    "otto_vault_search",
+    "otto_vault_backlinks",
+    "otto_vault_tags",
+    "otto_vault_graph",
+    "otto_vault_okf_validate",
 ];
 
 /// A resolved upstream read call: GET (or a read-only viewer POST), the `/api/v1`-
@@ -612,33 +684,62 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
         "otto_list_improvement_edits" => {
             ReadCall::get(format!("/workspaces/{}/improvement/edits", seg(ws_req()?)))
         }
-        "otto_vault_list_repos" => ReadCall::get(format!("/workspaces/{}/vault/repos", seg(ws_req()?))),
-        "otto_vault_search_symbols" => {
-            let mut path = format!("/workspaces/{}/vault/symbols?q={}", seg(ws_req()?), seg(&arg_str(args, "query")?));
-            if let Some(r) = args.get("repo_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                path.push_str(&format!("&repo_id={}", seg(r)));
+        "otto_vault_list" => ReadCall::get(format!("/workspaces/{}/vault/vaults", seg(ws_req()?))),
+        "otto_vault_dir" => {
+            let v = arg_i64(args, "vault_id")?;
+            let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+            ReadCall::get(format!("/workspaces/{}/vault/vaults/{v}/dir?path={}", seg(ws_req()?), seg(path)))
+        }
+        "otto_vault_read" => {
+            let v = arg_i64(args, "vault_id")?;
+            ReadCall::get(format!(
+                "/workspaces/{}/vault/vaults/{v}/note?path={}",
+                seg(ws_req()?),
+                seg(&arg_str(args, "path")?)
+            ))
+        }
+        "otto_vault_search" => {
+            let v = arg_i64(args, "vault_id")?;
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20);
+            let body = json!({ "query": arg_str(args, "query")?, "limit": limit });
+            ReadCall::post(format!("/workspaces/{}/vault/vaults/{v}/search", seg(ws_req()?)), body)
+        }
+        "otto_vault_backlinks" => {
+            let v = arg_i64(args, "vault_id")?;
+            ReadCall::get(format!(
+                "/workspaces/{}/vault/vaults/{v}/backlinks?path={}",
+                seg(ws_req()?),
+                seg(&arg_str(args, "path")?)
+            ))
+        }
+        "otto_vault_tags" => {
+            let v = arg_i64(args, "vault_id")?;
+            ReadCall::get(format!("/workspaces/{}/vault/vaults/{v}/tags", seg(ws_req()?)))
+        }
+        "otto_vault_graph" => {
+            let v = arg_i64(args, "vault_id")?;
+            let mut path = format!("/workspaces/{}/vault/vaults/{v}/graph", seg(ws_req()?));
+            let focus = args.get("path").and_then(Value::as_str).filter(|s| !s.is_empty());
+            let mode = args
+                .get("mode")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(if focus.is_some() { "local" } else { "full" });
+            path.push_str(&format!("?mode={}", seg(mode)));
+            if let Some(f) = focus {
+                path.push_str(&format!("&path={}", seg(f)));
             }
-            if let Some(l) = args.get("limit").and_then(Value::as_u64) {
-                path.push_str(&format!("&limit={l}"));
+            if let Some(d) = args.get("depth").and_then(Value::as_u64) {
+                path.push_str(&format!("&depth={d}"));
             }
             ReadCall::get(path)
         }
-        "otto_vault_code_graph" => {
-            let mut path = format!("/workspaces/{}/vault/graph", seg(ws_req()?));
-            if let Some(r) = args.get("repo_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                path.push_str(&format!("?repo_id={}", seg(r)));
-            }
-            ReadCall::get(path)
-        }
-        "otto_vault_brain" => {
-            let mut body = json!({ "focus": arg_str(args, "focus")? });
-            if let Some(c) = args.get("cwd").and_then(Value::as_str) {
-                body["cwd"] = json!(c);
-            }
-            if let Some(b) = args.get("budget").and_then(Value::as_u64) {
-                body["budget"] = json!(b);
-            }
-            ReadCall::post(format!("/workspaces/{}/vault/brain", seg(ws_req()?)), body)
+        "otto_vault_okf_validate" => {
+            let v = arg_i64(args, "vault_id")?;
+            ReadCall::post(
+                format!("/workspaces/{}/vault/vaults/{v}/okf/validate", seg(ws_req()?)),
+                json!({}),
+            )
         }
         other => return Err(format!("unknown feature read tool `{other}`")),
     })
@@ -904,6 +1005,43 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .await?;
 
             Ok(finalize(json!({ "ok": true, "format": format })))
+        }
+        // Vault v3 doc writers — Editor-gated by the daemon route; the delete is
+        // a soft move into `.trash/`.
+        "otto_vault_write" => {
+            let ws = ctx.workspace_id.clone().ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+            let v = arg_i64(args, "vault_id")?;
+            let mut body = json!({
+                "path": arg_str(args, "path")?,
+                "content": args.get("content").and_then(Value::as_str).unwrap_or(""),
+            });
+            if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
+                body["if_hash"] = json!(h);
+            }
+            let meta = ctx
+                .put_json(&format!("/workspaces/{}/vault/vaults/{v}/note", seg(&ws)), &body)
+                .await?;
+            Ok(finalize(json!({ "ok": true, "meta": meta })))
+        }
+        "otto_vault_rename" => {
+            let ws = ctx.workspace_id.clone().ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+            let v = arg_i64(args, "vault_id")?;
+            let body = json!({ "from": arg_str(args, "from")?, "to": arg_str(args, "to")? });
+            let res = ctx
+                .post_json(&format!("/workspaces/{}/vault/vaults/{v}/rename", seg(&ws)), &body)
+                .await?;
+            Ok(finalize(res))
+        }
+        "otto_vault_delete" => {
+            let ws = ctx.workspace_id.clone().ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+            let v = arg_i64(args, "vault_id")?;
+            ctx.delete_ok(&format!(
+                "/workspaces/{}/vault/vaults/{v}/note?path={}",
+                seg(&ws),
+                seg(&arg_str(args, "path")?)
+            ))
+            .await?;
+            Ok(finalize(json!({ "ok": true, "trashed": args.get("path") })))
         }
         // First-party feature reads (workflows / brokers / issues / swarm / vault /
         // repos / sessions / product / findings / usage / self-improvement). All
@@ -1431,6 +1569,32 @@ mod tests {
         assert!(names.contains(&"canvas_update_scene"), "catalog missing canvas_update_scene");
     }
 
+    #[test]
+    fn catalog_lists_the_vault_tools() {
+        let cat = tool_catalog();
+        let names: Vec<&str> = cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for t in [
+            "otto_vault_list",
+            "otto_vault_dir",
+            "otto_vault_read",
+            "otto_vault_search",
+            "otto_vault_backlinks",
+            "otto_vault_tags",
+            "otto_vault_graph",
+            "otto_vault_okf_validate",
+            "otto_vault_write",
+            "otto_vault_rename",
+            "otto_vault_delete",
+        ] {
+            assert!(names.contains(&t), "catalog missing {t}");
+        }
+    }
+
     #[tokio::test]
     async fn canvas_create_scene_errors_without_title() {
         let ctx = test_ctx();
@@ -1515,6 +1679,20 @@ mod tests {
         assert!(c.path.starts_with("/issue/search?account_id=a1"));
         assert!(c.path.contains("&q=a%20%3D%20b"), "got {}", c.path);
         assert_eq!(read_route("otto_list_improvement_edits", &json!({}), ws).unwrap().path, "/workspaces/ws1/improvement/edits");
+        assert_eq!(read_route("otto_vault_list", &json!({}), ws).unwrap().path, "/workspaces/ws1/vault/vaults");
+        assert_eq!(
+            read_route("otto_vault_read", &json!({"vault_id":3,"path":"services/auth api.md"}), ws).unwrap().path,
+            "/workspaces/ws1/vault/vaults/3/note?path=services%2Fauth%20api.md"
+        );
+        let c = read_route("otto_vault_search", &json!({"vault_id":3,"query":"jwt"}), ws).unwrap();
+        assert!(c.post);
+        assert_eq!(c.path, "/workspaces/ws1/vault/vaults/3/search");
+        assert_eq!(c.body.unwrap()["limit"], json!(20));
+        // Graph defaults: local when a focus path is given, full otherwise.
+        assert!(read_route("otto_vault_graph", &json!({"vault_id":3,"path":"a.md"}), ws).unwrap().path.contains("mode=local"));
+        assert!(read_route("otto_vault_graph", &json!({"vault_id":3}), ws).unwrap().path.contains("mode=full"));
+        let c = read_route("otto_vault_okf_validate", &json!({"vault_id":3}), ws).unwrap();
+        assert!(c.post);
     }
 
     #[test]

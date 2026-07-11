@@ -50,7 +50,7 @@ bridges so an agent can work a ticket from a chat thread.
   live progress, per-agent findings, retry, and a configurable grace period.
   Findings become **tracked items** — a review-findings workflow with statuses
   and fix / verify / open-Jira / false-positive / regression-test actions — and
-  can be **ingested into a Proof Pack** or saved to the Vault.
+  can be **ingested into a Proof Pack** or saved to workspace memory.
 - **Proof Packs — the trust layer** — an evidence layer so "done" means *proven*,
   not asserted. Each unit of work collects **artifacts** — diffs, recognized test
   output, **CI status**, **screenshots/video**, **API/DB/Kafka read** samples,
@@ -122,10 +122,12 @@ bridges so an agent can work a ticket from a chat thread.
   (PLAIN/SCRAM) auth, prod/read-only guards, and an in-process Kafka-aware proxy
   so a private cluster is reachable through a single SSH tunnel (librdkafka can't
   SOCKS, so Otto rewrites the advertised broker addresses on the fly).
-- **Vault** — a workspace knowledge store: notes with `[[backlinks]]` and
-  keyword + **semantic (vector) hybrid recall** (`otto-memory`). The core is
-  domain-agnostic, so other areas (e.g. Product) recall from it instead of
-  re-fetching context each turn.
+- **Vault — the docs home** — register a local folder of markdown files (even a
+  live **Obsidian vault**) and get Obsidian-parity docs in Otto: file tree,
+  editor ⇄ reading view with wikilinks/backlinks/tags, full-text search, quick
+  switcher, and a graph view built to scale — with **OKF** as the documentation
+  standard and every note readable/writable by agents over MCP. Files stay the
+  source of truth; Otto keeps only a derived index (`otto-vault`).
 - **Multi-user, RBAC & sharing** — per-feature roles (None < View < Edit <
   Admin), per-session isolation, an admin overview + audited impersonation, and
   **session sharing** via scoped, expiring, revocable links gated by an
@@ -219,7 +221,8 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   `otto-orchestrator`, `otto-git`, `otto-issues` (Jira/Confluence),
   `otto-channels`, `otto-connections`, `otto-dbviewer` (Database Explorer),
   `otto-brokers` (Kafka viewer), `otto-ssh` (shared SSH-tunnel helper),
-  `otto-swarm` (Agent Swarm), `otto-memory` (Vault knowledge store),
+  `otto-swarm` (Agent Swarm), `otto-vault` (the docs home — file-backed
+  markdown vaults + OKF), `otto-memory` (workspace memory layer),
   `otto-product` (Jira/Confluence story workflows), `otto-improve`
   (self-improvement), `otto-usage` (ClickHouse usage/metrics), `otto-skills`
   (bundled skill library), `otto-context`, `otto-rbac`, `otto-netguard`

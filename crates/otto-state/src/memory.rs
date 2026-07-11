@@ -537,52 +537,6 @@ impl MemoriesRepo {
         Ok(())
     }
 
-    // -- vectors --
-
-    pub async fn put_vector(&self, id: &str, model: &str, dim: usize, v: &[f32]) -> Result<()> {
-        let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
-        let now = fmt(Utc::now());
-        sqlx::query(
-            "INSERT INTO memory_vectors(memory_id,model_id,dim,embedding,embedded_at) \
-             VALUES(?,?,?,?,?) ON CONFLICT(memory_id) DO UPDATE SET \
-             model_id=excluded.model_id, dim=excluded.dim, embedding=excluded.embedding, \
-             embedded_at=excluded.embedded_at",
-        )
-        .bind(id)
-        .bind(model)
-        .bind(dim as i64)
-        .bind(blob)
-        .bind(&now)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("memory.put_vector"))?;
-        Ok(())
-    }
-
-    pub async fn all_vectors(&self, ws: &str, model: &str) -> Result<Vec<(String, Vec<f32>)>> {
-        let rows = sqlx::query(
-            "SELECT v.memory_id AS mid, v.embedding AS emb FROM memory_vectors v \
-             JOIN memories m ON m.id = v.memory_id \
-             WHERE m.workspace_id = ? AND m.active = 1 AND v.model_id = ?",
-        )
-        .bind(ws)
-        .bind(model)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("memory.all_vectors"))?;
-        Ok(rows
-            .iter()
-            .map(|r| {
-                let b: Vec<u8> = r.get("emb");
-                let v = b
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect();
-                (r.get::<String, _>("mid"), v)
-            })
-            .collect())
-    }
-
     // -- links / graph --
 
     pub async fn link(
@@ -1018,22 +972,6 @@ impl MemoriesRepo {
             .execute(&self.pool)
             .await;
         Ok(())
-    }
-
-    /// Count active vectors for (workspace, model) — the cheap signature the
-    /// HNSW index uses to decide between its exact path and a cached ANN graph.
-    pub async fn count_vectors(&self, ws: &str, model: &str) -> Result<usize> {
-        let r = sqlx::query(
-            "SELECT COUNT(*) AS c FROM memory_vectors v \
-             JOIN memories m ON m.id = v.memory_id \
-             WHERE m.workspace_id = ? AND m.active = 1 AND v.model_id = ?",
-        )
-        .bind(ws)
-        .bind(model)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(dberr("memory.count_vectors"))?;
-        Ok(r.get::<i64, _>("c").max(0) as usize)
     }
 
     /// Remove a memory from the FTS index.

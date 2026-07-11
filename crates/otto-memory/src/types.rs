@@ -36,6 +36,9 @@ pub mod source {
     pub const MANUAL: &str = "manual";
 }
 
+/// Search mode. Vectors were removed with Vault v3 — `Hybrid` and `Semantic`
+/// are kept as accepted aliases (wire + Rust compat) and execute the keyword
+/// path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
@@ -66,10 +69,7 @@ pub struct MemoryQuery {
 }
 
 /// A structured "why this was selected" reason — the explainability surface.
-/// `kind` is one of: `vector` (semantic similarity), `keyword` (FTS/term match),
-/// `symbol` (defines/uses a matched symbol), `graph` (reachable in the dependency
-/// graph from the focus), `recent` (recently changed), `test` (a test for a
-/// matched file), `doc` (a linked doc).
+/// `kind` is one of: `keyword` (FTS/term match) or `scope` (same story).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextReason {
     pub kind: String,
@@ -97,56 +97,6 @@ pub struct MemoryHit {
     /// Structured selection reasons (Vault v2 explainability).
     #[serde(default)]
     pub reasons: Vec<ContextReason>,
-}
-
-/// Outcome of indexing a repo into the Vault.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct IndexResult {
-    pub repo_id: String,
-    pub files: usize,
-    pub symbols: usize,
-    pub edges: usize,
-    pub chunks: usize,
-}
-
-/// A node in the unified Vault graph (knowledge + code), for the Obsidian-style
-/// full graph view. `group` is `knowledge` or `code`; `kind` is the finer type.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FullGraphNode {
-    pub id: String,
-    pub label: String,
-    pub kind: String,
-    pub group: String,
-    pub file: Option<String>,
-    pub line: Option<i64>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FullGraphEdge {
-    pub src: String,
-    pub dst: String,
-    pub rel: String,
-    #[serde(default)]
-    pub detail: String,
-}
-
-/// The whole Vault as one graph: memory links + code dependency edges.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct FullGraph {
-    pub nodes: Vec<FullGraphNode>,
-    pub edges: Vec<FullGraphEdge>,
-}
-
-/// The assembled "Repo Brain" injected into an agent's context — sections of
-/// recalled knowledge/code, each carrying its selection reasons.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct RepoBrain {
-    pub focus: String,
-    pub sections: Vec<BriefSection>,
-    pub reasons: Vec<ContextReason>,
-    pub token_estimate: usize,
-    /// Rendered markdown block (what gets injected into CONTEXT.md).
-    pub markdown: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

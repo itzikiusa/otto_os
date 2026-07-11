@@ -16,8 +16,6 @@ pub mod db_assist;
 pub mod mockup_assist;
 pub mod context_packet;
 pub mod db_drafter;
-pub mod embedder;
-pub mod vault_routes;
 pub mod memory_gov;
 pub mod cli_update;
 pub mod error;

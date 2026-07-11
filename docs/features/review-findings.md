@@ -242,10 +242,11 @@ review's repo rules.
 
 1. persists a **markdown snapshot** to the `review_proof_packs` table
    (`ReviewProofPackExport {id, review_id, format, markdown, created_at}`), and
-2. **ingests the verified findings into Vault memory** — each `verified` finding
-   becomes a memory record (collection `findings`, kind `finding`, workspace scope,
-   tagged with its severity + category, with the linked commit/test attached as
-   refs), so the closed loop is searchable later (see [`./vault.md`](./vault.md)).
+2. **ingests the verified findings into workspace memory** — each `verified`
+   finding becomes a memory record (collection `findings`, kind `finding`,
+   workspace scope, tagged with its severity + category, with the linked
+   commit/test attached as refs), so the closed loop is keyword-searchable later
+   (`otto-memory`; see `docs/contracts/api.md` § Memory layer).
 
 It then emits the `proof_pack_exported` WS event.
 
@@ -360,7 +361,7 @@ Tables created/changed:
 - File a finding to **Jira**, gate it behind **human approval**, and generalize it
   into a durable **repo rule** that the Context Engine injects into future sessions.
 - Assemble a per-review evidence bundle and export it as markdown, ingesting the
-  **verified** findings into Vault memory for later recall.
+  **verified** findings into workspace memory for later recall.
 
 **Limitations / honest caveats:**
 
@@ -412,7 +413,7 @@ Tables created/changed:
 | "Convert to Jira" → 400 `invalid` | No Jira account is configured. Connect one under Settings → Issue Accounts ([`./jira-confluence.md`](./jira-confluence.md)). |
 | An agent action didn't open a session | `session_id` is only returned for agent-backed actions (fix / verify / regression-test); the others are pure status moves. |
 | Board not updating live | It refetches off `finding_updated`/`finding_action_started`/`proof_pack_exported` via the `findingBus`; if the socket dropped, it re-fetches on the next match. |
-| Export ran but nothing in Vault | Only **verified** findings are ingested into memory. Verify the relevant findings first, then re-export. |
+| Export ran but nothing in memory search | Only **verified** findings are ingested into memory. Verify the relevant findings first, then re-export. |
 | Approve/Reject not shown | They only appear once the **Require human approval** gate is set and the finding isn't already decided. |
 
 ---
@@ -423,8 +424,9 @@ Tables created/changed:
   these findings (fan-out, lenses, merge-readiness, handoff).
 - [`./proof-packs.md`](./proof-packs.md) — the generic work-item evidence layer
   (distinct from this workflow's namespaced review proof pack).
-- [`./vault.md`](./vault.md) — the knowledge store that verified findings are
-  ingested into on export.
+- `docs/contracts/api.md` (§ Memory layer) — the keyword memory store that
+  verified findings are ingested into on export (the [Vault](./vault.md) is now
+  the separate file-backed docs home).
 - [`./jira-confluence.md`](./jira-confluence.md) — connecting the account used by
   "Convert to Jira".
 - [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md) — the `Git` / `Context` feature

@@ -1,524 +1,470 @@
-# Vault — the workspace knowledge store
+# Otto Vault — the docs home (file-backed markdown vaults, OKF)
 
-The **Vault** is Otto's workspace-scoped knowledge store: a place where distilled
-notes (decisions, facts, requirements, constraints, learnings, answered questions,
-entities, summaries) and raw evidence (chunks) accumulate, link to each other with
-`[[backlinks]]`, and become recallable by **hybrid search** — keyword (SQL `LIKE`)
-fused with semantic (vector) similarity. The engine (`otto-memory`) is
-domain-agnostic: the **Product** section is its first consumer, ingesting story
-artifacts so agents recall a compact background brief each turn instead of
-re-reading every Jira/Confluence artifact, but any feature can write to and read
-from the same store.
+The **Vault** is Otto's documentation home: point it at a folder of markdown
+files on disk — including a **live Obsidian vault** — and Otto gives you an
+Obsidian-parity knowledge base (file tree, editor ⇄ reading view, wikilinks,
+backlinks, tags, full-text search, quick switcher, a scalable graph view) plus
+things Obsidian doesn't have: a deterministic **OKF (Open Knowledge Format)**
+validator, per-directory index generation, and **full MCP access** so every
+agent session can read *and write* the same docs.
 
-This document is the end-user and operator reference for the Vault. It documents
-what the code actually does today; where a capability is scaffolded but not wired
-into the running daemon, that is called out explicitly.
+**Files are the source of truth.** The daemon keeps only a derived, rebuildable
+SQLite index (notes, wikilinks/markdown links, tags, aliases, FTS5). There are
+**no embeddings, no vector stores, and no remote backends anywhere** — Vault v3
+deleted all of that (the v2 "Repo Brain": embedders, HNSW/Qdrant ANN, the
+SurrealDB graph mirror, tree-sitter code intel, spawn-time brain injection).
+"Smart indexing" now means agents writing linked, validated OKF docs that FTS
+and the link graph make findable — durable, diffable, greppable.
 
-> **At a glance.** The Vault is a single SQLite store living in your Otto data
-> directory. By default it embeds notes with a **local, dependency-free
-> deterministic stub embedder** — no model download, no API key, no network. Real
-> local (`fastembed`) and remote (OpenAI / Voyage) embedders are designed in
-> behind a trait but are **not** wired into the shipped daemon. Reads need
-> workspace **Viewer**; writes need **Editor**. The UI is the **Vault** section in
-> the left rail (un-gated — visible to any authenticated member).
+This document is the end-user and operator reference for Vault v3. The design
+(including its binding post-review amendments) is
+`docs/superpowers/specs/2026-07-11-vault-docs-home-design.md`; the API contract
+is `docs/contracts/api.md` → *Vault v3 — the docs home*.
 
 ---
 
-## 1. Overview & where it lives
+## 1. Summary
 
-The Vault is one of Otto's crates (`otto-memory`) plus a UI module
-(`ui/src/modules/vault/`). The daemon mounts its REST router under `/api/v1`; the
-persistence is plain SQLite tables in the shared state DB. Everything is scoped to
-a **workspace** (`workspace_id`), and rows cascade-delete when a workspace is
-removed.
-
-| Concern | Where it lives |
+| You want to… | The Vault gives you |
 |---|---|
-| Engine crate | `crates/otto-memory/` |
-| Service (save / search / recall / governance) | `crates/otto-memory/src/service.rs`, `governance.rs` |
-| Embedder seam | `crates/otto-memory/src/embed.rs` |
-| Vector index (brute-force cosine) | `crates/otto-memory/src/index.rs` |
-| Retrieval math (RRF + re-rank) | `crates/otto-memory/src/retrieve.rs` |
-| Collection ingest / graph import | `crates/otto-memory/src/ingest.rs` |
-| Obsidian-vault write-through / re-index | `crates/otto-memory/src/vault.rs` |
-| Shared-host remote backend | `crates/otto-memory/src/remote.rs` |
-| Core REST router | `crates/otto-memory/src/http.rs` |
-| Governance REST router | `crates/otto-server/src/memory_gov.rs` |
-| Product → memory ingest route | `crates/otto-server/src/routes/product_memory.rs` |
-| Persistence (DTOs + repo + SQL) | `crates/otto-state/src/memory.rs` |
-| SQLite schema | `crates/otto-state/migrations/0038_memory.sql`, `0039_memory_sharing.sql`, `0056_memory_lifecycle.sql` |
-| Daemon wiring (backend selection) | `crates/ottod/src/main.rs` (≈ lines 248–268) |
-| UI page + store | `ui/src/modules/vault/VaultPage.svelte`, `vault.svelte.ts` |
-| UI dialogs | `ImportGovDialog.svelte`, `MergeDialog.svelte`, `SplitDialog.svelte`, `MemoryStateBadge.svelte` |
-| TypeScript contract mirror | `ui/src/lib/api/types.ts` (`Memory`, `NewMemory`, `MemoryPatch`, `MemoryQuery`, `MemoryHit`, `RecallBrief`, `MemoryLink`, `MemoryGraphData`) |
-| Authoritative API contract | `docs/contracts/api.md` → *Memory layer (workspace-scoped knowledge store)* |
-| Stored data | SQLite tables `memories`, `memory_vectors`, `memory_links`, `governed_imports` in the Otto state DB |
-
-### Data model in one screen
-
-A row in `memories` carries:
-
-- **Identity & scope** — `id`, `workspace_id`, `collection` (`product` | `code` |
-  `docs` | `confluence` | `platform-map`, default `product`), `record_type`
-  (`item` = distilled, `chunk` = raw), `scope` (`workspace` | `story` | `entity`),
-  optional `story_id`.
-- **Content** — `kind` (the taxonomy below), `title`, `body`, `tags`, `entities`,
-  and `refs` (provenance pointers: a `{kind, ref, url?, label?}` list).
-- **Provenance** — `source_kind` (e.g. `jira`, `confluence`, `analysis`,
-  `transcript`, `question`, `learning`, `code`, `manual`, `graphify`) and an
-  optional `source_ref`.
-- **Ranking priors** — `confidence` (default 0.7) and `salience` (default 0.5).
-- **Lifecycle** — `active` (soft-delete flag), `state`
-  (`suggested`|`accepted`|`stale`|`contradicted`, default `accepted`),
-  `superseded_by`, `version`, `provenance_json`, `forgotten_at`, `undo_token`,
-  `expires_at`.
-- **Visibility** — `shared` (all workspace members; the default) or `private`
-  (creator-only).
-- **Bookkeeping** — `created_by`, `created_at`, `updated_at`, `last_accessed_at`,
-  `access_count`, `content_hash` (a normalized SHA-256 of the body, used for
-  exact-duplicate detection).
-
-The **`kind` taxonomy** (`crates/otto-memory/src/types.rs::kind`): `fact`,
-`decision`, `requirement`, `constraint`, `qa`, `learning`, `summary`, `entity`,
-`snapshot`, `glossary`, `chunk`.
+| Keep docs as plain files | A **vault = a registered local directory** of `.md` files; Otto never owns them |
+| Use an existing Obsidian vault | Register its folder — wikilinks, tags, aliases, embeds all parse natively |
+| Browse & edit | Virtualized file tree, CodeMirror editor with `[[` / `#` completion, autosave, reading view |
+| Navigate knowledge | Backlinks with context snippets, outgoing links, outline, properties, quick switcher (⌘O) |
+| Find things | FTS5 search with `tag:` / `path:` / `type:` operators; vault notes also appear in **global ⌘F** |
+| See the shape of it | A Canvas2D graph view with a Web-Worker Barnes-Hut layout, built for 100k notes / millions of edges |
+| Standardize docs | **OKF v0.1**: deterministic validator (E1–E3 / W1–W5), reserved `index.md`/`log.md`, concept templates, index generation |
+| Let agents use it | `otto_vault_*` MCP session tools (read + Editor-gated write) and outward `otto.vault_*` control-plane tools |
+| Stay safe | Deletion is a move to `<vault>/.trash/`; rename rewrites links across the vault; writes are optimistic-concurrency checked |
 
 ---
 
-## 2. Notes & backlinks
+## 2. Overview & where it lives
 
-### Creating notes
-
-A "note" is a `memories` row. There are several ways one is created:
-
-1. **Manually**, via `POST /workspaces/{ws}/memories` with a `NewMemory` body
-   (`source_kind: "manual"`). This is the direct API path; the engine assigns the
-   `id`, computes the `content_hash`, embeds the note on write, and (if a vault
-   directory is configured) writes a markdown file.
-2. **By ingesting a story** — Product extracts a story's answered questions,
-   learnings, latest analysis summary, and newest version into typed memories
-   (see §7).
-3. **By chunking text** into a collection — `POST .../memory/ingest-text` splits a
-   file's content into overlapping 40-line windows (8-line overlap) and stores each
-   as a `chunk` record tied back to the source path.
-4. **By importing a graph** — a graphify `graph.json` becomes `entity` memories +
-   links (see §4).
-5. **By importing a governance file** — AGENTS.md / CLAUDE.md / .cursorrules are
-   parsed into `suggested` memories (see §4).
-
-**Exact-duplicate saves are a NOOP.** Before inserting, the service looks up the
-`(workspace, collection, scope, story_id, content_hash)` tuple; if a live row with
-the same normalized body already exists, the existing row is returned unchanged
-(no new id, no duplicate). This is why repeated ingests are safe and idempotent.
-
-**Editing** a note (`PATCH .../memories/{id}`) accepts a partial `MemoryPatch`
-(`title`, `body`, `tags`, `entities`, `confidence`, `salience`, `active`). On
-update the `content_hash` and embedding are recomputed and `version` is bumped.
-
-**Soft-delete semantics.** `DELETE .../memories/{id}` flips `active=false` (a
-`204`); the row is never hard-deleted by this path. The richer governance
-`forget` endpoint (see §4) additionally mints an undo token and sets `state=stale`.
-
-### Backlinks and the link graph
-
-Links live in a separate `memory_links` table: `(src_id, dst_id, rel, weight,
-certainty)`. The `rel` vocabulary is `relates_to`, `supersedes`, `derived_from`,
-`about_entity`, `duplicates`, `blocks`; `certainty` is graphify-style
-(`extracted` | `inferred` | `ambiguous`).
-
-- `GET .../memories/{id}/links` returns **all** links touching a note (where it is
-  either source or destination).
-- The Vault UI computes **backlinks** as the subset where `dst_id == selected.id`
-  — i.e. the notes that point *to* the one you're reading, shown under
-  **"Linked by (N)"**.
-
-When the Vault writes Obsidian-style markdown files, links are rendered as
-`[[wikilinks]]` at the top of each note's body; the SQLite store is the derived
-index and the markdown files are the human-/git-facing representation.
-
-> **README divergence (intentional).** The README advertises "notes with
-> `[[backlinks]]`". The `[[…]]` wiki-link syntax is produced and parsed in the
-> **markdown vault file** representation (`vault.rs`). Inside the SQLite store and
-> the UI, links are first-class `memory_links` rows; the UI surfaces them as a
-> "Linked by" backlinks list rather than rendering inline `[[…]]` tokens in the
-> note body. Both describe the same link graph — the wiki-link text is the
-> file-format spelling of it.
-
----
-
-## 3. Collections & the graph view
-
-### Collections
-
-A **collection** is a free-form bucket (`collection` column) that groups related
-memories: `product` (the default), `code`, `docs`, `confluence`, `platform-map`.
-They're used for filtering (`?collection=` on list/search/graph) and as the
-default ingest target (`code` for `ingest-text`/`import-graph`, `platform-map` for
-governance imports). In the UI, the left sidebar shows **collection chips** (only
-when more than one collection is present) to filter the index and the graph.
-
-### The graph view
-
-`GET .../memory/graph?collection=` returns `GraphData { nodes, edges }`:
-
-- **nodes** — every active memory (`{id, label, kind, collection}`), capped at
-  5000 per workspace.
-- **edges** — every `memory_links` row in the workspace.
-
-The Vault UI renders this as a **dependency-free SVG graph**: nodes are laid out on
-a circle, colored by `kind` (entity = blue, decision = teal, constraint/requirement
-= orange, qa = magenta, chunk = grey, default = light blue), and edges are drawn as
-lines — dashed when `certainty == "inferred"`. A footer shows the node/edge counts.
-Toggle between the **Index** (list) and **Graph** views with the buttons at the top
-of the sidebar.
-
-There is also an **entity neighborhood** endpoint —
-`GET .../memory/entities/{id}/graph` — which returns just one memory's immediate
-links plus the memories on the other end (`{links, neighbors}`). This is the
-narrow, per-node traversal; the full graph endpoint is the workspace-wide view.
-
----
-
-## 4. Lifecycle governance
-
-Beyond create/read/update, the Vault has a governance layer (migration
-`0056_memory_lifecycle.sql`) for curating accumulated knowledge. All governance
-routes require workspace **Editor**.
-
-- **Lifecycle state** — `POST .../memory/{mid}/state` with `{state}`. Valid states
-  are `suggested` (auto-ingested, awaiting review), `accepted` (active/approved —
-  the default for manual creation), `stale` (soft-deprecated), `contradicted`
-  (overridden by a newer memory; set automatically by merge/split). Anything else
-  is a `400`. The UI shows the state as a chip and offers a state filter
-  (all / suggested / accepted / stale / contradicted).
-- **Forget with undo** — `POST .../memory/{mid}/forget` soft-deletes the row
-  (`active=0`, `state=stale`, `forgotten_at` set) and returns an opaque
-  `undo_token`. `POST .../memory/{mid}/forget/undo` with that token restores it
-  (`active=1`, `state=accepted`, token cleared — single use). The UI surfaces a
-  7-second **"Undo forget"** affordance after a forget. The undo token is a
-  SHA-256-derived 32-byte hex string; the undo is workspace-scoped.
-- **Merge (N→1)** — `POST .../memory/merge` with `{ids, title, body}`. Creates one
-  new memory inheriting the first source's collection/scope/story_id/visibility,
-  marks all sources `contradicted` and points their `superseded_by` at the new row,
-  and records `provenance_json = {op:"merge", source_ids:[…]}`. Requires ≥2 ids.
-  In the UI: enter **Merge…** mode, tick two or more notes, confirm the merged
-  title/body.
-- **Split (1→N)** — `POST .../memory/{mid}/split` with `{parts:[{title,body},…]}`.
-  Creates N children inheriting the parent's metadata, marks the parent
-  `contradicted` (pointing `superseded_by` at the first child), and records
-  `provenance_json = {op:"split", parent_id}`. Requires ≥2 parts.
-- **Provenance diff** — when a note has a `superseded_by`, the UI can fetch the
-  successor and show a word-level diff of the two bodies ("this → superseded"),
-  using the shared `DiffView` component.
-- **Governed import** — `POST .../memory/import` with
-  `{kind: "agents-md"|"claude-md"|"cursorrules"|"custom", content, label?}`. Splits
-  the markdown on level-2 (`##`) headings (or treats the whole file as one section
-  if there are none), creating one memory per non-empty section in the
-  `platform-map` collection, tagged with the import kind. AGENTS.md/CLAUDE.md
-  sections become `fact`, `.cursorrules` become `constraint`, `custom` become
-  `learning`. Every imported memory is set to `state=suggested` (awaiting review),
-  and the batch is recorded in `governed_imports` for auditability. Returns
-  `{imported, import_id}`. The UI exposes this as the **Import…** button →
-  `ImportGovDialog`.
-
-> Note: the `governed_imports` table records a `reverted_at` column and the engine
-> can list import batches (`list_governed_imports`), but a one-call "revert this
-> import" endpoint is not exposed; reverting today means forgetting the listed
-> memory ids.
-
----
-
-## 5. Hybrid recall (keyword + vector), explained
-
-`POST /workspaces/{ws}/memory/search` takes a `MemoryQuery` and returns ranked
-`MemoryHit[]`. The query carries `text`, optional filters (`collection`,
-`story_id`, `kinds`, `tags`, `entities`, `scope`, `include_inactive`), `k` (result
-count, default 20), and a `mode`:
-
-| `mode` | Behaviour |
-|---|---|
-| `hybrid` (default) | Run keyword **and** vector retrieval, fuse with RRF, then re-rank. |
-| `keyword` | Keyword only (SQL `LIKE`). |
-| `semantic` | Vector KNN only (skipped if there is no text or no embedder). |
-
-### How a query is matched and ranked
-
-1. **Keyword candidates** (`MemoriesRepo::search_keyword`). The query is tokenized
-   on non-alphanumerics into terms of length ≥2. A SQL prefilter selects rows where
-   `lower(title || ' ' || body) LIKE %term%` for *any* term (capped at 2000 rows),
-   then rows are ranked by how many distinct terms they contain. Up to `k×4`
-   candidates feed the fusion stage.
-2. **Semantic candidates** (`VectorIndex::knn`). If `mode != keyword` and there is
-   query text, the query string is embedded and the **brute-force cosine index**
-   scores it against every stored vector for the workspace + active rows + the
-   current embedder's model id, returning the top `k×4` by cosine similarity.
-3. **Fusion** (`retrieve::rrf_fuse`). For `hybrid`, the two id-rankings are combined
-   with **Reciprocal Rank Fusion** — each list contributes `1/(k0 + rank + 1)` per
-   id with damping `k0 = 60` — so an item ranked highly by either method (or
-   moderately by both) floats up. For pure `keyword`/`semantic`, the base score is
-   simply `1/(1 + rank)`.
-4. **Filter + re-rank** (`MemoryService::search` + `retrieve::rerank_score`). Each
-   fused candidate is loaded and dropped if it fails the post-filters (active,
-   visibility, `story_id`, `collection`, `kinds`). Survivors get a light prior on
-   top of the fused base score:
-
-   ```text
-   score = base × (1 + 0.3·recency + 0.05·ln(1+access_count)
-                     + 0.2·(confidence·salience))
-                 + scope_bonus
-   ```
-
-   where `recency = 0.5 ^ (recency_days / half_life)` (half-life defaults to 30
-   days, overridable via `recency_half_life_days`), and `scope_bonus = 0.15` when
-   the hit's `story_id` matches the queried one. Results are sorted descending and
-   truncated to `k`.
-5. **Access bookkeeping.** Every returned hit's `access_count` is incremented and
-   `last_accessed_at` updated, so frequently-recalled memories are gently boosted
-   over time.
-
-Each `MemoryHit` carries the `memory`, its final `score`, and a `why` array (an
-explanation hook — currently emitted empty by the engine).
-
-### Recall brief (token-budgeted)
-
-`POST /workspaces/{ws}/memory/recall` with `{story_id, focus?, token_budget?}`
-assembles a compact **`RecallBrief`** for an agent: it runs grouped hybrid searches
-(Constraints & Requirements, Decisions, Key Facts, Answered Questions, Learnings,
-Background) scoped to the story, packing as many hits as fit under the token budget
-(default 2000; Product calls it with 4000). The returned brief is a list of
-markdown sections plus the `token_estimate` and the `used` memory ids. Untrusted
-text is defanged (backticks/newlines neutralized) so a stored note can't act as a
-prompt instruction when the brief is composed into an agent's context.
-
----
-
-## 6. Embeddings (local-first)
-
-**Embeddings are computed on every write** (`MemoryService::embed_one` embeds
-`title + "\n" + body`) and stored as little-endian `f32[dim]` BLOBs in the
-`memory_vectors` table, keyed by `memory_id` + `model_id` + `dim`. Search embeds
-the query the same way and compares with cosine similarity.
-
-### What actually runs today
-
-The shipped daemon uses **`MemoryService::with_defaults`**, which wires the
-**`StubEmbedder`** (`crates/otto-memory/src/embed.rs`):
-
-- **Model id:** `stub-v1`, **dimension:** 256.
-- **Algorithm:** a deterministic, unit-normalized hashed bag-of-words — each token
-  is FNV-1a-hashed into one of 256 feature buckets. Notes that share tokens land on
-  closer vectors.
-- **Local-first by design:** no model download, no network call, no API key, zero
-  extra dependencies. This is what makes the Vault work out of the box and entirely
-  offline.
-
-It is explicitly *not* a substitute for a real semantic model — for short,
-keyword-overlapping notes it behaves much like a fuzzy keyword matcher, which is
-why `hybrid` mode (keyword ⊕ vector, RRF-fused) is the default and gives the best
-results with the stub in place.
-
-### Real embedders (designed, not wired)
-
-The `Embedder` trait has additional implementations in the codebase, intended to
-swap in behind the same seam:
-
-- **Remote** (`RemoteEmbedder`) — an OpenAI-/Voyage-compatible client that POSTs
-  `{model, input}` to `<base>/embeddings` with a bearer token. Presets:
-  OpenAI `text-embedding-3-small` (1536-dim) at `https://api.openai.com/v1`, and
-  Voyage `voyage-3` (1024-dim) at `https://api.voyageai.com/v1`. API keys are
-  passed in as resolved strings (sourced from the macOS Keychain) and **never**
-  stored in the DB.
-- **Local** — comments reference a `fastembed`-backed local model as the intended
-  on-device option.
-
-**However:** `crates/otto-memory/Cargo.toml` declares **no `[features]` and no
-`fastembed` dependency**, and `ottod/src/main.rs` only ever constructs the stub
-(`with_defaults`) or a remote *backend* (a different thing — see §7/§10). There is
-**no setting, env var, or build feature in the current tree that activates the
-`RemoteEmbedder` or a local `fastembed` model in the running daemon.** The
-`with_embedder(pool, embedder)` constructor exists as the one-line wiring point for
-when that lands. Treat real embedders as a designed-and-tested seam, not a
-user-facing option yet.
-
-> **Bottom line on the embedding question:** today the Vault embeds **locally with
-> a built-in deterministic stub** (`stub-v1`, 256-dim, no key, offline). API-based
-> embedders (OpenAI/Voyage) and a local `fastembed` model are implemented behind
-> the `Embedder` trait but are **not** connected to the shipped daemon.
-
-### Vectors & the index
-
-`sqlite-vec` and an HNSW ANN index are mentioned only as future seams in code
-comments. The active `VectorIndex` is **`BruteForceIndex`**: it loads every
-workspace vector for the current model and computes cosine in-process. This is
-sub-millisecond at single-user scale; for very large collections it is the
-documented place to swap in an ANN index behind the same trait.
-
----
-
-## 7. How other features use the Vault
-
-The whole point of the Vault is to let agent-driven features recall a small,
-relevant brief instead of re-fetching and re-stuffing raw context every turn.
-
-- **Product** is the first and primary consumer (`otto-product`,
-  `ProductMemory` in `memory_facade.rs`):
-  - **Ingest** — `POST /workspaces/{ws}/product/stories/{sid}/memory/ingest`
-    extracts a story's **answered questions**, **learnings**, **latest analysis
-    summary**, and **newest version** into typed memories (`qa`, `learning`,
-    `summary`, etc.) tagged with the `story_id`. Dedup and embedding happen inside
-    `save`, so repeated ingests are idempotent. Returns `{ingested}` (the number of
-    candidate memories submitted). Editor-gated.
-  - **Recall** — `ProductMemory::recall_brief` calls the engine's `recall_brief`
-    with a 4000-token budget, producing the grouped background brief an agent reads
-    in place of the raw Jira/Confluence artifacts.
-- **Agents / swarm.** The engine and the `recall`/`search` endpoints are
-  domain-agnostic and available to any caller with Viewer access, but at the time
-  of writing **only Product wires the recall façade** — `otto-swarm`,
-  `otto-context`, `otto-sessions`, and `otto-orchestrator` do not yet call the
-  Vault directly. Agents reach Vault content through Product's recall brief (and, of
-  course, through the HTTP API if scripted via an API token).
-- **Governed config import.** Any feature can fold an AGENTS.md / CLAUDE.md /
-  .cursorrules into the `platform-map` collection (see §4), making the project's
-  own operating rules recallable knowledge.
-
----
-
-## 8. API / contract reference
-
-All paths are relative to the `/api/v1` mount and require a bearer token. The
-authoritative contract is `docs/contracts/api.md` (*Memory layer*) and the
-TypeScript mirror in `ui/src/lib/api/types.ts`. Reads require workspace **Viewer**;
-mutations require **Editor**.
-
-### Core (router: `otto-memory/src/http.rs`)
-
-| Method & path | Auth | Request | Response |
-|---|---|---|---|
-| `GET /workspaces/{ws}/memories` | Viewer | query: `collection?, kind?, story_id?, tag?, include_inactive?, limit?` | `Memory[]` |
-| `POST /workspaces/{ws}/memories` | Editor | `NewMemory` | `Memory` (exact-dup save returns the existing row) |
-| `GET /workspaces/{ws}/memories/{id}` | Viewer | — | `Memory` (404 for another user's `private` memory) |
-| `PATCH /workspaces/{ws}/memories/{id}` | Editor | `MemoryPatch` | `Memory` |
-| `DELETE /workspaces/{ws}/memories/{id}` | Editor | — | `204` (soft-delete: `active=false`) |
-| `GET /workspaces/{ws}/memories/{id}/links` | Viewer | — | `MemoryLink[]` |
-| `POST /workspaces/{ws}/memory/search` | Viewer | `MemoryQuery` | `MemoryHit[]` (hybrid keyword⊕vector, RRF-fused, re-ranked) |
-| `POST /workspaces/{ws}/memory/recall` | Viewer | `{story_id, focus?, token_budget?}` | `RecallBrief` |
-| `GET /workspaces/{ws}/memory/graph` | Viewer | query: `collection?` | `GraphData {nodes, edges}` |
-| `POST /workspaces/{ws}/memory/ingest-text` | Editor | `{collection?, path, content}` | `{chunks}` |
-| `POST /workspaces/{ws}/memory/import-graph` | Editor | `{collection?, graph:{nodes,edges}}` | `ImportStats {nodes, edges}` |
-| `GET /workspaces/{ws}/memory/entities/{id}/graph` | Viewer | — | `{links, neighbors}` |
-| `POST /workspaces/{ws}/product/stories/{sid}/memory/ingest` | Editor | — | `{ingested}` |
-
-### Governance (router: `otto-server/src/memory_gov.rs` — all Editor)
-
-| Method & path | Request | Response |
+| Layer | Path | Responsibility |
 |---|---|---|
-| `POST /workspaces/{ws}/memory/{mid}/state` | `{state}` | `Memory` |
-| `POST /workspaces/{ws}/memory/{mid}/forget` | — | `{undo_token}` |
-| `POST /workspaces/{ws}/memory/{mid}/forget/undo` | `{undo_token}` | `Memory` (restored) |
-| `POST /workspaces/{ws}/memory/merge` | `{ids, title, body}` | `{memory}` |
-| `POST /workspaces/{ws}/memory/{mid}/split` | `{parts:[{title,body},…]}` | `{memories}` |
-| `POST /workspaces/{ws}/memory/import` | `{kind, content, label?}` | `{imported, import_id}` |
+| Engine crate | `crates/otto-vault/` | Scan/parse/resolve/index, note CRUD, rename-with-link-rewrite, search, switcher, graph payloads, OKF validator |
+| · parsing | `crates/otto-vault/src/parse.rs` | Frontmatter (YAML), wikilinks/md links/embeds, tags, headings, aliases — code fences excluded |
+| · resolution | `crates/otto-vault/src/resolve.rs` | Obsidian shortest-path link resolution |
+| · scanning | `crates/otto-vault/src/scan.rs`, `engine.rs` | Incremental (size+mtime) walk; freshness kicks |
+| · OKF | `crates/otto-vault/src/okf.rs` | E1–E3 / W1–W5 conformance + `index.md` generation |
+| · HTTP | `crates/otto-vault/src/http.rs` | The `/workspaces/{ws}/vault/*` router |
+| Persistence | `crates/otto-state/migrations/0103_vault_docs.sql` | `vaults`, `vault_notes`, `vault_links`, `vault_tags`, `vault_files` (+ runtime FTS5 `vault_fts`); the same migration **dropped** the v2 vector/backends/code tables |
+| MCP (session) | `crates/ottod/src/mcp_tools.rs` | `otto_vault_list/dir/read/search/backlinks/tags/graph/okf_validate` + `write/rename/delete` |
+| MCP (outward) | `crates/otto-server/src/mcp_outward.rs` | `otto.vault_*` — reads default-enabled, writes approval-gated |
+| Global search | `crates/otto-server/src/routes/search.rs` | ⌘F fans out to `vault_fts` (`kind: "vault_note"`) |
+| UI | `ui/src/modules/vault/` | `VaultPage` + `FileTree`, `NoteView`, `mdRender`, `RightPanel`, `SearchPanel`, `TagsPanel`, `Switcher`, `NewNoteDialog`, `GraphView` + `graph.worker.ts`, store `vault.svelte.ts` |
+| Contracts (authoritative) | `docs/contracts/api.md` → *Vault v3 — the docs home* | The REST surface; DTOs mirrored in `ui/src/lib/api/types.ts` |
+| Bundled skills | `okf-authoring`, `vault-repo-docs` | The OKF doctrine for agents; "index a repo" = write a linked OKF bundle into the vault |
 
-**Query notes** — `MemoryQuery.mode` ∈ `{hybrid (default), semantic, keyword}`;
-`k` defaults to 20. `visibility` ∈ `{shared (default), private}`. `viewer` is set
-server-side from the authenticated user and is never read from the client body.
+In the app, the Vault is the **Vault** item in the left nav (globe icon); the
+route is `#/vault`. Everything is workspace-scoped; RBAC rides the existing
+**Product** feature class (reads = View, writes = Edit — including View-gated
+read-shaped POSTs for `search` and `okf/validate`).
+
+### The derived index, in one screen
+
+Per note the index stores: `path`, `title` (frontmatter or filename stem),
+`okf_type`, `description`, the full `frontmatter_json` (unknown keys preserved),
+`tags_json` (frontmatter list *or* scalar + inline `#tags`, nested `#a/b`
+supported), `aliases`, `headings_json` (outline + `#anchor` targets),
+`word_count`, `size`, `mtime_ns`, and a content `hash` (sha256 — change
+detection + optimistic concurrency). Links are rows of
+`(src_path, raw_target, dst_path, kind: wiki|md|embed, anchor, alias)` —
+`dst_path NULL` means **unresolved** (legal; rendered dashed). Non-markdown
+files (images, PDFs…) are indexed as attachments in `vault_files` and served
+via the traversal-guarded `GET …/asset?path=` route. Any of it can be rebuilt
+from disk by a rescan.
+
+**Link resolution** follows Obsidian's shortest-path rules: exact relative path
+→ vault-root-relative → **unique** basename match anywhere in the vault
+(case-insensitive, `.md` optional); OKF's `/`-bundle-absolute links and
+`%20`-encoded markdown links also resolve. An **ambiguous basename stays
+unresolved** — surfaced in the unresolved count, never silently picked.
 
 ---
 
-## 9. Capabilities & limitations
+## 3. Setup — add a vault
+
+No external setup, accounts, or dependencies. From the Vault page:
+
+1. **Add a vault** (the empty-state button, or the vault switcher menu →
+   *Add vault…*). Give it a **name** and either:
+   - a **folder path** — registers an *existing* directory. Point it at a real
+     Obsidian vault (`~/Documents/Obsidian/MyVault`); the scanner skips
+     `.obsidian/`, `.git/`, `.trash/`, hidden files and `node_modules`, so
+     Obsidian and Otto coexist on the same files; or
+   - **leave the folder blank** — Otto creates `~/.otto/vault/<slug(name)>`.
+2. Tick **OKF vault** (default on) to enable Open Knowledge Format validation,
+   templates, and the OKF panel. It's a per-vault flag you can toggle later.
+3. Registration kicks a **full scan**; the header shows "Indexing vault…" while
+   `scan_state = scanning`, then note/link/unresolved counts.
+
+A workspace can register **multiple vaults**; the header button switches
+between them (the last selection is remembered per workspace). **Unregister
+vault (keeps files)** removes only the registration + index — files on disk are
+never touched. **Rescan** (toolbar / context menu) forces a full incremental
+pass.
+
+### Freshness model (no filesystem watcher)
+
+- **Writes are eagerly indexed** — every write/rename/delete/folder op through
+  the API or MCP re-scans before returning, so API/MCP writers always read
+  their own writes.
+- **Reads self-heal**: `GET /status` and every read (search, backlinks, graph,
+  dir, note — including the MCP tools) kick a **background incremental scan**
+  when the index is **>5 s stale**, so agents with no UI open stay fresh too.
+- The UI polls `/status` every 5 s while the page is visible; **edits made
+  externally (e.g. in Obsidian) appear within one poll cycle.** Concurrent scan
+  kicks coalesce; a scan diffs `(size, mtime)` and re-parses only changes, then
+  re-resolves links touching the changed paths.
+
+---
+
+## 4. Walkthrough — the UI
+
+Three-pane, Obsidian-style layout: left sidebar (Files / Search / Tags), center
+(note or graph), right panel (Backlinks / Outgoing / Outline / Properties /
+OKF). Both side panes are drag-resizable and persisted; the status bar shows
+**backlinks · words · characters · OKF badge · vault root path**. On phones the
+layout stacks (left pane becomes a top strip).
+
+### 4.1 File explorer
+
+A **virtualized, lazily-loaded tree** (directory levels fetch on expand — big
+vaults stay cheap). Row click opens a note; context menu:
+
+- **New note here / New folder here** (folders only)
+- **Rename** (inline) and **Move to…** (path prompt) — both are the same
+  server-side rename: the file/folder is moved on disk, then **every
+  referencing wikilink and markdown link across the vault is rewritten on
+  disk** (aliases and `#anchors` preserved, link style preserved); a toast
+  reports "N links updated". Rename refuses to overwrite an existing target;
+  case-only renames use a two-step move (APFS is case-insensitive); after a
+  rename the whole vault re-resolves, so a basename that just became ambiguous
+  surfaces as unresolved rather than silently re-pointing.
+- **Delete (→ .trash)** — a **soft delete**: the note moves to
+  `<vault>/.trash/…` inside the vault. Nothing is ever destroyed.
+
+You can also **drag a file onto a folder** to move it (same link-rewriting
+rename). Attachments appear in the tree; reserved OKF files (`index.md`,
+`log.md`) are styled dimmer. **⌘N** (or the + toolbar button) opens the
+new-note dialog — in an OKF vault it offers a **concept template** picker
+(Service / Reference / Decision / Runbook / Playbook / Metric / Dataset) that
+pre-fills `type/title/description/tags/timestamp` frontmatter plus
+`# Overview` / `# Citations` sections.
+
+### 4.2 Editor ⇄ reading view
+
+Each note opens with a breadcrumb and an **edit ⇄ read toggle** (**⌘E**); the
+chosen mode is remembered per vault.
+
+**Editing** is CodeMirror (markdown), with:
+
+- **Autosave** — 800 ms debounce after you stop typing, plus **⌘S** to save
+  now. Saves send the note's last-known content hash (`if_hash`).
+- **Conflict banner** — if the file changed on disk meanwhile (Obsidian, an
+  agent, another session), the write returns **409** and a banner offers
+  **Reload disk version** / **Overwrite**. It never auto-retries.
+- **`[[` wikilink completion** — live, server-side fuzzy over titles,
+  **aliases**, and paths (the same endpoint as the quick switcher). Picking an
+  alias inserts `[[File|alias]]`.
+- **`#` tag completion** from the vault's existing tags (with counts).
+
+**Reading view** renders GFM through an **allowlist sanitizer** (no scripts,
+iframes, or event handlers survive), with the Obsidian constructs:
+
+- **Wikilinks** in all forms: `[[note]]`, `[[note|alias]]`,
+  `[[note#heading]]` (opens and scrolls to the heading), `[[#heading]]`
+  (same-note anchor), and `#^block` block anchors (parsed and resolved to the
+  note). Unresolved links render dashed at reduced opacity — **click one to
+  create that note**.
+- **Embeds** — `![[note]]` renders the target inline in a bordered card
+  (depth 1, cycle-guarded — an embed never re-embeds); `![[image.png]]` and
+  `![](image.png)` render the attachment via an authenticated blob URL.
+- **Markdown links** — `[text](other-note.md)` (OKF's link form) resolves like
+  a wikilink, `%20` decoded; external URLs open in a new tab.
+- **Callouts** — `> [!note]`-style blockquotes get a styled card (warning /
+  caution / danger / bug variants get their own colors).
+- **`%%comments%%`** — hidden in reading view (single- and multi-line, outside
+  code fences), kept verbatim in the raw file.
+- **Tags** — inline `#tag` renders as a chip; clicking it runs a `tag:` search.
+- **Frontmatter** is stripped from the body (the Properties panel shows it);
+  code blocks are syntax-highlighted.
+
+### 4.3 Right panel — backlinks, outgoing, outline, properties
+
+- **Backlinks** ("linked mentions") — every note linking *to* this one, each
+  with a **context snippet**; click to jump. The count also shows in the
+  status bar.
+- **Outgoing links** — this note's links (embeds marked `⧉`, unresolved
+  flagged).
+- **Outline** — the heading tree; click to scroll the reading view.
+- **Properties** — the frontmatter as a key/value table (OKF fields —
+  `type`, `title`, `description`, `resource`, `tags`, `timestamp` — are
+  highlighted in OKF vaults; unparseable YAML shows a warning). Properties are
+  edited in the editor, not in the table.
+- **OKF card** (OKF vaults) — see §4.6.
+
+### 4.4 Search & tags
+
+Left-sidebar **Search** mode runs FTS5 (`bm25`-ranked) over titles + bodies
+with **highlighted snippets**. Operators compose inside the query:
+
+```
+deploy tag:runbook          # full-text AND tag filter
+path:services/ kafka        # restrict to a subtree
+type:Decision retention     # OKF type filter
+```
+
+**Tags** mode lists every tag with its count (frontmatter + inline, nested
+`a/b` tags included); clicking a tag jumps to a `tag:` search. Notes **>4 MiB**
+are indexed metadata-only (title/links/tags but no FTS body) so a giant log
+can't bloat the index.
+
+Vault notes are also **first-class results in the global ⌘F search**
+(`kind: "vault_note"`), routed back to `#/vault` with the right vault + note
+selected.
+
+### 4.5 Quick switcher (⌘O)
+
+**⌘O** opens the switcher: server-side fuzzy matching over **title, aliases,
+and path** (subsequence scoring), so a 100k-note vault never ships its full
+note list to the client. Alias hits display as `alias → real title`. **Enter**
+opens; **Shift+Enter** (or Enter with no hits) **creates a note by that name**.
+Reserved OKF files are excluded from switcher results.
+
+### 4.6 The OKF card — Open Knowledge Format
+
+OKF v0.1 is the vault's documentation standard: markdown + YAML frontmatter
+concepts, `index.md`/`log.md` reserved files, markdown links between concepts.
+For OKF vaults the right panel's **OKF** section (and the status-bar badge)
+exposes:
+
+- **Validate** — the deterministic conformance checker ("never eyeball
+  conformance"). Findings are clickable (opens the offending note):
+
+  | Rule | Severity | Meaning |
+  |---|---|---|
+  | E1 | error | missing or unparseable frontmatter |
+  | E2 | error | missing/empty `type` |
+  | E3 | error | reserved-file structure (only the bundle-root `index.md` may carry frontmatter, and only `okf_version`; `log.md` never) |
+  | W1 | warning | missing `title` or `description` |
+  | W2 | warning | broken internal link |
+  | W3 | warning | no `timestamp` |
+  | W4 | warning | directory without an `index.md` |
+  | W5 | warning | `log.md` `##` headings not ISO `YYYY-MM-DD` |
+
+  Warnings never fail a bundle — permissive consumption is intentional, and a
+  malformed note is indexed with a parse-error flag rather than aborting a scan.
+- **Generate indexes** — regenerates per-directory `index.md` files from the
+  notes' frontmatter descriptions (root index carries `okf_version`).
+
+`index.md`/`log.md` are flagged `reserved` everywhere: excluded from the
+switcher and (by default) the graph, never validated as concepts, searchable
+but marked. The OKF `type` drives the `type:` search operator and graph
+grouping. Two bundled skills make agents fluent: **`okf-authoring`** (the full
+OKF doctrine — produce/maintain/consume, augment-don't-rewrite, validate via
+tool not eyeballs) and **`vault-repo-docs`** ("index a repo" = read the code
+and write a linked OKF bundle — services/, endpoints/, decisions/, runbooks/ —
+into the vault, then validate).
+
+### 4.7 Graph view
+
+The graph toolbar button switches the center pane to a **Canvas2D graph of the
+whole vault** — engineered so scale is a rendering problem, not a feature
+limit (design budget: **100k nodes / 1–2M edges on an M-series laptop**):
+
+- **Wire format** — one compact JSON payload of parallel arrays
+  (`paths/titles/groups/flags` + a flat `[src,dst,…]` edge index list); ~1M
+  edges is 8–14 MB of local JSON, no per-object overhead.
+- **Layout** — a Web Worker (`graph.worker.ts`) runs Barnes-Hut quadtree
+  repulsion + springs + gravity over `Float32Array`s, posting positions back as
+  transferable, double-buffered buffers; above 30k nodes it seeds positions by
+  group cluster so layout converges in bounded time. **Stop/Resume layout** is
+  a button; dragging pins a node (double-click unpins; double-click the
+  background re-fits).
+- **Rendering honesty** — every edge exists and is reachable, but past a
+  ~150k-segment per-frame draw budget the renderer **deterministically samples
+  edges and fades them**; zooming in restores full detail through viewport
+  culling. Labels are budgeted to the top-degree nodes in view and fade in with
+  zoom (the *Text fade* slider). Node size scales with degree. This is the same
+  trade Obsidian makes, at a much higher ceiling — full simultaneous rendering
+  of 2M edges is beyond any tool.
+- **Filters** — a title filter (dims non-matches, client-side) and server-side
+  toggles: **Tags** (tag nodes), **Orphans**, **Unresolved** (ghost nodes),
+  **Reserved files**; **Group by** folder or OKF `type` colors clusters with a
+  stable palette.
+- **Forces / Display** — Obsidian-parity sliders: center / repel / link force /
+  link distance (live-tuned in the worker), node size / link width / text fade
+  (render-only).
+- **Full-graph edge budget** — `mode=full` enforces a server-side,
+  degree-prioritized edge budget (default 2M, `?edge_budget=` override); the
+  status strip shows a **truncated** chip when it was hit.
+- **Local graph** — the server does BFS neighborhoods (`mode=local`, `path=`,
+  `depth ≤ 3`) so the common case never ships the whole graph; the GraphView
+  component supports a local mode with a depth slider, and local is the
+  **default mode of the `otto_vault_graph` MCP tool**. The shipped Vault page
+  currently mounts the full-vault graph; local neighborhoods are served over
+  the API/MCP.
+
+Clicking a (non-ghost, non-tag) node opens the note.
+
+---
+
+## 5. API surface
+
+Authoritative contract: `docs/contracts/api.md` → **Vault v3 — the docs home**
+(DTOs mirrored in `ui/src/lib/api/types.ts`). The shape in brief — all under
+`/api/v1/workspaces/{ws}/vault/…`, reads `ws viewer`, writes `ws editor`:
+
+| Area | Routes |
+|---|---|
+| Vaults | `GET/POST /vault/vaults`, `PATCH/DELETE /vault/vaults/{id}`, `POST …/rescan`, `GET …/status` |
+| Files | `GET …/dir?path=`, `GET/PUT/DELETE …/note`, `POST …/rename` (→ `{links_updated}`), `POST …/folder`, `GET …/asset?path=` |
+| Knowledge | `GET …/backlinks?path=`, `POST …/search`, `GET …/switcher?q=`, `GET …/tags`, `GET …/graph?mode=full\|local&…` |
+| OKF | `POST …/okf/validate`, `POST …/okf/indexes` |
+
+Notable semantics (see the contract for the full notes): `PUT …/note` takes
+`if_hash` for optimistic concurrency (`""` = must-not-exist; mismatch → 409)
+and auto-creates parent folders; `DELETE …/note` moves to `.trash/`;
+`DELETE /vault/vaults/{id}` unregisters **only** (files untouched); every file
+op canonicalizes paths and rejects traversal/symlink escapes.
+
+There are **no vault WebSocket events** — the UI stays fresh via the 5 s
+status poll + scan-completion refreshes.
+
+## 6. MCP surface — agents read & write the docs home
+
+**Session tools** (the first-party `otto` server injected into agent sessions
+via `.mcp.json` / codex `--config`; calls run **as the session owner**, so
+workspace RBAC applies — an agent can only do what its owner could):
+
+| Tool | Kind | Maps to |
+|---|---|---|
+| `otto_vault_list` | read | list vaults (+counts, scan state) |
+| `otto_vault_dir` | read | one level of the tree (dirs / notes / attachments) |
+| `otto_vault_read` | read | note raw + meta + outgoing (+backlinks inline) |
+| `otto_vault_search` | read | FTS search (`tag:`/`path:`/`type:` operators) |
+| `otto_vault_backlinks` | read | linked mentions with snippets |
+| `otto_vault_tags` | read | tag counts |
+| `otto_vault_graph` | read | graph payload (**local** neighborhood by default; `mode=full` opt-in) |
+| `otto_vault_okf_validate` | read | the deterministic OKF report |
+| `otto_vault_write` | **write** | create/update a note (Editor-gated; parent folders auto-created; `if_hash` honored) |
+| `otto_vault_rename` | **write** | move + rewrite links across the vault |
+| `otto_vault_delete` | **write** | soft delete → `.trash/` |
+
+These three writers (plus the two canvas tools) are the only mutating tools in
+an otherwise read-only session-MCP surface. Every read runs the >5 s staleness
+check first, so agents always see fresh indexes.
+
+**Outward tools** (`otto.vault_*` on the outward MCP server, for external MCP
+clients): the eight reads are in the **default-enabled** set once the server is
+on; `otto.vault_write` / `otto.vault_rename` / `otto.vault_delete` are
+classified **DANGEROUS** — off by default and approval-gated by the control
+plane like every other write. See
+[`./mcp-control-plane.md`](./mcp-control-plane.md).
+
+## 7. The memories layer (what remains of v1/v2)
+
+The **workspace memory store** (`otto-memory`: `memories` / `memory_links`,
+lifecycle + governance, Product story ingest, `otto_search_memory`) is a
+separate feature that **stays** — but it is now **keyword-only** (FTS5 → LIKE
+fallback). `MemoryQuery.mode` still accepts `hybrid` / `semantic` as tolerated
+aliases, and **all modes execute the keyword path** — no embeddings are
+computed anywhere. Memories have **no Vault UI anymore** (the vault page is
+docs-only); the Product page and MCP/API are the memory consumers. The optional
+`OTTO_MEMORY_VAULT_DIR` markdown mirror and the `OTTO_MEMORY_REMOTE_URL`
+keyword-proxy remain. Contract: `docs/contracts/api.md` → *Memory layer*.
+
+---
+
+## 8. Capabilities & limitations
 
 **Capabilities**
-- Workspace-scoped notes across multiple collections, with a typed `kind`
-  taxonomy and provenance refs.
-- A first-class link graph (`memory_links`) with backlinks and a built-in,
-  dependency-free SVG graph view.
-- Hybrid recall: keyword (`LIKE`) ⊕ vector (cosine), RRF-fused and re-ranked by
-  recency, usage, confidence×salience, and story-scope match.
-- Exact-duplicate-safe (idempotent) saves via normalized body hashing.
-- Token-budgeted recall briefs for agents.
-- Full lifecycle governance: state machine, soft-delete with undo, merge, split,
-  provenance diff, and audited governed-config import.
-- Per-user `shared`/`private` visibility.
-- Optional Obsidian-vault markdown write-through + re-index for git-based sharing.
-- Optional shared-host backend so a team can share one Vault across machines.
 
-**Limitations / honest gaps**
-- **The shipped embedder is a deterministic stub**, not a learned semantic model;
-  real local (`fastembed`) and remote (OpenAI/Voyage) embedders are coded behind
-  the trait but not wired in or feature-flagged in the current tree.
-- **Brute-force vector search** only — fine for single-user scale; no ANN index
-  (`sqlite-vec`/HNSW) is wired despite the comment seams.
-- **Keyword search is `LIKE`-based**, not FTS5 — robust and always-available but
-  not stemmed/ranked like a true full-text index. (The contract's "FTS5" framing
-  describes the intended class of feature; the implementation is a `LIKE`
-  prefilter + term-count ranking.)
-- **Only Product consumes recall** today; other agent features don't yet read the
-  Vault directly.
-- **No one-click revert** for a governed import (the batch is tracked, but you
-  forget the rows manually).
-- The `MemoryHit.why` explanation array is currently emitted empty.
-- A shared SQLite **file** over a network share is unsupported — use the remote
-  backend or the markdown-vault sync route instead (see §10).
+- Multiple vaults per workspace; a vault is any local folder of markdown —
+  a live Obsidian vault works unmodified, and stays portable (nothing Otto adds
+  to your files except edits you ask for).
+- Derived-only index: everything in SQLite is rebuildable from disk; `.trash/`
+  soft deletes; rename rewrites links vault-wide on disk.
+- Obsidian-parity reading/editing: wikilinks (all forms), embeds, callouts,
+  `%%comments%%`, tags, aliases, unresolved-link create, per-vault edit/read
+  mode, autosave with conflict detection.
+- FTS5 search with operators; server-side fuzzy switcher; scalable graph.
+- OKF: deterministic validation, index generation, templates, reserved files,
+  `type`-driven grouping/filtering; agent skills for authoring + repo docs.
+- Full MCP read/write access with RBAC + approval gates.
 
----
+**Limitations / honest caveats**
 
-## 10. Security & permissions
+- **No filesystem watcher.** External edits are picked up by the freshness
+  model (§3): within one 5 s poll cycle while the page is open, or at the next
+  API/MCP read. They are not pushed instantly.
+- **Notes >4 MiB** are indexed metadata-only — no full-text body search.
+- **Ambiguous basenames stay unresolved** by design (never silently picked);
+  fix by qualifying the link path.
+- **Reserved files** (`index.md`/`log.md`) are excluded from the switcher and
+  (by default) the graph; searchable but flagged.
+- **Graph LOD**: past the draw budget, edges are sampled/faded until you zoom
+  in; `mode=full` may report `truncated` when the server edge budget is hit.
+- The shipped Vault page mounts the **full** graph; local neighborhoods are an
+  API/MCP capability (the component's local mode isn't currently mounted).
+- **No semantic search** — that's the point. Recall = FTS + links + tags +
+  types. (The memory layer likewise accepts but coerces `semantic`/`hybrid`.)
+- Frontmatter is edited as text in the editor; the Properties panel is
+  read-only.
 
-- **Workspace scope is the boundary.** Every query is keyed on `workspace_id`, and
-  the tables `ON DELETE CASCADE` from `workspaces`. There is no cross-workspace
-  read or search. The Vault has no RBAC *feature key* of its own — it ships
-  un-gated, so any authenticated workspace member sees the section — but the
-  per-route checks still enforce **Viewer for reads, Editor for writes** at the
-  workspace-role level (root bypasses the visibility filter).
-- **Per-user visibility.** A `private` memory is visible only to its creator; the
-  `get_one` endpoint returns **404** (not 403) for another user's private memory so
-  its existence isn't leaked, and `list`/`search` exclude others' private rows
-  (the server sets `viewer` from the authenticated user; root sees everything).
-- **Local-first data.** By default everything lives in your local SQLite state DB
-  and embeddings are computed on-device with the stub — no note text or vector
-  leaves the machine, and no API key is required.
-- **Secrets stay out of the DB.** When a remote embedder is used, its API key is a
-  Keychain-resolved string passed in at construction and never persisted.
-- **Prompt-injection defense.** Text composed into a recall brief is defanged
-  (backticks/newlines neutralized) so stored notes can't smuggle instructions into
-  an agent prompt.
-- **Sharing across machines** (operator choice, both opt-in):
-  - **Remote backend** — set `OTTO_MEMORY_REMOTE_URL` (and
-    `OTTO_MEMORY_REMOTE_TOKEN`) so every member's Otto forwards memory operations to
-    one shared host Otto that owns the SQLite (single writer; each member
-    authenticates as themselves, so `shared`/`private` is enforced per-user on the
-    host). Graph import must run on the host.
-  - **Markdown vault sync** — set `OTTO_MEMORY_VAULT_DIR` (ignored when a remote URL
-    is also set) to write each saved memory as an Obsidian-style note under
-    `<dir>/<workspace>/`. Sync that folder with git/Dropbox/Syncthing and re-index
-    it (`reindex_vault`) on other machines. A shared SQLite *file* over a network is
-    explicitly unsupported.
+**Non-goals** (deliberate — plugin territory, not core parity): canvas boards
+(Otto has its own [Canvas](./canvas.md) module), daily notes, sync/publish,
+PDF annotation, community plugins.
 
----
+## 9. Security & permissions
 
-## 11. Troubleshooting
+- **RBAC** — the `/workspaces/{ws}/vault/*` prefix rides the **Product**
+  feature class: reads need View, mutations Editor; the read-shaped POSTs
+  (`search`, `okf/validate`) are explicitly View-gated.
+- **Path safety** — every file op canonicalizes and guards: no `..`, no
+  absolute paths, no hidden/`.trash/` segments, symlink escapes rejected;
+  writes are restricted to the vault root. Attachments are served through the
+  same guard.
+- **Never destructive** — delete = `.trash/` move; unregister touches no files;
+  rename refuses to overwrite an existing target.
+- **Sanitized rendering** — reading-view HTML passes an allowlist sanitizer
+  (`ui/src/lib/sanitize.ts`): no `script`/`style`/`iframe`/`on*` handlers /
+  `javascript:` URLs, so a hostile note can't script the app.
+- **MCP writes are governed** — session tools act as the session owner
+  (Editor gate applies); outward write tools are off by default and
+  approval-gated.
+- **Local-first** — files and the index never leave the machine; no API keys,
+  no network calls, nothing to configure.
+
+## 10. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
-| **"No memories yet"** in the Vault | Nothing has been ingested for this workspace. Run a Product analysis or ingest a story (`POST .../product/stories/{sid}/memory/ingest`), import an AGENTS.md/CLAUDE.md, or create a note via the API. |
-| **Search returns weak/odd matches** | The default embedder is the deterministic stub, so `semantic` mode is approximate. Use `hybrid` (the UI default) and include distinctive keywords; vectors mainly help when terms overlap. |
-| **A saved note didn't create a new row** | Exact-duplicate detection — the same normalized body in the same `(collection, scope, story_id)` returns the existing row. Change the body or scope to create a distinct memory. |
-| **Can't see a teammate's note** | It may be `private` (creator-only). Private rows are invisible to others (404 on direct GET). Ask the creator to set it `shared`. |
-| **Write returns 403** | Writes require workspace **Editor**; reads only need **Viewer**. Check your workspace role. |
-| **Forgot a memory by mistake** | Use the **Undo forget** affordance (7s window in the UI) or `POST .../memory/{mid}/forget/undo` with the `undo_token` returned by forget. The token is single-use. |
-| **Graph view is empty** but the index isn't | The graph only shows **active** memories and existing `memory_links`; freshly ingested notes may have no links yet. Links come from imports, merge/split, or graphify. |
-| **Team can't share one Vault** | Don't point multiple instances at one SQLite file. Use `OTTO_MEMORY_REMOTE_URL` (shared host) or `OTTO_MEMORY_VAULT_DIR` + git sync + re-index. |
-| **Expecting OpenAI/Voyage embeddings** | Not wired into the shipped daemon. The remote/local embedders are scaffolded behind the `Embedder` trait but there is no setting/feature to enable them in the current build (see §6). |
-| **Vault data location** | The `memories`/`memory_vectors`/`memory_links`/`governed_imports` tables in the Otto state SQLite DB (under your Otto data directory). Backing up that DB backs up the Vault. |
+| Header shows **"index error"** / routes return 409 with a scan message | The vault root disappeared (unmounted disk, moved folder) — `scan_state = error:<msg>`. Restore the folder or unregister the vault (files elsewhere are untouched). |
+| **409 on save** / a yellow banner appears | The note changed on disk while you edited (Obsidian, an agent, another session). The conflict banner offers **Reload disk version** or **Overwrite** — nothing auto-retries. |
+| Edits made in Obsidian don't show immediately | No fs watcher — they appear within one 5 s status-poll cycle while the page is open (or at the next read). Hit **Rescan** to force it. |
+| A link renders dashed (unresolved) after a rename | The rename made that basename ambiguous (two files now share it) — vault-wide re-resolve surfaces this instead of guessing. Qualify the link with its path. |
+| Clicking an unresolved link asks to create a note | That's the feature — Obsidian-style click-to-create for ghost links. |
+| Big note isn't found by body search | Notes >4 MiB are metadata-only in the index (title/tags/links still work). |
+| `index.md` missing from switcher/graph | Reserved OKF files are excluded by default; the graph has a **Reserved files** toggle. |
+| Graph shows a **truncated** chip | The full-mode server edge budget (default 2M, degree-prioritized) was hit; use the filters/local mode or raise `?edge_budget=`. |
+| Writes fail with 403 | Vault mutations need workspace **Editor** (Product:Edit); reads only View. |
+| OKF errors on `index.md`/`log.md` frontmatter | E3: only the bundle-root `index.md` may carry frontmatter, and only `okf_version`; `log.md` never has frontmatter. |
 
----
+## 11. Related docs
 
-## 12. Related docs
-
-- [`./product.md`](./product.md) — the Product section; the Vault's first consumer
-  (story ingest + recall brief).
-- [`./agent-sessions.md`](./agent-sessions.md) — agent sessions, which read recalled
-  context instead of re-fetching raw artifacts each turn.
-- `docs/contracts/api.md` — authoritative API surface (*Memory layer* + *Must-have
-  wave* governance routes).
-- `crates/otto-memory/` — the engine; `crates/otto-state/src/memory.rs` and
-  `crates/otto-state/migrations/0038–0056` — persistence and schema.
+- `docs/contracts/api.md` — **Vault v3 — the docs home** (authoritative REST
+  surface) and **Memory layer** (the keyword memory store that remains).
+- `docs/superpowers/specs/2026-07-11-vault-docs-home-design.md` — the v3 design
+  + binding amendments.
+- [`./mcp-control-plane.md`](./mcp-control-plane.md) — how the `otto_vault_*` /
+  `otto.vault_*` tools are surfaced and governed.
+- [`./product.md`](./product.md) — Product's story→memory ingest (the memory
+  layer, not the docs vault).
+- [`./canvas.md`](./canvas.md) — Otto's canvas module (why canvas boards are a
+  vault non-goal).
+- Bundled skills: `okf-authoring` (write/validate OKF in the vault),
+  `vault-repo-docs` (document a repo as an OKF bundle).

@@ -119,8 +119,10 @@ pub struct ServerCtx {
     /// Per-run cancellation flags for in-flight product analysis agents (manual
     /// Stop). Mirrors `skill_eval_cancels`.
     pub product_agent_cancels: crate::product_run::CancelRegistry,
-    /// Memory layer — workspace-scoped keyword+vector knowledge store.
+    /// Memory layer — workspace-scoped keyword (FTS) knowledge store.
     pub memory: std::sync::Arc<otto_memory::MemoryService>,
+    /// Vault v3 — the file-backed docs home (markdown vaults, OKF).
+    pub vault: std::sync::Arc<otto_vault::VaultEngine>,
     // -- Agent Swarm -------------------------------------------------------
     pub swarm: Arc<otto_swarm::SwarmService>,
     pub swarm_repo: otto_state::SwarmRepo,

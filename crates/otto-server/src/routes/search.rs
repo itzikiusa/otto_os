@@ -9,7 +9,7 @@
 //!   - workflows (`WorkflowsRepo`)
 //!   - API-client saved requests (`ApiClientRepo`)
 //!   - swarm projects + tasks (`ctx.swarm_repo`)
-//!   - vault memories (`MemoriesRepo` keyword search)
+//!   - memories (`MemoriesRepo` keyword search)
 //!   - git repos (`ctx.git_store`)
 //!   - broker clusters (`BrokerClustersRepo`)
 //!   - canvas scenes (`ctx.canvas_repo`)
@@ -41,7 +41,8 @@ use crate::state::ServerCtx;
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     /// Discriminant: `"story"`, `"workflow"`, `"api_request"`, `"swarm_task"`,
-    /// `"swarm_project"`, `"memory"`, `"repo"`, `"broker_cluster"`, `"canvas"`.
+    /// `"swarm_project"`, `"memory"`, `"vault_note"`, `"repo"`,
+    /// `"broker_cluster"`, `"canvas"`.
     pub kind: String,
     /// Object id (workspace-scoped row id).
     pub id: String,
@@ -261,6 +262,30 @@ pub async fn search(
                         actions: vec!["open".into(), "copy-context".into()],
                     },
                 });
+            }
+        }
+    }
+
+    // --- 5b. Vault notes (docs home) ---------------------------------------
+    // FTS over every registered vault; the hit id is `<vault_id>:<path>` so the
+    // UI can route to `#/vault` with the right vault + note selected.
+    if let Ok(vaults) = ctx.vault.list(ws_id.as_str()).await {
+        for v in vaults {
+            let req = otto_vault::types::SearchReq { query: q.clone(), limit: CAP, ..Default::default() };
+            if let Ok(hits) = ctx.vault.search(ws_id.as_str(), v.id, &req).await {
+                for h in hits.into_iter().take(CAP) {
+                    all.push(Scored {
+                        score: if h.title.to_lowercase().contains(&q) { 2 } else { 1 },
+                        updated_at: String::new(),
+                        hit: SearchHit {
+                            kind: "vault_note".into(),
+                            id: format!("{}:{}", v.id, h.path),
+                            title: h.title,
+                            subtitle: Some(h.path),
+                            actions: vec!["open".into()],
+                        },
+                    });
+                }
             }
         }
     }

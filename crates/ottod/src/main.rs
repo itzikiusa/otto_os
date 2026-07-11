@@ -202,8 +202,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     ]);
 
     // The context provisioner is the single PreSpawnHook every session flows
-    // through. Held separately so the Vault "Repo Brain" source can be wired in
-    // once the memory service exists (below), making ALL agents consume the vault.
+    // through.
     let provisioner = Arc::new(otto_context::Provisioner::new(context_library.clone()));
     let manager = Arc::new(
         SessionManager::new(SessionsRepo::new(pool.clone()), events.clone(), providers)
@@ -358,13 +357,9 @@ async fn run(cfg: Config) -> Result<(), String> {
         }
         _ => memory,
     };
-    // Wire the configured real embedder (OpenAI/Voyage) from settings + Keychain;
-    // a misconfigured provider logs a warning and keeps the local stub default.
-    otto_server::embedder::apply_configured_embedder(&memory, &settings, &secrets).await;
-    // Wire the Vault Repo Brain into the spawn hook so EVERY agent session gets
-    // the workspace's repo brain (indexed repos, key deps, relevant symbols/
-    // knowledge/git), not just Product.
-    provisioner.set_brain_source(memory.clone());
+    // Vault v3 — the file-backed docs home (markdown vaults on disk, derived
+    // SQLite index, OKF validation). No embeddings anywhere.
+    let vault = Arc::new(otto_vault::VaultEngine::new(pool.clone()));
 
     // One shared auth-lookup cache: the authenticator fills it, the grants route
     // (via ServerCtx.auth_cache) evicts from it on set_grants. Clones share the
@@ -464,6 +459,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         canvas_repo,
         product_agent_cancels: otto_server::product_run::new_cancel_registry(),
         memory,
+        vault,
         swarm,
         swarm_repo,
         swarm_coords: otto_server::swarm_runtime::new_registry(),
@@ -824,11 +820,6 @@ async fn run(cfg: Config) -> Result<(), String> {
     // that re-derive from the authoritative repos and refresh per-session cost.
     let _workgraph_projector_handle = otto_server::workgraph_projector::spawn(ctx.clone());
     tracing::info!("workgraph projector started");
-
-    // --- Vault v2 remote backends ---
-    // Re-register every enabled Qdrant/SurrealDB/Ollama backend on the live
-    // memory service (best-effort; a down backend just falls back to SQLite).
-    otto_server::vault_routes::apply_configured_backends(&ctx).await;
 
     // --- Scheduled Tasks ---
     // Fires due recurring agent jobs (interval/daily/weekly), reaps interrupted
