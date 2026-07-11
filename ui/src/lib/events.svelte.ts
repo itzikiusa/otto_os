@@ -267,6 +267,9 @@ class EventsClient {
   private backoff = 1000;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  // True once any connection has opened — distinguishes a RE-connect (which
+  // must resync event-driven stores; events were lost) from the first connect.
+  private everConnected = false;
 
   start(): void {
     this.stopped = false;
@@ -317,8 +320,15 @@ class EventsClient {
       return;
     }
     this.sock.onopen = () => {
+      // Events that fired while the socket was down are gone for good — on a
+      // RE-connect (daemon restart, sleep/wake, network blip) resync the
+      // event-driven stores so boards/counts don't stay frozen at the last
+      // delivered event. First connect skips it: pages load their own data.
+      const reconnected = this.everConnected;
+      this.everConnected = true;
       this.state = 'connected';
       this.backoff = 1000;
+      if (reconnected) void swarm.resync();
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;

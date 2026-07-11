@@ -100,6 +100,30 @@ class SwarmStore {
   }
 
   /**
+   * Refetch the open swarm's live surfaces after a WS reconnect: any
+   * swarm_task/run events that fired while the socket was down are gone for
+   * good, so pull detail (counts), tasks, runs, board and graph fresh — in
+   * place, without touching the user's project selection or the loading flag.
+   */
+  async resync(): Promise<void> {
+    const sid = this.detail?.id;
+    if (!sid) return;
+    try {
+      const detail = await api.get<SwarmDetail>(`/swarm/swarms/${sid}`);
+      if (this.detail?.id !== sid) return; // navigated away mid-flight
+      this.detail = detail;
+      await Promise.all([
+        this.loadAllTasks(),
+        this.loadRuns({ swarm_id: sid }),
+        this.loadBoard(),
+        this.loadGraph(sid),
+      ]);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
    * Deep-link helper: ensure swarms are loaded for `workspaceId`, open `sid`,
    * select project `pid`, and flag the Kanban view. Used by the Product → Swarm
    * hand-off so the user lands directly on the new project's board.

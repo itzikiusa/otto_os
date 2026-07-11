@@ -1524,6 +1524,9 @@ async fn plan(
             order_idx: i as i64,
             created_by: user.0.id.clone(),
         }).await {
+            // Live-update open boards: without this, plan-created tasks (and the
+            // column counts) only appear after a manual reload.
+            emit_task(&ctx, &task.id).await;
             by_title.insert(title.to_lowercase(), task.id.clone());
             created.push(task);
         }
@@ -1539,6 +1542,7 @@ async fn plan(
                 let _ = ctx.swarm_repo.update_task(&created_task.id, TaskPatch {
                     depends_on: Some(json!(dep_ids)), ..Default::default()
                 }).await;
+                emit_task(&ctx, &created_task.id).await;
             }
         }
     }
