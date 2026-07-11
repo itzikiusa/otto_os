@@ -220,7 +220,9 @@ pub async fn run_swarm_agent(
             .await;
         emit_run(ctx, &run_id).await;
 
-        // Inject the prompt once the TUI has settled, confirming dispatch.
+        // Inject the prompt once the TUI has settled, confirming dispatch. A
+        // dead/exited PTY means the prompt was NEVER sent — kill and retry
+        // instead of watching a promptless session until the stuck window.
         if wait_for_tui(&ctx.manager, &sid).await {
             let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
             tokio::time::sleep(PASTE_TO_ENTER).await;
@@ -229,6 +231,11 @@ pub async fn run_swarm_agent(
             if !dispatched(&ctx.manager, &sid, before).await {
                 let _ = ctx.manager.input(&sid, b"\r").await;
             }
+        } else {
+            tracing::warn!("swarm_agent_run: TUI never settled for session {sid} — prompt not injected");
+            last_reason = Some(FailReason::Exited);
+            let _ = ctx.manager.kill_session(&sid).await;
+            continue;
         }
 
         let cb_run_id = run_id.clone();

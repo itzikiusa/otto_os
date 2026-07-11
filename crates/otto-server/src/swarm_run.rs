@@ -177,14 +177,22 @@ fn build_prompt(
         p.push_str(
             "You are a LEADER. Do NOT do the hands-on work yourself. Break this down into \
              concrete subtasks for your reports and return them in `subtasks` (give each an \
-             `assignee_role` matching one of your reports' titles). Keep it lean.\n\n",
+             `assignee_role` matching one of your reports' titles). Keep it lean: the FEWEST \
+             subtasks that deliver the goal, and never re-create work that is already on the \
+             team board. You own the plan — when triaging a proposal or handoff, delegate \
+             only what serves the plan and drop the rest (report status \"done\").\n\n",
         );
     } else {
         p.push_str(
             "Do the work now. Use `./otto-post` to share progress, ideas, reviews and concerns \
              with the team as you go. If your role is product/feature design (a PO, analyst, \
              etc.) and you produce a feature draft/spec, publish it to the Product page for the \
-             user to review with: `./otto-product --title \"Feature title\" \"<markdown body>\"`.\n\n",
+             user to review with: `./otto-product --title \"Feature title\" \"<markdown body>\"`.\n\n\
+             Stay on THIS task — the plan is owned by your manager. Do not invent new tasks: \
+             `subtasks` and `handoffs` go to your manager for triage, so use them only when \
+             you truly cannot proceed (at most ONE handoff, never a chain). If something is \
+             out of scope or wrong, say so in `concerns` or report status \"blocked\" — do \
+             NOT bounce work back and forth with another agent.\n\n",
         );
     }
     p.push_str(&format!(
@@ -594,7 +602,10 @@ async fn run_attempt(
     emit_run(ctx, run_id).await;
 
     // Re-provision into the (possibly reused) cwd is already done by the caller.
-    // Inject the brief once the TUI has drawn + settled.
+    // Inject the brief once the TUI has drawn + settled. A dead/exited PTY here
+    // means the brief was NEVER sent — fail the attempt so recovery respawns,
+    // instead of silently watching a promptless session until the stuck window
+    // (the operator sees "a session opened but nothing was sent to it").
     if wait_for_tui(&ctx.manager, &sid).await {
         let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
         tokio::time::sleep(PASTE_TO_ENTER).await;
@@ -603,6 +614,9 @@ async fn run_attempt(
         if !dispatched(&ctx.manager, &sid, before).await {
             let _ = ctx.manager.input(&sid, b"\r").await;
         }
+    } else {
+        tracing::warn!("swarm: TUI never settled for session {sid} — brief not injected");
+        return RunOutcome::failed(Some(sid), FailReason::Exited);
     }
 
     let provider_session_id = ctx
