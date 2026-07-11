@@ -28,6 +28,7 @@ import type {
   Vault,
   VaultBacklink,
   VaultDirEntry,
+  VaultDocsRun,
   VaultNote,
   VaultSearchHit,
   VaultStatus,
@@ -38,7 +39,7 @@ import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
 
 export type LeftMode = 'files' | 'search' | 'tags';
-export type CenterMode = 'note' | 'graph' | 'empty';
+export type CenterMode = 'note' | 'graph' | 'empty' | 'docs-agents';
 
 /** A row of the flattened, lazily-loaded file tree. */
 export interface TreeNode {
@@ -85,6 +86,13 @@ class VaultStore {
   // Quick switcher.
   switcherOpen = $state(false);
 
+  // Docs agents — the current (or last) multi-writer documentation run. The
+  // view owns the 1.5s poll timer; the run lives here so switching to a note
+  // or the graph and back doesn't lose it.
+  docsRun = $state<VaultDocsRun | null>(null);
+  /** Target-folder prefill for the docs-agent form ("Docs agent here"). */
+  docsAgentsDir = $state('');
+
   // OKF.
   okfReport = $state<OkfReport | null>(null);
   okfBusy = $state(false);
@@ -125,6 +133,8 @@ class VaultStore {
     this.backlinks = [];
     this.okfReport = null;
     this.roots = [];
+    this.docsRun = null;
+    this.docsAgentsDir = '';
     this.centerMode = 'empty';
     if (!v) return;
     localStorage.setItem(`${LAST_VAULT_KEY}:${this.wsId}`, String(v.id));
@@ -393,6 +403,14 @@ class VaultStore {
     } catch (e) {
       toasts.error(`Delete: ${msg(e)}`);
     }
+  }
+
+  // -- docs agents -------------------------------------------------------------------
+
+  /** Open the docs-agent center view, optionally prefilled with a folder. */
+  openDocsAgents(dir = ''): void {
+    this.docsAgentsDir = dir;
+    this.centerMode = 'docs-agents';
   }
 
   // -- search / tags / switcher ---------------------------------------------------------

@@ -9,7 +9,20 @@
   import { authedBlobUrl } from '../../lib/api/client';
   import { assetPath, vaultNote } from '../../lib/api/vault';
   import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from './mdRender';
+  import RefineDrawer from './RefineDrawer.svelte';
   import { vault } from './vault.svelte';
+
+  // -- "Refine with AI" drawer — open state lives here keyed BY PATH (outside
+  // the note data), so reloading the note after the agent edits it does not
+  // close the drawer or drop its terminal.
+  let refineOpen = $state<Record<string, boolean>>({});
+  const refineShown = $derived(!!(vault.notePath && refineOpen[vault.notePath]));
+
+  function toggleRefine(): void {
+    const p = vault.notePath;
+    if (!p) return;
+    refineOpen = { ...refineOpen, [p]: !refineOpen[p] };
+  }
 
   // -- attachments: authed blob URLs, cached per path -------------------------
   let assetUrls = $state<Record<string, string>>({});
@@ -176,6 +189,14 @@
         {/if}
         <button
           class="mode-btn"
+          class:refine-on={refineShown}
+          title="Refine with AI"
+          onclick={toggleRefine}
+        >
+          <Icon name="zap" size={14} />
+        </button>
+        <button
+          class="mode-btn"
           title={vault.editing ? 'Reading view (⌘E)' : 'Edit (⌘E)'}
           onclick={() => vault.setView(!vault.editing)}
         >
@@ -211,6 +232,15 @@
       <div class="read md-body" bind:this={readEl} onclick={onReadClick}>
         {@html rendered}
       </div>
+    {/if}
+
+    {#if refineShown && vault.notePath}
+      <!-- Keyed by path (NOT by note content): reloading the same note after
+           the agent's edit keeps the drawer + terminal mounted; opening a
+           different note resets the drawer to that note's refine session. -->
+      {#key vault.notePath}
+        <RefineDrawer path={vault.notePath} />
+      {/key}
     {/if}
   </div>
 {/if}
@@ -261,6 +291,11 @@
   }
   .mode-btn:hover {
     background: var(--hover, rgba(127, 127, 127, 0.12));
+  }
+  .mode-btn.refine-on {
+    border-color: var(--accent, #7a9cff);
+    color: var(--accent, #9ab4ff);
+    background: var(--accent-dim, rgba(90, 120, 255, 0.14));
   }
   .conflict {
     display: flex;

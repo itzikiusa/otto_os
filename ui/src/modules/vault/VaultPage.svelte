@@ -7,6 +7,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import DocsAgentsView from './DocsAgentsView.svelte';
   import FileTree from './FileTree.svelte';
   import GraphView from './GraphView.svelte';
   import NewNoteDialog from './NewNoteDialog.svelte';
@@ -16,6 +17,7 @@
   import Switcher from './Switcher.svelte';
   import TagsPanel from './TagsPanel.svelte';
   import { vault } from './vault.svelte';
+  import FolderPicker from '../../lib/components/FolderPicker.svelte';
 
   // -- pane widths (drag-resizable, persisted) ---------------------------------
   const LEFT_W_KEY = 'otto_vault_left_w';
@@ -60,15 +62,23 @@
   let cPath = $state('');
   let cOkf = $state(true);
   let creating = $state(false);
+  let createError = $state('');
+  // Folder selection uses the shared daemon-side FolderPicker (/fs/browse).
+  let browsing = $state(false);
 
   async function submitCreate(): Promise<void> {
     if (!cName.trim() || creating) return;
     creating = true;
+    createError = '';
     try {
       await vault.create(cName.trim(), cPath.trim() || undefined, cOkf);
       createOpen = false;
       cName = '';
       cPath = '';
+    } catch (e) {
+      // Surface the daemon's reason inline — a silently-failing dialog is the
+      // worst kind of "did nothing".
+      createError = e instanceof Error ? e.message : String(e);
     } finally {
       creating = false;
     }
@@ -181,6 +191,17 @@
       >
         <Icon name="share" size={14} />
       </button>
+      <button
+        class="tool"
+        class:active={vault.centerMode === 'docs-agents'}
+        title="Docs agent — have agents write documentation into this vault"
+        onclick={() =>
+          vault.centerMode === 'docs-agents'
+            ? (vault.centerMode = vault.note ? 'note' : 'empty')
+            : vault.openDocsAgents('')}
+      >
+        <Icon name="zap" size={14} />
+      </button>
       <button class="tool" title="Quick switcher (⌘O)" onclick={() => (vault.switcherOpen = true)}>
         <Icon name="search" size={14} />
       </button>
@@ -256,6 +277,8 @@
       <main class="center">
         {#if vault.centerMode === 'graph'}
           <GraphView />
+        {:else if vault.centerMode === 'docs-agents'}
+          <DocsAgentsView />
         {:else if vault.centerMode === 'note' && vault.note}
           <NoteView />
         {:else}
@@ -301,13 +324,19 @@
         <input bind:value={cName} placeholder="Team Docs" />
       </label>
       <label class="fld">
-        <span>Folder (blank → create under ~/.otto/vault)</span>
-        <input bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" />
+        <span>Folder (blank → create under ~/.otto/vault; a new path is created)</span>
+        <div class="pathrow">
+          <input bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" />
+          <button class="browse" type="button" onclick={() => (browsing = true)}>Browse…</button>
+        </div>
       </label>
       <label class="chk">
         <input type="checkbox" bind:checked={cOkf} />
         OKF vault (Open Knowledge Format validation + templates)
       </label>
+      {#if createError}
+        <div class="err" role="alert">{createError}</div>
+      {/if}
       <div class="actions">
         <button onclick={() => (createOpen = false)}>Cancel</button>
         <button class="primary" disabled={!cName.trim() || creating} onclick={() => void submitCreate()}>
@@ -316,6 +345,18 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if browsing}
+  <FolderPicker
+    title="Choose vault folder"
+    start={cPath || '~'}
+    onpick={(p: string) => {
+      cPath = p;
+      browsing = false;
+    }}
+    onclose={() => (browsing = false)}
+  />
 {/if}
 
 <NewNoteDialog bind:open={newNoteOpen} bind:dir={newNoteDir} />
@@ -560,6 +601,33 @@
     color: var(--text);
     font-size: 13px;
     padding: 8px 10px;
+  }
+  .pathrow {
+    display: flex;
+    gap: 6px;
+  }
+  .pathrow input {
+    flex: 1;
+    min-width: 0;
+  }
+  .browse {
+    border: 1px solid var(--border);
+    background: var(--panel-2, #222);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 0 12px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .err {
+    color: #e88;
+    font-size: 12px;
+    border: 1px solid rgba(214, 86, 72, 0.4);
+    background: rgba(214, 86, 72, 0.08);
+    border-radius: 7px;
+    padding: 6px 10px;
+    word-break: break-word;
   }
   .chk {
     display: flex;

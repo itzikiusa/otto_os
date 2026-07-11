@@ -1547,7 +1547,7 @@ fn slug_skill_name(name: &str) -> String {
 /// references/assets), else the operator's global `~/.claude/skills/<name>`.
 /// Re-copied each run (clean overwrite) so edits propagate. Best-effort: returns
 /// `None` when nothing could be staged (review still runs off the inlined text).
-fn stage_review_skills(library: &otto_context::Library, names: &[String]) -> Option<String> {
+pub(crate) fn stage_review_skills(library: &otto_context::Library, names: &[String]) -> Option<String> {
     use std::path::Path;
     let bundle = otto_context::materialize::default_context_root().join("review-skills");
     let skills_root = bundle.join(".claude").join("skills");
@@ -5599,6 +5599,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         otto_canvas::router::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
         otto_vault::router::<ServerCtx>(),
+        crate::vault_docs_agent::routes(),
         crate::memory_gov::memory_gov_routes(),
         otto_git::router::<ServerCtx>(),
         otto_issues::router::<ServerCtx>(),
