@@ -2,18 +2,25 @@
   // Agent-centric swarm graph: TEAM MEMBERS are the nodes (not tasks), laid out
   // radially around the coordinator by `reports_to`. Click a node → open that
   // agent's session; hover → its live sessions. A side rail shows a per-member
-  // brief (completed / to-address) and the most-urgent tasks, which you can DRAG
-  // onto a node to assign + launch that agent.
+  // brief (completed / live) and the currently active tasks.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { now } from '../../lib/stores/now.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { SwarmAgent, SwarmTask, SwarmRun } from './types';
+  import type { SwarmAgent, SwarmRun } from './types';
 
   const agents = $derived(swarm.detail?.agents ?? []);
-  const allTasks = $derived(Object.values(swarm.tasksByProject).flat());
+  const allTasks = $derived.by(() => {
+    const projectIds = new Set((swarm.detail?.projects ?? []).map((p) => p.id));
+    return [...projectIds].flatMap((id) => swarm.tasksByProject[id] ?? []);
+  });
+  const isLiveRun = (r: SwarmRun) =>
+    r.status === 'running' || r.status === 'waiting' || r.status === 'queued';
+  const liveTaskIds = $derived(
+    new Set(swarm.runs.filter((r) => r.task_id && isLiveRun(r)).map((r) => r.task_id as string)),
+  );
 
   // ── Tidy top-down TREE: root (coordinator) at the top, reports branching down
   //    level by level. x = tidy leaf packing (parents centered over children),
@@ -84,7 +91,7 @@
     const rs = swarm.runs.filter(
       (r) =>
         r.agent_id === agentId &&
-        (r.status === 'running' || r.status === 'waiting' || r.status === 'queued'),
+        isLiveRun(r),
     );
     if (rs.length === 0) return null;
     return [...rs].sort(
@@ -133,23 +140,19 @@
     swarm.runs.filter((r) => r.agent_id === agentId && r.status === 'done').length;
 
   function toAddress(agentId: string): number {
-    const tasks = allTasks.filter(
-      (t) => t.assignee_agent_id === agentId && t.status !== 'done' && t.status !== 'cancelled',
+    return allTasks.filter(
+      (t) => t.assignee_agent_id === agentId && liveTaskIds.has(t.id),
     ).length;
-    const stuck = swarm.runs.filter(
-      (r) => r.agent_id === agentId && (r.status === 'waiting' || r.status === 'error'),
-    ).length;
-    return tasks + stuck;
   }
 
-  // ── Task rail: most-urgent open tasks + search ──────────────────────────────
+  // ── Task rail: currently live tasks + search ───────────────────────────────
   const PRIO: Record<string, number> = { urgent: 3, high: 2, medium: 1, low: 0 };
   const SBIAS: Record<string, number> = {
     in_progress: 5, blocked: 4, todo: 3, in_review: 2, backlog: 1, done: 0, cancelled: 0,
   };
-  const openTasks = $derived(
+  const liveTasks = $derived(
     [...allTasks]
-      .filter((t) => t.status !== 'done' && t.status !== 'cancelled')
+      .filter((t) => liveTaskIds.has(t.id))
       .sort(
         (a, b) =>
           (PRIO[b.priority] ?? 0) - (PRIO[a.priority] ?? 0) ||
@@ -161,57 +164,16 @@
   // 5 most-urgent by default; searching reveals every match.
   const shownTasks = $derived.by(() => {
     const q = taskQuery.trim().toLowerCase();
-    if (!q) return openTasks.slice(0, 5);
-    return openTasks.filter((t) => t.title.toLowerCase().includes(q));
+    if (!q) return liveTasks.slice(0, 5);
+    return liveTasks.filter((t) => t.title.toLowerCase().includes(q));
   });
-
-  // ── Drag a task onto an agent → assign + launch ─────────────────────────────
-  let draggingTaskId = $state<string | null>(null);
-  let dropAgentId = $state<string | null>(null);
-
-  function onTaskDragStart(e: DragEvent, t: SwarmTask) {
-    draggingTaskId = t.id;
-    e.dataTransfer?.setData('text/plain', t.id);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-  }
-  function onTaskDragEnd() {
-    draggingTaskId = null;
-    dropAgentId = null;
-  }
-  function onNodeDragOver(e: DragEvent, a: SwarmAgent) {
-    if (!draggingTaskId) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-    dropAgentId = a.id;
-  }
-  function onNodeDragLeave(a: SwarmAgent) {
-    if (dropAgentId === a.id) dropAgentId = null;
-  }
-  async function onNodeDrop(e: DragEvent, a: SwarmAgent) {
-    e.preventDefault();
-    const tid = e.dataTransfer?.getData('text/plain') ?? draggingTaskId;
-    draggingTaskId = null;
-    dropAgentId = null;
-    if (!tid) return;
-    const task = allTasks.find((t) => t.id === tid);
-    if (!task) return;
-    try {
-      if (task.assignee_agent_id !== a.id) {
-        await swarm.updateTask(task, { assignee_agent_id: a.id } as Partial<SwarmTask>);
-      }
-      await swarm.runTask({ ...task, assignee_agent_id: a.id });
-      toasts.success(`Launched ${a.name}`, task.title);
-    } catch (err) {
-      toasts.error('Launch failed', err instanceof Error ? err.message : String(err));
-    }
-  }
 
   // ── Click → open the agent's (most recent) session; hover → its sessions ────
   let hoverAgentId = $state<string | null>(null);
   function openAgent(a: SwarmAgent) {
     const sess = agentSessions(a.id);
     if (sess.length > 0) swarm.selectedSessionId = sess[0].id;
-    else toasts.info(`${a.name} has no open session`, 'Drag a task here to launch one.');
+    else toasts.info(`${a.name} has no open session`, 'Start a task from the Board.');
   }
 
   // ── Pan + zoom (drag background, wheel to zoom) ──────────────────────────────
@@ -337,13 +299,9 @@
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="node act-{act}"
-                class:drop={dropAgentId === a.id}
                 style="left:{pos.x - NODE_W / 2}px; top:{pos.y - NODE_H / 2}px; width:{NODE_W}px; min-height:{NODE_H}px"
                 onmouseenter={() => (hoverAgentId = a.id)}
                 onmouseleave={() => (hoverAgentId === a.id ? (hoverAgentId = null) : null)}
-                ondragover={(e) => onNodeDragOver(e, a)}
-                ondragleave={() => onNodeDragLeave(a)}
-                ondrop={(e) => onNodeDrop(e, a)}
               >
                 <button class="node-hit" onclick={() => openAgent(a)} title="Open session">
                   <span class="avatar">{a.avatar || a.name.slice(0, 1)}</span>
@@ -382,7 +340,7 @@
     {/if}
   </div>
 
-  <!-- Side rail: per-member brief + draggable urgent tasks. -->
+  <!-- Side rail: per-member brief + current live tasks. -->
   <aside class="side">
     <section class="brief">
       <div class="side-head"><Icon name="user" size={12} /> Team brief</div>
@@ -400,7 +358,7 @@
     </section>
 
     <section class="tasks">
-      <div class="side-head"><Icon name="zap" size={12} /> Tasks <span class="dim">— drag onto a member to launch</span></div>
+      <div class="side-head"><Icon name="zap" size={12} /> Live tasks</div>
       <div class="search">
         <Icon name="search" size={12} />
         <input class="search-input" placeholder="Search tasks…" bind:value={taskQuery} />
@@ -410,13 +368,9 @@
           {@const ag = swarm.agentById(t.assignee_agent_id)}
           <div
             class="task-card prio-{t.priority}"
-            class:dragging={draggingTaskId === t.id}
-            draggable="true"
-            ondragstart={(e) => onTaskDragStart(e, t)}
-            ondragend={onTaskDragEnd}
             role="listitem"
           >
-            <Icon name="grip" size={12} />
+            <Icon name="zap" size={12} />
             <span class="task-main">
               <span class="task-title ellipsis2">{t.title}</span>
               <span class="task-meta dim">
@@ -428,7 +382,7 @@
           </div>
         {/each}
         {#if shownTasks.length === 0}
-          <p class="dim empty">{taskQuery ? 'No matching tasks.' : 'No open tasks.'}</p>
+          <p class="dim empty">{taskQuery ? 'No matching live tasks.' : 'No live tasks.'}</p>
         {/if}
       </div>
     </section>
@@ -462,7 +416,7 @@
   .canvas {
     position: absolute;
     inset: 0;
-    cursor: grab;
+    cursor: default;
     touch-action: none;
     background:
       radial-gradient(circle, color-mix(in srgb, var(--text-dim) 16%, transparent) 1px, transparent 1px);
@@ -497,11 +451,6 @@
   }
   .node.act-working {
     border-color: color-mix(in srgb, var(--status-working) 55%, var(--border));
-  }
-  .node.drop {
-    border-color: var(--accent);
-    outline: 2px dashed color-mix(in srgb, var(--accent) 60%, transparent);
-    outline-offset: 1px;
   }
   .node-hit {
     display: flex;
@@ -740,9 +689,6 @@
   }
   .task-card:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  }
-  .task-card.dragging {
-    opacity: 0.45;
   }
   .task-card.prio-urgent {
     border-inline-start-color: var(--status-exited);

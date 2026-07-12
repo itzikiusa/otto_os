@@ -208,9 +208,14 @@ test('Graph view: the agent org graph renders + the task rail; canvas pans/fits'
   await page.locator('.agent-graph .controls [aria-label="fit to view"]').click();
   await expect(page.locator('.agent-graph .node').first()).toBeVisible();
 
-  // The side rail shows the per-member brief + the searchable task list.
+  // The side rail shows the per-member brief + live-only task search. Seeded
+  // tasks exist on the Board, but there are no active runs in this daemon, so
+  // persisted assignments must not appear as current work.
   await expect(page.locator('.agent-graph .side .brief')).toBeVisible();
   await expect(page.locator('.agent-graph .side .tasks .search-input')).toBeVisible();
+  await expect(page.locator('.agent-graph .side .tasks')).toContainText('Live tasks');
+  await expect(page.locator('.agent-graph .side .tasks')).toContainText('No live tasks.');
+  await expect(page.locator('.agent-graph .side .tasks .task-card')).toHaveCount(0);
 
   // The page never overflows horizontally — the graph canvas clips/pans inside
   // its own bounds at every width.

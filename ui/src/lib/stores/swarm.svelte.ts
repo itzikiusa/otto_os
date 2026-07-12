@@ -84,6 +84,17 @@ class SwarmStore {
 
   async openSwarm(sid: string): Promise<void> {
     this.loading = true;
+    if (this.detail?.id !== sid) {
+      // Never let the next swarm render tasks/runs cached for the previous one
+      // while its detail and projects are loading.
+      this.detail = null;
+      this.tasksByProject = {};
+      this.runs = [];
+      this.board = [];
+      this.graph = null;
+      this.selectedProjectId = null;
+      this.selectedSessionId = null;
+    }
     try {
       this.detail = await api.get<SwarmDetail>(`/swarm/swarms/${sid}`);
       this.selectedProjectId = this.detail.projects[0]?.id ?? null;
@@ -207,6 +218,12 @@ class SwarmStore {
     );
     if (this.detail?.id === sid) this.detail = { ...this.detail, ...updated };
     this.swarms = this.swarms.map((s) => (s.id === sid ? updated : s));
+    if (this.detail?.id === sid) {
+      // Abort marks queued/running/waiting runs stopped server-side. Pull the
+      // authoritative rows immediately instead of waiting for a reconnect or
+      // a later run event before the org graph clears its live assignments.
+      await this.loadRuns({ swarm_id: sid });
+    }
   }
 
   // -- Agents ---------------------------------------------------------------
