@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,13 +30,40 @@ PATTERNS = (
 )
 
 
-def _git(root: Path, *args: str) -> str:
+def _git_head(root: Path) -> str:
+    """Read HEAD without executing repository-controlled programs or hooks."""
     try:
-        return subprocess.check_output(
-            ["git", "-C", str(root), *args], stderr=subprocess.DEVNULL, text=True
-        ).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "unknown"
+        marker = root / ".git"
+        if marker.is_file():
+            value = marker.read_text(encoding="utf-8").strip()
+            if not value.startswith("gitdir: "):
+                return "unknown"
+            git_dir = (root / value[8:]).resolve()
+        else:
+            git_dir = marker
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref: "):
+            return head
+        reference = head[5:]
+        candidates = [git_dir / reference]
+        common_marker = git_dir / "commondir"
+        if common_marker.is_file():
+            common = (git_dir / common_marker.read_text(encoding="utf-8").strip()).resolve()
+            candidates.append(common / reference)
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8").strip()
+        for packed_root in [git_dir, *(candidate.parent.parent.parent for candidate in candidates[1:])]:
+            packed = packed_root / "packed-refs"
+            if packed.is_file():
+                for line in packed.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if line and not line.startswith(("#", "^")):
+                        commit, name = line.split(" ", 1)
+                        if name == reference:
+                            return commit
+    except (OSError, ValueError):
+        pass
+    return "unknown"
 
 
 def _files(root: Path):
@@ -88,7 +114,7 @@ def inventory(root: Path):
     return {
         "version": 1,
         "repo": str(root),
-        "commit": _git(root, "rev-parse", "HEAD"),
+        "commit": _git_head(root),
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "candidates": candidates,
     }

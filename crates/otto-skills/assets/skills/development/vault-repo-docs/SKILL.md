@@ -3,6 +3,8 @@ name: vault-repo-docs
 description: Document a repository into the Otto Vault as an OKF knowledge bundle — read the code, author linked concept docs (services, endpoints, datasets, decisions, runbooks, metrics), validate conformance, and verify claims against the source. This REPLACES embedding-based repo indexing; "index a repo into the vault" now means writing durable, diffable OKF docs. Use when asked to index/scan/document a repo, map a feature's dependencies, or build the team's repo knowledge base.
 category: development
 version: 3
+metadata:
+  version: "3.0.0"
 ---
 
 # Vault Repository Documentation
@@ -67,3 +69,6 @@ See [full-scan-manifest.json](examples/full-scan-manifest.json),
 [datastore-impact-bundle](examples/datastore-impact-bundle) for compact output
 examples. Scripts are conservative accelerators; source reading remains the
 authority.
+
+Do not use this skill for a code review, implementation change, or one-off
+question about a repository that does not request durable Vault documentation.
