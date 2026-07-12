@@ -369,8 +369,11 @@ impl VaultEngine {
             .canonicalize()
             .map_err(|e| Error::Conflict(format!("vault root missing: {e}")))?;
         let target = rootc.join(rel);
-        let parent = target.parent().unwrap_or(&rootc);
-        if let Ok(pc) = parent.canonicalize() {
+        let mut existing = target.parent().unwrap_or(&rootc);
+        while !existing.exists() && existing != rootc {
+            existing = existing.parent().unwrap_or(&rootc);
+        }
+        if let Ok(pc) = existing.canonicalize() {
             if !pc.starts_with(&rootc) {
                 return Err(Error::Forbidden("path escapes the vault".into()));
             }
@@ -496,6 +499,64 @@ impl VaultEngine {
             .map_err(|e| Error::Internal(format!("write: {e}")))?;
         self.scan(id).await?;
         self.store.note_meta(id, &rel).await
+    }
+
+    /// Write a guarded, UTF-8 documentation artifact that is not a Markdown
+    /// note. This keeps OpenAPI/D2/JSON deliverables inside the same traversal,
+    /// symlink, optimistic-concurrency, size, and rescan boundary as notes.
+    pub async fn write_text_file(
+        self: &Arc<Self>,
+        ws: &str,
+        id: i64,
+        path: &str,
+        content: &str,
+        if_hash: Option<&str>,
+    ) -> Result<VaultTextFile> {
+        let v = self.get_scoped(ws, id).await?;
+        let rel = Self::check_rel(path)?;
+        let ext = std::path::Path::new(&rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(ext.as_str(), "yaml" | "yml" | "json" | "d2" | "mmd" | "txt" | "csv") {
+            return Err(Error::UnsupportedMedia(format!(
+                "text artifacts must end in .yaml, .yml, .json, .d2, .mmd, .txt, or .csv (got {path})"
+            )));
+        }
+        let bytes = content.as_bytes();
+        if bytes.len() as u64 > MAX_FTS_BYTES {
+            return Err(Error::PayloadTooLarge(format!(
+                "text artifact is {} bytes; maximum is {MAX_FTS_BYTES}",
+                bytes.len()
+            )));
+        }
+        let abs = Self::abs_guarded(&v.root_path, &rel)?;
+        if let Some(expected) = if_hash {
+            let current = match tokio::fs::read(&abs).await {
+                Ok(b) => hex_sha256(&b),
+                Err(_) => String::new(),
+            };
+            if current != expected {
+                return Err(Error::Conflict(format!(
+                    "text artifact changed on disk (hash {current})"
+                )));
+            }
+        }
+        if let Some(parent) = abs.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| Error::Internal(format!("mkdir: {e}")))?;
+        }
+        tokio::fs::write(&abs, bytes)
+            .await
+            .map_err(|e| Error::Internal(format!("write: {e}")))?;
+        self.scan(id).await?;
+        Ok(VaultTextFile {
+            path: rel,
+            size: bytes.len() as i64,
+            hash: hex_sha256(bytes),
+        })
     }
 
     /// Soft delete → `<vault>/.trash/<path>` (never destroys user files).

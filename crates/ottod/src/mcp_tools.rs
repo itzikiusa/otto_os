@@ -643,6 +643,11 @@ fn tool_catalog() -> Value {
                 "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative note path incl. .md" }, "content": { "type": "string" }, "if_hash": { "type": "string" } }, "required": ["vault_id", "path", "content"] }
             },
             {
+                "name": "otto_vault_write_file",
+                "description": "Create or update a guarded UTF-8 documentation artifact (Editor-gated): OpenAPI YAML, JSON, D2, Mermaid, text, or CSV. Parent folders are auto-created; pass `if_hash` for optimistic concurrency. Markdown must use otto_vault_write.",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative path ending .yaml/.yml/.json/.d2/.mmd/.txt/.csv" }, "content": { "type": "string" }, "if_hash": { "type": "string" } }, "required": ["vault_id", "path", "content"] }
+            },
+            {
                 "name": "otto_vault_rename",
                 "description": "Rename/move a note or folder (Editor-gated). Every referencing wikilink/markdown link across the vault is rewritten on disk; returns links_updated.",
                 "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["vault_id", "from", "to"] }
@@ -1147,6 +1152,21 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .put_json(&format!("/workspaces/{}/vault/vaults/{v}/note", seg(&ws)), &body)
                 .await?;
             Ok(finalize(json!({ "ok": true, "meta": meta })))
+        }
+        "otto_vault_write_file" => {
+            let ws = ctx.workspace_id.clone().ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+            let v = arg_i64(args, "vault_id")?;
+            let mut body = json!({
+                "path": arg_str(args, "path")?,
+                "content": args.get("content").and_then(Value::as_str).unwrap_or(""),
+            });
+            if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
+                body["if_hash"] = json!(h);
+            }
+            let file = ctx
+                .put_json(&format!("/workspaces/{}/vault/vaults/{v}/file", seg(&ws)), &body)
+                .await?;
+            Ok(finalize(json!({ "ok": true, "file": file })))
         }
         "otto_vault_rename" => {
             let ws = ctx.workspace_id.clone().ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
@@ -1713,6 +1733,7 @@ mod tests {
             "otto_vault_graph",
             "otto_vault_okf_validate",
             "otto_vault_write",
+            "otto_vault_write_file",
             "otto_vault_rename",
             "otto_vault_delete",
         ] {

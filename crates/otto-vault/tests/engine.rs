@@ -181,6 +181,60 @@ async fn write_read_conflict_delete_roundtrip() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn write_text_file_is_guarded_versioned_and_scanned() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+
+    let out = eng
+        .write_text_file(WS, id, "api/openapi.yaml", "openapi: 3.1.0\n", Some(""))
+        .await
+        .unwrap();
+    assert_eq!(out.path, "api/openapi.yaml");
+    assert_eq!(out.size, 15);
+    assert!(!out.hash.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(td.path().join("api/openapi.yaml")).unwrap(),
+        "openapi: 3.1.0\n"
+    );
+    let listing = eng.dir(WS, id, "api").await.unwrap();
+    assert!(listing.entries.iter().any(|e| e.path == "api/openapi.yaml"));
+
+    let err = eng
+        .write_text_file(WS, id, "api/openapi.yaml", "clobber", Some("deadbeef"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, otto_core::Error::Conflict(_)), "{err:?}");
+    eng.write_text_file(WS, id, "api/openapi.yaml", "openapi: 3.1.1\n", Some(&out.hash))
+        .await
+        .unwrap();
+
+    for bad in ["notes/no.md", "bin/app.exe", "../escape.yaml", ".trash/x.json"] {
+        assert!(
+            eng.write_text_file(WS, id, bad, "x", None).await.is_err(),
+            "text artifact path must be rejected: {bad}"
+        );
+    }
+    let oversized = "x".repeat(4 * 1024 * 1024 + 1);
+    let err = eng
+        .write_text_file(WS, id, "api/huge.json", &oversized, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, otto_core::Error::PayloadTooLarge(_)), "{err:?}");
+
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), td.path().join("escape")).unwrap();
+        let err = eng
+            .write_text_file(WS, id, "escape/nested/openapi.yaml", "x", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, otto_core::Error::Forbidden(_)), "{err:?}");
+        assert!(!outside.path().join("nested/openapi.yaml").exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rename_rewrites_links_on_disk() {
     let eng = engine().await;
     let (td, id) = fixture_vault(&eng).await;

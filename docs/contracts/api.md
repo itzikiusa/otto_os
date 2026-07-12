@@ -1995,6 +1995,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | GET /workspaces/{ws}/vault/vaults/{id}/dir | ws viewer | `?path=` | `VaultDirListing` — one level: dirs (with child counts), notes, attachments |
 | GET /workspaces/{ws}/vault/vaults/{id}/note | ws viewer | `?path=` | `VaultNote{meta, raw, outgoing}` |
 | PUT /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `{path, content, if_hash?}` | `VaultNoteMeta` — create/update; parent folders auto-created; `if_hash` mismatch → 409 (optimistic concurrency; `""` = must-not-exist) |
+| PUT /workspaces/{ws}/vault/vaults/{id}/file | ws editor | `{path, content, if_hash?}` | `{path,size,hash}` — create/update a guarded UTF-8 documentation artifact (`.yaml/.yml/.json/.d2/.mmd/.txt/.csv`, max 4 MiB); parent folders auto-created; same optimistic-concurrency, traversal, hidden-segment, and symlink-escape guards as note writes. Markdown stays on `/note`; binary files are rejected. |
 | DELETE /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `?path=` | 204 — soft delete → `<vault>/.trash/` (never destroys files) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{links_updated}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move |
 | POST /workspaces/{ws}/vault/vaults/{id}/folder | ws editor | `{path}` | 204 |

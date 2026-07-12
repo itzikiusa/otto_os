@@ -220,6 +220,20 @@ async fn write_note<C: VaultCtx>(
     ))
 }
 
+async fn write_text_file<C: VaultCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
+    Json(req): Json<WriteTextFileReq>,
+) -> ApiResult<Json<VaultTextFile>> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    Ok(Json(
+        c.vault()
+            .write_text_file(&ws, id, &req.path, &req.content, req.if_hash.as_deref())
+            .await?,
+    ))
+}
+
 async fn delete_note<C: VaultCtx>(
     State(c): State<C>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -358,6 +372,10 @@ pub fn router<C: VaultCtx>() -> Router<C> {
         .route(
             "/workspaces/{ws}/vault/vaults/{id}/note",
             get(note::<C>).put(write_note::<C>).delete(delete_note::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/file",
+            axum::routing::put(write_text_file::<C>),
         )
         .route("/workspaces/{ws}/vault/vaults/{id}/rename", post(rename::<C>))
         .route("/workspaces/{ws}/vault/vaults/{id}/folder", post(folder::<C>))
