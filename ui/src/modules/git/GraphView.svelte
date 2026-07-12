@@ -243,6 +243,26 @@
       .catch(() => (submodules = []));
   });
 
+  // Auto-fetch runs `fetch --prune` on the daemon but deliberately doesn't
+  // remount the graph — re-sync QUIETLY (no loading flags, no flicker) when a
+  // round completes, so a branch deleted outside this view (session terminal,
+  // remote) disappears without a manual Fetch. Plain (non-$state) bookkeeping:
+  // writing tracked state here would re-trigger the effect.
+  let refsSyncSeen: { id: string; rev: number } | null = null;
+  $effect(() => {
+    const id = repoId;
+    const rev = git.refsRev[id] ?? 0;
+    if (!refsSyncSeen || refsSyncSeen.id !== id) {
+      // First observation for this repo — the loader effect above owns it.
+      refsSyncSeen = { id, rev };
+      return;
+    }
+    if (refsSyncSeen.rev !== rev) {
+      refsSyncSeen = { id, rev };
+      void refreshAfter().catch(() => {});
+    }
+  });
+
   // ── Context-menu helpers ────────────────────────────────────────────────────
   /** Copy `text` to the clipboard and toast success/failure with `label`. */
   async function clip(text: string, label: string): Promise<void> {

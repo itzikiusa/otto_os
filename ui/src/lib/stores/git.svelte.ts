@@ -125,6 +125,13 @@ class GitStore {
   // on/off toggle is persisted per-device. ──
   autoFetchEnabled = $state(INITIAL_AUTO_FETCH.enabled);
   autoFetchIntervalSec = $state(INITIAL_AUTO_FETCH.intervalSec);
+  /** Per-repo ref-refresh signal, bumped after every successful auto-fetch.
+   *  The daemon's fetch runs `--prune`, and `setStatus` deliberately skips
+   *  no-op status writes — so a branch deleted elsewhere (session terminal,
+   *  another machine, a merged PR) changes NO status field and a view caching
+   *  refs (GraphView) would stay stale until remount. Such views re-sync
+   *  quietly when this counter moves. */
+  refsRev: Record<string, number> = $state({});
   private autoFetchTimer: ReturnType<typeof setTimeout> | null = null;
   private autoFetchInFlight = false;
   // Generation token: bumped on every stop/start so a round that was in flight
@@ -431,6 +438,7 @@ class GitStore {
               try {
                 const s = await api.post<RepoStatusResp>(`/repos/${id}/fetch`);
                 this.setStatus(id, s); // QUIET — no toast; setStatus skips no-ops
+                this.refsRev[id] = (this.refsRev[id] ?? 0) + 1;
                 this.autoFetchFailStreak[id] = 0;
                 this.autoFetchBackoff[id] = 0;
               } catch {
