@@ -1,0 +1,11 @@
+[
+  {
+    "severity": "major",
+    "category": "data",
+    "summary": "Orders status write path is missing from field impact",
+    "doc": "data/orders.md",
+    "source": "src/reconcile.rs:48",
+    "evidence": "The concept lists creation reads only, but reconciliation updates status after provider polling.",
+    "repair": "Add the update predicate, transaction/retry behavior, caller flow, and status field impact."
+  }
+]

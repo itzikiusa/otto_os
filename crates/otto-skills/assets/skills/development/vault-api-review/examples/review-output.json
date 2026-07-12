@@ -1,0 +1,11 @@
+[
+  {
+    "severity": "major",
+    "category": "api",
+    "summary": "Create order documents a DTO name instead of its response body",
+    "doc": "endpoints/create-order.md",
+    "source": "src/dto.rs:28",
+    "evidence": "The response section says CreateOrderResponse, while the DTO contains id, status, and created_at and the OpenAPI schema is empty.",
+    "repair": "Document all three fields with a source-derived example and update the matching OpenAPI component."
+  }
+]

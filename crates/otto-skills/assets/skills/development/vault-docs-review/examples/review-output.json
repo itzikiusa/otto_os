@@ -1,0 +1,11 @@
+[
+  {
+    "severity": "blocker",
+    "category": "coverage",
+    "summary": "The reconciliation worker is absent from coverage",
+    "doc": "coverage.md",
+    "source": "src/workers.rs:31",
+    "evidence": "The worker is registered hourly, but its inventory candidate has no coverage row or flow note.",
+    "repair": "Add the candidate row and document registration, scan scope, locking, retries, and shutdown behavior."
+  }
+]

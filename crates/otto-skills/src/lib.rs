@@ -341,6 +341,33 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_skills_are_complete_packages() {
+        let names = [
+            "vault-docs-review",
+            "vault-api-review",
+            "vault-data-review",
+            "vault-runtime-review",
+            "vault-evidence-review",
+        ];
+        let all = list_bundled();
+        for name in names {
+            let skill = all
+                .iter()
+                .find(|skill| skill.name == name)
+                .unwrap_or_else(|| panic!("{name} not bundled"));
+            assert_eq!(skill.category, "development", "{name} wrong category");
+            let files = bundled_files(name);
+            assert!(files.iter().any(|path| path == "SKILL.md"), "{name} missing SKILL.md");
+            assert!(files.iter().any(|path| path.starts_with("references/")), "{name} missing checklist");
+            assert!(files.iter().any(|path| path.starts_with("examples/")), "{name} missing example");
+            assert!(files.iter().any(|path| path == "evals/evals.json"), "{name} missing evals");
+            let body = bundled_body(name).expect("reviewer body");
+            assert!(body.contains("JSON"), "{name} missing JSON finding contract");
+            assert!(body.contains("[]"), "{name} missing clean verdict contract");
+        }
+    }
+
+    #[test]
     fn install_commit_message_skill_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let lib = Library::new(dir.path());
