@@ -45,11 +45,11 @@ FLOWS — the core requirement:
 
 const COVERAGE_RULES = `
 FULL-SCAN ACCOUNTING — required even for a focused scan:
-1. Run the staged vault-repo-docs inventory script against the repository and preserve its JSON manifest.
-2. Create coverage.md before concept docs. Reconcile EVERY candidate exactly once as documented, irrelevant, generated, or uncertain; include its file:line evidence, linked destination doc, and a concrete reason. A mention in an overview is not documented coverage.
-3. Treat candidates as leads: confirm them by reading registration, contracts, implementations, migrations/queries, and tests. Add manually discovered candidates to the ledger.
+1. Run the staged vault-repo-docs inventory script against the repository. Inspect scanned_files, exclusions, and per-kind counts; a non-empty source scan with zero candidates requires manual inspection, never automatic completion. Preserve its JSON as manifest.json with otto_vault_write_file.
+2. Create index.md, overview.md, coverage.md, and log.md before concept docs. Reconcile EVERY candidate exactly once as documented, irrelevant, generated, or uncertain; include its file:line evidence, linked destination doc, and a concrete reason. A mention in an overview is not documented coverage.
+3. Treat candidates as leads: confirm them by reading registration, contracts, implementations, migrations/queries, and tests. Add manually discovered candidates to BOTH manifest.json and coverage.md; do not suppress them to make the audit clean.
 4. Use otto_vault_write_file for api-openapi.yaml and other approved non-Markdown text artifacts.
-5. Before completion, run OKF validation and the staged audit_repo_bundle.py with the manifest, fix every error, then re-check load-bearing API/data/runtime claims against source. Disclose uncertain rows and call the scan partial if they remain.`;
+5. Before completion, run OKF validation and the staged audit_repo_bundle.py against the filesystem bundle path and manifest.json. Fix every finding, then re-check load-bearing API/data/runtime claims against source. An uncertain row fails the completion gate: disclose it and call the scan partial.`;
 
 export const DOCS_TEMPLATES: DocsTemplate[] = [
   {
@@ -88,9 +88,9 @@ Finish: verify every link resolves and flows/index.md covers every flow you enum
 
 Method:
 1. Locate the repo's bundle in the vault (folder named after the repo); read its index.md and overview.md. The overview frontmatter records the last scanned commit (\`commit:\`).
-2. In the repo, list what changed since then: \`git log --oneline <commit>..HEAD\` and \`git diff --stat <commit>..HEAD\`. If no marker exists, say so in your summary and scope by comparing the docs against the current code only where they disagree.
+2. Verify the recorded commit exists and is an ancestor of HEAD. If it is missing, invalid, or diverged, FALL BACK TO A FULL CURRENT-TREE SCAN; never infer changes by comparing only existing docs. Otherwise list the commit range and diff.
 3. Map each change to the affected notes: flows added → NEW flow note (one per flow, all of them); flows removed → delete/mark the note; changed routes/payloads/schemas/workers → update ONLY the affected sections and examples; new tables/topics → extend data.md / messaging.md. Regenerate api-openapi.yaml only if the API surface changed.
-4. Re-run the staged inventory for changed files plus their registration/contract dependencies. Update coverage.md for every added, changed, or removed candidate; preserve unaffected rows and reasons.
+4. Run the staged inventory with \`--changed-since <commit>\` and repeat \`--include-file <path>\` for affected registration/contract dependencies. Require \`mode: incremental\`; if it reports \`full-fallback\`, perform the full scan. Update manifest.json and coverage.md for every added, changed, or removed candidate; preserve unaffected rows and reasons.
 5. Keep every touched note's citations and mermaid diagrams in sync with the new code. Use otto_vault_write_file when api-openapi.yaml changes.
 6. Run OKF validation and the staged repository-bundle audit with the updated manifest; source-check every changed claim.
 7. Refresh overview.md's \`commit:\` and \`scanned_at:\` to the new HEAD, and update index.md if notes were added/removed.

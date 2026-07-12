@@ -1,6 +1,6 @@
 ---
 name: vault-repo-docs
-description: Document a repository into the Otto Vault as an OKF knowledge bundle — read the code, author linked concept docs (services, endpoints, datasets, decisions, runbooks, metrics), validate conformance, and verify claims against the source. This REPLACES embedding-based repo indexing; "index a repo into the vault" now means writing durable, diffable OKF docs. Use when asked to index/scan/document a repo, map a feature's dependencies, or build the team's repo knowledge base.
+description: Use when indexing, scanning, or documenting a repository into the Otto Vault as a durable OKF bundle, including full, focused, and incremental scans or feature dependency maps; not for code review or one-off repository questions.
 category: development
 version: 3
 metadata:
@@ -18,23 +18,33 @@ sample.
 
 1. Read [full-scan-method.md](references/full-scan-method.md). Establish repo
    path, commit, scan mode, bundle path, and prior coverage ledger.
-2. Run `scripts/inventory_repo.py REPO --format json > manifest.json`. Treat
-   candidates as leads, not facts. Supplement the inventory by reading
-   entrypoints, route registration, DTOs, migrations, query builders, broker
-   wiring, workers, configuration, and tests.
+2. For a full or focused scan, run `scripts/inventory_repo.py REPO --format
+   json > manifest.json`. For an incremental scan, use `--changed-since COMMIT`
+   and repeat `--include-file PATH` for affected registration/contract files.
+   An invalid or diverged baseline must produce `mode: full-fallback`, never a
+   guessed incremental scope. Preserve `manifest.json` in the bundle. Review
+   `scanned_files`, `exclusions`, counts, and suspicious zero-candidate output.
+   Treat candidates as leads, not facts; inspect entrypoints, registration,
+   DTOs, migrations, queries, broker wiring, workers, configuration, and tests.
 3. Write `coverage.md` before concept docs. Give every candidate exactly one
    status: `documented`, `irrelevant`, `generated`, or `uncertain`. Include its
-   evidence, destination document, and a concrete reason.
+   evidence, destination document, and a concrete reason. Add manually found
+   candidates to both the manifest and ledger; an unknown ledger row is an
+   audit error.
 4. Document breadth first, then depth. Use the completion contracts in:
    - [api-documentation.md](references/api-documentation.md)
    - [datastore-documentation.md](references/datastore-documentation.md)
    - [flows-messaging-workers.md](references/flows-messaging-workers.md)
    - [evidence-and-citations.md](references/evidence-and-citations.md)
+   Keep output consumable with linked concepts, dense tables, diagrams, and
+   examples; do not restate the repository line by line.
 5. Use `otto_vault_write` for Markdown. Use `otto_vault_write_file` for
    approved text artifacts such as `api-openapi.yaml`; never hide YAML in a
    Markdown note merely because the writer lacks the correct tool.
 6. Run the OKF validator and `scripts/audit_repo_bundle.py BUNDLE --manifest
-   manifest.json`. Resolve every error and every unexplained coverage gap.
+   BUNDLE/manifest.json`. The audit resolves document links, checks kind-specific
+   depth, and reconciles API operations with OpenAPI. Resolve every finding; an
+   uncertain row deliberately fails the completion gate and means partial.
 7. Perform a second source pass: re-check at least the route registration plus
    DTO for each API, every DB access path cited, and every trigger/side effect
    for runtime flows. Update the ledger and scan marker only after this pass.
@@ -45,8 +55,8 @@ A full scan is complete only when:
 
 - `index.md`, `overview.md`, `coverage.md`, and `log.md` exist and link to all
   generated concepts;
-- the ledger accounts for every manifest candidate, with no duplicate IDs and
-  no `uncertain` row silently presented as complete;
+- the ledger accounts for every manifest candidate, with no duplicate IDs,
+  missing target documents, or `uncertain` rows presented as complete;
 - APIs contain real request and response bodies, validation, errors, auth,
   examples, side effects, flow links, and matching OpenAPI operations;
 - data assets contain schema, grain, indexes/TTL, actual read and write paths,
@@ -61,8 +71,10 @@ A full scan is complete only when:
 - **Full:** inventory the current tree and reconcile all candidates.
 - **Focused:** inventory the entire repo, document the requested lens deeply,
   and mark out-of-scope rows `irrelevant` with the focus as the reason.
-- **Incremental:** diff the recorded commit to HEAD, inventory changed files,
-  update only affected concepts, and reconcile changed/new/removed candidates.
+- **Incremental:** use `--changed-since` only when the recorded commit exists
+  and is an ancestor of HEAD. Include affected registration/contract files,
+  update changed/new/removed candidates, and accept `full-fallback` when the
+  baseline is unsafe.
 
 See [full-scan-manifest.json](examples/full-scan-manifest.json),
 [api-flow-bundle](examples/api-flow-bundle), and

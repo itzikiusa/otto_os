@@ -6,9 +6,9 @@
   "mode": "full",
   "requested_changed_since": null,
   "fallback_reason": null,
-  "scanned_files": ["src/http.rs", "src/orders.rs"],
+  "scanned_files": ["src/http.rs"],
   "exclusions": [],
-  "counts": {"files_scanned": 2, "files_excluded": 0, "candidates": 2, "by_kind": {"api": 1, "data": 1}},
+  "counts": {"files_scanned": 1, "files_excluded": 0, "candidates": 1, "by_kind": {"api": 1}},
   "candidates": [
     {
       "id": "api:5ad60d3fea49",
@@ -20,15 +20,6 @@
       "path": "src/http.rs",
       "line": 42,
       "evidence": "src/http.rs:42"
-    },
-    {
-      "id": "data:39f7208e6541",
-      "kind": "data",
-      "name": "INSERT INTO orders (id, status) VALUES (?, ?)",
-      "signature": "insert into orders (id, status) values (?, ?)",
-      "path": "src/orders.rs",
-      "line": 71,
-      "evidence": "src/orders.rs:71"
     }
   ]
 }

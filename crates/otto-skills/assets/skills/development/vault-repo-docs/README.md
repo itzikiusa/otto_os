@@ -1,15 +1,20 @@
-# vault-repo-docs
+# vault-repo-docs package
 
-Bundled Otto skill for source-backed repository documentation in the Vault.
-Otto stages the whole directory into an agent run; `SKILL.md` is the entrypoint.
+This staged Otto skill turns repository source into a coverage-accounted OKF
+Vault bundle. `SKILL.md` is the agent entrypoint; references hold completion
+contracts, examples show valid output, and eval fixtures exercise the scripts.
 
-Local deterministic checks:
+Qualification:
 
 ```sh
 python3 -m unittest discover -s scripts -p 'test_*.py' -v
+python3 scripts/run_evals.py
 python3 -m json.tool evals/evals.json >/dev/null
 ```
 
-`inventory_repo.py` and `audit_repo_bundle.py` are read-only, standard-library
-helpers. The inventory emits candidates rather than semantic claims; an agent
-must verify every candidate against source and reconcile it in `coverage.md`.
+Both scripts are read-only. `inventory_repo.py --changed-since` invokes only
+metadata-oriented Git commands with hooks, external diffs, global config, and
+system config disabled; it rejects option-like revisions and falls back to a
+full scan when the baseline cannot be verified as an ancestor. It never runs
+repository code. `audit_repo_bundle.py` reads bundle files and does not modify
+them. Neither script requires network access or third-party Python packages.

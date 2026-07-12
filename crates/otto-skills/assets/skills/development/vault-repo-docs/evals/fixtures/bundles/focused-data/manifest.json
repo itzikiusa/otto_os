@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "mode": "focused",
+  "scanned_files": ["src/api.rs", "src/dao.rs"],
+  "exclusions": [],
+  "counts": {"files_scanned": 2, "files_excluded": 0, "candidates": 2, "by_kind": {"api": 1, "data": 1}},
+  "candidates": [
+    {"id": "data:orders", "kind": "data", "evidence": "src/dao.rs:2"},
+    {"id": "api:orders", "kind": "api", "evidence": "src/api.rs:1"}
+  ]
+}
