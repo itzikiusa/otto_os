@@ -36,6 +36,18 @@ const CANCEL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Cap on the dedup set size; cleared when exceeded to avoid unbounded growth.
 const DEDUP_CAP: usize = 2000;
 
+/// Zombie-socket watchdog: Slack pings a Socket Mode connection every few
+/// seconds, so a healthy socket NEVER goes this long without a frame. When it
+/// does, the TCP connection died silently (laptop sleep, Wi-Fi change, NAT
+/// timeout) and `stream.next()` would hang forever looking "connected" while
+/// Slack queues undeliverable events — reconnect instead, and Slack redelivers
+/// everything pending. Without this, a message sent onto a dead socket sits
+/// invisible until something else kills the connection minutes later.
+const IDLE_RECONNECT: Duration = Duration::from_secs(75);
+/// Client-side probe ping cadence: forces the OS to notice a dead TCP path
+/// (the send fails / no pong comes back) well before `IDLE_RECONNECT` fires.
+const CLIENT_PING_INTERVAL: Duration = Duration::from_secs(30);
+
 /// How long to wait for a TCP/TLS connection to Slack to establish.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Overall per-request deadline for ordinary Web API calls. A hung Slack
@@ -357,19 +369,42 @@ pub async fn run(
         let (mut sink, mut stream) = ws_stream.split();
 
         // --- Step 3: read frames ---
+        let mut last_frame = std::time::Instant::now();
+        let mut last_ping = std::time::Instant::now();
         'inner: loop {
             if cancel.load(Ordering::Relaxed) {
                 debug!("slack listener stopping (cancel) in inner loop");
                 return;
             }
 
-            // Use a select with a timeout so we can check `cancel` periodically.
+            // Zombie-socket watchdog: see IDLE_RECONNECT. Any frame (Slack's
+            // own pings included) resets the clock below.
+            if last_frame.elapsed() >= IDLE_RECONNECT {
+                warn!(
+                    "slack: no frames for {}s — connection presumed dead, reconnecting",
+                    last_frame.elapsed().as_secs()
+                );
+                break 'inner;
+            }
+            if last_ping.elapsed() >= CLIENT_PING_INTERVAL {
+                last_ping = std::time::Instant::now();
+                if let Err(e) = sink.send(Message::Ping(Default::default())).await {
+                    warn!("slack: probe ping failed ({e}), reconnecting");
+                    break 'inner;
+                }
+            }
+
+            // Use a select with a timeout so we can check `cancel` (and the
+            // watchdog above) periodically.
             let maybe_msg = tokio::select! {
                 msg = stream.next() => msg,
                 _ = tokio::time::sleep(CANCEL_CHECK_INTERVAL) => {
                     continue 'inner;
                 }
             };
+            if let Some(Ok(_)) = &maybe_msg {
+                last_frame = std::time::Instant::now();
+            }
 
             let raw = match maybe_msg {
                 Some(Ok(Message::Text(text))) => text,
@@ -446,8 +481,19 @@ pub async fn run(
                         guard.insert(dedup_key);
                     }
 
-                    // Process the event payload.
-                    handle_event(event, &integ, &bot_token, Arc::clone(&bridge)).await;
+                    // Process the event payload OFF the read loop: attachment
+                    // downloads + session spawn can take seconds, and a slow
+                    // event must never delay reading (and acking) the next
+                    // frame. Ordering into a shared session is unaffected —
+                    // the bridge's find-or-create lock serializes that, and
+                    // PTY submits were already spawned per message.
+                    let event = event.clone();
+                    let integ = integ.clone();
+                    let bot_token = bot_token.clone();
+                    let bridge = Arc::clone(&bridge);
+                    tokio::spawn(async move {
+                        handle_event(&event, &integ, &bot_token, bridge).await;
+                    });
                 }
                 other => {
                     // Ack anything that carries an envelope_id (slash commands, interactive, etc.)

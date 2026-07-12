@@ -27,7 +27,14 @@ integration, resolves its token(s) from the Keychain, and spawns one listener
 task per integration:
 
 - **Slack** → `crates/otto-channels/src/slack.rs::run` — opens a Socket Mode
-  WebSocket and forwards `message` / `app_mention` events.
+  WebSocket and forwards `message` / `app_mention` events. A zombie-socket
+  watchdog force-reconnects when no frame (Slack's own pings included) arrives
+  for 75 s, plus a client probe ping every 30 s — a silently-dead TCP
+  connection (laptop sleep, Wi-Fi change, NAT timeout) is detected within
+  about a minute and Slack redelivers anything queued, instead of messages
+  sitting invisible until the connection happens to die on its own. Events are
+  handled on spawned tasks, so a slow one (attachment download, session spawn)
+  never delays reading/acking the next frame.
 - **Telegram** → `crates/otto-channels/src/telegram.rs::run` — long-polls
   `getUpdates` and forwards text messages.
 
