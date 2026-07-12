@@ -38,6 +38,11 @@ const CONTEXT_FILE: &str = "CONTEXT.md";
 /// The claude activity-hooks settings file, loaded out-of-tree via `--settings`.
 const SETTINGS_FILE: &str = "settings.json";
 
+/// A session-local Codex home whose `skills/` is owned by Otto. Other entries
+/// are symlinked to the user's real Codex home so auth, config, plugins, and
+/// rollout/session persistence keep their normal behavior.
+const CODEX_SHADOW_HOME: &str = "codex-home";
+
 /// Hard ceiling (in lines) on the context block Otto injects into EVERY session.
 /// Otto must never bloat the agent's context window, so the assembled block is
 /// capped here and the cap is asserted by a unit test — i.e. enforced on every
@@ -57,12 +62,13 @@ fn context_file_name(provider: &str) -> &'static str {
 }
 
 /// The bundle subdirectory each CLI scans for skills (verified per client):
-/// claude → `.claude/skills`, agy → `.agents/skills`, codex reads its skills
-/// on demand from a plain `skills/` dir referenced by the context index.
+/// claude → `.claude/skills`, agy → `.agents/skills`, codex → the `skills/`
+/// root of its session-local shadow CODEX_HOME, grok → a plain indexed dir.
 fn skills_subdir(provider: &str) -> &'static str {
     match provider {
         "claude" => ".claude/skills",
         "agy" => ".agents/skills",
+        "codex" => "codex-home/skills",
         _ => "skills",
     }
 }
@@ -73,9 +79,8 @@ enum SkillIndex<'a> {
     /// (claude via `--add-dir` → `.claude/skills`, agy → `.agents/skills`).
     None,
     /// Emit a compact index (name + description + absolute `SKILL.md` path under
-    /// `skills_dir`) for codex, which has no first-class out-of-tree skill
-    /// loading and reads the referenced file on demand.
-    Codex { skills_dir: &'a Path },
+    /// `skills_dir`) for providers that also need prompt-level discovery.
+    Indexed { skills_dir: &'a Path },
 }
 
 /// One skill artifact the plan wants on disk. Either a recursive copy of the
@@ -144,7 +149,7 @@ fn bundle_dir(ctx_root: &Path, provider: &str, cwd: &str) -> PathBuf {
 /// under `ctx_root` and return both the result and the [`SpawnInjection`] the
 /// CLI needs to load that bundle. Nothing is written into `cwd`.
 ///
-/// Providers other than `claude`/`codex`/`agy` (shell/…) are skipped: empty
+/// Providers other than `claude`/`codex`/`agy`/`grok` (shell/…) are skipped: empty
 /// result + empty injection.
 pub fn provision(
     library: &Library,
@@ -214,9 +219,11 @@ pub fn append_context_block(ctx_root: &Path, cwd: &str, provider: &str, block: &
 ///   context is appended to the system prompt (claude does NOT load `CLAUDE.md`
 ///   from an added dir); activity hooks come via `--settings`.
 /// - **agy** — `--add-dir` auto-loads `<dir>/AGENTS.md` AND `<dir>/.agents/skills`.
-/// - **codex** — no flag loads an out-of-tree instructions file, so the context
-///   text is passed inline via `-c developer_instructions=…`; `--add-dir` grants
-///   read access to the skill files referenced by the index.
+/// - **codex** — `CODEX_HOME` points at the bundle's shadow home, whose
+///   `skills/` is Otto-owned and whose other entries link back to the real
+///   Codex home; context stays inline via `developer_instructions`.
+/// - **grok** — `--rules=<bundle>/CONTEXT.md` appends Otto's context to this
+///   launch only. Grok currently has no per-launch native skill-root flag.
 fn injection_for(provider: &str, dir: &Path) -> SpawnInjection {
     let d = dir.to_string_lossy().into_owned();
     let ctx = dir.join(context_file_name(provider));
@@ -234,6 +241,7 @@ fn injection_for(provider: &str, dir: &Path) -> SpawnInjection {
         }
         "agy" => SpawnInjection { args: vec![format!("--add-dir={d}")], env: Vec::new() },
         "codex" => {
+            sync_codex_shadow_home(dir);
             let mut args = vec![format!("--add-dir={d}")];
             if let Ok(text) = fs::read_to_string(&ctx) {
                 let text = text.trim();
@@ -242,9 +250,62 @@ fn injection_for(provider: &str, dir: &Path) -> SpawnInjection {
                     args.push(format!("developer_instructions={text}"));
                 }
             }
-            SpawnInjection { args, env: Vec::new() }
+            SpawnInjection {
+                args,
+                env: vec![(
+                    "CODEX_HOME".to_string(),
+                    dir.join(CODEX_SHADOW_HOME).to_string_lossy().into_owned(),
+                )],
+            }
         }
+        "grok" if ctx.is_file() => SpawnInjection {
+            args: vec![format!("--rules={}", ctx.display())],
+            env: Vec::new(),
+        },
         _ => SpawnInjection::default(),
+    }
+}
+
+/// Populate the session-local Codex home with links to the user's real Codex
+/// state, deliberately excluding `skills/`. The shadow's skills are managed by
+/// Otto, while auth/config/plugins/sessions keep using their canonical files.
+/// Existing shadow entries are never overwritten: they may have been created
+/// by Codex itself during an earlier managed launch.
+fn sync_codex_shadow_home(bundle: &Path) {
+    let shadow = bundle.join(CODEX_SHADOW_HOME);
+    if let Err(e) = fs::create_dir_all(&shadow) {
+        tracing::warn!(path = %shadow.display(), error = %e, "create Codex shadow home failed");
+        return;
+    }
+
+    let source = std::env::var_os("CODEX_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")));
+    let Some(source) = source else { return };
+    if source == shadow || !source.is_dir() {
+        return;
+    }
+
+    let entries = match fs::read_dir(&source) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(path = %source.display(), error = %e, "read real Codex home failed");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        if entry.file_name() == "skills" {
+            continue;
+        }
+        let dest = shadow.join(entry.file_name());
+        if fs::symlink_metadata(&dest).is_ok() {
+            continue;
+        }
+        #[cfg(unix)]
+        if let Err(e) = std::os::unix::fs::symlink(entry.path(), &dest) {
+            tracing::warn!(path = %dest.display(), error = %e, "link Codex shadow-home entry failed");
+        }
     }
 }
 
@@ -271,7 +332,9 @@ fn plan(
     ctx_root: &Path,
 ) -> ProviderPlan {
     match provider {
-        "claude" | "codex" | "agy" => plan_provider(library, cfg, cwd, provider, ctx_root),
+        "claude" | "codex" | "agy" | "grok" => {
+            plan_provider(library, cfg, cwd, provider, ctx_root)
+        }
         other => ProviderPlan {
             provider: other.to_string(),
             skipped: true,
@@ -336,9 +399,8 @@ fn read_memory(cwd: &str) -> Option<String> {
 /// Build the markdown context block (soul + optional skills index + context +
 /// repo rules + memory). The skills section is controlled by `index`:
 /// [`SkillIndex::None`] omits it (claude/agy auto-load the skill files), while
-/// [`SkillIndex::Codex`] emits a compact name+description+path index (codex has
-/// no first-class out-of-tree skills and reads each referenced `SKILL.md` on
-/// demand). Full skill bodies are NEVER inlined here — that is what pushed codex
+/// [`SkillIndex::Indexed`] emits a compact name+description+path index. Full
+/// skill bodies are NEVER inlined here — that is what pushed Codex
 /// past its hard 150k-char instructions limit; an index scales as the library
 /// grows.
 fn build_block(
@@ -355,7 +417,7 @@ fn build_block(
         sections.push(format!("## Soul\n\n{}", soul.trim_end()));
     }
 
-    if let SkillIndex::Codex { skills_dir } = index {
+    if let SkillIndex::Indexed { skills_dir } = index {
         if !skills.is_empty() {
             let mut buf = String::from(
                 "## Skills\n\nThe following skills are available. When one is relevant to your \
@@ -499,7 +561,9 @@ fn build_skill_artifacts(
 ///   `--settings`).
 /// - **agy** — `AGENTS.md` (auto-loaded via `--add-dir`) + `.agents/skills`.
 /// - **codex** — `CONTEXT.md` (passed inline via `-c developer_instructions`,
-///   carrying a skills *index*) + `skills/` (read on demand).
+///   carrying a skills index) + a session-local shadow CODEX_HOME whose
+///   `skills/` root is native-discoverable.
+/// - **grok** — `CONTEXT.md` (passed via `--rules`) + indexed `skills/` files.
 fn plan_provider(
     library: &Library,
     cfg: &WorkspaceContextConfig,
@@ -513,10 +577,9 @@ fn plan_provider(
     let skills_dir = bundle.join(skills_subdir(provider));
     let skill_artifacts = build_skill_artifacts(library, &skills, &skills_dir);
 
-    // codex gets a skills index into its bundle skills dir; claude/agy auto-load
-    // the skill files, so their block omits the section.
-    let index = if provider == "codex" {
-        SkillIndex::Codex { skills_dir: &skills_dir }
+    // Codex and Grok receive a compact index; Claude/Agy auto-load their skills.
+    let index = if matches!(provider, "codex" | "grok") {
+        SkillIndex::Indexed { skills_dir: &skills_dir }
     } else {
         SkillIndex::None
     };
@@ -1021,7 +1084,7 @@ mod tests {
         assert!(ctx.contains("Persona text."));
         assert!(ctx.contains("### triage"));
         assert!(ctx.contains("Triage incoming tickets"));
-        let skill_md = bundle.join("skills/triage/SKILL.md");
+        let skill_md = bundle.join("codex-home/skills/triage/SKILL.md");
         assert!(ctx.contains(&skill_md.display().to_string()), "index points at the skill file");
         assert!(!ctx.contains("SKILL BODY ALPHA"));
 
@@ -1031,16 +1094,57 @@ mod tests {
             "---\ndescription: Triage incoming tickets\n---\nSKILL BODY ALPHA"
         );
         assert_eq!(
-            merge::read_manifest(&bundle.join("skills")),
+            merge::read_manifest(&bundle.join("codex-home/skills")),
             vec!["triage".to_string()]
         );
 
-        // Injection: --add-dir + the context passed inline via developer_instructions.
+        // Injection: a shadow CODEX_HOME makes bundle skills native, while
+        // --add-dir grants access and developer_instructions carries context.
         assert!(inj.args.iter().any(|a| a == &format!("--add-dir={}", bundle.display())));
-        let di = inj.args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].clone());
-        let di = di.expect("a `-c developer_instructions=…` arg");
+        assert_eq!(
+            inj.env,
+            vec![(
+                "CODEX_HOME".to_string(),
+                bundle.join("codex-home").to_string_lossy().into_owned()
+            )]
+        );
+        let di = inj
+            .args
+            .windows(2)
+            .find(|w| w[0] == "-c" && w[1].starts_with("developer_instructions="))
+            .map(|w| w[1].clone())
+            .expect("a `-c developer_instructions=…` arg");
         assert!(di.starts_with("developer_instructions="));
         assert!(di.contains("## Soul"));
+    }
+
+    #[test]
+    fn grok_receives_the_session_context_as_rules() {
+        let (_l, cwd, root, lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        lib.put_skill(
+            "triage",
+            "---\ndescription: Triage incoming tickets\n---\nSKILL BODY ALPHA",
+        )
+        .unwrap();
+
+        let (res, inj) = provision(
+            &lib,
+            &WorkspaceContextConfig::default(),
+            &cwd_path,
+            "grok",
+            root.path(),
+        );
+        assert!(!res.skipped);
+        let bundle = bundle_of(&root, "grok", &cwd_path);
+        let ctx = fs::read_to_string(bundle.join("CONTEXT.md")).unwrap();
+        assert!(ctx.contains("### triage"));
+        assert!(ctx.contains(&bundle.join("skills/triage/SKILL.md").display().to_string()));
+        assert_eq!(
+            inj.args,
+            vec![format!("--rules={}", bundle.join("CONTEXT.md").display())]
+        );
+        assert_clean_cwd(cwd.path());
     }
 
     #[test]
