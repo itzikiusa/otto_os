@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use otto_core::{Error, Result};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+use tokio::io::AsyncWriteExt;
 
 use crate::parse::{self, parse_note};
 use crate::resolve::ResolveIndex;
@@ -37,6 +38,8 @@ pub struct VaultEngine {
     scans: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     /// Unix seconds of the last completed scan per vault (staleness probe).
     last_scan: Mutex<HashMap<i64, Arc<AtomicI64>>>,
+    /// Hash-check + replace serialization for each writable vault path.
+    writes: Mutex<HashMap<(i64, String), Arc<tokio::sync::Mutex<()>>>>,
     switcher: RwLock<HashMap<i64, Arc<SwitcherIx>>>,
     fts_ok: std::sync::atomic::AtomicU8, // 0 unknown / 1 yes / 2 no
 }
@@ -47,6 +50,7 @@ impl VaultEngine {
             store: Store::new(pool),
             scans: Mutex::new(HashMap::new()),
             last_scan: Mutex::new(HashMap::new()),
+            writes: Mutex::new(HashMap::new()),
             switcher: RwLock::new(HashMap::new()),
             fts_ok: std::sync::atomic::AtomicU8::new(0),
         }
@@ -155,6 +159,15 @@ impl VaultEngine {
 
     fn last_scan_cell(&self, id: i64) -> Arc<AtomicI64> {
         self.last_scan.lock().unwrap().entry(id).or_default().clone()
+    }
+
+    fn write_lock(&self, id: i64, path: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.writes
+            .lock()
+            .unwrap()
+            .entry((id, path.to_string()))
+            .or_default()
+            .clone()
     }
 
     /// Fire-and-forget scan kick (coalesced).
@@ -381,6 +394,67 @@ impl VaultEngine {
         Ok(target)
     }
 
+    /// Resolve a write through its canonical parent and reject a pre-existing
+    /// symlink leaf. Atomic rename then replaces, rather than follows, a leaf
+    /// swapped in after this check.
+    fn guarded_write_target(root: &str, rel: &str) -> Result<PathBuf> {
+        let rootc = Path::new(root)
+            .canonicalize()
+            .map_err(|e| Error::Conflict(format!("vault root missing: {e}")))?;
+        let candidate = rootc.join(rel);
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| Error::Invalid(format!("invalid path: {rel}")))?
+            .canonicalize()
+            .map_err(|e| Error::Conflict(format!("text artifact parent missing: {e}")))?;
+        if !parent.starts_with(&rootc) {
+            return Err(Error::Forbidden("path escapes the vault".into()));
+        }
+        let target = parent.join(
+            candidate
+                .file_name()
+                .ok_or_else(|| Error::Invalid(format!("invalid path: {rel}")))?,
+        );
+        if std::fs::symlink_metadata(&target)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(Error::Forbidden("text artifact target must not be a symlink".into()));
+        }
+        Ok(target)
+    }
+
+    /// Write a unique same-directory temp, flush it, then atomically replace the
+    /// destination without ever opening that destination for writing.
+    async fn atomic_replace(target: &Path, bytes: &[u8]) -> Result<()> {
+        let parent = target
+            .parent()
+            .ok_or_else(|| Error::Invalid(format!("invalid path: {}", target.display())))?;
+        let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("artifact");
+        let temp = parent.join(format!(".{name}.otto-tmp-{}", otto_core::new_id()));
+        let write = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+                .await
+                .map_err(|e| Error::Internal(format!("create temp {}: {e}", temp.display())))?;
+            file.write_all(bytes)
+                .await
+                .map_err(|e| Error::Internal(format!("write temp {}: {e}", temp.display())))?;
+            file.sync_all()
+                .await
+                .map_err(|e| Error::Internal(format!("flush temp {}: {e}", temp.display())))?;
+            tokio::fs::rename(&temp, target)
+                .await
+                .map_err(|e| Error::Internal(format!("replace {}: {e}", target.display())))
+        }
+        .await;
+        if write.is_err() {
+            let _ = tokio::fs::remove_file(&temp).await;
+        }
+        write
+    }
+
     // -- notes ---------------------------------------------------------------------
 
     pub async fn dir(self: &Arc<Self>, ws: &str, id: i64, path: &str) -> Result<DirListing> {
@@ -531,7 +605,17 @@ impl VaultEngine {
                 bytes.len()
             )));
         }
-        let abs = Self::abs_guarded(&v.root_path, &rel)?;
+        let lock = self.write_lock(id, &rel);
+        let _guard = lock.lock().await;
+        // Check the nearest existing ancestor before creating parents, then
+        // canonicalize the now-existing parent for the actual replace.
+        let candidate = Self::abs_guarded(&v.root_path, &rel)?;
+        if let Some(parent) = candidate.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| Error::Internal(format!("mkdir: {e}")))?;
+        }
+        let abs = Self::guarded_write_target(&v.root_path, &rel)?;
         if let Some(expected) = if_hash {
             let current = match tokio::fs::read(&abs).await {
                 Ok(b) => hex_sha256(&b),
@@ -543,14 +627,7 @@ impl VaultEngine {
                 )));
             }
         }
-        if let Some(parent) = abs.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| Error::Internal(format!("mkdir: {e}")))?;
-        }
-        tokio::fs::write(&abs, bytes)
-            .await
-            .map_err(|e| Error::Internal(format!("write: {e}")))?;
+        Self::atomic_replace(&abs, bytes).await?;
         self.scan(id).await?;
         Ok(VaultTextFile {
             path: rel,

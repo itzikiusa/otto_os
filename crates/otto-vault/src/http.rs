@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -19,7 +19,12 @@ use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{Error, Id};
 
 use crate::engine::VaultEngine;
+use crate::scan::MAX_FTS_BYTES;
 use crate::types::*;
+
+/// Allow decoded content through the 4 MiB engine cap plus JSON framing. Keep
+/// the larger transport limit local to this route.
+const TEXT_FILE_JSON_BODY_LIMIT: usize = MAX_FTS_BYTES as usize + 64 * 1024;
 
 /// Host-application context required by the vault router.
 pub trait VaultCtx: Clone + Send + Sync + 'static {
@@ -375,7 +380,8 @@ pub fn router<C: VaultCtx>() -> Router<C> {
         )
         .route(
             "/workspaces/{ws}/vault/vaults/{id}/file",
-            axum::routing::put(write_text_file::<C>),
+            axum::routing::put(write_text_file::<C>)
+                .layer(DefaultBodyLimit::max(TEXT_FILE_JSON_BODY_LIMIT)),
         )
         .route("/workspaces/{ws}/vault/vaults/{id}/rename", post(rename::<C>))
         .route("/workspaces/{ws}/vault/vaults/{id}/folder", post(folder::<C>))

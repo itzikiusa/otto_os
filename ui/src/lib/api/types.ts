@@ -5107,6 +5107,18 @@ export interface VaultNote {
   outgoing: VaultOutgoingLink[];
 }
 
+export interface VaultTextFile {
+  path: string;
+  size: number;
+  hash: string;
+}
+
+export interface WriteTextFileReq {
+  path: string;
+  content: string;
+  if_hash?: string;
+}
+
 export interface VaultBacklink {
   path: string;
   title: string;

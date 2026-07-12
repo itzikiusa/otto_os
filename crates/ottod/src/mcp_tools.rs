@@ -849,6 +849,15 @@ fn arg_str(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required string argument `{key}`"))
 }
 
+/// Required string that may be explicitly empty (valid for file content).
+fn arg_string_allow_empty(args: &Value, key: &str) -> Result<String, String> {
+    match args.get(key) {
+        Some(Value::String(value)) => Ok(value.clone()),
+        Some(_) => Err(format!("argument `{key}` must be a string")),
+        None => Err(format!("missing required string argument `{key}`")),
+    }
+}
+
 /// Extract a required integer argument.
 fn arg_i64(args: &Value, key: &str) -> Result<i64, String> {
     args.get(key)
@@ -1143,7 +1152,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             let v = arg_i64(args, "vault_id")?;
             let mut body = json!({
                 "path": arg_str(args, "path")?,
-                "content": args.get("content").and_then(Value::as_str).unwrap_or(""),
+                "content": arg_string_allow_empty(args, "content")?,
             });
             if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
                 body["if_hash"] = json!(h);
@@ -1158,7 +1167,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             let v = arg_i64(args, "vault_id")?;
             let mut body = json!({
                 "path": arg_str(args, "path")?,
-                "content": args.get("content").and_then(Value::as_str).unwrap_or(""),
+                "content": arg_string_allow_empty(args, "content")?,
             });
             if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
                 body["if_hash"] = json!(h);
@@ -1739,6 +1748,47 @@ mod tests {
         ] {
             assert!(names.contains(&t), "catalog missing {t}");
         }
+
+        let write_file = cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "otto_vault_write_file")
+            .unwrap();
+        assert_eq!(
+            write_file["inputSchema"]["required"],
+            json!(["vault_id", "path", "content"])
+        );
+        assert_eq!(write_file["inputSchema"]["properties"]["content"]["type"], json!("string"));
+    }
+
+    #[tokio::test]
+    async fn vault_write_file_requires_string_content_but_allows_explicit_empty() {
+        let ctx = test_ctx();
+        for arguments in [
+            json!({ "vault_id": 1, "path": "api.json" }),
+            json!({ "vault_id": 1, "path": "api.json", "content": 7 }),
+        ] {
+            let resp = handle(
+                &ctx,
+                json!({ "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                        "params": { "name": "otto_vault_write_file", "arguments": arguments } }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp["result"]["isError"], json!(true));
+            let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("content"), "got: {text}");
+        }
+
+        let err = run_tool(
+            &ctx,
+            "otto_vault_write_file",
+            &json!({ "vault_id": 1, "path": "api.json", "content": "" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.contains("content"), "explicit empty content must pass argument validation: {err}");
     }
 
     #[tokio::test]

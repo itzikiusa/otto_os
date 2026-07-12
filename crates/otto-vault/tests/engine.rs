@@ -199,6 +199,16 @@ async fn write_text_file_is_guarded_versioned_and_scanned() {
     let listing = eng.dir(WS, id, "api").await.unwrap();
     assert!(listing.entries.iter().any(|e| e.path == "api/openapi.yaml"));
 
+    for extension in ["yaml", "yml", "json", "d2", "mmd", "txt", "csv"] {
+        let path = format!("formats/artifact.{extension}");
+        let written = eng
+            .write_text_file(WS, id, &path, extension, Some(""))
+            .await
+            .unwrap_or_else(|e| panic!(".{extension} must be writable: {e}"));
+        assert_eq!(written.path, path);
+        assert_eq!(std::fs::read_to_string(td.path().join(&path)).unwrap(), extension);
+    }
+
     let err = eng
         .write_text_file(WS, id, "api/openapi.yaml", "clobber", Some("deadbeef"))
         .await
@@ -231,7 +241,50 @@ async fn write_text_file_is_guarded_versioned_and_scanned() {
             .unwrap_err();
         assert!(matches!(err, otto_core::Error::Forbidden(_)), "{err:?}");
         assert!(!outside.path().join("nested/openapi.yaml").exists());
+
+        let outside_file = outside.path().join("outside.json");
+        std::fs::write(&outside_file, "outside must stay unchanged").unwrap();
+        std::os::unix::fs::symlink(&outside_file, td.path().join("final-link.json")).unwrap();
+        let err = eng
+            .write_text_file(WS, id, "final-link.json", "escaped", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, otto_core::Error::Forbidden(_)), "{err:?}");
+        assert_eq!(
+            std::fs::read_to_string(&outside_file).unwrap(),
+            "outside must stay unchanged"
+        );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_text_file_writes_with_one_hash_yield_exactly_one_conflict() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let old_content = "z".repeat(4 * 1024 * 1024);
+    let initial = eng
+        .write_text_file(WS, id, "api/concurrent.json", &old_content, Some(""))
+        .await
+        .unwrap();
+
+    let first = eng.write_text_file(WS, id, "api/concurrent.json", "a", Some(&initial.hash));
+    let second = eng.write_text_file(WS, id, "api/concurrent.json", "b", Some(&initial.hash));
+    let (a, b) = tokio::join!(first, second);
+
+    let conflicts = [&a, &b]
+        .into_iter()
+        .filter(|r| matches!(r, Err(otto_core::Error::Conflict(_))))
+        .count();
+    let successes = [&a, &b].into_iter().filter(|r| r.is_ok()).count();
+    assert_eq!(successes, 1, "one writer must win: a={a:?}, b={b:?}");
+    assert_eq!(conflicts, 1, "one writer must observe a stale hash: a={a:?}, b={b:?}");
+    assert_eq!(
+        std::fs::metadata(td.path().join("api/concurrent.json"))
+            .unwrap()
+            .len(),
+        1,
+        "the winning write must be atomically complete"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

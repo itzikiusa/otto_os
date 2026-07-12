@@ -920,6 +920,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn vault_text_file_route_requires_product_edit() {
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/workspaces/{ws}/vault/vaults/{id}/file"),
+            Require(Product, Edit),
+        );
+    }
+
     // ---- Snips --------------------------------------------------------------
 
     #[test]
