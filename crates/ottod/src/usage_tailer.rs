@@ -16,11 +16,15 @@
 //!   * **agy** — unsupported (token usage is encrypted on disk); logged once.
 //!
 //! Correctness invariants:
-//!   * **No double-counting.** Two guards. (1) A per-file byte-offset cursor is
-//!     persisted to `<data_dir>/usage_tailer.json` (atomic write), so no *line*
+//!   * **No double-counting.** Provider-specific guards complement the per-file
+//!     byte-offset cursor. Claude uses a persisted response-key seen set.
+//!     Codex uses persisted cumulative counters keyed by session id, so repeated
+//!     snapshots and resumes across rollout files emit only positive deltas.
+//!     The cursor itself is persisted to `<data_dir>/usage_tailer.json`
+//!     (atomic write), so no *line*
 //!     is read twice — including across restarts. Only complete lines (up to
 //!     the last `\n`) are consumed; a trailing partial line is left for the
-//!     next scan. (2) A persisted seen-set of claude response keys
+//!     next scan. Claude's response keys are
 //!     (`message.id:requestId`, `<data_dir>/usage_tailer_seen.json`), because
 //!     one API *response* spans several transcript lines (one per content
 //!     block, all repeating the same usage) and resumed sessions replay old
@@ -49,8 +53,8 @@ use std::time::Duration;
 
 use otto_state::{SessionsRepo, SqlitePool};
 use otto_usage::{
-    estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta, CursorStore,
-    SeenKeys, UsageEngine, UsageEvent, EXTERNAL_WORKSPACE,
+    estimate_cost, parse_claude_line, parse_codex_line, parse_codex_session_meta,
+    CodexCounterStore, CursorStore, SeenKeys, UsageEngine, UsageEvent, EXTERNAL_WORKSPACE,
 };
 use tokio::task::JoinHandle;
 
@@ -61,6 +65,10 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(20);
 /// ~1.5k responses/day, so 100k keys ≈ two months of history — far beyond how
 /// far back a resume replays — while keeping the JSON file a few MB.
 const SEEN_KEYS_CAP: usize = 100_000;
+
+/// Codex sessions are far less numerous than response ids; this covers years
+/// of normal use while bounding the persisted cumulative-counter map.
+const CODEX_COUNTERS_CAP: usize = 20_000;
 
 /// Default model label for Codex turns when the rollout file carries no model.
 /// `estimate_cost` prices this at the gpt tier (substring match on "codex").
@@ -100,6 +108,9 @@ pub struct UsageTailer {
     /// Set when [`Self::scan_once`] recorded a new claude key, so the seen file
     /// is only rewritten when it actually changed.
     seen_dirty: bool,
+    /// Session-wide cumulative-token baselines for Codex rollout snapshots.
+    codex_counters: CodexCounterStore,
+    codex_counters_dirty: bool,
 }
 
 /// One Otto session, projected for attribution.
@@ -125,6 +136,10 @@ impl UsageTailer {
     pub fn new(usage: Arc<UsageEngine>, pool: SqlitePool, data_dir: PathBuf, home: PathBuf) -> Self {
         let cursors = CursorStore::load(data_dir.join("usage_tailer.json"));
         let seen = SeenKeys::load(data_dir.join("usage_tailer_seen.json"), SEEN_KEYS_CAP);
+        let codex_counters = CodexCounterStore::load(
+            data_dir.join("usage_tailer_codex_totals.json"),
+            CODEX_COUNTERS_CAP,
+        );
         Self {
             usage,
             pool,
@@ -133,6 +148,8 @@ impl UsageTailer {
             cursors,
             seen,
             seen_dirty: false,
+            codex_counters,
+            codex_counters_dirty: false,
         }
     }
 
@@ -358,14 +375,11 @@ impl UsageTailer {
 
     /// Seed the cursor for every transcript file that isn't already tracked,
     /// setting it to the file's current size so existing history is skipped.
+    /// Codex also records each session's latest cumulative snapshot: otherwise
+    /// the first append after upgrading would look like an all-history delta.
     async fn seed_existing_files(&mut self) {
-        let files: Vec<PathBuf> = self
-            .claude_files()
-            .into_iter()
-            .chain(self.codex_files())
-            .collect();
         let mut seeded = 0usize;
-        for f in files {
+        for f in self.claude_files() {
             if self.cursors.contains(&f) {
                 continue;
             }
@@ -373,12 +387,61 @@ impl UsageTailer {
             self.cursors.set(&f, size);
             seeded += 1;
         }
+
+        let mut codex_baselines = 0usize;
+        let mut catchup_files = 0usize;
+        let mut new_baseline_sessions = std::collections::HashSet::new();
+        for f in self.codex_files() {
+            let meta = read_codex_meta(&f).await;
+            let session_id = meta
+                .as_ref()
+                .and_then(|m| m.session_id.clone())
+                .unwrap_or_else(|| codex_thread_uuid(&f));
+            let needs_baseline = new_baseline_sessions.contains(&session_id)
+                || !self.codex_counters.contains(&session_id);
+            if !self.cursors.contains(&f) {
+                if !needs_baseline {
+                    // A resume can create a new rollout while ottod is down.
+                    // Read it from byte 0 against the persisted session total.
+                    self.cursors.set(&f, 0);
+                    catchup_files += 1;
+                } else {
+                    // Preserve the existing no-historical-backfill policy for
+                    // sessions Otto has never observed.
+                    let size = file_size(&f).await.unwrap_or(0);
+                    self.cursors.set(&f, size);
+                    seeded += 1;
+                }
+            }
+            if needs_baseline {
+                new_baseline_sessions.insert(session_id.clone());
+            }
+            let model = meta
+                .and_then(|m| m.model)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| CODEX_FALLBACK_MODEL.to_string());
+            if new_baseline_sessions.contains(&session_id) {
+                if let Some(total) = read_last_codex_usage(&f, &model).await {
+                    self.codex_counters.seed(&session_id, &total);
+                    codex_baselines += 1;
+                }
+            }
+        }
         if seeded > 0 {
             if let Err(e) = self.cursors.save() {
                 tracing::warn!("usage tailer: failed to persist seeded cursors: {e}");
             }
         }
-        tracing::info!("usage tailer: seeded {seeded} pre-existing transcript file(s)");
+        if codex_baselines > 0 {
+            if let Err(e) = self.codex_counters.save() {
+                tracing::warn!("usage tailer: failed to persist Codex baselines: {e}");
+            }
+        }
+        tracing::info!(
+            "usage tailer: seeded {seeded} pre-existing transcript file(s), \
+             {codex_baselines} Codex cumulative baseline(s), \
+             {catchup_files} resumed rollout(s) queued for catch-up"
+        );
     }
 
     /// One full scan: rebuild attribution, tail both providers, persist cursors.
@@ -396,13 +459,31 @@ impl UsageTailer {
             }
         }
 
-        if let Err(e) = self.cursors.save() {
-            tracing::warn!("usage tailer: failed to persist cursors: {e}");
-        }
+        let mut guards_persisted = true;
         if self.seen_dirty {
             match self.seen.save() {
                 Ok(()) => self.seen_dirty = false,
-                Err(e) => tracing::warn!("usage tailer: failed to persist seen keys: {e}"),
+                Err(e) => {
+                    guards_persisted = false;
+                    tracing::warn!("usage tailer: failed to persist seen keys: {e}");
+                }
+            }
+        }
+        if self.codex_counters_dirty {
+            match self.codex_counters.save() {
+                Ok(()) => self.codex_counters_dirty = false,
+                Err(e) => {
+                    guards_persisted = false;
+                    tracing::warn!("usage tailer: failed to persist Codex counters: {e}");
+                }
+            }
+        }
+        // Persist provider-level dedup baselines before advancing byte offsets.
+        // If a guard write fails, replaying lines is safe in-process and safer
+        // across restart than committing a cursor ahead of its dedup state.
+        if guards_persisted {
+            if let Err(e) = self.cursors.save() {
+                tracing::warn!("usage tailer: failed to persist cursors: {e}");
             }
         }
         Ok(())
@@ -535,12 +616,18 @@ impl UsageTailer {
     }
 
     async fn tail_codex_file(&mut self, file: &Path, attr: &Attribution) -> Result<(), String> {
-        // The session_meta (cwd + model) lives on the first line; read it once
+        // The session_meta (id + cwd + model) lives on the first line; read it once
         // (cheaply, just the head) so we can attribute and price every turn.
         let meta = read_codex_meta(file).await;
         let cwd = meta.as_ref().and_then(|m| m.cwd.clone());
+        let thread_uuid = codex_thread_uuid(file);
+        let codex_session_id = meta
+            .as_ref()
+            .and_then(|m| m.session_id.clone())
+            .unwrap_or_else(|| thread_uuid.clone());
         let model = meta
-            .and_then(|m| m.model)
+            .as_ref()
+            .and_then(|m| m.model.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| CODEX_FALLBACK_MODEL.to_string());
 
@@ -557,16 +644,17 @@ impl UsageTailer {
             })
         });
 
-        // thread-uuid from the filename: rollout-<ts>-<uuid>.jsonl → last uuid.
-        let thread_uuid = codex_thread_uuid(file);
-
         let (chunk, new_offset) = match self.read_new_bytes(file).await? {
             Some(v) => v,
             None => return Ok(()),
         };
 
         for line in chunk.lines() {
-            let Some(parsed) = parse_codex_line(line, &model) else {
+            let Some(total) = parse_codex_line(line, &model) else {
+                continue;
+            };
+            self.codex_counters_dirty = true;
+            let Some(parsed) = self.codex_counters.apply(&codex_session_id, &total) else {
                 continue;
             };
             let (workspace_id, session_id) = match &sref {
@@ -703,6 +791,43 @@ async fn read_codex_meta(file: &Path) -> Option<otto_usage::CodexMeta> {
     parse_codex_session_meta(first)
 }
 
+/// Search backward through a bounded tail of a rollout for its newest
+/// cumulative token snapshot. The first 512 KiB normally contains one; the
+/// wider ceiling handles a large final tool result without loading multi-GB
+/// rollouts in full.
+async fn read_last_codex_usage(file: &Path, model: &str) -> Option<otto_usage::ParsedUsage> {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK_BYTES: u64 = 512 * 1024;
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    const OVERLAP: u64 = 16 * 1024;
+    let path = file.to_path_buf();
+    let model = model.to_string();
+    tokio::task::spawn_blocking(move || -> Option<otto_usage::ParsedUsage> {
+        let mut f = std::fs::File::open(&path).ok()?;
+        let size = f.metadata().ok()?.len();
+        let floor = size.saturating_sub(MAX_BYTES);
+        let mut end = size;
+        while end > floor {
+            let start = end.saturating_sub(CHUNK_BYTES).max(floor);
+            f.seek(SeekFrom::Start(start)).ok()?;
+            let mut buf = vec![0u8; (end - start) as usize];
+            f.read_exact(&mut buf).ok()?;
+            let text = String::from_utf8_lossy(&buf);
+            if let Some(total) = text.lines().rev().find_map(|line| parse_codex_line(line, &model)) {
+                return Some(total);
+            }
+            if start == floor {
+                break;
+            }
+            end = start.saturating_add(OVERLAP);
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Extract the thread uuid from a codex rollout filename:
 /// `rollout-<ISO-ts>-<uuid>.jsonl`. The uuid is the tail after the timestamp;
 /// since the ts itself contains `-`, we take the canonical 5-group uuid (last
@@ -734,5 +859,28 @@ mod tests {
             codex_thread_uuid(f),
             "019ed94a-994a-7010-b01f-9b840c5b7068"
         );
+    }
+
+    #[tokio::test]
+    async fn read_last_codex_usage_finds_the_newest_cumulative_snapshot() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("otto-codex-tail-test-{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(
+            "rollout-2026-07-12T20-00-00-019ed94a-994a-7010-b01f-9b840c5b7068.jsonl",
+        );
+        let old = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":5}}}}"#;
+        let new = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":160,"cached_input_tokens":120,"output_tokens":9,"reasoning_output_tokens":4}}}}"#;
+        let padding = "tool output\n".repeat(60_000);
+        std::fs::write(&file, format!("{old}\n{padding}{new}\n")).unwrap();
+
+        let got = read_last_codex_usage(&file, "gpt-5-codex").await.unwrap();
+        assert_eq!(got.input, 40);
+        assert_eq!(got.cache_read, 120);
+        assert_eq!(got.output, 9, "reasoning is already included in output");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
