@@ -15,7 +15,7 @@ Start every concept with a YAML mapping between `---` delimiters.
 
 | Field | Requirement | Rule |
 |---|---|---|
-| `type` | Required | Non-empty, free-form concept kind |
+| `type` | Required | Non-empty scalar concept kind; Otto extracts YAML strings and numbers, not collections, booleans, nulls, or comment-only values |
 | `title` | Recommended | Display name; filename is fallback |
 | `description` | Recommended | Exactly one sentence used by search and indexes |
 | `resource` | Conditional | Canonical URI for a real asset; omit for abstract concepts |

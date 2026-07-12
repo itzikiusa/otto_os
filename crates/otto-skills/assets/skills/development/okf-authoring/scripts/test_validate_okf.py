@@ -37,6 +37,20 @@ class ValidateOkfTests(unittest.TestCase):
             [("E3", "docs/index.md"), ("E3", "log.md")],
         )
 
+    def test_type_matches_otto_string_or_number_semantics(self):
+        report = validate_okf.validate_bundle(FIXTURES / "invalid-type-values")
+
+        self.assertFalse(report["conformant"])
+        self.assertEqual(
+            [(item["rule"], item["path"]) for item in report["errors"]],
+            [
+                ("E2", "boolean-type.md"),
+                ("E2", "comment-only-type.md"),
+                ("E2", "mapping-type.md"),
+                ("E2", "sequence-type.md"),
+            ],
+        )
+
     def test_quality_warnings_do_not_make_cli_fail(self):
         stdout = io.StringIO()
         with redirect_stdout(stdout):

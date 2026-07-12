@@ -12,12 +12,70 @@ import validate_okf
 
 
 HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
-FENCE_RE = re.compile(r"(?:^|\n)(?:```|~~~)[^\n]*\n.+?(?:\n```|\n~~~)", re.DOTALL)
+FENCE_RE = re.compile(
+    r"(?:^|\n)(?P<fence>```|~~~)(?P<language>[^\n]*)\n"
+    r"(?P<body>.*?)(?:\n(?P=fence)[ \t]*(?=\n|$))",
+    re.DOTALL,
+)
 TABLE_HEADER_RE = re.compile(
     r"\|[^\n]*\bfield\b[^\n]*\btype\b[^\n]*\bdescription\b[^\n]*\|",
     re.IGNORECASE,
 )
 LINK_RE = re.compile(r"\[[^\]]+\]\([^)]+\)")
+UNKNOWN_RE = re.compile(r"\bunknown\b|\bn\s*/?\s*a\b|\bnot applicable\b", re.I)
+DEPTH_KEYWORDS = {
+    "access",
+    "atomic",
+    "auth",
+    "authentication",
+    "authorization",
+    "body",
+    "commit",
+    "consistency",
+    "delete",
+    "description",
+    "effect",
+    "effects",
+    "error",
+    "errors",
+    "example",
+    "examples",
+    "expire",
+    "field",
+    "fields",
+    "flow",
+    "header",
+    "impact",
+    "index",
+    "indexes",
+    "insert",
+    "isolation",
+    "join",
+    "joins",
+    "lookup",
+    "parameter",
+    "parameters",
+    "path",
+    "query",
+    "read",
+    "reads",
+    "relationship",
+    "relationships",
+    "request",
+    "response",
+    "retention",
+    "runtime",
+    "scan",
+    "side",
+    "success",
+    "transaction",
+    "ttl",
+    "type",
+    "update",
+    "validation",
+    "write",
+    "writes",
+}
 
 
 def _normalize_heading(value: str) -> str:
@@ -41,10 +99,108 @@ def _section(sections: Dict[str, str], *aliases: str) -> str:
     return ""
 
 
-def _has_body_example(content: str, allow_none: bool = False) -> bool:
-    if allow_none and re.search(r"\b(no|none|not applicable)\b.{0,20}\b(body|payload)\b", content, re.I):
+def _prose(content: str) -> str:
+    content = FENCE_RE.sub(" ", content)
+    content = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", content)
+    content = re.sub(r"[`|#*_<>:-]", " ", content)
+    return re.sub(r"\s+", " ", content).strip()
+
+
+def _has_substantive_content(content: str) -> bool:
+    words = [word.lower() for word in re.findall(r"[A-Za-z0-9]+", _prose(content))]
+    return len(words) >= 4 and any(word not in DEPTH_KEYWORDS for word in words)
+
+
+def _has_evidence_backed_unknown(content: str) -> bool:
+    return bool(
+        UNKNOWN_RE.search(content)
+        and LINK_RE.search(content)
+        and _has_substantive_content(content)
+    )
+
+
+def _has_depth(content: str) -> bool:
+    if UNKNOWN_RE.search(content):
+        return _has_evidence_backed_unknown(content)
+    return _has_substantive_content(content)
+
+
+def _has_explicit_absence(content: str, nouns: str) -> bool:
+    if not _has_substantive_content(content):
+        return False
+    return bool(
+        re.search(r"\b(?:no|without)\b.{{0,32}}\b(?:{})\b".format(nouns), content, re.I)
+        or re.search(r"\b(?:{})\b.{{0,20}}\bnone\b".format(nouns), content, re.I)
+    )
+
+
+def _has_schema_table(content: str) -> bool:
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        if not TABLE_HEADER_RE.search(line):
+            continue
+        if index + 2 >= len(lines):
+            return False
+        separator = lines[index + 1].strip().strip("|")
+        if not separator or not all(
+            re.fullmatch(r"\s*:?-{3,}:?\s*", cell)
+            for cell in separator.split("|")
+        ):
+            return False
+        for row in lines[index + 2 :]:
+            if row.strip().startswith("|"):
+                cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+                if len(cells) >= 3 and all(cells[:3]):
+                    return True
+            elif row.strip():
+                break
+        return False
+    return False
+
+
+def _is_structured_example(language: str, body: str) -> bool:
+    language = language.strip().lower().split(maxsplit=1)[0] if language.strip() else ""
+    body = body.strip()
+    if not body:
+        return False
+    if language == "json" or body.startswith(("{", "[")):
+        try:
+            parsed = json.loads(body)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(parsed, (dict, list)) and bool(parsed)
+    if language in {"sql", "postgresql", "mysql"}:
+        return bool(re.search(r"\b(?:select|insert|update|delete|create|with)\b", body, re.I))
+    if language in {"yaml", "yml"}:
+        return bool(re.search(r"^\s*[A-Za-z_][\w.-]*\s*:\s*\S+", body, re.MULTILINE))
+    if language in {"xml", "html"}:
+        return bool(re.search(r"<([A-Za-z_][\w:.-]*)\b[^>]*>.*</\1>", body, re.DOTALL))
+    if language in {"http", "https"} or re.search(
+        r"^(?:GET|POST|PUT|PATCH|DELETE|HTTP/)\s+", body, re.MULTILINE
+    ):
         return True
-    return bool(FENCE_RE.search(content))
+    if language in {"graphql", "gql"}:
+        return bool(re.search(r"\b(?:query|mutation|subscription)\b", body))
+    if language in {"bash", "console", "sh", "shell", "zsh"}:
+        return bool(re.search(r"^(?:\$\s*)?(?:curl|http|wget|redis-cli|psql|mysql)\b", body, re.MULTILINE))
+    return bool(
+        re.search(r"^\s*[A-Za-z_][\w.-]*\s*[=:]\s*\S+", body, re.MULTILINE)
+    )
+
+
+def _has_structured_example(content: str) -> bool:
+    return any(
+        _is_structured_example(match.group("language"), match.group("body"))
+        for match in FENCE_RE.finditer(content)
+    )
+
+
+def _has_body_contract(content: str, allow_absence: bool = False) -> bool:
+    if _has_evidence_backed_unknown(content):
+        return True
+    if _has_schema_table(content) or _has_structured_example(content):
+        return True
+    return allow_absence and _has_explicit_absence(content, "body|payload|response")
 
 
 def _finding(rule: str, path: str, message: str, severity: str = "warning") -> Dict[str, str]:
@@ -73,14 +229,25 @@ def _audit_api(path: str, sections: Dict[str, str], findings: List[Dict[str, str
     flow = _section(sections, "Flow", "Runtime Flow")
     citations = _section(sections, "Citations", "Sources")
 
-    _require(findings, bool(authentication), "Q_API_AUTH", path, "API endpoint needs authentication and authorization details")
-    _require(findings, bool(parameters), "Q_API_PARAMETERS", path, "API endpoint needs path, query, and header parameter details or an explicit none")
-    _require(findings, bool(request) and _has_body_example(request, allow_none=True), "Q_API_REQUEST", path, "API endpoint needs a request schema/body and realistic example or an explicit no-body statement")
-    _require(findings, bool(success) and _has_body_example(success), "Q_API_SUCCESS", path, "API endpoint needs a success response body and realistic example")
-    _require(findings, bool(errors) and _has_body_example(errors) and bool(re.search(r"\b[45]\d\d\b", errors)), "Q_API_ERRORS", path, "API endpoint needs material error status and response body examples")
-    _require(findings, bool(validation), "Q_API_VALIDATION", path, "API endpoint needs validation rules")
-    _require(findings, bool(side_effects), "Q_API_SIDE_EFFECTS", path, "API endpoint needs side effects or an explicit none")
-    _require(findings, bool(flow), "Q_API_FLOW", path, "API endpoint needs a link or description of its runtime flow")
+    _require(findings, _has_depth(authentication), "Q_API_AUTH", path, "API endpoint needs authentication and authorization details")
+    _require(findings, _has_depth(parameters), "Q_API_PARAMETERS", path, "API endpoint needs path, query, and header parameter details or an explicit none")
+    _require(findings, _has_body_contract(request, allow_absence=True), "Q_API_REQUEST", path, "API endpoint needs a request schema/body and realistic example or an explicit no-body statement")
+    _require(findings, _has_body_contract(success, allow_absence=True), "Q_API_SUCCESS", path, "API endpoint needs a success response body and realistic example")
+    _require(
+        findings,
+        _has_evidence_backed_unknown(errors)
+        or _has_explicit_absence(errors, "error|errors|response|responses")
+        or (
+            _has_body_contract(errors)
+            and bool(re.search(r"\b[45]\d\d\b", errors))
+        ),
+        "Q_API_ERRORS",
+        path,
+        "API endpoint needs material error status and response body examples",
+    )
+    _require(findings, _has_depth(validation), "Q_API_VALIDATION", path, "API endpoint needs validation rules")
+    _require(findings, _has_depth(side_effects), "Q_API_SIDE_EFFECTS", path, "API endpoint needs side effects or an explicit none")
+    _require(findings, _has_depth(flow), "Q_API_FLOW", path, "API endpoint needs a link or description of its runtime flow")
     _require(findings, bool(citations) and bool(LINK_RE.search(citations)), "Q_CITATIONS", path, "Concept needs source citations")
 
 
@@ -95,14 +262,79 @@ def _audit_data(path: str, sections: Dict[str, str], findings: List[Dict[str, st
     examples = _section(sections, "Examples", "Common Query Patterns")
     citations = _section(sections, "Citations", "Sources")
 
-    _require(findings, bool(re.search(r"\b(one|each)\s+(row|document|record|value|event)\b", overview, re.I)), "Q_DATA_GRAIN", path, "Data asset needs an explicit grain or key-value purpose")
-    _require(findings, bool(TABLE_HEADER_RE.search(fields)), "Q_DATA_FIELDS", path, "Data asset needs full known fields with types and descriptions")
-    _require(findings, bool(access) and bool(re.search(r"\bread|select|lookup|scan\b", access, re.I)) and bool(re.search(r"\bwrite|insert|update|delete|publish\b", access, re.I)), "Q_DATA_ACCESS", path, "Data asset needs actual read and write access paths or explicit none")
-    _require(findings, bool(index_ttl) and "index" in index_ttl.lower() and bool(re.search(r"\bttl|retention|expire|archive\b", index_ttl, re.I)), "Q_DATA_INDEX_TTL", path, "Data asset needs indexes and TTL or retention behavior")
-    _require(findings, bool(transactions) and bool(re.search(r"\btransaction|atomic|consisten|isolation|commit\b", transactions, re.I)), "Q_DATA_TRANSACTIONS", path, "Data asset needs transaction and consistency behavior")
-    _require(findings, bool(relationships), "Q_DATA_RELATIONSHIPS", path, "Data asset needs joins or relationships or an explicit none")
-    _require(findings, bool(impact) and "`" in impact and bool(re.search(r"\bread|write|update|insert|delete\b", impact, re.I)), "Q_DATA_IMPACT", path, "Data asset needs field-level read/write impact paths")
-    _require(findings, bool(examples) and bool(FENCE_RE.search(examples)), "Q_DATA_EXAMPLES", path, "Data asset needs a realistic query or payload example")
+    _require(
+        findings,
+        _has_evidence_backed_unknown(overview)
+        or (
+            _has_depth(overview)
+            and bool(re.search(r"\b(one|each)\s+(row|document|record|value|event)\b", overview, re.I))
+        ),
+        "Q_DATA_GRAIN",
+        path,
+        "Data asset needs an explicit grain or key-value purpose",
+    )
+    _require(
+        findings,
+        _has_evidence_backed_unknown(fields) or _has_schema_table(fields),
+        "Q_DATA_FIELDS",
+        path,
+        "Data asset needs full known fields with types and descriptions",
+    )
+    _require(
+        findings,
+        _has_evidence_backed_unknown(access)
+        or (
+            _has_depth(access)
+            and bool(re.search(r"\bread|select|lookup|scan\b", access, re.I))
+            and bool(re.search(r"\bwrite|insert|update|delete|publish\b", access, re.I))
+        ),
+        "Q_DATA_ACCESS",
+        path,
+        "Data asset needs actual read and write access paths or explicit none",
+    )
+    _require(
+        findings,
+        _has_evidence_backed_unknown(index_ttl)
+        or (
+            _has_depth(index_ttl)
+            and "index" in index_ttl.lower()
+            and bool(re.search(r"\bttl|retention|expire|archive\b", index_ttl, re.I))
+        ),
+        "Q_DATA_INDEX_TTL",
+        path,
+        "Data asset needs indexes and TTL or retention behavior",
+    )
+    _require(
+        findings,
+        _has_evidence_backed_unknown(transactions)
+        or (
+            _has_depth(transactions)
+            and bool(re.search(r"\btransaction|atomic|consisten|isolation|commit\b", transactions, re.I))
+        ),
+        "Q_DATA_TRANSACTIONS",
+        path,
+        "Data asset needs transaction and consistency behavior",
+    )
+    _require(findings, _has_depth(relationships), "Q_DATA_RELATIONSHIPS", path, "Data asset needs joins or relationships or an explicit none")
+    _require(
+        findings,
+        _has_evidence_backed_unknown(impact)
+        or (
+            _has_depth(impact)
+            and "`" in impact
+            and bool(re.search(r"\bread|write|update|insert|delete\b", impact, re.I))
+        ),
+        "Q_DATA_IMPACT",
+        path,
+        "Data asset needs field-level read/write impact paths",
+    )
+    _require(
+        findings,
+        _has_evidence_backed_unknown(examples) or _has_structured_example(examples),
+        "Q_DATA_EXAMPLES",
+        path,
+        "Data asset needs a realistic query or payload example",
+    )
     _require(findings, bool(citations) and bool(LINK_RE.search(citations)), "Q_CITATIONS", path, "Concept needs source citations")
 
 

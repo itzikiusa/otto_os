@@ -74,10 +74,10 @@ Inserts one `widgets` row and emits `widget.created` in the same documented tran
 
 # Flow
 
-The route calls the widget service, which checks uniqueness and writes through the widget repository; see [Create widget flow](../flows/create-widget.md).
+The route calls the widget service, which checks uniqueness and writes through the widget repository; the cited implementation records the ordered path.
 
 # Citations
 
-[1] [Route and DTO](../../src/api/widgets.rs#L42)
-[2] [Service transaction](../../src/widgets/service.rs#L88)
+[1] [Route and DTO](https://github.com/example/widgets/blob/0123456789abcdef0123456789abcdef01234567/src/api/widgets.rs#L42)
+[2] [Service transaction](https://github.com/example/widgets/blob/0123456789abcdef0123456789abcdef01234567/src/widgets/service.rs#L88)
 ````

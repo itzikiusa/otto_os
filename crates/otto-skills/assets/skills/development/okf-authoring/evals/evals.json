@@ -73,9 +73,49 @@
           "Q_DATA_INDEX_TTL",
           "Q_DATA_TRANSACTIONS",
           "Q_DATA_IMPACT",
+          "Q_DATA_EXAMPLES",
           "Q_CITATIONS"
         ],
         "must_not_invent": true
+      }
+    },
+    {
+      "id": "malformed-type-values",
+      "category": "conformance regression",
+      "fixture": "fixtures/invalid-type-values",
+      "task": "Validate type values with the same scalar semantics as Otto.",
+      "expect": {
+        "must_reject_type_values": [
+          "boolean",
+          "comment-only",
+          "mapping",
+          "sequence"
+        ],
+        "must_accept_type_values": [
+          "non-empty string",
+          "number"
+        ]
+      }
+    },
+    {
+      "id": "adversarial-depth-tokens",
+      "category": "quality regression",
+      "fixture": "fixtures/adversarial-depth",
+      "task": "Audit headings, keyword-only sections, header-only schemas, and arbitrary fenced text.",
+      "expect": {
+        "endpoint_quality_finding_count": 8,
+        "data_quality_finding_count": 8,
+        "must_not_treat_syntax_as_depth": true
+      }
+    },
+    {
+      "id": "evidence-backed-unknown-control",
+      "category": "false-positive control",
+      "fixture": "fixtures/evidence-backed-unknowns",
+      "task": "Audit explicit unknowns that explain and link the evidence checked.",
+      "expect": {
+        "quality_finding_count": 0,
+        "bare_unknown_would_fail": true
       }
     },
     {

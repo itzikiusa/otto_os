@@ -15,6 +15,12 @@ ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
+YAML_NON_STRING_SCALARS = {
+    "false",
+    "null",
+    "true",
+    "~",
+}
 
 
 def _finding(rule: str, path: str, message: str) -> Dict[str, str]:
@@ -23,7 +29,7 @@ def _finding(rule: str, path: str, message: str) -> Dict[str, str]:
 
 def _scalar(raw: str) -> Optional[str]:
     value = raw.strip()
-    if not value or value in {"null", "Null", "NULL", "~", "[]", "{}"}:
+    if not value or value.startswith("#"):
         return None
     if value.startswith('"'):
         try:
@@ -35,6 +41,10 @@ def _scalar(raw: str) -> Optional[str]:
         return value[1:-1].replace("''", "'")
     if " #" in value:
         value = value.split(" #", 1)[0].rstrip()
+    if not value or value.lower() in YAML_NON_STRING_SCALARS:
+        return None
+    if value.startswith(("[", "{")):
+        return None
     return value or None
 
 

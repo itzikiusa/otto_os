@@ -40,7 +40,7 @@ Keep `log.md` newest-first, without frontmatter. Use ISO dates and link changed 
 * **Deprecation**: Retired the [Legacy import](flows/legacy-import.md).
 ```
 
-Allowed lead words are `**Initialization**`, `**Creation**`, `**Update**`, and `**Deprecation**`.
+Recommended lead words include `**Initialization**`, `**Creation**`, `**Update**`, and `**Deprecation**`. Use another concise lead word when it describes the knowledge change more precisely.
 
 ## Neighborhood maintenance
 

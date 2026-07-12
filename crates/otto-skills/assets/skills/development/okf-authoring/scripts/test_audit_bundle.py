@@ -40,8 +40,59 @@ class AuditBundleTests(unittest.TestCase):
                 "Q_DATA_INDEX_TTL",
                 "Q_DATA_TRANSACTIONS",
                 "Q_DATA_IMPACT",
+                "Q_DATA_EXAMPLES",
                 "Q_CITATIONS",
             },
+        )
+
+    def test_syntax_tokens_do_not_satisfy_endpoint_depth(self):
+        findings = audit_bundle.audit_bundle(FIXTURES / "adversarial-depth")
+
+        endpoint_rules = {
+            item["rule"]
+            for item in findings
+            if item["path"] == "endpoints/create-widget.md"
+        }
+        self.assertEqual(
+            endpoint_rules,
+            {
+                "Q_API_AUTH",
+                "Q_API_PARAMETERS",
+                "Q_API_REQUEST",
+                "Q_API_SUCCESS",
+                "Q_API_ERRORS",
+                "Q_API_VALIDATION",
+                "Q_API_SIDE_EFFECTS",
+                "Q_API_FLOW",
+            },
+        )
+
+    def test_headers_and_keywords_do_not_satisfy_data_depth(self):
+        findings = audit_bundle.audit_bundle(FIXTURES / "adversarial-depth")
+
+        data_rules = {
+            item["rule"]
+            for item in findings
+            if item["path"] == "datasets/orders.md"
+        }
+        self.assertEqual(
+            data_rules,
+            {
+                "Q_DATA_GRAIN",
+                "Q_DATA_FIELDS",
+                "Q_DATA_ACCESS",
+                "Q_DATA_INDEX_TTL",
+                "Q_DATA_TRANSACTIONS",
+                "Q_DATA_RELATIONSHIPS",
+                "Q_DATA_IMPACT",
+                "Q_DATA_EXAMPLES",
+            },
+        )
+
+    def test_evidence_backed_unknowns_are_an_explicit_quality_state(self):
+        self.assertEqual(
+            audit_bundle.audit_bundle(FIXTURES / "evidence-backed-unknowns"),
+            [],
         )
 
     def test_clean_bundle_has_no_findings(self):

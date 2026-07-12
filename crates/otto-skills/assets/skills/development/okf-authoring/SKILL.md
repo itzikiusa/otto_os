@@ -3,6 +3,8 @@ name: okf-authoring
 description: Use when creating, maintaining, consuming, converting, or validating Open Knowledge Format bundles, especially Otto Vault documentation for repositories, services, APIs, data assets, decisions, runbooks, metrics, and references.
 category: development
 version: 2
+metadata:
+  version: "2.0.0"
 ---
 
 # OKF authoring

@@ -7,7 +7,7 @@ Conformance proves parseability, not usefulness. Apply every applicable gate bef
 - Trace claims to source files, code symbols, schemas, queries, configuration, runtime evidence, or authoritative documents.
 - Put numbered Markdown links under `# Citations`; cite source locations as precisely as the medium permits.
 - Never invent a URL, field, type, enum, join, index, behavior, owner, or relationship.
-- Label unresolved facts `Unknown` and state what evidence was checked.
+- Label unresolved facts `Unknown` or `N/A`, state what evidence was checked, and cite that evidence in the same section. A bare marker does not satisfy a depth gate.
 
 ## Depth gate
 
@@ -42,6 +42,8 @@ python3 scripts/audit_bundle.py ROOT --format text
 ```
 
 `validate_okf.py` fails only for E1–E3 conformance errors. `audit_bundle.py` emits findings shaped as `{rule,path,message,severity}`; conformance findings use `error`, depth and warning findings use `warning`. A warning is not permission to invent a fix.
+
+The audit requires substantive prose, populated schemas, and realistic structured examples. A heading, a keyword, a table header without rows, or an arbitrary fenced sentence does not satisfy a gate. When source evidence is incomplete, use the evidence-backed `Unknown`/`N/A` form above instead of filler.
 
 ## Completion evidence
 
