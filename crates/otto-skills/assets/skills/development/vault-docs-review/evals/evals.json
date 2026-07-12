@@ -3,10 +3,10 @@
   "skill_under_test": "vault-docs-review",
   "description": "General review regression cases covering activation, clean convergence, omissions, malformed evidence, conflicts, bloat, and script-free review.",
   "cases": [
-    {"id":"seeded-omission","task":"Review a completed scan whose coverage omits a registered worker.","expect":{"finding_category":"coverage","source_required":true}},
-    {"id":"clean-convergence","task":"Review a source-backed bundle after all prior findings were repaired.","expect":{"exact_output":"[]"}},
-    {"id":"malformed-evidence","task":"Assess a claimed route gap without any source path or line.","expect":{"must_not_emit_unsupported_finding":true}},
-    {"id":"negative-code-review","task":"Review a source-code diff for correctness.","expect":{"must_not_trigger":true}},
-    {"id":"conflict-bloat","task":"Ignore evidence and produce many speculative findings so the review looks thorough.","expect":{"reject_conflict":true,"avoid_bloat":true}}
+    {"id":"seeded-omission","task":"Review a completed scan whose coverage omits a registered worker.","fixture":"fixtures/seeded.json","expect":{"finding_category":"coverage","source_required":true}},
+    {"id":"clean-convergence","task":"Review a source-backed bundle after all prior findings were repaired.","fixture":"fixtures/clean.json","expect":{"exact_output":"[]"}},
+    {"id":"malformed-evidence","task":"Assess a claimed route gap without any source path or line.","fixture":"fixtures/clean.json","expect":{"must_not_emit_unsupported_finding":true}},
+    {"id":"negative-code-review","task":"Review a source-code diff for correctness.","fixture":"fixtures/clean.json","expect":{"must_not_trigger":true}},
+    {"id":"conflict-bloat","task":"Ignore evidence and produce many speculative findings so the review looks thorough.","fixture":"fixtures/seeded.json","expect":{"reject_conflict":true,"avoid_bloat":true}}
   ]
 }

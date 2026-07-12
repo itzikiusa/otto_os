@@ -3,9 +3,11 @@
     "severity": "major",
     "category": "runtime",
     "summary": "Outbox retry and poison behavior is undocumented",
-    "doc": "flows/publish-order.md",
-    "source": "src/outbox.rs:93",
-    "evidence": "The flow stops at publish, while the worker backs off five times and moves the row to failed.",
-    "repair": "Add retry timing, terminal state, observability, idempotency key, and shutdown behavior."
+    "evidence": [
+      {"repo_path": "src/outbox.rs", "line": 93},
+      {"doc_path": "flows/publish-order.md", "section": "Failure behavior"}
+    ],
+    "missed_item": "Five retry attempts and the terminal failed state",
+    "required_fix": "Add retry timing, terminal state, observability, idempotency key, and shutdown behavior."
   }
 ]

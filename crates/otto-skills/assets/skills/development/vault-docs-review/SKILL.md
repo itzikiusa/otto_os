@@ -18,11 +18,15 @@ do not edit docs or source.
    [checklist.md](references/checklist.md).
 2. Read the request, manifest, coverage ledger, bundle index, and relevant
    source. Do not trust the author's completion statement.
-3. Reconcile candidate counts and inspect all `uncertain`, `irrelevant`, and
-   generated rows. Sample no less than one source-backed concept per detected
-   kind, then expand wherever the sample reveals a systematic gap.
-4. Check completeness, evidence, cross-links, examples, API/data/runtime depth,
-   and consistency between Markdown and text artifacts.
+3. Reconcile every manifest candidate and coverage row. Inspect every in-scope
+   documented concept against its core API/data/runtime/quality contract, plus
+   all `uncertain`, `irrelevant`, and generated rows. Uninspected eligible rows
+   prevent a clean verdict.
+4. Check completeness, cross-links, examples, API/data/runtime depth, and
+   consistency between Markdown and text artifacts exhaustively. Sampling is
+   allowed only for secondary claim-level citation auditing after every concept
+   passes its structural and type-specific contract; expand the sample whenever
+   it reveals a systematic evidence gap.
 5. Emit only the JSON array required by the finding contract. Return `[]` only
    when no actionable finding remains. Never invent a finding to consume an
    iteration.

@@ -13,13 +13,17 @@ Use when a completed Vault scan needs a read-only claim-to-source audit.
 ## Workflow
 
 1. Read [checklist.md](references/checklist.md).
-2. Inspect every coverage exception and all load-bearing claims. Sample
+2. Run OKF validation; reconcile index entries and internal links; inspect
+   diagram fences for valid source/render structure. Inspect every coverage
+   exception and all load-bearing claims. Sample
    additional claims across API, data, and runtime concepts; expand if a sample
    exposes systematic citation drift.
 3. Open each cited location and decide whether it directly supports the claim.
    Prefer executable source/migrations over tests, generated contracts, config,
    and prose. Record contradictions rather than choosing convenient evidence.
-4. Emit only the finding JSON array or `[]`. Re-review repaired claims during
+4. Reconcile examples with their source types/fixtures and verify non-Markdown
+   artifacts agree with the linked concepts.
+5. Emit only the finding JSON array or `[]`. Re-review repaired claims during
    later iterations without repeating resolved findings.
 
 Caller focus chooses claims to prioritize, not a lower proof threshold. Do not

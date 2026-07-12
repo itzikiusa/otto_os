@@ -1,0 +1,1 @@
+{"repo":[{"path":"src/reconcile.rs","line":48,"text":"UPDATE orders SET status = ? WHERE id = ?"}],"bundle":[{"path":"data/orders.md","section":"Field-level Impact","text":"Full schema, read/write access, consistency, indexes, retention, and field impact with citations"}],"expected_findings":[]}

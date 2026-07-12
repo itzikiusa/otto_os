@@ -9,6 +9,9 @@ checkpointing, overlap protection, recovery, and shutdown. For messages check
 topic/queue, key/partition, headers, complete payload, delivery semantics, and
 producer/consumer links.
 
-Return only `[]` or objects with `severity`, `category`, `summary`, `doc`,
-`source`, `evidence`, `repair`. Category is `runtime` or `coverage`; source is
-real `path:line`. Do not infer a schedule from an unregistered worker function.
+Return only `[]` or objects with `severity`, `category`, `summary`, `evidence`,
+`missed_item`, `required_fix`. Evidence is an array of repository locations
+(`repo_path`, positive `line`) and documentation locations (`doc_path`,
+`section`). Category is `runtime` or `coverage`; severity is
+`blocking`, `major`, or `minor`. Do not infer a schedule from an unregistered
+worker function.

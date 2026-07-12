@@ -4,20 +4,23 @@ Return one JSON array and no surrounding prose. Each actionable finding is:
 
 ```json
 {
-  "severity": "blocker|major|minor",
+  "severity": "blocking|major|minor",
   "category": "coverage|api|data|runtime|evidence|quality",
   "summary": "Concise, unique problem",
-  "doc": "bundle-relative/path.md",
-  "source": "repo/relative/path.rs:42",
-  "evidence": "What the docs claim or omit and what the source proves",
-  "repair": "Concrete change the author can verify"
+  "evidence": [
+    {"repo_path": "repo/relative/path.rs", "line": 42},
+    {"doc_path": "bundle-relative/path.md", "section": "Section name"}
+  ],
+  "missed_item": "The exact contract, flow, field, or proof that is absent",
+  "required_fix": "Concrete change the author can verify"
 }
 ```
 
-`doc` may be `coverage.md` or the missing destination path. `source` must be a
-real `path:line`; use an empty string only for a bundle-internal structural gap.
-Severity: blocker means completion is materially false or unsafe; major means a
-reader cannot use the concept reliably; minor is bounded quality loss.
+Evidence entries use either `repo_path` with a positive `line`, or `doc_path`
+with a non-empty `section`. Include both when comparing source to docs. A
+bundle-internal structural gap may use only doc evidence. Severity: `blocking`
+means completion is materially false or unsafe; `major` means a reader cannot
+use the concept reliably; `minor` is bounded quality loss.
 
 Findings must be independently actionable, deduplicated, and source-backed.
 Return `[]` for a clean round. Malformed JSON, prose outside the array, or a

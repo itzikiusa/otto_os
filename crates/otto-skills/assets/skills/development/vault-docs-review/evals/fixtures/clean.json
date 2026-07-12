@@ -1,0 +1,5 @@
+{
+  "repo": [{"path":"src/workers.rs","line":31,"text":"schedule_hourly(reconcile_orders)"}],
+  "bundle": [{"path":"workers/reconcile-orders.md","section":"Schedule","text":"Hourly registration and full worker contract with source evidence"}],
+  "expected_findings": []
+}

@@ -1,11 +1,13 @@
 [
   {
-    "severity": "blocker",
+    "severity": "blocking",
     "category": "evidence",
     "summary": "The documented authorization rule contradicts middleware",
-    "doc": "endpoints/delete-order.md",
-    "source": "src/auth.rs:61",
-    "evidence": "The note claims any authenticated user may delete, but middleware requires orders:admin.",
-    "repair": "Correct the authorization claim and cite both route middleware wiring and the policy check."
+    "evidence": [
+      {"repo_path": "src/auth.rs", "line": 61},
+      {"doc_path": "endpoints/delete-order.md", "section": "Authorization"}
+    ],
+    "missed_item": "The orders:admin authorization requirement",
+    "required_fix": "Correct the authorization claim and cite both route middleware wiring and the policy check."
   }
 ]

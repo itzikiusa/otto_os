@@ -1,0 +1,13 @@
+{
+  "repo": [{"path":"src/auth.rs","line":61,"text":"require_scope(\"orders:admin\")"}],
+  "bundle": [
+    {"path":"endpoints/delete-order.md","section":"frontmatter","text":"---\ndescription: Missing type\n---"},
+    {"path":"index.md","section":"Endpoints","text":"[Delete order](endpoints/missing.md)"},
+    {"path":"flows/delete-order.md","section":"Diagram","text":"```mermaid\nflowchart TD\nA[Unclosed label --> B\n```"}
+  ],
+  "expected_findings": [
+    {"severity":"major","category":"quality","summary":"OKF type is missing from delete-order","evidence":[{"doc_path":"endpoints/delete-order.md","section":"frontmatter"}],"missed_item":"Required OKF type","required_fix":"Add a source-appropriate non-empty type and rerun OKF validation."},
+    {"severity":"major","category":"evidence","summary":"Index link target does not exist","evidence":[{"doc_path":"index.md","section":"Endpoints"}],"missed_item":"Reachable link to the delete-order concept","required_fix":"Point the index at the actual concept path and verify the internal link."},
+    {"severity":"major","category":"quality","summary":"Diagram source is invalid Mermaid","evidence":[{"doc_path":"flows/delete-order.md","section":"Diagram"}],"missed_item":"Balanced renderable diagram source","required_fix":"Fix the unclosed node label and verify the diagram renders."}
+  ]
+}
