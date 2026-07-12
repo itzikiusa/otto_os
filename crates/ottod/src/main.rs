@@ -763,6 +763,13 @@ async fn run(cfg: Config) -> Result<(), String> {
         ctx.clone(),
     ));
 
+    // --- Vault docs-runs recovery: this restart killed any in-flight run ---
+    // Flip still-non-terminal persisted runs to 'interrupted' and soft-trash
+    // their orphaned `_drafts/docs-run-*` dirs (multi-writer runs only).
+    tokio::spawn(otto_server::vault_docs_agent::recover_interrupted(
+        ctx.clone(),
+    ));
+
     // --- Insights scheduler: opt-in, catch-up usage reports ---
     // Background supervisor that ticks ~hourly and, for each ENABLED cadence
     // (daily/weekly/monthly — all default OFF), runs the `insights` skill for the

@@ -2017,28 +2017,44 @@ Notes:
 
 ### Docs agents (AI writers into a vault)
 
-Launch 1–4 WRITER agents (per-agent provider/model) as REAL managed sessions that
+Launch 1–4 WRITER agents (per-agent provider/model) as managed sessions that
 write notes into a vault through the session-injected otto MCP vault tools
-(`otto_vault_write` etc.). A single writer writes final notes directly into
-`target_dir`; with >1 writers each drafts under `_drafts/docs-run-<run8>/agent-<n>/`
-and a SUMMARIZER session consolidates the drafts into `target_dir`, after which the
-server moves the whole drafts dir into `<vault>/.trash/` and rescans. Run state is
-IN-MEMORY and poll-only — runs do NOT survive a daemon restart (the agent sessions
-themselves persist as ordinary managed sessions). Cancel stops orchestrating between
-stages; it never kills the agent sessions. `written` = the final agent's reported
-results (a temp JSON file), falling back to a server-side before/after diff of note
-paths under `target_dir`. OKF vaults: agents are REQUIRED to produce OKF-conformant
-notes — claude gets the staged `okf-authoring` skill via `meta.extra_dirs`
+(`otto_vault_write` etc.). The sessions are BACKGROUND/EMBEDDED
+(`meta.source:"vault-docs"` is in `BACKGROUND_SESSION_SOURCES`): they never
+appear in the sidebar Agents group or the tiled grid — they open only as inline
+terminals inside the Vault view's run panel (and follow background-session
+retention). A single writer writes final notes directly into `target_dir`; with
+>1 writers each drafts under `_drafts/docs-run-<run8>/agent-<n>/` and a
+SUMMARIZER session consolidates the drafts into `target_dir`, after which the
+server moves the whole drafts dir into `<vault>/.trash/` and rescans.
+
+Run state lives in an in-memory registry while a run is LIVE and is
+write-through mirrored to SQLite (`vault_docs_runs`) at every transition — runs
+SURVIVE daemon restarts as history. Each refine turn is recorded as a
+`kind:"refine"` run (one agent entry, `note_path` set) so edits share the same
+history. On startup, any row still `running|summarizing` was killed by the
+restart: it (and its non-terminal agents/summarizer) flips to `interrupted`,
+and a multi-writer run's orphaned `_drafts/docs-run-*` dir is soft-moved to
+`<vault>/.trash/` + the vault rescanned. Cancel stops orchestrating between
+stages; it never kills the agent sessions. The refine turn runs in a DETACHED
+server task — a client disconnect mid-turn cannot strand a `running` row — and
+the per-note session registry is rehydrated from the newest persisted refine
+turn after a restart. `written` = the final agent's reported results (a temp
+JSON file), falling back to a server-side before/after diff of note paths under
+`target_dir`. OKF vaults: agents are REQUIRED to produce OKF-conformant notes —
+claude gets the staged `okf-authoring` skill via `meta.extra_dirs`
 (`--add-dir`), codex/agy get the SKILL.md text inlined in the prompt. DTOs
-(`VaultDocsRun`, `VaultDocsAgent`, `VaultDocsSummarizer`) are mirrored in
-`ui/src/lib/api/types.ts`.
+(`VaultDocsRun{kind, note_path, …}`, `VaultDocsAgent`, `VaultDocsSummarizer`)
+are mirrored in `ui/src/lib/api/types.ts`; run/agent/summarizer states include
+`interrupted`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/run | ws editor | `{prompt, target_dir?, agents: [{provider, model?}] (1..=4), summarizer?: {provider?, model?}}` | `VaultDocsRun` — initial snapshot, `state:"running"`; `summarizer.state:"skipped"` when 1 writer |
-| GET /vault/docs-agents/runs/{run_id} | ws viewer (the run's ws, re-checked) | — | `VaultDocsRun` — the UI polls every 1500ms while `running\|summarizing`; 404 after a daemon restart |
-| POST /vault/docs-agents/runs/{run_id}/cancel | ws editor (the run's ws, re-checked) | — | 204 — marks the run `cancelled` + stops orchestrating (agent sessions stay open) |
-| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — LONG request (returns when the turn completes); ONE resumed session per (vault, note); `provider` honored on the FIRST turn only |
+| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/run | ws editor | `{prompt, target_dir?, agents: [{provider, model?}] (1..=4), summarizer?: {provider?, model?}}` | `VaultDocsRun` — initial snapshot, `state:"running"`; `summarizer.state:"skipped"` when 1 writer; the durable row exists before this returns |
+| GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/runs | ws viewer | `?limit=` (default 50, cap 200) | `VaultDocsRun[]` — docs + refine runs newest-first; live runs carry their fresher in-memory snapshot |
+| GET /vault/docs-agents/runs/{run_id} | ws viewer (the run's ws, re-checked) | — | `VaultDocsRun` — the UI polls every 1500ms while `running\|summarizing`; served from the durable row when not live (history / after a restart, where it reads `interrupted`) |
+| POST /vault/docs-agents/runs/{run_id}/cancel | ws editor (the run's ws, re-checked) | — | 204 — marks the run `cancelled` + stops orchestrating (agent sessions stay open); 404 once terminal (evicted from the live registry) |
+| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — LONG request (returns when the turn completes); ONE resumed session per (vault, note), rehydrated from history after a restart; `provider` honored on the FIRST turn only |
 | GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws viewer | `?path=` | `{session_id: string\|null, running: boolean}` — poll right after POSTing refine to attach the live shell |
 
 ## Message Brokers (Kafka viewer)

@@ -1,13 +1,18 @@
 <script lang="ts">
   // Docs agents — fan 1-4 writer agents out over a prompt to author notes into
-  // the vault (a summarizer consolidates drafts when >1 writer). Center-stage
-  // view: a compact form, then per-agent rows with live status + inline
-  // terminals, in the spirit of git/ReviewAgents.svelte. The run itself lives
-  // on the vault store (survives switching to a note and back); this view owns
-  // the 1.5s poll timer and stops it on unmount or a terminal state.
+  // the vault (a summarizer consolidates drafts when >1 writer), plus the
+  // vault's RUN HISTORY (docs runs + per-note refine turns, server-persisted
+  // in `vault_docs_runs`). Center-stage view: a compact form, the selected
+  // run's per-agent rows with live status + inline terminals, and the runs
+  // list below. The selected run lives on the vault store; the LIST is
+  // refetched from the server on every mount — that is what makes runs
+  // reappear after a tab/module switch or a full app restart. This view owns
+  // the 1.5s poll timer and stops it once nothing is active.
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
+  import { api } from '../../lib/api/client';
+  import type { VaultDocsRun } from '../../lib/api/types';
   import { cancelDocsRun, docsRun as getDocsRun, runDocsAgents } from '../../lib/api/vault';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { toasts } from '../../lib/toast.svelte';
@@ -27,7 +32,10 @@
 
   const providers = $derived(agentProviders());
   const run = $derived(vault.docsRun);
-  const active = $derived(run != null && (run.state === 'running' || run.state === 'summarizing'));
+  const isActive = (r: VaultDocsRun) => r.state === 'running' || r.state === 'summarizing';
+  const active = $derived(run != null && isActive(run));
+  /** Anything (selected or listed) still moving → the poll keeps ticking. */
+  const anyActive = $derived((run != null && isActive(run)) || vault.docsRuns.some(isActive));
 
   // Prefill (and re-prefill on "Docs agent here" from a folder's context menu).
   $effect(() => {
@@ -57,22 +65,24 @@
 
   async function poll(): Promise<void> {
     const r = vault.docsRun;
-    if (!r) {
-      stopPoll();
-      return;
-    }
     try {
-      const next = await getDocsRun(r.id);
-      vault.docsRun = next;
-      if (next.state !== 'running' && next.state !== 'summarizing') {
-        stopPoll();
-        // The run wrote (or trashed drafts of) notes — reflect it everywhere.
-        void vault.refreshTree();
-        void vault.refreshStatus();
+      if (r && isActive(r)) {
+        const next = await getDocsRun(r.id);
+        // Async guard: ignore if the user selected another run meanwhile.
+        if (vault.docsRun?.id === next.id) vault.docsRun = next;
+        if (!isActive(next)) {
+          // The run wrote (or trashed drafts of) notes — reflect it everywhere.
+          void vault.refreshTree();
+          void vault.refreshStatus();
+        }
       }
+      // Keep the history list in step (it also carries refine turns that
+      // complete server-side without this view's involvement).
+      await vault.refreshDocsRuns();
     } catch {
       /* transient — next tick retries */
     }
+    if (!anyActive) stopPoll();
   }
 
   async function start(): Promise<void> {
@@ -86,6 +96,7 @@
         summarizer: agents.length > 1 ? { provider: sumProvider } : undefined,
       });
       openTerminals = new Set();
+      void vault.refreshDocsRuns();
       startPoll();
     } catch (e) {
       toasts.error('Docs agent', e instanceof Error ? e.message : String(e));
@@ -111,25 +122,53 @@
 
   /** Back to the form (keeps the prompt so a tweak-and-rerun is one edit). */
   function newRun(): void {
-    stopPoll();
     vault.docsRun = null;
     openTerminals = new Set();
   }
 
+  /** Show one run (live or history) — the poll follows the selection. */
+  function selectRun(r: VaultDocsRun): void {
+    vault.docsRun = r;
+    openTerminals = new Set();
+    if (isActive(r)) startPoll();
+  }
+
   // Inline live terminals — multiple may be open at once, keyed by session id.
+  // History runs may reference sessions retention has since pruned — verify
+  // the session still exists before mounting a dead terminal.
   let openTerminals = $state<Set<string>>(new Set());
-  function toggleTerminal(sessionId: string | null): void {
+  async function toggleTerminal(sessionId: string | null): Promise<void> {
     if (!sessionId) return;
     const next = new Set(openTerminals);
-    if (next.has(sessionId)) next.delete(sessionId);
-    else next.add(sessionId);
+    if (next.has(sessionId)) {
+      next.delete(sessionId);
+      openTerminals = next;
+      return;
+    }
+    try {
+      await api.get(`/sessions/${sessionId}`);
+    } catch {
+      toasts.error('Docs agent', 'This agent session no longer exists (cleaned up by retention).');
+      return;
+    }
+    next.add(sessionId);
     openTerminals = next;
   }
 
   onMount(() => {
-    // Coming back to the view mid-run → resume polling.
+    // Refetch the persisted list, then re-surface the most recent ACTIVE run
+    // when nothing is selected — a run launched before a tab switch (or a
+    // daemon restart, as `interrupted` history) is visible again immediately.
+    void vault.refreshDocsRuns().then(() => {
+      if (!vault.docsRun) {
+        const live = vault.docsRuns.find(isActive);
+        if (live) vault.docsRun = live;
+      }
+      const r = vault.docsRun;
+      if ((r && isActive(r)) || vault.docsRuns.some(isActive)) startPoll();
+    });
     const r = vault.docsRun;
-    if (r && (r.state === 'running' || r.state === 'summarizing')) startPoll();
+    if (r && isActive(r)) startPoll();
     return () => stopPoll();
   });
 </script>
@@ -197,19 +236,30 @@
     {:else}
       <!-- ── run view ──────────────────────────────────────────────────────── -->
       <div class="run-head">
-        <span class="pill st-{run.state}">
+        <span
+          class="pill st-{run.state}"
+          title={run.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
+        >
           {#if active}<span class="spinner-xs"></span>{/if}
           {run.state}
         </span>
+        <span class="kind-chip">{run.kind}</span>
         <span class="run-meta" title={run.prompt}>
-          {run.prompt}{run.target_dir ? ` → ${run.target_dir}/` : ''}
+          {#if run.kind === 'refine'}
+            <button class="note-link" onclick={() => void vault.open(run.note_path)}>
+              {run.note_path}
+            </button>
+            — {run.prompt}
+          {:else}
+            {run.prompt}{run.target_dir ? ` → ${run.target_dir}/` : ''}
+          {/if}
         </span>
         <span class="grow"></span>
-        {#if active}
+        {#if active && run.kind === 'docs'}
           <button class="ghost" disabled={cancelling} onclick={() => void cancel()}>
             {cancelling ? 'Cancelling…' : 'Cancel'}
           </button>
-        {:else}
+        {:else if !active}
           <button class="ghost" onclick={newRun}>New run</button>
         {/if}
       </div>
@@ -226,7 +276,7 @@
               <span class="chip">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</span>
               <span class="grow"></span>
               {#if agent.session_id}
-                <button class="ghost small" onclick={() => toggleTerminal(agent.session_id)}>
+                <button class="ghost small" onclick={() => void toggleTerminal(agent.session_id)}>
                   {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
                 </button>
               {/if}
@@ -254,8 +304,10 @@
           </div>
         {/each}
 
-        <!-- Summarizer row — same treatment; "skipped" when there is 1 writer. -->
-        <div class="agent-card">
+        <!-- Summarizer row — same treatment; "skipped" when there is 1 writer.
+             Refine turns have no summarizer stage at all. -->
+        {#if run.kind !== 'refine'}
+          <div class="agent-card">
           <div class="agent-top">
             <span class="agent-name">summarizer</span>
             <span class="chip">
@@ -263,7 +315,10 @@
             </span>
             <span class="grow"></span>
             {#if run.summarizer.session_id}
-              <button class="ghost small" onclick={() => toggleTerminal(run.summarizer.session_id)}>
+              <button
+                class="ghost small"
+                onclick={() => void toggleTerminal(run.summarizer.session_id)}
+              >
                 {openTerminals.has(run.summarizer.session_id) ? 'Hide' : 'Open'}
               </button>
             {/if}
@@ -275,14 +330,15 @@
           {#if run.summarizer.error}
             <p class="agent-err">{run.summarizer.error}</p>
           {/if}
-          {#if run.summarizer.session_id && openTerminals.has(run.summarizer.session_id)}
-            <div class="term">
-              {#key run.summarizer.session_id}
-                <Terminal sessionId={run.summarizer.session_id} />
-              {/key}
-            </div>
-          {/if}
-        </div>
+            {#if run.summarizer.session_id && openTerminals.has(run.summarizer.session_id)}
+              <div class="term">
+                {#key run.summarizer.session_id}
+                  <Terminal sessionId={run.summarizer.session_id} />
+                {/key}
+              </div>
+            {/if}
+          </div>
+        {/if}
       </div>
 
       {#if run.written.length > 0}
@@ -295,6 +351,34 @@
           {/each}
         </div>
       {/if}
+    {/if}
+
+    <!-- ── runs (current + history, server-persisted) ─────────────────────── -->
+    {#if vault.docsRuns.length > 0}
+      <div class="runs-section">
+        <span class="runs-title">Runs</span>
+        {#each vault.docsRuns as r (r.id)}
+          <button
+            class="run-row"
+            class:selected={run?.id === r.id}
+            onclick={() => selectRun(r)}
+            title={r.prompt}
+          >
+            <span
+              class="pill st-{r.state}"
+              title={r.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
+            >
+              {#if isActive(r)}<span class="spinner-xs"></span>{/if}
+              {r.state}
+            </span>
+            <span class="kind-chip">{r.kind}</span>
+            <span class="run-row-text">
+              {r.kind === 'refine' ? `${r.note_path} — ${r.prompt}` : r.prompt}
+            </span>
+            <span class="run-row-when">{new Date(r.started_at).toLocaleString()}</span>
+          </button>
+        {/each}
+      </div>
     {/if}
   </div>
 </div>
@@ -519,9 +603,13 @@
   }
   .st-pending,
   .st-skipped,
-  .st-cancelled {
+  .st-cancelled,
+  .st-interrupted {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);
+  }
+  .st-interrupted {
+    border: 1px dashed color-mix(in srgb, var(--text-dim) 45%, transparent);
   }
   .st-running,
   .st-summarizing {
@@ -588,6 +676,80 @@
     word-break: break-all;
   }
   .written-link:hover {
+    text-decoration: underline;
+  }
+
+  /* ── runs list (current + history) ────────────────────────────────────── */
+  .runs-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+    margin-top: 4px;
+  }
+  .runs-title {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 2px;
+  }
+  .run-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 5px 8px;
+    cursor: pointer;
+    text-align: start;
+    min-width: 0;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .run-row:hover {
+    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
+  }
+  .run-row.selected {
+    border-color: var(--accent, #7a9cff);
+    background: var(--accent-dim, rgba(90, 120, 255, 0.08));
+  }
+  .run-row-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+  }
+  .run-row-when {
+    flex: none;
+    font-size: 10.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .kind-chip {
+    flex: none;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 1px 7px;
+  }
+  .note-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    color: var(--accent, #7a9cff);
+    cursor: pointer;
+  }
+  .note-link:hover {
     text-decoration: underline;
   }
 </style>

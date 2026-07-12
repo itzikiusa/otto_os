@@ -17,10 +17,16 @@
 //!   instructions to an existing note across turns (the `canvas_assist`
 //!   one-session-per-artifact pattern; provider honored on the FIRST turn only).
 //!
-//! Run state is IN-MEMORY and poll-only: runs do NOT survive a daemon restart
-//! (the sessions themselves do — they're ordinary managed sessions). Cancel
-//! stops orchestrating between stages but never kills the agent sessions
-//! (they're the user's, visible and closeable in the UI).
+//! Run state lives in the in-memory registry for LIVE orchestration and is
+//! write-through mirrored to SQLite (`vault_docs_runs`, [`persist`]) at every
+//! transition — runs therefore survive a daemon restart as HISTORY. Orchestration
+//! itself does not survive: any row still non-terminal at startup was killed by
+//! the restart, and [`recover_interrupted`] flips it (and its non-terminal
+//! agents) to `interrupted` + soft-trashes the run's orphaned `_drafts` dir.
+//! Cancel stops orchestrating between stages but never kills the agent sessions.
+//! The sessions are BACKGROUND (`meta.source = "vault-docs"` is in
+//! `BACKGROUND_SESSION_SOURCES`): embedded in the Vault view's run panel, never
+//! listed in the sidebar Agents group.
 //!
 //! OKF vaults (`vault.okf`): notes MUST be OKF-conformant. claude agents get
 //! the staged `okf-authoring` skill library via `meta.extra_dirs` →
@@ -59,7 +65,7 @@ const REFINE_INLINE_CAP: usize = 30_000;
 // ---------------------------------------------------------------------------
 
 /// One writer agent's live view inside a run.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultDocsAgent {
     pub index: usize,
     /// Display name, e.g. `"writer-1 · claude"`.
@@ -75,25 +81,33 @@ pub struct VaultDocsAgent {
 }
 
 /// The consolidation agent's live view (skipped entirely for a single writer).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultDocsSummarizer {
     pub provider: String,
     pub model: Option<String>,
-    /// `pending | running | done | error | skipped`.
+    /// `pending | running | done | error | skipped | interrupted`.
     pub state: String,
     pub session_id: Option<String>,
     pub error: Option<String>,
 }
 
-/// A whole docs run — the poll snapshot the UI renders every 1500ms.
-#[derive(Clone, Debug, Serialize)]
+/// A whole docs run — the poll snapshot the UI renders every 1500ms, AND the
+/// durable `payload` persisted per transition in `vault_docs_runs` (hence
+/// `Deserialize` + defaults: rows written before a field existed must load).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultDocsRun {
     pub id: String,
     pub ws_id: String,
     pub vault_id: i64,
+    /// `docs` (writer fan-out) | `refine` (one per-note edit turn).
+    #[serde(default = "default_run_kind")]
+    pub kind: String,
     pub prompt: String,
     pub target_dir: String,
-    /// `running | summarizing | done | error | cancelled`.
+    /// Refine turns: the note being edited (`""` for docs runs).
+    #[serde(default)]
+    pub note_path: String,
+    /// `running | summarizing | done | error | cancelled | interrupted`.
     pub state: String,
     pub agents: Vec<VaultDocsAgent>,
     pub summarizer: VaultDocsSummarizer,
@@ -102,6 +116,10 @@ pub struct VaultDocsRun {
     pub error: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
+}
+
+fn default_run_kind() -> String {
+    "docs".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,8 +179,10 @@ pub struct RefineSessionResp {
 
 // ---------------------------------------------------------------------------
 // In-memory registries (on ServerCtx; constructed in ottod main + test ctxs).
-// Runs are poll-only and do NOT survive a daemon restart — by design (the
-// sessions themselves persist as ordinary managed sessions).
+// The run registry holds LIVE runs only — every transition is mirrored to the
+// durable `vault_docs_runs` table ([`persist`]) and terminal runs are evicted
+// after their final awaited upsert ([`finalize_run`]), so `get_run`/`list_runs`
+// serve history (and post-restart polls) from the DB.
 // ---------------------------------------------------------------------------
 
 /// One live run: its poll snapshot + the cancel flag the orchestrator checks
@@ -170,7 +190,14 @@ pub struct RefineSessionResp {
 pub struct RunEntry {
     pub run: VaultDocsRun,
     pub cancel: Arc<AtomicBool>,
+    /// Signal into the run's write-behind persister (`None` in unit tests,
+    /// which have no runtime).
+    pub persist_tx: Option<PersistTx>,
 }
+
+/// Signal channel into a run's write-behind persister: `None` = "snapshot +
+/// upsert soon" (coalesced), `Some(ack)` = "flush now and ack when durable".
+pub type PersistTx = tokio::sync::mpsc::UnboundedSender<Option<tokio::sync::oneshot::Sender<()>>>;
 
 pub type RunRegistry = Arc<Mutex<HashMap<String, RunEntry>>>;
 
@@ -202,7 +229,113 @@ fn with_run(reg: &RunRegistry, run_id: &str, f: impl FnOnce(&mut VaultDocsRun)) 
 /// True when the run reached a terminal state (guards late stage transitions
 /// from clobbering a cancel that landed while a stage was in flight).
 fn is_terminal(state: &str) -> bool {
-    matches!(state, "done" | "error" | "cancelled")
+    matches!(state, "done" | "error" | "cancelled" | "interrupted")
+}
+
+/// Flatten a run into its durable row (payload = the full JSON snapshot).
+fn run_row(run: &VaultDocsRun) -> otto_state::VaultDocsRunRow {
+    otto_state::VaultDocsRunRow {
+        id: run.id.clone(),
+        vault_id: run.vault_id,
+        ws_id: run.ws_id.clone(),
+        kind: run.kind.clone(),
+        state: run.state.clone(),
+        prompt: run.prompt.clone(),
+        target_dir: run.target_dir.clone(),
+        note_path: run.note_path.clone(),
+        payload: serde_json::to_string(run).unwrap_or_else(|_| "{}".into()),
+        started_at: run.started_at.clone(),
+        finished_at: run.finished_at.clone(),
+        updated_at: String::new(), // stamped by the repo on upsert
+    }
+}
+
+/// Spawn a run's WRITE-BEHIND PERSISTER: one long-lived task that owns every
+/// durable write for the run. Callers only signal it (sync, non-blocking);
+/// signals coalesce to the latest snapshot and upserts run strictly
+/// sequentially. This is deliberate: concurrent same-row upserts from
+/// freshly-spawned tasks proved able to permanently lose an sqlx-sqlite
+/// wakeup (future pending forever, no error, workers idle) — funneling every
+/// write through one task removes that pattern entirely.
+fn spawn_persister(
+    repo: otto_state::VaultDocsRunsRepo,
+    snapshot: impl Fn() -> Option<VaultDocsRun> + Send + 'static,
+) -> PersistTx {
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<Option<tokio::sync::oneshot::Sender<()>>>();
+    tokio::spawn(async move {
+        while let Some(first) = rx.recv().await {
+            // Coalesce everything queued behind this signal; keep every ack.
+            let mut acks: Vec<tokio::sync::oneshot::Sender<()>> = Vec::new();
+            if let Some(a) = first {
+                acks.push(a);
+            }
+            while let Ok(more) = rx.try_recv() {
+                if let Some(a) = more {
+                    acks.push(a);
+                }
+            }
+            if let Some(run) = snapshot() {
+                if let Err(e) = repo.upsert(&run_row(&run)).await {
+                    warn!("vault_docs: persist run {}: {}", run.id, e);
+                }
+            }
+            for a in acks {
+                let _ = a.send(());
+            }
+        }
+    });
+    tx
+}
+
+/// Signal the run's persister (sync + non-blocking, so callable from
+/// `on_ready` closures). No-op once the run is evicted or in unit tests.
+fn persist(reg: &RunRegistry, run_id: &str) {
+    let tx = reg
+        .lock()
+        .unwrap()
+        .get(run_id)
+        .and_then(|e| e.persist_tx.clone());
+    if let Some(tx) = tx {
+        let _ = tx.send(None);
+    }
+}
+
+/// Flush a persister and wait (bounded) until its queued snapshot is durable.
+async fn flush_persister(tx: &PersistTx) {
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    if tx.send(Some(ack_tx)).is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await;
+}
+
+/// Terminal cleanup: flush the persister (acked, bounded), write the final
+/// snapshot directly (the persister is idle after the ack, so this write has
+/// no concurrent twin), then evict the registry entry — the durable row is
+/// now the single source of truth (`get_run`/`list_runs` fall back to it) and
+/// the registry stays bounded for the daemon's life.
+async fn finalize_run(reg: &RunRegistry, repo: &otto_state::VaultDocsRunsRepo, run_id: &str) {
+    let (snap, tx) = {
+        let reg = reg.lock().unwrap();
+        let e = reg.get(run_id);
+        (
+            e.map(|e| e.run.clone()),
+            e.and_then(|e| e.persist_tx.clone()),
+        )
+    };
+    if let Some(tx) = tx {
+        flush_persister(&tx).await;
+    }
+    if let Some(run) = snap {
+        if let Err(e) = repo.upsert(&run_row(&run)).await {
+            warn!("vault_docs: persist final run {}: {}", run.id, e);
+            // Keep the entry — the DB row is stale/absent, memory is all we have.
+            return;
+        }
+    }
+    // Dropping the entry drops its sender → the persister task exits.
+    reg.lock().unwrap().remove(run_id);
 }
 
 /// Set a terminal run state + `finished_at`, unless one already landed.
@@ -233,6 +366,10 @@ pub fn routes() -> Router<ServerCtx> {
         .route(
             "/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session",
             get(refine_session),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/docs-agents/runs",
+            get(list_runs),
         )
         // NOT ws-scoped: the run id carries its ws, and the handlers re-check
         // the caller's role against it (policy row: /vault/docs-agents/*).
@@ -308,8 +445,10 @@ async fn start_run(
         id: run_id.clone(),
         ws_id: ws_id.clone(),
         vault_id,
+        kind: "docs".into(),
         prompt: req.prompt.clone(),
         target_dir: target_dir.clone(),
+        note_path: String::new(),
         state: "running".into(),
         agents: writers
             .iter()
@@ -337,13 +476,27 @@ async fn start_run(
         started_at: chrono::Utc::now().to_rfc3339(),
         finished_at: None,
     };
+    let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
+    let persist_tx = {
+        let reg = ctx.vault_docs_runs.clone();
+        let snap_id = run_id.clone();
+        spawn_persister(repo.clone(), move || {
+            reg.lock().unwrap().get(&snap_id).map(|e| e.run.clone())
+        })
+    };
     ctx.vault_docs_runs.lock().unwrap().insert(
         run_id.clone(),
         RunEntry {
             run: run.clone(),
             cancel: Arc::new(AtomicBool::new(false)),
+            persist_tx: Some(persist_tx),
         },
     );
+    // Awaited (not fire-and-forget): the row must exist before the response so
+    // an immediate runs-list reload in another tab already sees this run.
+    if let Err(e) = repo.upsert(&run_row(&run)).await {
+        warn!("vault_docs: persist new run {run_id}: {e}");
+    }
 
     tokio::spawn(run_docs(
         ctx.clone(),
@@ -360,20 +513,30 @@ async fn start_run(
     Ok(Json(run))
 }
 
-/// `GET /vault/docs-agents/runs/{run_id}` — the poll snapshot. The run's ws is
-/// re-checked against the caller (the path itself is not ws-scoped).
+/// `GET /vault/docs-agents/runs/{run_id}` — the poll snapshot: the live
+/// registry first, else the durable row (history / after a restart, where a
+/// stale open poll now resolves to `interrupted` instead of a 404). The run's
+/// ws is re-checked against the caller (the path itself is not ws-scoped).
 async fn get_run(
     Path(run_id): Path<String>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<VaultDocsRun>> {
-    let run = ctx
+    let mem = ctx
         .vault_docs_runs
         .lock()
         .unwrap()
         .get(&run_id)
-        .map(|e| e.run.clone())
-        .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
+        .map(|e| e.run.clone());
+    let run = match mem {
+        Some(r) => r,
+        None => otto_state::VaultDocsRunsRepo::new(ctx.pool.clone())
+            .get(&run_id)
+            .await
+            .map_err(ApiError)?
+            .and_then(|row| row_to_run_dto(&row))
+            .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?,
+    };
     crate::auth::require_ws_role(
         &ctx,
         &user,
@@ -382,6 +545,76 @@ async fn get_run(
     )
     .await?;
     Ok(Json(run))
+}
+
+/// Parse a durable row back into the DTO. The row's flat `state` wins over the
+/// payload's (they only diverge if a payload ever failed to parse during the
+/// startup sweep); an unparseable payload drops the row with a warning.
+fn row_to_run_dto(row: &otto_state::VaultDocsRunRow) -> Option<VaultDocsRun> {
+    match serde_json::from_str::<VaultDocsRun>(&row.payload) {
+        Ok(mut run) => {
+            run.state = row.state.clone();
+            Some(run)
+        }
+        Err(e) => {
+            warn!("vault_docs: unparseable payload for run {}: {}", row.id, e);
+            None
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ListRunsQ {
+    limit: Option<i64>,
+}
+
+/// `GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/runs?limit=` — the
+/// vault's runs (docs + refine), newest-first: durable rows overlaid with the
+/// fresher live-registry snapshot where one exists.
+async fn list_runs(
+    Path((ws_id, vault_id)): Path<(String, i64)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<ListRunsQ>,
+) -> ApiResult<Json<Vec<VaultDocsRun>>> {
+    crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id.clone()), WorkspaceRole::Viewer)
+        .await?;
+    // Scope check only — rows are keyed by vault id.
+    ctx.vault
+        .get_scoped(&ws_id, vault_id)
+        .await
+        .map_err(ApiError)?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let rows = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone())
+        .list_for_vault(vault_id, limit)
+        .await
+        .map_err(ApiError)?;
+
+    let mut runs: Vec<VaultDocsRun> = Vec::with_capacity(rows.len());
+    {
+        let reg = ctx.vault_docs_runs.lock().unwrap();
+        let mut seen: HashSet<String> = HashSet::new();
+        for row in &rows {
+            seen.insert(row.id.clone());
+            match reg.get(&row.id) {
+                Some(e) => runs.push(e.run.clone()),
+                None => {
+                    if let Some(run) = row_to_run_dto(row) {
+                        runs.push(run);
+                    }
+                }
+            }
+        }
+        // A live run whose first upsert failed (DB hiccup) is registry-only —
+        // still surface it rather than letting it vanish from the list.
+        for e in reg.values() {
+            if e.run.vault_id == vault_id && !seen.contains(&e.run.id) {
+                runs.push(e.run.clone());
+            }
+        }
+    }
+    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at).then(b.id.cmp(&a.id)));
+    Ok(Json(runs))
 }
 
 /// `POST /vault/docs-agents/runs/{run_id}/cancel` — trip the flag and mark the
@@ -403,11 +636,28 @@ async fn cancel_run(
     crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id), WorkspaceRole::Editor).await?;
     cancel.store(true, Ordering::Relaxed);
     finish_run(&ctx.vault_docs_runs, &run_id, "cancelled", None);
+    persist(&ctx.vault_docs_runs, &run_id);
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// The note's most recent persisted refine session, IF that session still
+/// exists (retention may have pruned it — then a fresh first turn is correct).
+async fn rehydrate_refine_session(ctx: &ServerCtx, vault_id: i64, path: &str) -> Option<Id> {
+    let row = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone())
+        .latest_refine_for_note(vault_id, path)
+        .await
+        .ok()
+        .flatten()?;
+    let run: VaultDocsRun = serde_json::from_str(&row.payload).ok()?;
+    let sid = Id::from(run.agents.first()?.session_id.clone()?);
+    ctx.manager.get(&sid).await.is_ok().then_some(sid)
 }
 
 /// `POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine` — one resumed
 /// session per (vault, note); returns when the turn completes (LONG request).
+/// The turn itself runs in a DETACHED task: a client disconnect (page reload)
+/// drops this handler's future, but the turn still completes and finalizes
+/// both the refine registry and the recorded turn row.
 async fn refine(
     Path((ws_id, vault_id)): Path<(String, i64)>,
     State(ctx): State<ServerCtx>,
@@ -436,12 +686,22 @@ async fn refine(
     // Resume the note's session when one exists; the request's provider is
     // honored on the FIRST turn only. A resumed turn must poll the transcript
     // of the session's REAL provider, so read it back from the session record.
-    let existing = ctx
+    // The registry is memory-only — on a miss (fresh daemon), rehydrate the
+    // note's session from its newest persisted refine turn so "one session per
+    // note" survives restarts.
+    let mut existing = ctx
         .vault_docs_refine
         .lock()
         .unwrap()
         .get(&key)
         .and_then(|e| e.session_id.clone());
+    if existing.is_none() {
+        existing = rehydrate_refine_session(&ctx, vault_id, &req.path).await;
+        if let Some(sid) = &existing {
+            let mut reg = ctx.vault_docs_refine.lock().unwrap();
+            reg.entry(key.clone()).or_default().session_id = Some(sid.clone());
+        }
+    }
     let first_turn = existing.is_none();
     let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
         .get("default_provider")
@@ -486,37 +746,148 @@ async fn refine(
         let e = reg.entry(key.clone()).or_default();
         e.running = true;
     }
-    let ready_reg = ctx.vault_docs_refine.clone();
-    let ready_key = key.clone();
-    let on_ready = move |sid: &Id| {
-        let mut reg = ready_reg.lock().unwrap();
-        let e = reg.entry(ready_key).or_default();
-        e.session_id = Some(sid.clone());
+
+    // Each refine turn is recorded as a `kind:"refine"` run (one agent entry)
+    // so edits share the docs runs history. Not run-registry-held — the turn
+    // is a single await; the durable row is the whole story. Shared behind a
+    // mutex: on_ready, the finalizer, and any in-flight persist snapshot the
+    // SAME object, so no persist can regress the row.
+    let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
+    let turn_run = VaultDocsRun {
+        id: otto_core::new_id().to_string(),
+        ws_id: ws_id.clone(),
+        vault_id,
+        kind: "refine".into(),
+        prompt: req.prompt.clone(),
+        target_dir: String::new(),
+        note_path: req.path.clone(),
+        state: "running".into(),
+        agents: vec![VaultDocsAgent {
+            index: 0,
+            name: format!("refine \u{00b7} {provider}"),
+            provider: provider.clone(),
+            model: req.model.clone().filter(|m| !m.trim().is_empty()),
+            state: "running".into(),
+            session_id: existing.as_ref().map(|s| s.to_string()),
+            error: None,
+            drafts: Vec::new(),
+        }],
+        summarizer: VaultDocsSummarizer {
+            provider: String::new(),
+            model: None,
+            state: "skipped".into(),
+            session_id: None,
+            error: None,
+        },
+        written: Vec::new(),
+        error: None,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        finished_at: None,
+    };
+    let turn_id = turn_run.id.clone();
+    if let Err(e) = repo.upsert(&run_row(&turn_run)).await {
+        warn!("vault_docs: persist refine turn {turn_id}: {e}");
+    }
+    let turn_run = Arc::new(Mutex::new(turn_run));
+    // The turn's own write-behind persister (same single-writer discipline as
+    // docs runs; see `spawn_persister`). Exits when the last sender drops.
+    let persist_tx = {
+        let snap = Arc::clone(&turn_run);
+        spawn_persister(repo.clone(), move || Some(snap.lock().unwrap().clone()))
     };
 
-    let turn = crate::agent_session::run_session_turn(
-        &ctx,
-        &ws,
-        &user,
-        existing.as_ref(),
-        &format!("Vault refine: {}", req.path),
-        &vault.root_path,
-        &provider,
-        meta,
-        &prompt,
-        crate::agent_session::STUCK_IDLE,
-        on_ready,
-    )
-    .await;
+    let ready_reg = ctx.vault_docs_refine.clone();
+    let ready_key = key.clone();
+    let ready_tx = persist_tx.clone();
+    let ready_turn = Arc::clone(&turn_run);
+    let on_ready = move |sid: &Id| {
+        {
+            let mut reg = ready_reg.lock().unwrap();
+            let e = reg.entry(ready_key).or_default();
+            e.session_id = Some(sid.clone());
+        }
+        // Durable ASAP (a restart mid-turn must still know the session).
+        if let Some(a) = ready_turn.lock().unwrap().agents.get_mut(0) {
+            a.session_id = Some(sid.to_string());
+        }
+        let _ = ready_tx.send(None);
+    };
 
-    // The turn is over either way — clear `running` before propagating errors.
-    if let Some(e) = ctx.vault_docs_refine.lock().unwrap().get_mut(&key) {
-        e.running = false;
-    }
-    let (reply, sid) = turn?;
-    if let Some(e) = ctx.vault_docs_refine.lock().unwrap().get_mut(&key) {
-        e.session_id = Some(sid.clone());
-    }
+    let task = {
+        let ctx = ctx.clone();
+        let refine_reg = ctx.vault_docs_refine.clone();
+        let key = key.clone();
+        let repo = repo.clone();
+        let turn_run = Arc::clone(&turn_run);
+        let persist_tx = persist_tx.clone();
+        let path = req.path.clone();
+        let title = format!("Vault refine: {}", req.path);
+        let root = vault.root_path.clone();
+        let provider = provider.clone();
+        tokio::spawn(async move {
+            let turn = crate::agent_session::run_session_turn(
+                &ctx,
+                &ws,
+                &user,
+                existing.as_ref(),
+                &title,
+                &root,
+                &provider,
+                meta,
+                &prompt,
+                crate::agent_session::STUCK_IDLE,
+                on_ready,
+            )
+            .await;
+
+            // The turn is over either way — clear `running` + finish the
+            // recorded turn (this task survives a client disconnect, so the
+            // row can never be stranded `running` until the next restart).
+            if let Some(e) = refine_reg.lock().unwrap().get_mut(&key) {
+                e.running = false;
+            }
+            let final_row = {
+                let mut run = turn_run.lock().unwrap();
+                run.finished_at = Some(chrono::Utc::now().to_rfc3339());
+                match &turn {
+                    Ok((_reply, sid)) => {
+                        run.state = "done".into();
+                        run.written = vec![path.clone()];
+                        if let Some(a) = run.agents.get_mut(0) {
+                            a.state = "done".into();
+                            a.session_id = Some(sid.to_string());
+                        }
+                    }
+                    Err(e) => {
+                        run.state = "error".into();
+                        run.error = Some(e.0.to_string());
+                        if let Some(a) = run.agents.get_mut(0) {
+                            a.state = "error".into();
+                            a.error = Some(e.0.to_string());
+                        }
+                    }
+                }
+                run_row(&run)
+            };
+            if let Ok((_reply, sid)) = &turn {
+                if let Some(e) = refine_reg.lock().unwrap().get_mut(&key) {
+                    e.session_id = Some(sid.clone());
+                }
+            }
+            // Flush any queued on_ready write, then land the terminal row
+            // directly — the persister is idle after the ack, so this write
+            // has no concurrent twin.
+            flush_persister(&persist_tx).await;
+            if let Err(e) = repo.upsert(&final_row).await {
+                warn!("vault_docs: persist refine turn {}: {}", final_row.id, e);
+            }
+            turn
+        })
+    };
+
+    let (reply, sid) = task
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("refine turn panicked: {e}"))))??;
     Ok(Json(RefineResp {
         session_id: sid.to_string(),
         reply,
@@ -538,17 +909,134 @@ async fn refine_session(
         .get_scoped(&ws_id, vault_id)
         .await
         .map_err(ApiError)?;
-    let entry = ctx
+    let mut entry = ctx
         .vault_docs_refine
         .lock()
         .unwrap()
-        .get(&(vault_id, q.path))
+        .get(&(vault_id, q.path.clone()))
         .cloned()
         .unwrap_or_default();
+    // Registry miss (fresh daemon): rehydrate the note's persisted session so
+    // the drawer re-attaches the SAME conversation after a restart.
+    if entry.session_id.is_none() && !entry.running {
+        if let Some(sid) = rehydrate_refine_session(&ctx, vault_id, &q.path).await {
+            let mut reg = ctx.vault_docs_refine.lock().unwrap();
+            reg.entry((vault_id, q.path.clone()))
+                .or_default()
+                .session_id = Some(sid.clone());
+            entry.session_id = Some(sid);
+        }
+    }
     Ok(Json(RefineSessionResp {
         session_id: entry.session_id.map(|s| s.to_string()),
         running: entry.running,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Startup recovery — a restart kills the orchestrator, not the durable rows.
+// ---------------------------------------------------------------------------
+
+/// Flip every non-terminal state in a run to `interrupted` (run, agents,
+/// summarizer) + stamp `finished_at`. No-op on already-terminal runs.
+fn mark_run_interrupted(run: &mut VaultDocsRun) -> bool {
+    if is_terminal(&run.state) {
+        return false;
+    }
+    run.state = "interrupted".into();
+    run.error
+        .get_or_insert_with(|| "interrupted by a daemon restart".into());
+    run.finished_at = Some(chrono::Utc::now().to_rfc3339());
+    for a in &mut run.agents {
+        if matches!(a.state.as_str(), "pending" | "running") {
+            a.state = "interrupted".into();
+        }
+    }
+    if matches!(run.summarizer.state.as_str(), "pending" | "running") {
+        run.summarizer.state = "interrupted".into();
+    }
+    true
+}
+
+/// Soft-move an interrupted run's orphaned `_drafts/docs-run-<run8>` dir into
+/// `.trash/` (suffix `-interrupted` on a name collision with an earlier trash
+/// of the same run). Same never-destroy stance as the normal stage-3 cleanup.
+/// Returns whether anything moved.
+fn trash_orphan_drafts(root: &str, run_id: &str) -> bool {
+    let run8: String = run_id.chars().take(8).collect();
+    let src = std::path::Path::new(root)
+        .join("_drafts")
+        .join(format!("docs-run-{run8}"));
+    if !src.is_dir() {
+        return false;
+    }
+    let trash = std::path::Path::new(root).join(".trash");
+    let _ = std::fs::create_dir_all(&trash);
+    let mut dst = trash.join(format!("docs-run-{run8}"));
+    if dst.exists() {
+        dst = trash.join(format!("docs-run-{run8}-interrupted"));
+    }
+    match std::fs::rename(&src, &dst) {
+        Ok(()) => true,
+        Err(e) => {
+            warn!("vault_docs: trash orphan drafts {}: {}", src.display(), e);
+            false
+        }
+    }
+}
+
+/// Startup sweep (spawned once from `ottod` main): every run row still
+/// non-terminal was killed by the restart — mark it `interrupted`, soft-trash
+/// its orphaned `_drafts` dir (multi-writer docs runs), and rescan the touched
+/// vaults so the tree stops showing the leftovers.
+pub async fn recover_interrupted(ctx: ServerCtx) {
+    let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
+    let rows = match repo.list_unfinished().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!("vault_docs: recover: list unfinished runs: {e}");
+            return;
+        }
+    };
+    if rows.is_empty() {
+        return;
+    }
+    let mut marked = 0usize;
+    let mut rescan: HashSet<i64> = HashSet::new();
+    for mut row in rows {
+        row.state = "interrupted".into();
+        match serde_json::from_str::<VaultDocsRun>(&row.payload) {
+            Ok(mut run) => {
+                mark_run_interrupted(&mut run);
+                row.payload = serde_json::to_string(&run).unwrap_or(row.payload);
+                row.finished_at = run.finished_at.clone();
+                if run.kind == "docs" && run.agents.len() > 1 {
+                    // Vault may be gone/re-scoped — resolve tolerantly.
+                    if let Ok(vault) = ctx.vault.get_scoped(&row.ws_id, row.vault_id).await {
+                        if trash_orphan_drafts(&vault.root_path, &run.id) {
+                            rescan.insert(row.vault_id);
+                        }
+                    }
+                }
+            }
+            // Unparseable payload (should never happen — we wrote it): still
+            // flip the flat state so the run stops counting as live.
+            Err(e) => warn!("vault_docs: recover: bad payload for {}: {}", row.id, e),
+        }
+        if let Err(e) = repo.upsert(&row).await {
+            warn!("vault_docs: recover: persist {}: {}", row.id, e);
+        } else {
+            marked += 1;
+        }
+    }
+    for vault_id in &rescan {
+        let _ = ctx.vault.scan(*vault_id).await;
+    }
+    tracing::info!(
+        "vault_docs: marked {marked} interrupted run(s) from before restart \
+         ({} vault(s) rescanned after drafts cleanup)",
+        rescan.len()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +1069,7 @@ async fn run_docs(
         Some(e) => Arc::clone(&e.cancel),
         None => return,
     };
+    let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
     let m = writers.len();
     let run8: String = run_id.chars().take(8).collect();
 
@@ -668,6 +1157,8 @@ async fn run_docs(
                         a.session_id = Some(sid);
                     }
                 });
+                // Durable ASAP: a restart mid-turn must still know the session.
+                persist(&ready_reg, &ready_run);
             };
             let res = crate::agent_session::run_session_turn(
                 &ctx,
@@ -683,7 +1174,7 @@ async fn run_docs(
                 on_ready,
             )
             .await;
-            match res {
+            let ok = match res {
                 Ok((_reply, sid)) => {
                     with_run(&reg, &run_id, |r| {
                         if let Some(a) = r.agents.get_mut(i) {
@@ -703,7 +1194,9 @@ async fn run_docs(
                     });
                     false
                 }
-            }
+            };
+            persist(&reg, &run_id);
+            ok
         });
     }
     let mut any_ok = false;
@@ -715,6 +1208,7 @@ async fn run_docs(
 
     if cancel.load(Ordering::Relaxed) {
         finish_run(&reg, &run_id, "cancelled", None);
+        finalize_run(&reg, &repo, &run_id).await;
         let _ = std::fs::remove_file(&results_path);
         return;
     }
@@ -730,6 +1224,7 @@ async fn run_docs(
         } else {
             finish_run(&reg, &run_id, "error", Some("writer agent failed".into()));
         }
+        finalize_run(&reg, &repo, &run_id).await;
         let _ = std::fs::remove_file(&results_path);
         return;
     }
@@ -769,11 +1264,13 @@ async fn run_docs(
             "error",
             Some("all writer agents failed".into()),
         );
+        finalize_run(&reg, &repo, &run_id).await;
         let _ = std::fs::remove_file(&results_path);
         return;
     }
     if cancel.load(Ordering::Relaxed) {
         finish_run(&reg, &run_id, "cancelled", None);
+        finalize_run(&reg, &repo, &run_id).await;
         let _ = std::fs::remove_file(&results_path);
         return;
     }
@@ -784,6 +1281,7 @@ async fn run_docs(
         }
         r.summarizer.state = "running".into();
     });
+    persist(&reg, &run_id);
 
     let sum_prompt = build_summarizer_prompt(
         &prompt,
@@ -815,6 +1313,7 @@ async fn run_docs(
         with_run(&ready_reg, &ready_run, |r| {
             r.summarizer.session_id = Some(sid);
         });
+        persist(&ready_reg, &ready_run);
     };
     let sum_res = crate::agent_session::run_session_turn(
         &ctx,
@@ -848,6 +1347,7 @@ async fn run_docs(
             Some(e.0.to_string())
         }
     };
+    persist(&reg, &run_id);
 
     // ---- Stage 3: soft-trash the drafts dir + resolve `written` -------------
     // std::fs::rename is atomic within a filesystem; a cross-device rename (or
@@ -873,6 +1373,7 @@ async fn run_docs(
             Some(format!("summarizer failed: {e}")),
         ),
     }
+    finalize_run(&reg, &repo, &run_id).await;
     let _ = std::fs::remove_file(&results_path);
 }
 
@@ -1479,6 +1980,139 @@ mod tests {
         assert_eq!(inline_for_provider("codex", None), None);
     }
 
+    fn sample_run(state: &str) -> VaultDocsRun {
+        VaultDocsRun {
+            id: "run-12345678".into(),
+            ws_id: "w1".into(),
+            vault_id: 1,
+            kind: "docs".into(),
+            prompt: "p".into(),
+            target_dir: String::new(),
+            note_path: String::new(),
+            state: state.into(),
+            agents: vec![
+                VaultDocsAgent {
+                    index: 0,
+                    name: "writer-1 · claude".into(),
+                    provider: "claude".into(),
+                    model: None,
+                    state: "done".into(),
+                    session_id: Some("s1".into()),
+                    error: None,
+                    drafts: vec![],
+                },
+                VaultDocsAgent {
+                    index: 1,
+                    name: "writer-2 · claude".into(),
+                    provider: "claude".into(),
+                    model: None,
+                    state: "running".into(),
+                    session_id: Some("s2".into()),
+                    error: None,
+                    drafts: vec![],
+                },
+                VaultDocsAgent {
+                    index: 2,
+                    name: "writer-3 · claude".into(),
+                    provider: "claude".into(),
+                    model: None,
+                    state: "pending".into(),
+                    session_id: None,
+                    error: None,
+                    drafts: vec![],
+                },
+            ],
+            summarizer: VaultDocsSummarizer {
+                provider: "claude".into(),
+                model: None,
+                state: "pending".into(),
+                session_id: None,
+                error: None,
+            },
+            written: vec![],
+            error: None,
+            started_at: "2026-07-12T10:00:00Z".into(),
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn interrupted_sweep_flips_only_non_terminal_states() {
+        let mut run = sample_run("running");
+        assert!(mark_run_interrupted(&mut run));
+        assert_eq!(run.state, "interrupted");
+        assert!(run.finished_at.is_some());
+        assert!(run.error.as_deref().unwrap().contains("restart"));
+        // done stays done; running/pending flip.
+        assert_eq!(run.agents[0].state, "done");
+        assert_eq!(run.agents[1].state, "interrupted");
+        assert_eq!(run.agents[2].state, "interrupted");
+        assert_eq!(run.summarizer.state, "interrupted");
+
+        // Terminal runs are untouched (idempotent across sweeps).
+        let mut done = sample_run("done");
+        assert!(!mark_run_interrupted(&mut done));
+        assert_eq!(done.state, "done");
+        let mut twice = sample_run("running");
+        mark_run_interrupted(&mut twice);
+        assert!(!mark_run_interrupted(&mut twice));
+
+        // A skipped summarizer (single-writer / all-failed) stays skipped.
+        let mut single = sample_run("running");
+        single.summarizer.state = "skipped".into();
+        mark_run_interrupted(&mut single);
+        assert_eq!(single.summarizer.state, "skipped");
+    }
+
+    #[test]
+    fn payload_without_kind_or_note_path_still_deserializes_as_docs() {
+        // Forward-compat: rows written before the fields existed.
+        let legacy = r#"{
+            "id": "r1", "ws_id": "w1", "vault_id": 1, "prompt": "p",
+            "target_dir": "", "state": "running", "agents": [],
+            "summarizer": {"provider": "claude", "model": null, "state": "pending",
+                           "session_id": null, "error": null},
+            "written": [], "error": null,
+            "started_at": "t", "finished_at": null
+        }"#;
+        let run: VaultDocsRun = serde_json::from_str(legacy).unwrap();
+        assert_eq!(run.kind, "docs");
+        assert_eq!(run.note_path, "");
+        // And a full round-trip preserves the new fields.
+        let mut run = sample_run("running");
+        run.kind = "refine".into();
+        run.note_path = "docs/a.md".into();
+        let back: VaultDocsRun =
+            serde_json::from_str(&serde_json::to_string(&run).unwrap()).unwrap();
+        assert_eq!(back.kind, "refine");
+        assert_eq!(back.note_path, "docs/a.md");
+    }
+
+    #[test]
+    fn orphan_drafts_move_to_trash_with_collision_suffix() {
+        let tmp = std::env::temp_dir().join(format!("otto-vdr-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let drafts = tmp.join("_drafts/docs-run-run-1234/agent-1");
+        std::fs::create_dir_all(&drafts).unwrap();
+        std::fs::write(drafts.join("a.md"), "draft").unwrap();
+        let root = tmp.to_string_lossy().to_string();
+
+        // "run-1234" are the first 8 chars of the run id.
+        assert!(trash_orphan_drafts(&root, "run-12345678"));
+        assert!(!tmp.join("_drafts/docs-run-run-1234").exists());
+        assert!(tmp.join(".trash/docs-run-run-1234/agent-1/a.md").exists());
+
+        // Missing dir → no-op.
+        assert!(!trash_orphan_drafts(&root, "run-12345678"));
+
+        // Collision (same run trashed before) → `-interrupted` suffix.
+        std::fs::create_dir_all(tmp.join("_drafts/docs-run-run-1234")).unwrap();
+        assert!(trash_orphan_drafts(&root, "run-12345678"));
+        assert!(tmp.join(".trash/docs-run-run-1234-interrupted").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn run_state_transitions_respect_terminal_states() {
         let reg = new_run_registry();
@@ -1486,8 +2120,10 @@ mod tests {
             id: "r1".into(),
             ws_id: "w1".into(),
             vault_id: 1,
+            kind: "docs".into(),
             prompt: "p".into(),
             target_dir: String::new(),
+            note_path: String::new(),
             state: "running".into(),
             agents: vec![],
             summarizer: VaultDocsSummarizer {
@@ -1507,6 +2143,7 @@ mod tests {
             RunEntry {
                 run,
                 cancel: Arc::new(AtomicBool::new(false)),
+                persist_tx: None,
             },
         );
         // Cancel lands first…

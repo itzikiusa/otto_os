@@ -7,6 +7,7 @@ import {
   createVaultFolder,
   deleteVault,
   deleteVaultNote,
+  listDocsRuns,
   listVaults,
   okfIndexes,
   okfValidate,
@@ -86,12 +87,28 @@ class VaultStore {
   // Quick switcher.
   switcherOpen = $state(false);
 
-  // Docs agents — the current (or last) multi-writer documentation run. The
-  // view owns the 1.5s poll timer; the run lives here so switching to a note
-  // or the graph and back doesn't lose it.
+  // Docs agents — the SELECTED run (live or history). The view owns the 1.5s
+  // poll timer; the run lives here so switching to a note or the graph and
+  // back doesn't lose it. `docsRuns` is the server-persisted list (docs +
+  // refine, newest-first) — the durable source the view refetches on mount,
+  // which is what makes runs survive tab switches AND app restarts.
   docsRun = $state<VaultDocsRun | null>(null);
+  docsRuns = $state<VaultDocsRun[]>([]);
   /** Target-folder prefill for the docs-agent form ("Docs agent here"). */
   docsAgentsDir = $state('');
+
+  /** Refresh the persisted runs list (newest-first; live runs overlaid). */
+  async refreshDocsRuns(): Promise<void> {
+    if (!this.current) return;
+    const vaultId = this.current.id;
+    try {
+      const runs = await listDocsRuns(this.wsId, vaultId);
+      // Async guard: drop the result if the vault changed under us.
+      if (this.current?.id === vaultId) this.docsRuns = runs;
+    } catch {
+      /* transient — the view's poll retries */
+    }
+  }
 
   // OKF.
   okfReport = $state<OkfReport | null>(null);
@@ -134,6 +151,7 @@ class VaultStore {
     this.okfReport = null;
     this.roots = [];
     this.docsRun = null;
+    this.docsRuns = [];
     this.docsAgentsDir = '';
     this.centerMode = 'empty';
     if (!v) return;

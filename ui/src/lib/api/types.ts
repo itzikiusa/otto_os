@@ -5177,10 +5177,10 @@ export interface OkfReport {
 
 export interface VaultDocsAgent {
   index: number;
-  name: string; // "writer-1 · claude"
+  name: string; // "writer-1 · claude" / "refine · claude"
   provider: string;
   model: string | null;
-  state: 'pending' | 'running' | 'done' | 'error';
+  state: 'pending' | 'running' | 'done' | 'error' | 'interrupted';
   session_id: string | null;
   error: string | null;
   drafts: string[]; // vault-relative draft note paths this agent produced
@@ -5188,7 +5188,8 @@ export interface VaultDocsAgent {
 export interface VaultDocsSummarizer {
   provider: string;
   model: string | null;
-  state: 'pending' | 'running' | 'done' | 'error' | 'skipped'; // skipped when 1 writer
+  // skipped when 1 writer; interrupted when a daemon restart killed the run
+  state: 'pending' | 'running' | 'done' | 'error' | 'skipped' | 'interrupted';
   session_id: string | null;
   error: string | null;
 }
@@ -5196,9 +5197,11 @@ export interface VaultDocsRun {
   id: string;
   ws_id: string;
   vault_id: number;
+  kind: 'docs' | 'refine'; // refine = one per-note edit turn
   prompt: string;
   target_dir: string;
-  state: 'running' | 'summarizing' | 'done' | 'error' | 'cancelled';
+  note_path: string; // refine: the note being edited ("" for docs runs)
+  state: 'running' | 'summarizing' | 'done' | 'error' | 'cancelled' | 'interrupted';
   agents: VaultDocsAgent[];
   summarizer: VaultDocsSummarizer;
   written: string[]; // final note paths in the vault

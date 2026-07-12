@@ -905,6 +905,10 @@ mod tests {
             pol(Method::GET, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session"),
             Require(Product, View),
         );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/runs"),
+            Require(Product, View),
+        );
         // Non-ws run poll/cancel (the handlers re-check the run's ws role).
         assert_eq!(
             pol(Method::GET, "/api/v1/vault/docs-agents/runs/{run_id}"),

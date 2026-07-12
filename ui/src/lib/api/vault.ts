@@ -142,6 +142,12 @@ export function docsRun(runId: string) {
   return api.get<VaultDocsRun>(`/vault/docs-agents/runs/${enc(runId)}`);
 }
 
+/** The vault's persisted runs (docs + refine), newest-first — live runs carry
+ *  their fresher in-memory snapshot. Survives daemon restarts (history). */
+export function listDocsRuns(ws: string, id: number, limit = 50) {
+  return api.get<VaultDocsRun[]>(`${base(ws)}/${id}/docs-agents/runs?limit=${limit}`);
+}
+
 export function cancelDocsRun(runId: string) {
   return api.post<void>(`/vault/docs-agents/runs/${enc(runId)}/cancel`, {});
 }

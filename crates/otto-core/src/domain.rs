@@ -159,11 +159,11 @@ pub struct Session {
 /// Meta `source` values stamped on **background/automation** agent sessions —
 /// ones owned by an engine (channel tickets, review agents, skill eval/review,
 /// product analysis, swarm roles, canvas/mockup/db assist panels, workflow
-/// steps) rather than opened by the user. Any other value — or no `source` at
-/// all — marks a **foreground** session: one listed in the sidebar's "Agents"
-/// group. MUST stay in sync with the UI filter (`plainAgentSessions` in
-/// `ui/src/lib/stores/workspace.svelte.ts`).
-pub const BACKGROUND_SESSION_SOURCES: [&str; 10] = [
+/// steps, vault docs/refine writers) rather than opened by the user. Any other
+/// value — or no `source` at all — marks a **foreground** session: one listed
+/// in the sidebar's "Agents" group. MUST stay in sync with the UI filter
+/// (`plainAgentSessions` in `ui/src/lib/stores/workspace.svelte.ts`).
+pub const BACKGROUND_SESSION_SOURCES: [&str; 11] = [
     "channel",
     "review",
     "skilleval",
@@ -174,6 +174,7 @@ pub const BACKGROUND_SESSION_SOURCES: [&str; 10] = [
     "mockup_assist",
     "db_assist",
     "workflow",
+    "vault-docs",
 ];
 
 impl Session {
