@@ -858,6 +858,14 @@ fn arg_string_allow_empty(args: &Value, key: &str) -> Result<String, String> {
     }
 }
 
+fn arg_optional_string(args: &Value, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(format!("argument `{key}` must be a string")),
+        None => Ok(None),
+    }
+}
+
 /// Extract a required integer argument.
 fn arg_i64(args: &Value, key: &str) -> Result<i64, String> {
     args.get(key)
@@ -1154,7 +1162,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 "path": arg_str(args, "path")?,
                 "content": arg_string_allow_empty(args, "content")?,
             });
-            if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
+            if let Some(h) = arg_optional_string(args, "if_hash")? {
                 body["if_hash"] = json!(h);
             }
             let meta = ctx
@@ -1169,7 +1177,7 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 "path": arg_str(args, "path")?,
                 "content": arg_string_allow_empty(args, "content")?,
             });
-            if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
+            if let Some(h) = arg_optional_string(args, "if_hash")? {
                 body["if_hash"] = json!(h);
             }
             let file = ctx
@@ -1780,6 +1788,19 @@ mod tests {
             let text = resp["result"]["content"][0]["text"].as_str().unwrap();
             assert!(text.contains("content"), "got: {text}");
         }
+
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+                    "params": { "name": "otto_vault_write_file", "arguments": {
+                        "vault_id": 1, "path": "api.json", "content": "{}", "if_hash": 7
+                    } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("if_hash"), "got: {text}");
 
         let err = run_tool(
             &ctx,

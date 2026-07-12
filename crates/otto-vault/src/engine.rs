@@ -8,9 +8,12 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use otto_core::{Error, Result};
+use rustix::fd::OwnedFd;
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::parse::{self, parse_note};
 use crate::resolve::ResolveIndex;
@@ -31,6 +34,9 @@ struct SwitcherIx {
     rows: Vec<(String, String, Vec<String>)>,
 }
 
+type VaultWriteKey = (i64, String);
+type VaultWriteLock = Arc<tokio::sync::Mutex<()>>;
+
 pub struct VaultEngine {
     store: Store,
     /// Per-vault scan serialization + coalescing (a kick while a scan runs is
@@ -39,7 +45,7 @@ pub struct VaultEngine {
     /// Unix seconds of the last completed scan per vault (staleness probe).
     last_scan: Mutex<HashMap<i64, Arc<AtomicI64>>>,
     /// Hash-check + replace serialization for each writable vault path.
-    writes: Mutex<HashMap<(i64, String), Arc<tokio::sync::Mutex<()>>>>,
+    writes: Mutex<HashMap<VaultWriteKey, VaultWriteLock>>,
     switcher: RwLock<HashMap<i64, Arc<SwitcherIx>>>,
     fts_ok: std::sync::atomic::AtomicU8, // 0 unknown / 1 yes / 2 no
 }
@@ -161,7 +167,7 @@ impl VaultEngine {
         self.last_scan.lock().unwrap().entry(id).or_default().clone()
     }
 
-    fn write_lock(&self, id: i64, path: &str) -> Arc<tokio::sync::Mutex<()>> {
+    fn write_lock(&self, id: i64, path: &str) -> VaultWriteLock {
         self.writes
             .lock()
             .unwrap()
@@ -394,63 +400,127 @@ impl VaultEngine {
         Ok(target)
     }
 
-    /// Resolve a write through its canonical parent and reject a pre-existing
-    /// symlink leaf. Atomic rename then replaces, rather than follows, a leaf
-    /// swapped in after this check.
-    fn guarded_write_target(root: &str, rel: &str) -> Result<PathBuf> {
-        let rootc = Path::new(root)
-            .canonicalize()
-            .map_err(|e| Error::Conflict(format!("vault root missing: {e}")))?;
-        let candidate = rootc.join(rel);
-        let parent = candidate
-            .parent()
-            .ok_or_else(|| Error::Invalid(format!("invalid path: {rel}")))?
-            .canonicalize()
-            .map_err(|e| Error::Conflict(format!("text artifact parent missing: {e}")))?;
-        if !parent.starts_with(&rootc) {
-            return Err(Error::Forbidden("path escapes the vault".into()));
+    /// Open (and create where absent) every parent component relative to a held
+    /// vault directory capability. `NOFOLLOW` on each hop prevents a concurrent
+    /// symlink swap from redirecting later reads or the final rename.
+    fn text_parent(root: &str, rel: &str) -> Result<(OwnedFd, String)> {
+        let mut parts = rel.split('/').peekable();
+        let mut parent = rustix::fs::open(
+            root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| Error::Conflict(format!("open vault root: {e}")))?;
+        let dir_mode = Mode::RWXU | Mode::RGRP | Mode::XGRP | Mode::ROTH | Mode::XOTH;
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                return Ok((parent, part.to_string()));
+            }
+            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let next = match rustix::fs::openat(&parent, part, flags, Mode::empty()) {
+                Ok(fd) => fd,
+                Err(Errno::NOENT) => {
+                    match rustix::fs::mkdirat(&parent, part, dir_mode) {
+                        Ok(()) | Err(Errno::EXIST) => {}
+                        Err(e) => {
+                            return Err(Error::Internal(format!(
+                                "create text artifact directory {part}: {e}"
+                            )))
+                        }
+                    }
+                    rustix::fs::openat(&parent, part, flags, Mode::empty()).map_err(|e| {
+                        if matches!(e, Errno::LOOP | Errno::NOTDIR) {
+                            Error::Forbidden("path escapes the vault".into())
+                        } else {
+                            Error::Internal(format!("open text artifact directory {part}: {e}"))
+                        }
+                    })?
+                }
+                Err(Errno::LOOP | Errno::NOTDIR) => {
+                    return Err(Error::Forbidden("path escapes the vault".into()))
+                }
+                Err(e) => {
+                    return Err(Error::Internal(format!(
+                        "open text artifact directory {part}: {e}"
+                    )))
+                }
+            };
+            parent = next;
         }
-        let target = parent.join(
-            candidate
-                .file_name()
-                .ok_or_else(|| Error::Invalid(format!("invalid path: {rel}")))?,
-        );
-        if std::fs::symlink_metadata(&target)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Err(Error::Forbidden("text artifact target must not be a symlink".into()));
-        }
-        Ok(target)
+        Err(Error::Invalid(format!("invalid path: {rel}")))
     }
 
-    /// Write a unique same-directory temp, flush it, then atomically replace the
-    /// destination without ever opening that destination for writing.
-    async fn atomic_replace(target: &Path, bytes: &[u8]) -> Result<()> {
-        let parent = target
-            .parent()
-            .ok_or_else(|| Error::Invalid(format!("invalid path: {}", target.display())))?;
-        let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("artifact");
-        let temp = parent.join(format!(".{name}.otto-tmp-{}", otto_core::new_id()));
+    async fn text_file_bytes(parent: &OwnedFd, name: &str) -> Result<Option<Vec<u8>>> {
+        match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode).is_symlink() => {
+                return Err(Error::Forbidden(
+                    "text artifact target must not be a symlink".into(),
+                ))
+            }
+            Ok(_) => {}
+            Err(Errno::NOENT) => return Ok(None),
+            Err(e) => {
+                return Err(Error::Internal(format!(
+                    "inspect text artifact {name}: {e}"
+                )))
+            }
+        }
+        let fd = match rustix::fs::openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(Errno::LOOP) => {
+                return Err(Error::Forbidden(
+                    "text artifact target must not be a symlink".into(),
+                ))
+            }
+            Err(e) => {
+                return Err(Error::Internal(format!(
+                    "open text artifact {name}: {e}"
+                )))
+            }
+        };
+        let mut file = tokio::fs::File::from_std(std::fs::File::from(fd));
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .await
+            .map_err(|e| Error::Internal(format!("read text artifact {name}: {e}")))?;
+        Ok(Some(bytes))
+    }
+
+    /// Write a unique same-directory temp and rename it relative to the held
+    /// parent capability. Parent path replacement cannot redirect either step.
+    async fn atomic_replace_at(parent: &OwnedFd, name: &str, bytes: &[u8]) -> Result<()> {
+        let temp = format!(".{name}.otto-tmp-{}", otto_core::new_id());
+        let mode = Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH;
+        let fd = rustix::fs::openat(
+            parent,
+            temp.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode,
+        )
+        .map_err(|e| Error::Internal(format!("create text artifact temp {temp}: {e}")))?;
         let write = async {
-            let mut file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)
-                .await
-                .map_err(|e| Error::Internal(format!("create temp {}: {e}", temp.display())))?;
+            let mut file = tokio::fs::File::from_std(std::fs::File::from(fd));
             file.write_all(bytes)
                 .await
-                .map_err(|e| Error::Internal(format!("write temp {}: {e}", temp.display())))?;
+                .map_err(|e| Error::Internal(format!("write text artifact temp {temp}: {e}")))?;
             file.sync_all()
                 .await
-                .map_err(|e| Error::Internal(format!("flush temp {}: {e}", temp.display())))?;
-            tokio::fs::rename(&temp, target)
-                .await
-                .map_err(|e| Error::Internal(format!("replace {}: {e}", target.display())))
+                .map_err(|e| Error::Internal(format!("flush text artifact temp {temp}: {e}")))?;
+            drop(file);
+            rustix::fs::renameat(parent, temp.as_str(), parent, name)
+                .map_err(|e| Error::Internal(format!("replace text artifact {name}: {e}")))?;
+            rustix::fs::fsync(parent)
+                .map_err(|e| Error::Internal(format!("flush text artifact directory: {e}")))
         }
         .await;
         if write.is_err() {
-            let _ = tokio::fs::remove_file(&temp).await;
+            let _ = rustix::fs::unlinkat(parent, temp.as_str(), AtFlags::empty());
         }
         write
     }
@@ -607,27 +677,25 @@ impl VaultEngine {
         }
         let lock = self.write_lock(id, &rel);
         let _guard = lock.lock().await;
-        // Check the nearest existing ancestor before creating parents, then
-        // canonicalize the now-existing parent for the actual replace.
-        let candidate = Self::abs_guarded(&v.root_path, &rel)?;
-        if let Some(parent) = candidate.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| Error::Internal(format!("mkdir: {e}")))?;
-        }
-        let abs = Self::guarded_write_target(&v.root_path, &rel)?;
+        let (parent, name) = Self::text_parent(&v.root_path, &rel)?;
         if let Some(expected) = if_hash {
-            let current = match tokio::fs::read(&abs).await {
-                Ok(b) => hex_sha256(&b),
-                Err(_) => String::new(),
+            let current = match Self::text_file_bytes(&parent, &name).await? {
+                Some(bytes) => hex_sha256(&bytes),
+                None => String::new(),
             };
             if current != expected {
                 return Err(Error::Conflict(format!(
                     "text artifact changed on disk (hash {current})"
                 )));
             }
+        } else if rustix::fs::statat(&parent, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode).is_symlink())
+        {
+            return Err(Error::Forbidden(
+                "text artifact target must not be a symlink".into(),
+            ));
         }
-        Self::atomic_replace(&abs, bytes).await?;
+        Self::atomic_replace_at(&parent, &name, bytes).await?;
         self.scan(id).await?;
         Ok(VaultTextFile {
             path: rel,

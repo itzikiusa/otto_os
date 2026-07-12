@@ -22,9 +22,11 @@ use crate::engine::VaultEngine;
 use crate::scan::MAX_FTS_BYTES;
 use crate::types::*;
 
-/// Allow decoded content through the 4 MiB engine cap plus JSON framing. Keep
-/// the larger transport limit local to this route.
-const TEXT_FILE_JSON_BODY_LIMIT: usize = MAX_FTS_BYTES as usize + 64 * 1024;
+/// A JSON string byte may expand to six encoded bytes (`\u00XX`). Allow that
+/// worst case for decoded content through the 4 MiB engine cap, plus bounded
+/// path/hash framing. Keep the larger transport limit local to this route; the
+/// engine remains the authoritative decoded-content limit.
+const TEXT_FILE_JSON_BODY_LIMIT: usize = MAX_FTS_BYTES as usize * 6 + 64 * 1024;
 
 /// Host-application context required by the vault router.
 pub trait VaultCtx: Clone + Send + Sync + 'static {

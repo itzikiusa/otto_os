@@ -287,6 +287,83 @@ async fn concurrent_text_file_writes_with_one_hash_yield_exactly_one_conflict() 
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn create_only_text_write_does_not_replace_an_unreadable_existing_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let target = td.path().join("api/protected.json");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "protected").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let result = eng
+        .write_text_file(WS, id, "api/protected.json", "replacement", Some(""))
+        .await;
+
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(result.is_err(), "an unreadable existing file must not look absent");
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "protected");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn parent_swap_after_validation_cannot_redirect_text_write_outside_vault() {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let parent = td.path().join("api");
+    let held_parent = td.path().join("api-held");
+    let outside = tempfile::tempdir().unwrap();
+    let fifo = parent.join("race.json");
+    std::fs::create_dir(&parent).unwrap();
+    let status = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(status.success(), "mkfifo failed: {status}");
+
+    let seed = b"existing";
+    let expected_hash = format!("{:x}", Sha256::digest(seed));
+    let writer_engine = eng.clone();
+    let write = tokio::spawn(async move {
+        writer_engine
+            .write_text_file(WS, id, "api/race.json", "replacement", Some(&expected_hash))
+            .await
+    });
+
+    // Opening the FIFO for write completes only once the engine has validated
+    // the parent and opened the existing leaf for its hash read.
+    let fifo_for_open = fifo.clone();
+    let fifo_writer = tokio::task::spawn_blocking(move || {
+        std::fs::OpenOptions::new().write(true).open(fifo_for_open)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    std::fs::rename(&parent, &held_parent).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+    tokio::task::spawn_blocking(move || {
+        let mut fifo_writer = fifo_writer;
+        fifo_writer.write_all(seed).unwrap();
+    })
+    .await
+    .unwrap();
+
+    let result = write.await.unwrap();
+    assert!(result.is_ok(), "capability-held parent write failed: {result:?}");
+    assert!(
+        !outside.path().join("race.json").exists(),
+        "a swapped parent symlink redirected the write outside the vault"
+    );
+    assert_eq!(
+        std::fs::read_to_string(held_parent.join("race.json")).unwrap(),
+        "replacement"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rename_rewrites_links_on_disk() {
     let eng = engine().await;

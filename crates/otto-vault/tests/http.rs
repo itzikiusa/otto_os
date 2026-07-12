@@ -123,6 +123,26 @@ async fn text_file_route_accepts_decoded_content_through_four_mib_and_rejects_ne
         );
     }
 
+    let size = 4 * 1024 * 1024;
+    let escaped = json!({
+        "path": "escaped-exactly-four.json",
+        "content": "\0".repeat(size),
+        "if_hash": "",
+    });
+    assert!(
+        serde_json::to_vec(&escaped).unwrap().len() >= size * 6,
+        "test must exercise worst-case JSON string escaping"
+    );
+    let (status, response) = put_file(&app, id, escaped).await;
+    assert_eq!(status, StatusCode::OK, "response: {response}");
+    assert_eq!(response["size"], size);
+    assert_eq!(
+        std::fs::metadata(td.path().join("escaped-exactly-four.json"))
+            .unwrap()
+            .len(),
+        size as u64
+    );
+
     let size = 4 * 1024 * 1024 + 1;
     let request = json!({ "path": "too-large.json", "content": "x".repeat(size) });
     assert!(
