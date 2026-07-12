@@ -84,6 +84,9 @@ struct Ctx {
     session_id: Option<String>,
     /// Calling workspace id (for audit). May be empty.
     workspace_id: Option<String>,
+    /// Session metadata source. Review sessions use this to receive a
+    /// read-only Vault catalog and a dispatcher-level mutation deny.
+    source: Option<String>,
     /// Audit sink. `None` when the DB can't be opened (audit degrades to logs).
     audit: Option<McpAuditRepo>,
 }
@@ -659,6 +662,31 @@ fn tool_catalog() -> Value {
             }
         ]
     })
+}
+
+const VAULT_MUTATION_TOOLS: [&str; 4] = [
+    "otto_vault_write",
+    "otto_vault_write_file",
+    "otto_vault_rename",
+    "otto_vault_delete",
+];
+
+fn is_vault_docs_reviewer(source: Option<&str>) -> bool {
+    source == Some("vault-docs-review")
+}
+
+fn tool_catalog_for_source(source: Option<&str>) -> Value {
+    let mut catalog = tool_catalog();
+    if is_vault_docs_reviewer(source) {
+        if let Some(tools) = catalog["tools"].as_array_mut() {
+            tools.retain(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_none_or(|name| !VAULT_MUTATION_TOOLS.contains(&name))
+            });
+        }
+    }
+    catalog
 }
 
 /// The new first-party feature read tools route through one pure mapping
@@ -1304,7 +1332,7 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
         "tools/list" => {
             // The static first-party read-only catalog, plus — when the live-agent
             // gateway is enabled for this workspace — the governed downstream tools.
-            let mut cat = tool_catalog();
+            let mut cat = tool_catalog_for_source(ctx.source.as_deref());
             let gw = ctx.gateway_tools().await;
             if let Some(arr) = cat["tools"].as_array_mut() {
                 for t in gw {
@@ -1326,6 +1354,17 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                 .unwrap_or("")
                 .to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            if is_vault_docs_reviewer(ctx.source.as_deref())
+                && VAULT_MUTATION_TOOLS.contains(&name.as_str())
+            {
+                return Some(rpc_ok(
+                    id,
+                    tool_result(
+                        &json!({ "error": "vault mutation tools are disabled for documentation review sessions" }),
+                        true,
+                    ),
+                ));
+            }
             // A namespaced `mcp__server__tool` is a governed downstream call —
             // route it through the control-plane gateway (which audits it itself).
             if name.starts_with("mcp__") {
@@ -1367,6 +1406,7 @@ struct Creds {
     base: Option<String>,
     session_id: Option<String>,
     workspace_id: Option<String>,
+    source: Option<String>,
 }
 
 /// Find the creds-file path: `--config <path>` / `--config=<path>` in `args`, else
@@ -1403,6 +1443,7 @@ fn parse_creds(body: &str) -> Result<Creds, String> {
         base: s("base"),
         session_id: s("session_id"),
         workspace_id: s("workspace_id"),
+        source: s("source"),
     })
 }
 
@@ -1417,6 +1458,7 @@ fn load_creds(args: &[String]) -> Result<Creds, String> {
                 base: s("OTTO_MCP_BASE"),
                 session_id: s("OTTO_SESSION_ID"),
                 workspace_id: s("OTTO_WORKSPACE_ID"),
+                source: s("OTTO_SESSION_SOURCE"),
             });
         }
     }
@@ -1446,6 +1488,7 @@ pub async fn run() -> Result<(), String> {
     });
     let session_id = creds.session_id;
     let workspace_id = creds.workspace_id;
+    let source = creds.source;
 
     // Open the same SQLite DB the daemon uses, for the audit ledger. Best-effort:
     // if it can't be opened the tools still run, audit just degrades to stderr.
@@ -1468,6 +1511,7 @@ pub async fn run() -> Result<(), String> {
         token,
         session_id,
         workspace_id,
+        source,
         audit,
     };
 
@@ -1629,13 +1673,14 @@ mod tests {
     #[test]
     fn parse_creds_reads_fields_and_requires_token() {
         let c = parse_creds(
-            r#"{"token":"t-1","base":"http://127.0.0.1:7700","session_id":"s-1","workspace_id":"ws-1"}"#,
+            r#"{"token":"t-1","base":"http://127.0.0.1:7700","session_id":"s-1","workspace_id":"ws-1","source":"vault-docs-review"}"#,
         )
         .unwrap();
         assert_eq!(c.token, "t-1");
         assert_eq!(c.base.as_deref(), Some("http://127.0.0.1:7700"));
         assert_eq!(c.session_id.as_deref(), Some("s-1"));
         assert_eq!(c.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(c.source.as_deref(), Some("vault-docs-review"));
         // A token-less document is rejected.
         assert!(parse_creds(r#"{"base":"x"}"#).is_err());
     }
@@ -1768,6 +1813,54 @@ mod tests {
             json!(["vault_id", "path", "content"])
         );
         assert_eq!(write_file["inputSchema"]["properties"]["content"]["type"], json!("string"));
+    }
+
+    #[test]
+    fn vault_docs_review_source_gets_read_only_vault_catalog() {
+        let cat = tool_catalog_for_source(Some("vault-docs-review"));
+        let names: Vec<&str> = cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        for read in ["otto_vault_list", "otto_vault_read", "otto_vault_search"] {
+            assert!(names.contains(&read), "reviewer catalog missing {read}");
+        }
+        for mutation in [
+            "otto_vault_write",
+            "otto_vault_write_file",
+            "otto_vault_rename",
+            "otto_vault_delete",
+        ] {
+            assert!(!names.contains(&mutation), "reviewer catalog leaked {mutation}");
+        }
+
+        let normal = tool_catalog_for_source(Some("vault-docs"));
+        assert!(normal["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "otto_vault_write"));
+    }
+
+    #[tokio::test]
+    async fn vault_docs_review_source_cannot_call_hidden_vault_mutations() {
+        let mut ctx = test_ctx();
+        ctx.source = Some("vault-docs-review".into());
+        let response = handle(
+            &ctx,
+            json!({"jsonrpc":"2.0","id":31,"method":"tools/call","params":{
+                "name":"otto_vault_write","arguments":{"vault_id":1,"path":"x.md","content":"x"}
+            }}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], json!(true));
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("disabled for documentation review"));
     }
 
     #[tokio::test]
@@ -1962,6 +2055,7 @@ mod tests {
             token: "test-token".to_string(),
             session_id: Some("sess-test".into()),
             workspace_id: Some("ws-test".into()),
+            source: None,
             audit: None,
         }
     }

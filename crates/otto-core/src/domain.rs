@@ -163,7 +163,7 @@ pub struct Session {
 /// value — or no `source` at all — marks a **foreground** session: one listed
 /// in the sidebar's "Agents" group. MUST stay in sync with the UI filter
 /// (`plainAgentSessions` in `ui/src/lib/stores/workspace.svelte.ts`).
-pub const BACKGROUND_SESSION_SOURCES: [&str; 11] = [
+pub const BACKGROUND_SESSION_SOURCES: [&str; 12] = [
     "channel",
     "review",
     "skilleval",
@@ -175,6 +175,7 @@ pub const BACKGROUND_SESSION_SOURCES: [&str; 11] = [
     "db_assist",
     "workflow",
     "vault-docs",
+    "vault-docs-review",
 ];
 
 impl Session {

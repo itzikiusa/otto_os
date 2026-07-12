@@ -918,6 +918,20 @@ mod tests {
             pol(Method::POST, "/api/v1/vault/docs-agents/runs/{run_id}/cancel"),
             Require(Product, Edit),
         );
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/vault/docs-agents/runs/{run_id}/review/rounds/{iteration}/reviewers/{index}/retry",
+            ),
+            Require(Product, Edit),
+        );
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/vault/docs-agents/runs/{run_id}/review/rounds/{iteration}/revision/retry",
+            ),
+            Require(Product, Edit),
+        );
     }
 
     #[test]

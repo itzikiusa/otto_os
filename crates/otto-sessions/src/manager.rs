@@ -84,6 +84,7 @@ fn write_codex_creds(
     token: &str,
     base: &str,
     workspace_id: &str,
+    source: Option<&str>,
 ) -> std::io::Result<std::path::PathBuf> {
     let path = codex_creds_path(session_id);
     if let Some(parent) = path.parent() {
@@ -94,6 +95,7 @@ fn write_codex_creds(
         "base": base,
         "session_id": session_id.to_string(),
         "workspace_id": workspace_id,
+        "source": source,
     })
     .to_string();
     std::fs::write(&path, body)?;
@@ -1045,6 +1047,9 @@ impl SessionManager {
             "OTTO_WORKSPACE_ID".to_string(),
             session.workspace_id.to_string(),
         );
+        if let Some(source) = session.meta.get("source").and_then(serde_json::Value::as_str) {
+            env.insert("OTTO_SESSION_SOURCE".to_string(), source.to_string());
+        }
         let server = crate::mcp::OttoToolsServer {
             command: self.mcp_tools_bin.clone(),
             args: vec!["mcp-tools".to_string()],
@@ -1069,6 +1074,7 @@ impl SessionManager {
                 &token,
                 &self.ingest_base,
                 &session.workspace_id,
+                session.meta.get("source").and_then(serde_json::Value::as_str),
             ) {
                 Ok(path) => {
                     return crate::mcp::codex_mcp_inject_args(
@@ -2246,6 +2252,23 @@ mod tests {
     use super::*;
     use otto_core::domain::{SessionKind, Workspace};
     use otto_state::NewSession;
+
+    #[test]
+    fn codex_creds_preserve_session_source_for_mcp_policy() {
+        let session_id = new_id();
+        let path = write_codex_creds(
+            &session_id,
+            "token",
+            "http://127.0.0.1:7700",
+            "workspace",
+            Some("vault-docs-review"),
+        )
+        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["source"], serde_json::json!("vault-docs-review"));
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn ps_time_parses_all_shapes() {
