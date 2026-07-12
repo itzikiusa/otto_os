@@ -221,7 +221,10 @@ impl AuthRepo {
             // session tokens. API tokens keep their long fixed lifetime and
             // impersonation tokens have a SHORT FIXED TTL — neither is ever slid
             // (impersonation must time out predictably).
-            let slide = !is_impersonation && kind != "api" && kind != "mcp";
+            let slide = !is_impersonation
+                && kind != "api"
+                && kind != "mcp"
+                && kind != "agent_mcp";
             if slide {
                 sqlx::query(
                     "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
@@ -286,6 +289,8 @@ impl AuthRepo {
                 scope: None,
                 mcp_only: false,
                 mcp_scope: None,
+                mcp_internal: false,
+                mcp_session_id: None,
             });
         }
 
@@ -342,6 +347,8 @@ impl AuthRepo {
                 }),
                 mcp_only: false,
                 mcp_scope: None,
+                mcp_internal: false,
+                mcp_session_id: None,
             });
         }
 
@@ -355,14 +362,31 @@ impl AuthRepo {
         // before per-token scopes existed) keeps full access. The scope is cached
         // alongside the context — it is immutable for the life of a token (changing
         // access = revoke + re-mint), so the cache never goes stale on it.
-        let mcp_only = kind == "mcp";
-        let mcp_scope = if mcp_only {
+        let mcp_internal = kind == "agent_mcp";
+        let mcp_only = kind == "mcp" || mcp_internal;
+        let mcp_scope = if mcp_internal {
+            let raw: Option<String> = row.get("mcp_scope");
+            Some(
+                raw.as_deref()
+                    .and_then(|value| serde_json::from_str::<McpScope>(value).ok())
+                    .ok_or(Error::Unauthorized)?,
+            )
+        } else if mcp_only {
             let raw: Option<String> = row.get("mcp_scope");
             Some(
                 raw.as_deref()
                     .and_then(|s| serde_json::from_str::<McpScope>(s).ok())
                     .unwrap_or_else(McpScope::unrestricted),
             )
+        } else {
+            None
+        };
+        let mcp_session_id = if mcp_internal {
+            Some(Id::from(
+                row.get::<Option<String>, _>("session_scope")
+                    .filter(|value| !value.is_empty())
+                    .ok_or(Error::Unauthorized)?,
+            ))
         } else {
             None
         };
@@ -374,6 +398,8 @@ impl AuthRepo {
             // governed invoke choke point + the HTTP transport (design §14 F1).
             mcp_only,
             mcp_scope,
+            mcp_internal,
+            mcp_session_id,
         };
 
         // Populate the cache so the next request for this token avoids the DB.
@@ -544,6 +570,93 @@ impl AuthRepo {
                 expires_at,
             },
         ))
+    }
+
+    /// Mint the internal, per-session credential used by a Vault documentation
+    /// reviewer. The persisted token kind forces every HTTP request through the
+    /// MCP-only route choke point; the persisted scope permits only Vault reads
+    /// in one workspace. Neither property can be changed by editing the child
+    /// process environment or its MCP configuration.
+    pub async fn issue_vault_reviewer_token(
+        &self,
+        user_id: &Id,
+        label: Option<&str>,
+        session_id: &Id,
+        workspace_id: &Id,
+    ) -> Result<(String, Id)> {
+        let scope = McpScope {
+            tools: Some(
+                [
+                    "vault_list",
+                    "vault_dir",
+                    "vault_read",
+                    "vault_search",
+                    "vault_backlinks",
+                    "vault_tags",
+                    "vault_graph",
+                    "vault_okf_validate",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ),
+            allow_writes: false,
+            workspace_id: Some(workspace_id.clone()),
+        };
+        let scope_json = serde_json::to_string(&scope)
+            .map_err(|e| Error::Internal(format!("serialize reviewer scope: {e}")))?;
+        let mut buf = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut buf);
+        let token = hex::encode(buf);
+        let id = new_id();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO auth_sessions
+               (id, user_id, token_hash, created_at, expires_at, last_seen_at, kind,
+                label, token_prefix, mcp_scope, session_scope)
+             VALUES (?, ?, ?, ?, ?, ?, 'agent_mcp', ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(user_id)
+        .bind(token_hash(&token))
+        .bind(now.to_rfc3339())
+        .bind((now + Duration::days(TOKEN_TTL_DAYS)).to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(label)
+        .bind(token.chars().take(12).collect::<String>())
+        .bind(scope_json)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("issue vault reviewer token: {e}")))?;
+        Ok((token, id))
+    }
+
+    /// Revoke one internal Vault-reviewer credential by id and owner.
+    pub async fn revoke_vault_reviewer_token(&self, user_id: &Id, id: &Id) -> Result<bool> {
+        let cached_hash: Option<String> = sqlx::query(
+            "SELECT token_hash FROM auth_sessions
+             WHERE id = ? AND user_id = ? AND kind = 'agent_mcp'",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("revoke vault reviewer token lookup: {e}")))?
+        .map(|row| row.get("token_hash"));
+        let result = sqlx::query(
+            "DELETE FROM auth_sessions
+             WHERE id = ? AND user_id = ? AND kind = 'agent_mcp'",
+        )
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("revoke vault reviewer token: {e}")))?;
+        if let (Some(cache), Some(hash)) = (&self.cache, cached_hash) {
+            cache.evict(&hash);
+        }
+        Ok(result.rows_affected() > 0)
     }
 
     /// List every outward MCP token (across all users), newest first, with the
@@ -1334,6 +1447,64 @@ mod tests {
         );
         assert!(repo.list_mcp_tokens().await.unwrap().is_empty());
         assert!(!repo.revoke_mcp_token_by_id(&info.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn vault_reviewer_token_is_server_bound_and_read_only() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let uid = seed_user(&pool, "vault-reviewer").await;
+        let session_id = Id::from("review-session-1");
+        let workspace_id = Id::from("workspace-1");
+
+        let (token, token_id) = repo
+            .issue_vault_reviewer_token(
+                &uid,
+                Some("vault-review"),
+                &session_id,
+                &workspace_id,
+            )
+            .await
+            .unwrap();
+
+        let ctx = repo.authenticate(&token).await.unwrap();
+        assert!(ctx.mcp_only, "reviewer token must be denied on direct feature routes");
+        assert!(ctx.mcp_internal, "reviewer token must use the internal governed MCP path");
+        assert_eq!(ctx.mcp_session_id.as_ref(), Some(&session_id));
+        let scope = ctx.mcp_scope.expect("reviewer token carries an immutable scope");
+        assert_eq!(scope.workspace_id.as_ref(), Some(&workspace_id));
+        assert!(scope.deny_reason("vault_read", false, Some("workspace-1")).is_none());
+        assert!(scope.deny_reason("vault_write", true, Some("workspace-1")).is_some());
+        assert!(scope.deny_reason("vault_read", false, Some("workspace-2")).is_some());
+
+        assert!(repo
+            .revoke_vault_reviewer_token(&uid, &token_id)
+            .await
+            .unwrap());
+        assert!(matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)));
+    }
+
+    #[tokio::test]
+    async fn vault_reviewer_token_fails_closed_when_persisted_scope_is_missing() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let uid = seed_user(&pool, "vault-reviewer-corrupt").await;
+        let (token, token_id) = repo
+            .issue_vault_reviewer_token(
+                &uid,
+                None,
+                &Id::from("review-session-corrupt"),
+                &Id::from("workspace-corrupt"),
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE auth_sessions SET mcp_scope = NULL WHERE id = ?")
+            .bind(token_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)));
     }
 
     /// A legacy `issue_mcp_token` (no explicit scope) resolves to the unrestricted

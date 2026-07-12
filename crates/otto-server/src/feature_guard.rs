@@ -97,10 +97,7 @@ where
             // permitted for the stdio bridge. EVERYTHING else is denied so a
             // leaked `kind='mcp'` token can never reach a feature endpoint
             // directly (design §14 F1).
-            let allowed = (method == Method::POST && template == "/api/v1/mcp/otto-tools/invoke")
-                || (method == Method::GET && template == "/api/v1/mcp/otto-server")
-                || (template == "/api/v1/mcp/http"
-                    && (method == Method::POST || method == Method::GET));
+            let allowed = mcp_route_allowed(&method, &template);
             return if allowed {
                 next.run(req).await
             } else {
@@ -199,6 +196,16 @@ where
     }
 }
 
+/// Exact HTTP surface reachable by an MCP-restricted credential. Internal
+/// reviewer credentials use the same deny-by-default boundary as outward MCP
+/// tokens, so reusing one as a bearer token can never reach Vault writes.
+fn mcp_route_allowed(method: &Method, template: &str) -> bool {
+    (method == Method::POST && template == "/api/v1/mcp/otto-tools/invoke")
+        || (method == Method::GET && template == "/api/v1/mcp/otto-server")
+        || (template == "/api/v1/mcp/http"
+            && (method == Method::POST || method == Method::GET))
+}
+
 /// Build a `403 Forbidden` `ApiError` (rendered as the JSON `Problem` body).
 fn forbidden(reason: &str) -> ApiError {
     ApiError(Error::Forbidden(reason.to_string()))
@@ -285,6 +292,22 @@ mod scope_tests {
             role,
             otp_pending: false,
         }
+    }
+
+    #[test]
+    fn internal_reviewer_mcp_token_cannot_reach_direct_vault_mutations() {
+        assert!(!mcp_route_allowed(
+            &Method::PUT,
+            "/api/v1/workspaces/{ws}/vault/vaults/{id}/file",
+        ));
+        assert!(!mcp_route_allowed(
+            &Method::PUT,
+            "/api/v1/workspaces/{ws}/vault/vaults/{id}/note",
+        ));
+        assert!(mcp_route_allowed(
+            &Method::POST,
+            "/api/v1/mcp/otto-tools/invoke",
+        ));
     }
 
     #[test]

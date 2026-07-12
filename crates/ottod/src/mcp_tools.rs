@@ -671,6 +671,17 @@ const VAULT_MUTATION_TOOLS: [&str; 4] = [
     "otto_vault_delete",
 ];
 
+const VAULT_REVIEW_READ_TOOLS: [(&str, &str); 8] = [
+    ("otto_vault_list", "otto.vault_list"),
+    ("otto_vault_dir", "otto.vault_dir"),
+    ("otto_vault_read", "otto.vault_read"),
+    ("otto_vault_search", "otto.vault_search"),
+    ("otto_vault_backlinks", "otto.vault_backlinks"),
+    ("otto_vault_tags", "otto.vault_tags"),
+    ("otto_vault_graph", "otto.vault_graph"),
+    ("otto_vault_okf_validate", "otto.vault_okf_validate"),
+];
+
 fn is_vault_docs_reviewer(source: Option<&str>) -> bool {
     source == Some("vault-docs-review")
 }
@@ -682,11 +693,55 @@ fn tool_catalog_for_source(source: Option<&str>) -> Value {
             tools.retain(|tool| {
                 tool["name"]
                     .as_str()
-                    .is_none_or(|name| !VAULT_MUTATION_TOOLS.contains(&name))
+                    .is_some_and(|name| {
+                        VAULT_REVIEW_READ_TOOLS
+                            .iter()
+                            .any(|(internal, _)| *internal == name)
+                    })
             });
         }
     }
     catalog
+}
+
+/// Map the compatibility names exposed by the in-session MCP bridge onto the
+/// governed outward tools. Workspace identity is injected from the session;
+/// it is also pinned in the persisted token scope and checked server-side.
+fn reviewer_read_invoke(name: &str, args: &Value, workspace_id: &str) -> Option<(String, Value)> {
+    let outward = VAULT_REVIEW_READ_TOOLS
+        .iter()
+        .find_map(|(internal, outward)| (*internal == name).then_some(*outward))?;
+    let mut mapped = args.as_object().cloned().unwrap_or_default();
+    mapped.insert(
+        "workspace_id".to_string(),
+        Value::String(workspace_id.to_string()),
+    );
+    Some((outward.to_string(), Value::Object(mapped)))
+}
+
+async fn run_reviewer_read(ctx: &Ctx, name: &str, args: &Value) -> Result<Value, String> {
+    let workspace = ctx
+        .workspace_id
+        .as_deref()
+        .ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+    let (tool, arguments) = reviewer_read_invoke(name, args, workspace)
+        .ok_or_else(|| format!("tool `{name}` is outside the documentation reviewer scope"))?;
+    let envelope = ctx
+        .post_json(
+            "/mcp/otto-tools/invoke",
+            &json!({"tool": tool, "arguments": arguments}),
+        )
+        .await?;
+    if envelope.get("decision").and_then(Value::as_str) != Some("allowed")
+        || envelope.get("executed").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(envelope
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("governed reviewer read was denied")
+            .to_string());
+    }
+    Ok(envelope.get("content").cloned().unwrap_or(Value::Null))
 }
 
 /// The new first-party feature read tools route through one pure mapping
@@ -1333,7 +1388,11 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
             // The static first-party read-only catalog, plus — when the live-agent
             // gateway is enabled for this workspace — the governed downstream tools.
             let mut cat = tool_catalog_for_source(ctx.source.as_deref());
-            let gw = ctx.gateway_tools().await;
+            let gw = if is_vault_docs_reviewer(ctx.source.as_deref()) {
+                Vec::new()
+            } else {
+                ctx.gateway_tools().await
+            };
             if let Some(arr) = cat["tools"].as_array_mut() {
                 for t in gw {
                     arr.push(json!({
@@ -1364,6 +1423,18 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                         true,
                     ),
                 ));
+            }
+            if is_vault_docs_reviewer(ctx.source.as_deref()) {
+                return Some(match run_reviewer_read(ctx, &name, &args).await {
+                    Ok(value) => {
+                        ctx.audit(&name, &args, true, None).await;
+                        rpc_ok(id, tool_result(&value, false))
+                    }
+                    Err(error) => {
+                        ctx.audit(&name, &args, false, None).await;
+                        rpc_ok(id, tool_result(&json!({"error": error}), true))
+                    }
+                });
             }
             // A namespaced `mcp__server__tool` is a governed downstream call —
             // route it through the control-plane gateway (which audits it itself).
@@ -1842,6 +1913,26 @@ mod tests {
             .unwrap()
             .iter()
             .any(|tool| tool["name"] == "otto_vault_write"));
+    }
+
+    #[test]
+    fn reviewer_read_bridge_maps_only_vault_reads_to_governed_tools() {
+        let (tool, args) = reviewer_read_invoke(
+            "otto_vault_read",
+            &json!({"vault_id": 7, "path": "api/widgets.md"}),
+            "workspace-1",
+        )
+        .expect("vault read must be routed through the governed MCP choke point");
+        assert_eq!(tool, "otto.vault_read");
+        assert_eq!(args["workspace_id"], "workspace-1");
+        assert_eq!(args["vault_id"], 7);
+        assert_eq!(args["path"], "api/widgets.md");
+        assert!(reviewer_read_invoke(
+            "otto_vault_write",
+            &json!({"vault_id": 7, "path": "x.md", "content": "x"}),
+            "workspace-1",
+        )
+        .is_none());
     }
 
     #[tokio::test]

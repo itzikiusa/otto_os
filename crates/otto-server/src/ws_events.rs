@@ -622,6 +622,8 @@ mod tests {
             scope,
             mcp_only: false,
             mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
         }
     }
 

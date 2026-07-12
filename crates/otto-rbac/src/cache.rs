@@ -168,6 +168,8 @@ mod tests {
             scope: None,
             mcp_only: false,
             mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
         }
     }
 
