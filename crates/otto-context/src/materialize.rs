@@ -278,6 +278,17 @@ fn sync_codex_shadow_home(bundle: &Path) {
         return;
     }
 
+    // Bundles created before native discovery stored Codex skills directly at
+    // `<bundle>/skills`. Preserve resumes across the upgrade by copying that
+    // managed tree into the shadow home once; a later provision reconciles it.
+    let legacy_skills = bundle.join("skills");
+    let shadow_skills = shadow.join("skills");
+    if legacy_skills.is_dir() && !shadow_skills.exists() {
+        if let Err(e) = copy_dir_all(&legacy_skills, &shadow_skills) {
+            tracing::warn!(path = %legacy_skills.display(), error = %e, "migrate legacy Codex skills failed");
+        }
+    }
+
     let source = std::env::var_os("CODEX_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
@@ -1145,6 +1156,29 @@ mod tests {
             vec![format!("--rules={}", bundle.join("CONTEXT.md").display())]
         );
         assert_clean_cwd(cwd.path());
+    }
+
+    #[test]
+    fn codex_resume_migrates_the_legacy_skills_directory() {
+        let (_l, cwd, root, _lib) = setup();
+        let cwd_path = cwd.path().to_string_lossy().into_owned();
+        let bundle = bundle_of(&root, "codex", &cwd_path);
+        fs::create_dir_all(bundle.join("skills/triage")).unwrap();
+        fs::write(bundle.join("skills/triage/SKILL.md"), "legacy skill").unwrap();
+        fs::write(bundle.join("CONTEXT.md"), "legacy context").unwrap();
+
+        let inj = resume_injection(root.path(), &cwd_path, "codex");
+        assert_eq!(
+            fs::read_to_string(bundle.join("codex-home/skills/triage/SKILL.md")).unwrap(),
+            "legacy skill"
+        );
+        assert_eq!(
+            inj.env,
+            vec![(
+                "CODEX_HOME".to_string(),
+                bundle.join("codex-home").to_string_lossy().into_owned()
+            )]
+        );
     }
 
     #[test]
