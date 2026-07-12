@@ -236,10 +236,10 @@ test('ui: review history survives reload and exposes nested retry controls', asy
               model: null,
               skill: 'vault-evidence-review',
               focus: null,
-              state: 'running',
+              state: 'error',
               session_id: null,
               findings: [],
-              error: null,
+              error: 'malformed reviewer JSON',
             },
           ],
           revision: {
@@ -283,10 +283,10 @@ test('ui: review history survives reload and exposes nested retry controls', asy
             },
           ],
           revision: {
-            state: 'running',
+            state: 'error',
             session_id: null,
             changed_paths: [],
-            error: null,
+            error: 'revision result is missing written paths',
           },
         },
       ],
@@ -346,8 +346,18 @@ test('ui: review history survives reload and exposes nested retry controls', asy
   await expect(reloaded).toContainText('coverage.md');
 
   await reloaded.locator('.run-row', { hasText: 'REVIEW-HISTORY reviewer retry' }).click();
+  await expect(reloaded.locator('.reviewer-card')).toContainText('malformed reviewer JSON');
+  await expect(
+    reloaded.locator('.reviewer-card').getByRole('button', { name: 'Retry reviewer' }),
+  ).toBeVisible();
   await reloaded.locator('.reviewer-card').getByRole('button', { name: 'Retry reviewer' }).click();
   await reloaded.locator('.run-row', { hasText: 'REVIEW-HISTORY revision retry' }).click();
+  await expect(reloaded.locator('.revision-card')).toContainText(
+    'revision result is missing written paths',
+  );
+  await expect(
+    reloaded.locator('.revision-card').getByRole('button', { name: 'Retry revision' }),
+  ).toBeVisible();
   await reloaded.locator('.revision-card').getByRole('button', { name: 'Retry revision' }).click();
   const retries = () =>
     page.evaluate(

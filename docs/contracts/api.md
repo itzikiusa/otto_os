@@ -2090,7 +2090,9 @@ lens without removing the selected method's mandatory checks.
 The response/persisted DTOs are mirrored in `ui/src/lib/api/types.ts`:
 
 - `VaultDocsRun.review = {state,max_iterations,current_iteration,outcome,
-  reviewers,rounds}`. Old rows deserialize as `state:"skipped"`.
+  reviewers,rounds}`. Top-level `reviewers` are the immutable resolved templates;
+  live session/state/findings exist only in each round, preventing contradictory
+  duplicate snapshots. Old rows deserialize as `state:"skipped"`.
 - Each round is `{iteration,state,reviewers,revision}`. Reviewers carry
   `{index,provider,model,skill,focus,state,session_id,findings,error}`;
   revisions carry `{state,session_id,changed_paths,error}`.

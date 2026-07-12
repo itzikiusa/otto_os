@@ -5277,6 +5277,7 @@ export interface VaultDocsReview {
   max_iterations: number;
   current_iteration: number;
   outcome: string | null;
+  /** Immutable resolved reviewer templates; live state/findings are per round. */
   reviewers: VaultDocsReviewer[];
   rounds: VaultDocsReviewRound[];
 }

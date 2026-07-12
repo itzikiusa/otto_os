@@ -698,7 +698,10 @@
                             {openTerminals.has(reviewer.session_id) ? 'Hide' : 'Open'}
                           </button>
                         {/if}
-                        {#if active && (reviewer.state === 'pending' || reviewer.state === 'running')}
+                        {#if active &&
+                          (reviewer.state === 'pending' ||
+                            reviewer.state === 'running' ||
+                            reviewer.state === 'error')}
                           <button
                             class="ghost small"
                             disabled={retrying[`reviewer-${round.iteration}-${reviewer.index}`]}
@@ -769,7 +772,10 @@
                           {openTerminals.has(round.revision.session_id) ? 'Hide' : 'Open'}
                         </button>
                       {/if}
-                      {#if active && (round.revision.state === 'pending' || round.revision.state === 'running')}
+                      {#if active &&
+                        (round.revision.state === 'pending' ||
+                          round.revision.state === 'running' ||
+                          round.revision.state === 'error')}
                         <button
                           class="ghost small"
                           disabled={retrying[`revision-${round.iteration}`]}
