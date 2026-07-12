@@ -24,6 +24,10 @@ chrono = { workspace = true }
 # (Task B2b): the `otto` MCP entry, when the workspace opts in, carries a scoped
 # token the tools authorize with. Reuses the existing auth-token system.
 otto-rbac = { workspace = true }
+# Upserting the `otto` MCP server into grok's project-scoped
+# `<cwd>/.grok/config.toml` (grok doesn't read the workspace `.mcp.json`).
+# Format-preserving so a hand-edited project config survives.
+toml_edit = "0.25"
 
 [dev-dependencies]
 tempfile = { workspace = true }

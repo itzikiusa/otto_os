@@ -60,6 +60,26 @@ const REMINDER_NUDGE: &str = "You have not done the task — you only restated t
 Read the referenced context files, DO the actual work now, and write your handoff summary to the \
 required file. Do not repeat or restate these instructions.";
 
+/// Extra turn-completion channels for providers WITHOUT a pollable transcript
+/// (codex/agy/grok/custom). Turn completion is transcript-based and only
+/// claude writes one — without these, a non-claude agent that finished its
+/// work sits "running" until the 10h idle backstop (the live "codex/grok done
+/// but shown RUNNING" bug).
+#[derive(Default)]
+pub struct TurnOpts {
+    /// Completion marker: the turn is complete the moment this file exists
+    /// with non-empty content — the (trimmed) content IS the turn text. The
+    /// caller appends a "FINALLY write your one-line summary to <path>"
+    /// instruction to the prompt. Checked for every provider (a compliant
+    /// claude just completes via whichever channel fires first).
+    pub done_file: Option<std::path::PathBuf>,
+    /// Quiet fallback for non-transcript providers only: once the prompt was
+    /// dispatched, this much PTY silence counts as turn-complete (empty turn
+    /// text). Working TUIs repaint (spinners/tool output), so silence this
+    /// long means the agent is sitting at its input box. Ignored for claude.
+    pub quiet_done: Option<Duration>,
+}
+
 /// Run one turn. Returns `(reply_text, session_id)`. Persist the returned
 /// `session_id` so the next turn resumes the SAME session.
 #[allow(clippy::too_many_arguments)]
@@ -73,10 +93,43 @@ pub async fn run_session_turn(
     provider: &str,
     meta: Value,
     prompt: &str,
+    stuck_after: Duration,
+    on_ready: impl FnOnce(&Id),
+) -> ApiResult<(String, Id)> {
+    run_session_turn_with(
+        ctx,
+        ws,
+        user,
+        existing,
+        title,
+        cwd,
+        provider,
+        meta,
+        prompt,
+        stuck_after,
+        TurnOpts::default(),
+        on_ready,
+    )
+    .await
+}
+
+/// [`run_session_turn`] with extra completion channels (see [`TurnOpts`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session_turn_with(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    user: &User,
+    existing: Option<&Id>,
+    title: &str,
+    cwd: &str,
+    provider: &str,
+    meta: Value,
+    prompt: &str,
     // No-output idle trip. Workflow steps pass a short value (e.g. 3 min) as an
     // early "stuck" signal; interactive callers pass STUCK_IDLE (10h) to keep the
     // long backstop. Never lengthens past TURN_TIMEOUT.
     stuck_after: Duration,
+    opts: TurnOpts,
     on_ready: impl FnOnce(&Id),
 ) -> ApiResult<(String, Id)> {
     // 1. E2E short-circuit: the offline test daemon points CLAUDE_BIN at a
@@ -200,6 +253,16 @@ pub async fn run_session_turn(
     let deadline = Instant::now() + TURN_TIMEOUT;
     let mut reminder_nudges: u32 = 0;
     loop {
+        // Marker channel (provider-agnostic): the agent wrote its done-file —
+        // the turn is complete regardless of transcript availability.
+        if let Some(df) = &opts.done_file {
+            if let Ok(s) = tokio::fs::read_to_string(df).await {
+                let t = s.trim();
+                if !t.is_empty() {
+                    return Ok((t.to_string(), sid));
+                }
+            }
+        }
         if let Some(path) = transcript_path(provider, &cwd_canon, psid.as_deref()) {
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
                 if let Some(err) = otto_orchestrator::claude_pty::transcript_api_error(&content) {
@@ -233,6 +296,17 @@ pub async fn run_session_turn(
                     return Err(ApiError(Error::Upstream(
                         "agent session exited before replying".into(),
                     )));
+                }
+                // Quiet fallback (non-transcript providers only): a TUI that's
+                // WORKING keeps painting; this much silence means it's idle at
+                // its input box — the turn is over even if the agent never
+                // wrote the done-file. Claude keeps transcript-only detection.
+                if !can_confirm {
+                    if let Some(q) = opts.quiet_done {
+                        if h.last_output_at().elapsed() >= q {
+                            return Ok((String::new(), sid));
+                        }
+                    }
                 }
                 if h.last_output_at().elapsed() >= stuck_after {
                     return Err(ApiError(Error::Upstream(format!(

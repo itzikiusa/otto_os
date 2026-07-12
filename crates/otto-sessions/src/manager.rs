@@ -1054,6 +1054,13 @@ impl SessionManager {
         if let Err(e) = crate::mcp::enable_otto_tools(&session.cwd, &server) {
             tracing::warn!("otto MCP tools: write .mcp.json failed: {e}");
         }
+        // grok reads its own project-scoped `.grok/config.toml`, never
+        // `.mcp.json` — without this a grok session has no otto tools.
+        if session.provider == "grok" {
+            if let Err(e) = crate::mcp::enable_otto_tools_grok(&session.cwd, &server) {
+                tracing::warn!("otto MCP tools: write .grok/config.toml failed: {e}");
+            }
+        }
         // Codex doesn't read `.mcp.json`: attach via per-spawn `-c` overrides that
         // point at a per-session creds file (the token never touches argv).
         if session.provider == "codex" {

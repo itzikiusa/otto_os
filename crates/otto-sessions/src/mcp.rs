@@ -207,6 +207,63 @@ pub fn codex_mcp_inject_args(ottod: &str, creds_path: &str) -> Vec<String> {
     ]
 }
 
+/// Add (or refresh) Otto's `otto` MCP server in grok's PROJECT-scoped config
+/// (`<workspace>/.grok/config.toml`) — grok reads that plus `~/.grok/config.toml`
+/// but NOT the workspace `.mcp.json`, so without this a grok session has no
+/// otto tools at all ("Otto MCP is blocked"). Format-preserving upsert
+/// (toml_edit): only the `[mcp_servers.otto]` table is managed; everything
+/// else in the file survives. Best-effort, mirrors [`enable_otto_tools`].
+///
+/// Shape (verified against `grok mcp add -s project`):
+/// ```toml
+/// [mcp_servers.otto]
+/// command = "<ottod>"
+/// args = ["mcp-tools"]
+/// enabled = true
+/// [mcp_servers.otto.env]
+/// OTTO_MCP_TOKEN = "…"
+/// ```
+pub fn enable_otto_tools_grok(workspace_root: &str, server: &OttoToolsServer) -> Result<(), String> {
+    use toml_edit::{value, Array, DocumentMut, Item, Table};
+
+    let dir = Path::new(workspace_root).join(".grok");
+    let path = dir.join("config.toml");
+    let mut doc: DocumentMut = match std::fs::read_to_string(&path) {
+        Ok(s) => s
+            .parse()
+            .map_err(|e| format!("parse {}: {e}", path.display()))?,
+        Err(_) => DocumentMut::new(),
+    };
+
+    let servers = doc
+        .entry("mcp_servers")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or("mcp_servers is not a table")?;
+    // Implicit so it renders as [mcp_servers.otto], not a bare [mcp_servers].
+    servers.set_implicit(true);
+
+    let mut entry = Table::new();
+    entry["command"] = value(server.command.clone());
+    let mut args = Array::new();
+    for a in &server.args {
+        args.push(a.clone());
+    }
+    entry["args"] = value(args);
+    entry["enabled"] = value(true);
+    if !server.env.is_empty() {
+        let mut env = Table::new();
+        for (k, v) in &server.env {
+            env[k.as_str()] = value(v.clone());
+        }
+        entry["env"] = Item::Table(env);
+    }
+    servers.insert(OTTO_TOOLS_KEY, Item::Table(entry));
+
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
 /// Remove Otto's first-party `otto` MCP tool server, preserving everything else.
 /// No-op if absent. Mirrors [`disable_browser`].
 pub fn disable_otto_tools(workspace_root: &str) -> Result<(), String> {
@@ -306,6 +363,62 @@ mod tests {
         // Pre-existing servers are untouched.
         assert!(servers.contains_key("otto-browser"));
         assert!(servers.contains_key("myserver"));
+    }
+
+    /// grok project config: upsert is format-preserving and idempotent — a
+    /// user's own `[mcp_servers.other]` table and top-level keys survive, and
+    /// re-enabling replaces (not duplicates) the managed `otto` table.
+    #[test]
+    fn grok_project_config_upsert_preserves_user_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let grok_cfg = dir.path().join(".grok").join("config.toml");
+        std::fs::create_dir_all(grok_cfg.parent().unwrap()).unwrap();
+        std::fs::write(
+            &grok_cfg,
+            "# my config\nmodel = \"grok-4\"\n\n[mcp_servers.other]\ncommand = \"node\"\nargs = [\"x.js\"]\n",
+        )
+        .unwrap();
+
+        let mut env = BTreeMap::new();
+        env.insert("OTTO_MCP_TOKEN".to_string(), "tok-1".to_string());
+        let server = OttoToolsServer {
+            command: "/usr/local/bin/ottod".into(),
+            args: vec!["mcp-tools".into()],
+            env,
+        };
+        enable_otto_tools_grok(root, &server).unwrap();
+        enable_otto_tools_grok(root, &server).unwrap(); // idempotent
+
+        let s = std::fs::read_to_string(&grok_cfg).unwrap();
+        assert!(s.contains("# my config"), "{s}");
+        assert!(s.contains("model = \"grok-4\""), "{s}");
+        assert!(s.contains("[mcp_servers.other]"), "{s}");
+        assert_eq!(s.matches("[mcp_servers.otto]").count(), 1, "{s}");
+        let doc: toml_edit::DocumentMut = s.parse().unwrap();
+        let otto = &doc["mcp_servers"]["otto"];
+        assert_eq!(otto["command"].as_str(), Some("/usr/local/bin/ottod"));
+        assert_eq!(otto["enabled"].as_bool(), Some(true));
+        assert_eq!(otto["env"]["OTTO_MCP_TOKEN"].as_str(), Some("tok-1"));
+    }
+
+    /// grok project config: created from scratch when absent.
+    #[test]
+    fn grok_project_config_created_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        enable_otto_tools_grok(
+            root,
+            &OttoToolsServer {
+                command: "ottod".into(),
+                args: vec!["mcp-tools".into()],
+                env: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let s = std::fs::read_to_string(dir.path().join(".grok/config.toml")).unwrap();
+        assert!(s.contains("[mcp_servers.otto]"), "{s}");
+        assert!(s.contains("args = [\"mcp-tools\"]"), "{s}");
     }
 
     /// A user server named "otto" can never clobber the managed first-party entry
