@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "repo": "/work/acme-orders",
+  "commit": "31f4c2a",
+  "generated_at": "2026-07-12T09:00:00Z",
+  "candidates": [
+    {
+      "id": "api:5bfe99e3b61d",
+      "kind": "api",
+      "name": ".route(\"/orders\", post(create_order))",
+      "path": "src/http.rs",
+      "line": 42,
+      "evidence": "src/http.rs:42"
+    },
+    {
+      "id": "data:04ee5ab98a61",
+      "kind": "data",
+      "name": "INSERT INTO orders (id, status) VALUES (?, ?)",
+      "path": "src/orders.rs",
+      "line": 71,
+      "evidence": "src/orders.rs:71"
+    }
+  ]
+}

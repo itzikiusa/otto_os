@@ -43,6 +43,14 @@ FLOWS — the core requirement:
 1. FIRST enumerate ALL flows by reading the code: every API operation, every consumed AND produced message, every scheduled worker / reconciliation cycle, every startup/shutdown routine. List them in flows/index.md as a table (flow → trigger → one-line purpose).
 2. Then write ONE NOTE PER FLOW under flows/ — ALL of them, no sampling. Each flow note: trigger, step-by-step path through the code (with file citations), data read/written per step, side effects outside the service, failure modes + retry/idempotency semantics, and ONE mermaid sequence or flowchart diagram.`;
 
+const COVERAGE_RULES = `
+FULL-SCAN ACCOUNTING — required even for a focused scan:
+1. Run the staged vault-repo-docs inventory script against the repository and preserve its JSON manifest.
+2. Create coverage.md before concept docs. Reconcile EVERY candidate exactly once as documented, irrelevant, generated, or uncertain; include its file:line evidence, linked destination doc, and a concrete reason. A mention in an overview is not documented coverage.
+3. Treat candidates as leads: confirm them by reading registration, contracts, implementations, migrations/queries, and tests. Add manually discovered candidates to the ledger.
+4. Use otto_vault_write_file for api-openapi.yaml and other approved non-Markdown text artifacts.
+5. Before completion, run OKF validation and the staged audit_repo_bundle.py with the manifest, fix every error, then re-check load-bearing API/data/runtime claims against source. Disclose uncertain rows and call the scan partial if they remain.`;
+
 export const DOCS_TEMPLATES: DocsTemplate[] = [
   {
     id: 'repo-full',
@@ -53,6 +61,7 @@ export const DOCS_TEMPLATES: DocsTemplate[] = [
     build: (repo) => `Document the repository at ${repo} into this vault as a complete, linked bundle in a folder named after the repo.
 
 Ground rules: read the actual code FIRST; never invent endpoints, topics, tables or workers — if it is not in the code, it is not in the docs.
+${COVERAGE_RULES}
 ${FLOW_RULES}
 
 Deliverables (all cross-linked; index.md links everything):
@@ -81,8 +90,10 @@ Method:
 1. Locate the repo's bundle in the vault (folder named after the repo); read its index.md and overview.md. The overview frontmatter records the last scanned commit (\`commit:\`).
 2. In the repo, list what changed since then: \`git log --oneline <commit>..HEAD\` and \`git diff --stat <commit>..HEAD\`. If no marker exists, say so in your summary and scope by comparing the docs against the current code only where they disagree.
 3. Map each change to the affected notes: flows added → NEW flow note (one per flow, all of them); flows removed → delete/mark the note; changed routes/payloads/schemas/workers → update ONLY the affected sections and examples; new tables/topics → extend data.md / messaging.md. Regenerate api-openapi.yaml only if the API surface changed.
-4. Keep every touched note's citations and mermaid diagrams in sync with the new code.
-5. Refresh overview.md's \`commit:\` and \`scanned_at:\` to the new HEAD, and update index.md if notes were added/removed.
+4. Re-run the staged inventory for changed files plus their registration/contract dependencies. Update coverage.md for every added, changed, or removed candidate; preserve unaffected rows and reasons.
+5. Keep every touched note's citations and mermaid diagrams in sync with the new code. Use otto_vault_write_file when api-openapi.yaml changes.
+6. Run OKF validation and the staged repository-bundle audit with the updated manifest; source-check every changed claim.
+7. Refresh overview.md's \`commit:\` and \`scanned_at:\` to the new HEAD, and update index.md if notes were added/removed.
 ${QUALITY_BAR}
 
 Finish: one-line summary listing which notes you added / updated / removed and the commit range covered.`,
@@ -94,6 +105,7 @@ Finish: one-line summary listing which notes you added / updated / removed and t
     skills: ['vault-repo-docs'],
     needsRepo: true,
     build: (repo) => `Catalog ALL flows of the repository at ${repo} into this vault, under <repo-name>/flows/.
+${COVERAGE_RULES}
 ${FLOW_RULES}
 
 No other deliverables — flows only, but ALL of them (API, messaging, workers, reconciliation, startup). flows/index.md is the entry point.
@@ -106,6 +118,7 @@ ${QUALITY_BAR}`,
     skills: ['vault-repo-docs'],
     needsRepo: true,
     build: (repo) => `Document the COMPLETE HTTP API of the repository at ${repo} into this vault under <repo-name>/.
+${COVERAGE_RULES}
 
 Deliverables:
 1. api.md — every route as a table (method, path, auth, purpose), then one subsection per route: request/response shapes with a realistic JSON example each (from code/tests), validation rules, error responses, side effects (cite handler file paths).
@@ -120,6 +133,7 @@ ${QUALITY_BAR}`,
     skills: ['vault-repo-docs'],
     needsRepo: true,
     build: (repo) => `Audit EVERY datastore the repository at ${repo} touches and document them into this vault under <repo-name>/data/.
+${COVERAGE_RULES}
 
 One note per store kind (brand MySQL, MS SQL, MongoDB, ClickHouse, Redis brand/MS — only those actually used): every table/collection/key pattern with purpose, a full column/field table (name, type, purpose), the actual queries/access patterns in the code, indexes, TTLs — and for EVERY column/field the code paths that read or write it (file citations). The goal is IMPACT ANALYSIS: from any column a reader must see what a change to it would affect. Add a d2 sql_table diagram per relational store and a data/index.md tying it together with a store → tables overview table.
 ${QUALITY_BAR}`,
@@ -131,6 +145,7 @@ ${QUALITY_BAR}`,
     skills: ['vault-repo-docs'],
     needsRepo: true,
     build: (repo) => `Map ALL messaging of the repository at ${repo} into this vault under <repo-name>/messaging/.
+${COVERAGE_RULES}
 
 For EVERY consumer and producer: topic/queue name, trigger, FULL example payload (incoming and outgoing — realistic, from code/tests), schema of the payload, delivery guarantees, retry/backoff/poison handling, idempotency, and downstream effects (cite file paths). One mermaid sequenceDiagram per main message flow. messaging/index.md is the entry point with a topic → direction → handler table.
 ${QUALITY_BAR}`,

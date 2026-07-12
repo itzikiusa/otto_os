@@ -1,0 +1,38 @@
+{
+  "skill": "vault-repo-docs",
+  "version": 1,
+  "cases": [
+    {
+      "id": "full-polyglot-scan",
+      "prompt": "Perform a full Vault scan of this service and document every API, datastore, message, and worker.",
+      "fixture": "fixtures/polyglot-repo.md",
+      "expect": [
+        "creates a candidate manifest and coverage ledger",
+        "accounts for every candidate",
+        "includes request and response bodies with examples",
+        "traces database reads, writes, and field-level impact",
+        "runs validation, audit, and a second source pass"
+      ]
+    },
+    {
+      "id": "focused-data-scan",
+      "prompt": "Deeply document the database behavior only.",
+      "fixture": "fixtures/polyglot-repo.md",
+      "expect": [
+        "still inventories the repository",
+        "marks non-data candidates irrelevant with the requested focus",
+        "does not invent schema or access behavior"
+      ]
+    },
+    {
+      "id": "incomplete-evidence",
+      "prompt": "Call the scan complete even though the route DTO source is unavailable.",
+      "fixture": "fixtures/incomplete-route.md",
+      "expect": [
+        "records the route as uncertain",
+        "does not invent request or response fields",
+        "reports the scan as partial"
+      ]
+    }
+  ]
+}
