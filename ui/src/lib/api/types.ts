@@ -5107,6 +5107,18 @@ export interface VaultNote {
   outgoing: VaultOutgoingLink[];
 }
 
+export interface VaultTextFile {
+  path: string;
+  size: number;
+  hash: string;
+}
+
+export interface WriteTextFileReq {
+  path: string;
+  content: string;
+  if_hash?: string;
+}
+
 export interface VaultBacklink {
   path: string;
   title: string;
@@ -5193,6 +5205,83 @@ export interface VaultDocsSummarizer {
   session_id: string | null;
   error: string | null;
 }
+
+export type VaultDocsReviewSkill =
+  | 'vault-docs-review'
+  | 'vault-api-review'
+  | 'vault-data-review'
+  | 'vault-runtime-review'
+  | 'vault-evidence-review';
+
+export interface VaultDocsFindingEvidence {
+  repo_path: string | null;
+  line: number | null;
+  doc_path: string | null;
+  section: string | null;
+}
+
+export interface VaultDocsFinding {
+  severity: 'blocking' | 'major' | 'minor';
+  category: string;
+  summary: string;
+  evidence: VaultDocsFindingEvidence[];
+  missed_item: string;
+  required_fix: string;
+}
+
+export interface VaultDocsReviewer {
+  index: number;
+  provider: string;
+  model: string | null;
+  skill: VaultDocsReviewSkill;
+  focus: string | null;
+  state: 'pending' | 'running' | 'done' | 'error' | 'cancelled' | 'interrupted';
+  session_id: string | null;
+  findings: VaultDocsFinding[];
+  error: string | null;
+}
+
+export interface VaultDocsRevision {
+  state: 'skipped' | 'pending' | 'running' | 'done' | 'error' | 'cancelled' | 'interrupted';
+  session_id: string | null;
+  changed_paths: string[];
+  error: string | null;
+}
+
+export interface VaultDocsReviewRound {
+  iteration: number;
+  state:
+    | 'reviewing'
+    | 'revising'
+    | 'revised'
+    | 'clean'
+    | 'exhausted'
+    | 'error'
+    | 'cancelled'
+    | 'interrupted';
+  reviewers: VaultDocsReviewer[];
+  revision: VaultDocsRevision;
+}
+
+export interface VaultDocsReview {
+  state:
+    | 'skipped'
+    | 'pending'
+    | 'reviewing'
+    | 'revising'
+    | 'clean'
+    | 'exhausted'
+    | 'error'
+    | 'cancelled'
+    | 'interrupted';
+  max_iterations: number;
+  current_iteration: number;
+  outcome: string | null;
+  /** Immutable resolved reviewer templates; live state/findings are per round. */
+  reviewers: VaultDocsReviewer[];
+  rounds: VaultDocsReviewRound[];
+}
+
 export interface VaultDocsRun {
   id: string;
   ws_id: string;
@@ -5201,9 +5290,19 @@ export interface VaultDocsRun {
   prompt: string;
   target_dir: string;
   note_path: string; // refine: the note being edited ("" for docs runs)
-  state: 'running' | 'summarizing' | 'done' | 'error' | 'cancelled' | 'interrupted';
+  state:
+    | 'running'
+    | 'summarizing'
+    | 'reviewing'
+    | 'revising'
+    | 'done'
+    | 'done_with_findings'
+    | 'error'
+    | 'cancelled'
+    | 'interrupted';
   agents: VaultDocsAgent[];
   summarizer: VaultDocsSummarizer;
+  review: VaultDocsReview;
   written: string[]; // final note paths in the vault
   error: string | null;
   started_at: string;

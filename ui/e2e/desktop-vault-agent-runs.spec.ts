@@ -142,7 +142,238 @@ test('ui: refine turns appear in the runs history with the note path', async ({ 
   await expect(refineRow.locator('.kind-chip')).toHaveText('refine');
 });
 
-test('ui: vault-docs sessions are hidden from the sidebar Agents group', async ({ page }) => {
+test('ui: review history survives reload and exposes nested retry controls', async ({ page }) => {
+  const now = new Date().toISOString();
+  const baseRun = {
+    ws_id: workspaceId,
+    vault_id: vaultId,
+    kind: 'docs',
+    target_dir: '',
+    note_path: '',
+    agents: [],
+    summarizer: {
+      provider: 'claude',
+      model: null,
+      state: 'skipped',
+      session_id: null,
+      error: null,
+    },
+    written: ['services/orders.md'],
+    started_at: now,
+    finished_at: now,
+  };
+  const exhausted = {
+    ...baseRun,
+    id: 'review-history-exhausted',
+    prompt: 'REVIEW-HISTORY exhausted',
+    state: 'done_with_findings',
+    error: null,
+    review: {
+      state: 'exhausted',
+      max_iterations: 3,
+      current_iteration: 3,
+      outcome: 'findings_remain',
+      reviewers: [],
+      rounds: [
+        {
+          iteration: 3,
+          state: 'exhausted',
+          reviewers: [
+            {
+              index: 0,
+              provider: 'claude',
+              model: null,
+              skill: 'vault-data-review',
+              focus: 'Transactions and indexes',
+              state: 'done',
+              session_id: null,
+              findings: [
+                {
+                  severity: 'blocking',
+                  category: 'data',
+                  summary: 'Transaction boundary is still undocumented',
+                  evidence: [
+                    { repo_path: 'src/store.rs', line: 88, doc_path: 'data/orders.md', section: 'Writes' },
+                  ],
+                  missed_item: 'Database transaction boundary',
+                  required_fix: 'Explain the atomic write set and rollback behavior.',
+                },
+              ],
+              error: null,
+            },
+          ],
+          revision: {
+            state: 'done',
+            session_id: null,
+            changed_paths: ['data/orders.md', 'coverage.md'],
+            error: null,
+          },
+        },
+      ],
+    },
+  };
+  const reviewerStuck = {
+    ...baseRun,
+    id: 'review-history-reviewer',
+    prompt: 'REVIEW-HISTORY reviewer retry',
+    state: 'reviewing',
+    error: null,
+    finished_at: null,
+    review: {
+      state: 'reviewing',
+      max_iterations: 3,
+      current_iteration: 1,
+      outcome: null,
+      reviewers: [],
+      rounds: [
+        {
+          iteration: 1,
+          state: 'reviewing',
+          reviewers: [
+            {
+              index: 0,
+              provider: 'claude',
+              model: null,
+              skill: 'vault-evidence-review',
+              focus: null,
+              state: 'error',
+              session_id: null,
+              findings: [],
+              error: 'malformed reviewer JSON',
+            },
+          ],
+          revision: {
+            state: 'skipped',
+            session_id: null,
+            changed_paths: [],
+            error: null,
+          },
+        },
+      ],
+    },
+  };
+  const revisionStuck = {
+    ...baseRun,
+    id: 'review-history-revision',
+    prompt: 'REVIEW-HISTORY revision retry',
+    state: 'revising',
+    error: null,
+    finished_at: null,
+    review: {
+      state: 'revising',
+      max_iterations: 3,
+      current_iteration: 1,
+      outcome: null,
+      reviewers: [],
+      rounds: [
+        {
+          iteration: 1,
+          state: 'revising',
+          reviewers: [
+            {
+              index: 0,
+              provider: 'claude',
+              model: null,
+              skill: 'vault-evidence-review',
+              focus: null,
+              state: 'done',
+              session_id: null,
+              findings: [],
+              error: null,
+            },
+          ],
+          revision: {
+            state: 'error',
+            session_id: null,
+            changed_paths: [],
+            error: 'revision result is missing written paths',
+          },
+        },
+      ],
+    },
+  };
+  await page.addInitScript(
+    ({ reviewerRun, revisionRun, exhaustedRun }) => {
+      const realFetch = window.fetch.bind(window);
+      const state = { reviewerRetries: 0, revisionRetries: 0 };
+      (window as unknown as { __vaultReviewHistoryE2E: typeof state }).__vaultReviewHistoryE2E =
+        state;
+      window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(
+          typeof input === 'string' || input instanceof URL ? String(input) : input.url,
+          location.href,
+        );
+        const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+        const path = url.pathname;
+        if (path.endsWith('/docs-agents/runs') && method === 'GET') {
+          return Response.json([reviewerRun, revisionRun, exhaustedRun]);
+        }
+        if (path.includes('/vault/docs-agents/runs/review-history-')) {
+          if (path.endsWith('/review/rounds/1/reviewers/0/retry')) {
+            state.reviewerRetries += 1;
+            return new Response(null, { status: 202 });
+          }
+          if (path.endsWith('/review/rounds/1/revision/retry')) {
+            state.revisionRetries += 1;
+            return new Response(null, { status: 202 });
+          }
+          if (path.endsWith(exhaustedRun.id)) return Response.json(exhaustedRun);
+          if (path.endsWith(revisionRun.id)) return Response.json(revisionRun);
+          return Response.json(reviewerRun);
+        }
+        return realFetch(input, init);
+      };
+    },
+    { reviewerRun: reviewerStuck, revisionRun: revisionStuck, exhaustedRun: exhausted },
+  );
+
+  await openPage(page, 'vault');
+  await page.locator('button[title^="Docs agent"]').click();
+  const panel = page.locator('.docs-agents');
+  await expect(panel.locator('.runs-section')).toContainText('REVIEW-HISTORY exhausted', {
+    timeout: 15_000,
+  });
+  await page.reload();
+  await openPage(page, 'vault');
+  const reloaded = page.locator('.docs-agents');
+  await expect(reloaded.locator('.runs-section')).toContainText('REVIEW-HISTORY exhausted', {
+    timeout: 15_000,
+  });
+  await reloaded.locator('.run-row', { hasText: 'REVIEW-HISTORY exhausted' }).click();
+  await expect(reloaded.locator('.review-outcome')).toContainText('Review limit reached');
+  await expect(reloaded).toContainText('Transaction boundary is still undocumented');
+  await expect(reloaded).toContainText('data/orders.md');
+  await expect(reloaded).toContainText('coverage.md');
+
+  await reloaded.locator('.run-row', { hasText: 'REVIEW-HISTORY reviewer retry' }).click();
+  await expect(reloaded.locator('.reviewer-card')).toContainText('malformed reviewer JSON');
+  await expect(
+    reloaded.locator('.reviewer-card').getByRole('button', { name: 'Retry reviewer' }),
+  ).toBeVisible();
+  await reloaded.locator('.reviewer-card').getByRole('button', { name: 'Retry reviewer' }).click();
+  await reloaded.locator('.run-row', { hasText: 'REVIEW-HISTORY revision retry' }).click();
+  await expect(reloaded.locator('.revision-card')).toContainText(
+    'revision result is missing written paths',
+  );
+  await expect(
+    reloaded.locator('.revision-card').getByRole('button', { name: 'Retry revision' }),
+  ).toBeVisible();
+  await reloaded.locator('.revision-card').getByRole('button', { name: 'Retry revision' }).click();
+  const retries = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as {
+          __vaultReviewHistoryE2E: { reviewerRetries: number; revisionRetries: number };
+        }).__vaultReviewHistoryE2E,
+    );
+  await expect.poll(async () => (await retries()).reviewerRetries).toBe(1);
+  await expect.poll(async () => (await retries()).revisionRetries).toBe(1);
+});
+
+test('ui: vault-docs sessions are hidden from the sidebar Agents group', async (
+  { page },
+  testInfo,
+) => {
   // The E2E stub never creates real sessions for runs, so seed the two cases
   // directly: an embedded vault-docs session and an ordinary foreground one.
   const { ctx, base } = await apiCtx();
@@ -158,8 +389,13 @@ test('ui: vault-docs sessions are hidden from the sidebar Agents group', async (
         },
       })
       .then((r) => r.json());
-  await mk('VDOCS-EMBEDDED', 'vault-docs');
-  await mk('VISIBLE-FOREGROUND');
+  const suffix = testInfo.project.name;
+  const docsTitle = `VDOCS-EMBEDDED-${suffix}`;
+  const reviewerTitle = `VDOCS-REVIEWER-EMBEDDED-${suffix}`;
+  const foregroundTitle = `VISIBLE-FOREGROUND-${suffix}`;
+  await mk(docsTitle, 'vault-docs');
+  await mk(reviewerTitle, 'vault-docs-review');
+  await mk(foregroundTitle);
   await ctx.dispose();
 
   // This test needs the EXPANDED navigator (the shared beforeEach collapses
@@ -169,9 +405,10 @@ test('ui: vault-docs sessions are hidden from the sidebar Agents group', async (
   const nav = page.locator('nav.navigator');
   await expect(nav).toBeVisible({ timeout: 15_000 });
   // The ordinary session shows in the sidebar Agents list…
-  await expect(nav.getByText('VISIBLE-FOREGROUND', { exact: true })).toBeVisible({
+  await expect(nav.getByText(foregroundTitle, { exact: true })).toBeVisible({
     timeout: 15_000,
   });
   // …the vault-docs one never does (same session list, filtered by source).
-  await expect(nav.getByText('VDOCS-EMBEDDED', { exact: true })).toHaveCount(0);
+  await expect(nav.getByText(docsTitle, { exact: true })).toHaveCount(0);
+  await expect(nav.getByText(reviewerTitle, { exact: true })).toHaveCount(0);
 });

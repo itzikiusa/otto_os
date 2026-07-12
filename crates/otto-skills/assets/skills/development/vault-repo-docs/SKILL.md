@@ -1,82 +1,86 @@
 ---
-description: Document a repository into the Otto Vault as an OKF knowledge bundle — read the code, author linked concept docs (services, endpoints, datasets, decisions, runbooks, metrics), validate conformance, and verify claims against the source. This REPLACES embedding-based repo indexing; "index a repo into the vault" now means writing durable, diffable OKF docs. Use when asked to index/scan/document a repo, map a feature's dependencies, or build the team's repo knowledge base.
+name: vault-repo-docs
+description: Use when indexing, scanning, or documenting a repository into the Otto Vault as a durable OKF bundle, including full, focused, and incremental scans or feature dependency maps; not for code review or one-off repository questions.
 category: development
-version: 2
+version: 3
+metadata:
+  version: "3.0.0"
 ---
 
-# Vault Repo Docs — index a repo by DOCUMENTING it (OKF)
+# Vault Repository Documentation
 
-The old Repo Brain (tree-sitter symbols + embeddings) is gone. The vault is a
-**docs home**: a directory of markdown files with an index the daemon keeps
-(links, tags, full text). Indexing a repo = an agent reading the code and
-writing a linked **OKF bundle** into the vault. Docs are durable, greppable,
-diffable, and every claim is verifiable against the source — none of which
-embeddings gave us.
+Turn a repository into a durable, linked, source-backed OKF bundle. Load
+`okf-authoring` for the format contract. A full scan means every discovered
+candidate is reconciled in `coverage.md`; it never means a representative
+sample.
 
-Load the companion `okf-authoring` skill for the format doctrine; this skill
-is the repo→bundle workflow.
+## Required workflow
 
-## Tools
+1. Read [full-scan-method.md](references/full-scan-method.md). Establish repo
+   path, commit, scan mode, bundle path, and prior coverage ledger.
+2. For a full or focused scan, run `scripts/inventory_repo.py REPO --format
+   json > manifest.json`. For an incremental scan, use `--changed-since COMMIT`
+   and repeat `--include-file PATH` for affected registration/contract files.
+   An invalid or diverged baseline must produce `mode: full-fallback`, never a
+   guessed incremental scope. Preserve `manifest.json` in the bundle. Review
+   `scanned_files`, `exclusions`, counts, and suspicious zero-candidate output.
+   Treat candidates as leads, not facts; inspect entrypoints, registration,
+   DTOs, migrations, queries, broker wiring, workers, configuration, and tests.
+3. Write `coverage.md` before concept docs. Give every candidate exactly one
+   status: `documented`, `irrelevant`, `generated`, or `uncertain`. Include its
+   evidence, destination document, and a concrete reason. Add manually found
+   candidates to both the manifest and ledger; an unknown ledger row is an
+   audit error.
+4. Document breadth first, then depth. Use the completion contracts in:
+   - [api-documentation.md](references/api-documentation.md)
+   - [datastore-documentation.md](references/datastore-documentation.md)
+   - [flows-messaging-workers.md](references/flows-messaging-workers.md)
+   - [evidence-and-citations.md](references/evidence-and-citations.md)
+   Keep output consumable with linked concepts, dense tables, diagrams, and
+   examples; do not restate the repository line by line.
+5. Use `otto_vault_write` for Markdown. Use `otto_vault_write_file` for
+   approved text artifacts such as `api-openapi.yaml`; never hide YAML in a
+   Markdown note merely because the writer lacks the correct tool.
+6. Run the OKF validator and `scripts/audit_repo_bundle.py BUNDLE --manifest
+   BUNDLE/manifest.json`. The audit resolves document links, checks kind-specific
+   depth, and reconciles API operations with OpenAPI. Resolve every finding; an
+   uncertain row deliberately fails the completion gate and means partial.
+7. Perform a second source pass: re-check at least the route registration plus
+   DTO for each API, every DB access path cited, and every trigger/side effect
+   for runtime flows. Update the ledger and scan marker only after this pass.
 
-Session MCP (`otto_*`) or Otto MCP control plane (`otto.vault_*`) or HTTP
-(`http://127.0.0.1:7700/api/v1`, Bearer `$OTTO_API_TOKEN`):
+## Completion contract
 
-| Step | Session MCP | HTTP |
-| --- | --- | --- |
-| Find the vault | `otto_vault_list` | `GET /workspaces/{ws}/vault/vaults` |
-| Browse | `otto_vault_dir` | `GET …/vaults/{id}/dir?path=` |
-| Read a note | `otto_vault_read` | `GET …/vaults/{id}/note?path=` |
-| Write a note | `otto_vault_write` | `PUT …/vaults/{id}/note {path,content,if_hash?}` |
-| Search | `otto_vault_search` | `POST …/vaults/{id}/search {query}` |
-| Backlinks | `otto_vault_backlinks` | `GET …/vaults/{id}/backlinks?path=` |
-| Link graph | `otto_vault_graph` | `GET …/vaults/{id}/graph?mode=local&path=` |
-| Validate | `otto_vault_okf_validate` | `POST …/vaults/{id}/okf/validate` |
-| Regenerate indexes | — | `POST …/vaults/{id}/okf/indexes` |
+A full scan is complete only when:
 
-## Workflow
+- `index.md`, `overview.md`, `coverage.md`, and `log.md` exist and link to all
+  generated concepts;
+- the ledger accounts for every manifest candidate, with no duplicate IDs,
+  missing target documents, or `uncertain` rows presented as complete;
+- APIs contain real request and response bodies, validation, errors, auth,
+  examples, side effects, flow links, and matching OpenAPI operations;
+- data assets contain schema, grain, indexes/TTL, actual read and write paths,
+  consistency boundaries, field-level impact, examples, and citations;
+- messaging, workers, startup/shutdown, and reconciliation flows are inventoried;
+- every load-bearing claim cites `relative/path:line` and has been rechecked;
+- validators and audits are clean. If evidence is unavailable, say what remains
+  uncertain and finish as partial rather than fabricating completeness.
 
-1. **Pick the bundle home.** `otto_vault_list` → use the workspace's OKF vault
-   (ask which if several). Place the repo's bundle under a top-level folder
-   named after the repo (e.g. `go-admission/`).
-2. **Survey the repo before writing.** Read the README, entrypoints, route
-   tables, schema/migrations, config. Build a mental inventory of concepts:
-   - `services/` — one doc per deployable/service (grain: what it is, its
-     endpoints table, trust/dependency prose with links).
-   - `endpoints/` or a `# Endpoints` table inside the service doc (mint
-     separate docs only for endpoints with real behavioral depth).
-   - `datasets/`/`tables/` — one doc per table/store with a `# Schema` table,
-     the grain ("one row per X"), and `# Joins` links.
-   - `decisions/` — ADRs you can EVIDENCE from the code/history
-     (`# Context / # Decision / # Consequences`).
-   - `runbooks/` — operational flows visible in the code (retries, health,
-     failure modes).
-   - `references/` — enums/status codes/metrics that ≥2 docs would cite
-     (four-gate test from `okf-authoring`).
-3. **Write concepts** with `otto_vault_write`, OKF frontmatter always
-   (`type`, one-sentence `description`, `resource` = repo URL/path, `tags`,
-   `timestamp`). Cross-link generously — links are the graph. Cite files as
-   `path/to/file.rs:123` in Citations.
-4. **Wire the bundle**: repo root `index.md` (or run the index generator
-   endpoint), dated `log.md` entry (`**Creation**`/`**Update**` bullets).
-5. **Validate**: `otto_vault_okf_validate` → fix EVERY error (E1/E2/E3);
-   fix warnings you introduced. Never report done with errors.
-6. **Verify claims (second pass).** Re-read each doc you wrote and check 2-3
-   load-bearing claims per doc against the actual source (endpoint paths,
-   column names, config keys). Fix what you got wrong — never leave invented
-   facts. This pass is NOT optional.
-7. **Maintain mode** (repo changed): find affected docs via
-   `otto_vault_search` (by `resource`/path/topic), update bodies +
-   `timestamp`, add concepts for new assets, `**Deprecation**` log entries
-   for removed ones, re-validate.
+## Modes
 
-## Rules
+- **Full:** inventory the current tree and reconcile all candidates.
+- **Focused:** inventory the entire repo, document the requested lens deeply,
+  and mark out-of-scope rows `irrelevant` with the focus as the reason.
+- **Incremental:** use `--changed-since` only when the recorded commit exists
+  and is an ancestor of HEAD. Include affected registration/contract files,
+  update changed/new/removed candidates, and accept `full-fallback` when the
+  baseline is unsafe.
 
-- **Never invent**: no fabricated endpoints, columns, enum values or URLs —
-  every fact traces to a file you read.
-- **Augment, don't rewrite** existing docs (headings survive verbatim; tags
-  union-merge; `type`/`title`/`resource` copy verbatim).
-- Standard markdown links (`[auth](/go-admission/services/auth.md)` or
-  relative) — not wikilinks — inside OKF bundles.
-- Keep each doc scannable: prose ≤3 paragraphs, then tables/lists/fenced code.
-- Big repos: document breadth-first (all services shallow) before depth; a
-  bundle that covers everything thinly beats three perfect docs.
+See [full-scan-manifest.json](examples/full-scan-manifest.json),
+[api-flow-bundle](examples/api-flow-bundle), and
+[datastore-impact-bundle](examples/datastore-impact-bundle) for compact output
+examples. Scripts are conservative accelerators; source reading remains the
+authority.
+
+Do not use this skill for a code review, implementation change, or one-off
+question about a repository that does not request durable Vault documentation.

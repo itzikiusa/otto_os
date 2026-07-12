@@ -1,0 +1,184 @@
+{
+  "schema_version": "1.0",
+  "skill_under_test": "okf-authoring",
+  "baseline_observations": [
+    "Explicitly prompted authors can produce thorough API and data documentation, so completion contracts must be checked rather than inferred from apparent thoroughness.",
+    "Existing API documentation can name DTOs while omitting complete request, success, and error bodies or realistic examples.",
+    "Full-scan content depth is not complete without deterministic quality gates.",
+    "Existing datastore documentation can omit field depth, access paths, indexes and TTL, transaction behavior, impact paths, and citations."
+  ],
+  "cases": [
+    {
+      "id": "activate-produce-api",
+      "category": "positive activation",
+      "task": "Create an OKF concept for this HTTP endpoint from the supplied source evidence.",
+      "expect": {
+        "must_activate": true,
+        "must_read": [
+          "references/concept-patterns.md",
+          "references/quality-gates.md"
+        ],
+        "must_include": [
+          "request schema and body example",
+          "success response schema and body example",
+          "material error response bodies",
+          "source citations"
+        ]
+      }
+    },
+    {
+      "id": "activate-maintain-data",
+      "category": "positive activation",
+      "task": "Update this OKF table concept after its schema and write path changed.",
+      "expect": {
+        "must_activate": true,
+        "must_preserve": [
+          "existing heading order and wording",
+          "unknown frontmatter"
+        ],
+        "must_include": [
+          "full known fields",
+          "reads and writes",
+          "access patterns",
+          "indexes or TTL",
+          "transaction behavior",
+          "field-level impact",
+          "citations"
+        ]
+      }
+    },
+    {
+      "id": "seeded-api-omissions",
+      "category": "quality regression",
+      "fixture": "fixtures/missing-endpoint-sections",
+      "task": "Audit this conformant endpoint bundle for documentation depth.",
+      "expect": {
+        "must_find": [
+          "Q_API_REQUEST",
+          "Q_API_SUCCESS",
+          "Q_API_ERRORS"
+        ],
+        "must_not_invent": true
+      }
+    },
+    {
+      "id": "seeded-data-omissions",
+      "category": "quality regression",
+      "fixture": "fixtures/shallow-data-asset",
+      "task": "Audit this conformant data bundle for documentation depth.",
+      "expect": {
+        "must_find": [
+          "Q_DATA_FIELDS",
+          "Q_DATA_ACCESS",
+          "Q_DATA_INDEX_TTL",
+          "Q_DATA_TRANSACTIONS",
+          "Q_DATA_IMPACT",
+          "Q_DATA_EXAMPLES",
+          "Q_CITATIONS"
+        ],
+        "must_not_invent": true
+      }
+    },
+    {
+      "id": "malformed-type-values",
+      "category": "conformance regression",
+      "fixture": "fixtures/invalid-type-values",
+      "task": "Validate type values with the same scalar semantics as Otto.",
+      "expect": {
+        "must_reject_type_values": [
+          "boolean",
+          "comment-only",
+          "mapping",
+          "sequence"
+        ],
+        "must_accept_type_values": [
+          "non-empty string",
+          "number"
+        ]
+      }
+    },
+    {
+      "id": "adversarial-depth-tokens",
+      "category": "quality regression",
+      "fixture": "fixtures/adversarial-depth",
+      "task": "Audit headings, keyword-only sections, header-only schemas, and arbitrary fenced text.",
+      "expect": {
+        "endpoint_quality_finding_count": 8,
+        "data_quality_finding_count": 8,
+        "must_not_treat_syntax_as_depth": true
+      }
+    },
+    {
+      "id": "evidence-backed-unknown-control",
+      "category": "false-positive control",
+      "fixture": "fixtures/evidence-backed-unknowns",
+      "task": "Audit explicit unknowns that explain and link the evidence checked.",
+      "expect": {
+        "quality_finding_count": 0,
+        "bare_unknown_would_fail": true
+      }
+    },
+    {
+      "id": "clean-control",
+      "category": "false-positive control",
+      "fixture": "fixtures/clean-bundle",
+      "task": "Validate and audit this complete OKF bundle.",
+      "expect": {
+        "conformant": true,
+        "warning_count": 0,
+        "quality_finding_count": 0,
+        "input_mutated": false
+      }
+    },
+    {
+      "id": "negative-trigger",
+      "category": "negative activation",
+      "task": "Review this source-code change for correctness bugs only.",
+      "expect": {
+        "must_activate": false
+      }
+    },
+    {
+      "id": "iteration-convergence",
+      "category": "repair loop",
+      "fixture": "fixtures/shallow-data-asset",
+      "task": "Audit the bundle, repair a copy using only supplied facts, then audit it again.",
+      "expect": {
+        "first_audit_has_findings": true,
+        "unknown_facts_are_labeled": true,
+        "second_audit_finding_count": 0,
+        "unsupported_claim_count": 0
+      }
+    },
+    {
+      "id": "conflict-with-generic-docs-scope",
+      "category": "conflict control",
+      "task": "Rewrite this ordinary README for clarity; it is not part of an OKF bundle.",
+      "expect": {
+        "must_activate": false,
+        "must_not_claim_generic_markdown_scope": true
+      }
+    },
+    {
+      "id": "bloat-progressive-disclosure",
+      "category": "bloat control",
+      "task": "Explain the shortest correct produce workflow without loading datastore or API details.",
+      "expect": {
+        "must_use_core_workflow": true,
+        "must_not_load_unneeded_references": true
+      }
+    },
+    {
+      "id": "script-readonly-safety",
+      "category": "script risk control",
+      "fixture": "fixtures/clean-bundle",
+      "task": "Run both offline scripts and prove the bundle was not modified.",
+      "expect": {
+        "stdlib_only": true,
+        "network_access": false,
+        "input_mutated": false,
+        "clean_exit_code": 0
+      }
+    }
+  ]
+}

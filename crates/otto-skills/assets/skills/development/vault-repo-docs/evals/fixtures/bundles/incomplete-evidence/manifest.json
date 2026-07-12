@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "mode": "full",
+  "scanned_files": ["src/api.rs"],
+  "exclusions": [],
+  "counts": {"files_scanned": 1, "files_excluded": 0, "candidates": 1, "by_kind": {"api": 1}},
+  "candidates": [{"id": "api:orders", "kind": "api", "evidence": "src/api.rs:1"}]
+}

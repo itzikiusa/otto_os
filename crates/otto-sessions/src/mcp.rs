@@ -135,13 +135,10 @@ pub fn merge_user_servers(workspace_root: &str, servers: &[UserMcpServer]) -> Re
     write_doc(&path, &doc)
 }
 
-/// The command + env for Otto's first-party read-only MCP tool server
-/// (Task B2b). The command runs the `ottod mcp-tools` subcommand; the env
-/// carries the per-session **read-only** credential the tools authorize with
-/// (the same per-session token Otto already mints for `/ingest/*`), the daemon
-/// base URL the tools call back into, and the session/workspace identifiers used
-/// for RBAC scoping + audit. `env` values are secrets-in-transit only — they
-/// live in the spawned child's environment, never persisted to the repo.
+/// The command plus per-session environment for Otto's first-party MCP tool
+/// server. The shared project launchers persist only command/args; callers put
+/// `env` on the individual agent process so its MCP child inherits the correct
+/// credential and policy without contaminating another session in the same cwd.
 #[derive(Debug, Clone)]
 pub struct OttoToolsServer {
     pub command: String,
@@ -149,11 +146,11 @@ pub struct OttoToolsServer {
     pub env: std::collections::BTreeMap<String, String>,
 }
 
-/// Add (or refresh) Otto's first-party `otto` MCP tool server in the workspace
-/// `.mcp.json`, preserving every other key (including `otto-browser` and the
-/// user's own servers). Called on agent spawn **only** when `otto_mcp_enabled`
-/// is on for the workspace. Best-effort: errors are returned for logging and
-/// never block a spawn.
+/// Add (or refresh) Otto's identity-neutral first-party launcher in the shared
+/// workspace `.mcp.json`, preserving every other key. Per-session env is
+/// deliberately omitted: several agent/reviewer sessions can share this cwd,
+/// and persisting one session's token/source here would make the last spawner's
+/// capabilities win for every later resume.
 pub fn enable_otto_tools(workspace_root: &str, server: &OttoToolsServer) -> Result<(), String> {
     let path = mcp_path(workspace_root);
     let mut doc = read_doc(&path)?;
@@ -168,14 +165,6 @@ pub fn enable_otto_tools(workspace_root: &str, server: &OttoToolsServer) -> Resu
         "args".into(),
         Value::Array(server.args.iter().cloned().map(Value::String).collect()),
     );
-    if !server.env.is_empty() {
-        let env: Map<String, Value> = server
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-            .collect();
-        entry.insert("env".into(), Value::Object(env));
-    }
     servers.insert(OTTO_TOOLS_KEY.to_string(), Value::Object(entry));
     write_doc(&path, &doc)
 }
@@ -214,14 +203,14 @@ pub fn codex_mcp_inject_args(ottod: &str, creds_path: &str) -> Vec<String> {
 /// (toml_edit): only the `[mcp_servers.otto]` table is managed; everything
 /// else in the file survives. Best-effort, mirrors [`enable_otto_tools`].
 ///
-/// Shape (verified against `grok mcp add -s project`):
+/// Shape (verified against `grok mcp add -s project`). Credentials are inherited
+/// from the individual Grok process environment, so this shared file stays
+/// identity-neutral:
 /// ```toml
 /// [mcp_servers.otto]
 /// command = "<ottod>"
 /// args = ["mcp-tools"]
 /// enabled = true
-/// [mcp_servers.otto.env]
-/// OTTO_MCP_TOKEN = "…"
 /// ```
 pub fn enable_otto_tools_grok(workspace_root: &str, server: &OttoToolsServer) -> Result<(), String> {
     use toml_edit::{value, Array, DocumentMut, Item, Table};
@@ -251,13 +240,6 @@ pub fn enable_otto_tools_grok(workspace_root: &str, server: &OttoToolsServer) ->
     }
     entry["args"] = value(args);
     entry["enabled"] = value(true);
-    if !server.env.is_empty() {
-        let mut env = Table::new();
-        for (k, v) in &server.env {
-            env[k.as_str()] = value(v.clone());
-        }
-        entry["env"] = Item::Table(env);
-    }
     servers.insert(OTTO_TOOLS_KEY, Item::Table(entry));
 
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
@@ -321,8 +303,9 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Enabling the first-party `otto` server writes a command+args+env entry and
-    /// preserves every other key already in the file (browser + a user server).
+    /// The cwd-shared launcher is identity-neutral: per-session credentials and
+    /// source policy stay in the agent process environment, never in a file
+    /// another session in the same cwd can overwrite or inherit.
     #[test]
     fn enable_otto_tools_preserves_other_servers() {
         let dir = tempfile::tempdir().unwrap();
@@ -359,7 +342,7 @@ mod tests {
         let otto = servers.get("otto").and_then(|v| v.as_object()).unwrap();
         assert_eq!(otto["command"], json!("/usr/local/bin/ottod"));
         assert_eq!(otto["args"], json!(["mcp-tools"]));
-        assert_eq!(otto["env"]["OTTO_MCP_TOKEN"], json!("secret-token"));
+        assert!(otto.get("env").is_none(), "shared config leaked session env: {otto:?}");
         // Pre-existing servers are untouched.
         assert!(servers.contains_key("otto-browser"));
         assert!(servers.contains_key("myserver"));
@@ -399,7 +382,7 @@ mod tests {
         let otto = &doc["mcp_servers"]["otto"];
         assert_eq!(otto["command"].as_str(), Some("/usr/local/bin/ottod"));
         assert_eq!(otto["enabled"].as_bool(), Some(true));
-        assert_eq!(otto["env"]["OTTO_MCP_TOKEN"].as_str(), Some("tok-1"));
+        assert!(otto.get("env").is_none(), "shared Grok config leaked session env: {otto:?}");
     }
 
     /// grok project config: created from scratch when absent.

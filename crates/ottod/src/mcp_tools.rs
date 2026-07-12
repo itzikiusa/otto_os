@@ -84,6 +84,9 @@ struct Ctx {
     session_id: Option<String>,
     /// Calling workspace id (for audit). May be empty.
     workspace_id: Option<String>,
+    /// Session metadata source. Review sessions use this to receive a
+    /// read-only Vault catalog and a dispatcher-level mutation deny.
+    source: Option<String>,
     /// Audit sink. `None` when the DB can't be opened (audit degrades to logs).
     audit: Option<McpAuditRepo>,
 }
@@ -643,6 +646,11 @@ fn tool_catalog() -> Value {
                 "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative note path incl. .md" }, "content": { "type": "string" }, "if_hash": { "type": "string" } }, "required": ["vault_id", "path", "content"] }
             },
             {
+                "name": "otto_vault_write_file",
+                "description": "Create or update a guarded UTF-8 documentation artifact (Editor-gated): OpenAPI YAML, JSON, D2, Mermaid, text, or CSV. Parent folders are auto-created; pass `if_hash` for optimistic concurrency. Markdown must use otto_vault_write.",
+                "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string", "description": "Vault-relative path ending .yaml/.yml/.json/.d2/.mmd/.txt/.csv" }, "content": { "type": "string" }, "if_hash": { "type": "string" } }, "required": ["vault_id", "path", "content"] }
+            },
+            {
                 "name": "otto_vault_rename",
                 "description": "Rename/move a note or folder (Editor-gated). Every referencing wikilink/markdown link across the vault is rewritten on disk; returns links_updated.",
                 "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["vault_id", "from", "to"] }
@@ -654,6 +662,86 @@ fn tool_catalog() -> Value {
             }
         ]
     })
+}
+
+const VAULT_MUTATION_TOOLS: [&str; 4] = [
+    "otto_vault_write",
+    "otto_vault_write_file",
+    "otto_vault_rename",
+    "otto_vault_delete",
+];
+
+const VAULT_REVIEW_READ_TOOLS: [(&str, &str); 8] = [
+    ("otto_vault_list", "otto.vault_list"),
+    ("otto_vault_dir", "otto.vault_dir"),
+    ("otto_vault_read", "otto.vault_read"),
+    ("otto_vault_search", "otto.vault_search"),
+    ("otto_vault_backlinks", "otto.vault_backlinks"),
+    ("otto_vault_tags", "otto.vault_tags"),
+    ("otto_vault_graph", "otto.vault_graph"),
+    ("otto_vault_okf_validate", "otto.vault_okf_validate"),
+];
+
+fn is_vault_docs_reviewer(source: Option<&str>) -> bool {
+    source == Some("vault-docs-review")
+}
+
+fn tool_catalog_for_source(source: Option<&str>) -> Value {
+    let mut catalog = tool_catalog();
+    if is_vault_docs_reviewer(source) {
+        if let Some(tools) = catalog["tools"].as_array_mut() {
+            tools.retain(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_some_and(|name| {
+                        VAULT_REVIEW_READ_TOOLS
+                            .iter()
+                            .any(|(internal, _)| *internal == name)
+                    })
+            });
+        }
+    }
+    catalog
+}
+
+/// Map the compatibility names exposed by the in-session MCP bridge onto the
+/// governed outward tools. Workspace identity is injected from the session;
+/// it is also pinned in the persisted token scope and checked server-side.
+fn reviewer_read_invoke(name: &str, args: &Value, workspace_id: &str) -> Option<(String, Value)> {
+    let outward = VAULT_REVIEW_READ_TOOLS
+        .iter()
+        .find_map(|(internal, outward)| (*internal == name).then_some(*outward))?;
+    let mut mapped = args.as_object().cloned().unwrap_or_default();
+    mapped.insert(
+        "workspace_id".to_string(),
+        Value::String(workspace_id.to_string()),
+    );
+    Some((outward.to_string(), Value::Object(mapped)))
+}
+
+async fn run_reviewer_read(ctx: &Ctx, name: &str, args: &Value) -> Result<Value, String> {
+    let workspace = ctx
+        .workspace_id
+        .as_deref()
+        .ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+    let (tool, arguments) = reviewer_read_invoke(name, args, workspace)
+        .ok_or_else(|| format!("tool `{name}` is outside the documentation reviewer scope"))?;
+    let envelope = ctx
+        .post_json(
+            "/mcp/otto-tools/invoke",
+            &json!({"tool": tool, "arguments": arguments}),
+        )
+        .await?;
+    if envelope.get("decision").and_then(Value::as_str) != Some("allowed")
+        || envelope.get("executed").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(envelope
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("governed reviewer read was denied")
+            .to_string());
+    }
+    Ok(envelope.get("content").cloned().unwrap_or(Value::Null))
 }
 
 /// The new first-party feature read tools route through one pure mapping
@@ -842,6 +930,23 @@ fn arg_str(args: &Value, key: &str) -> Result<String, String> {
         .map(str::to_owned)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("missing required string argument `{key}`"))
+}
+
+/// Required string that may be explicitly empty (valid for file content).
+fn arg_string_allow_empty(args: &Value, key: &str) -> Result<String, String> {
+    match args.get(key) {
+        Some(Value::String(value)) => Ok(value.clone()),
+        Some(_) => Err(format!("argument `{key}` must be a string")),
+        None => Err(format!("missing required string argument `{key}`")),
+    }
+}
+
+fn arg_optional_string(args: &Value, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(format!("argument `{key}` must be a string")),
+        None => Ok(None),
+    }
 }
 
 /// Extract a required integer argument.
@@ -1138,15 +1243,30 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             let v = arg_i64(args, "vault_id")?;
             let mut body = json!({
                 "path": arg_str(args, "path")?,
-                "content": args.get("content").and_then(Value::as_str).unwrap_or(""),
+                "content": arg_string_allow_empty(args, "content")?,
             });
-            if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
+            if let Some(h) = arg_optional_string(args, "if_hash")? {
                 body["if_hash"] = json!(h);
             }
             let meta = ctx
                 .put_json(&format!("/workspaces/{}/vault/vaults/{v}/note", seg(&ws)), &body)
                 .await?;
             Ok(finalize(json!({ "ok": true, "meta": meta })))
+        }
+        "otto_vault_write_file" => {
+            let ws = ctx.workspace_id.clone().ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+            let v = arg_i64(args, "vault_id")?;
+            let mut body = json!({
+                "path": arg_str(args, "path")?,
+                "content": arg_string_allow_empty(args, "content")?,
+            });
+            if let Some(h) = arg_optional_string(args, "if_hash")? {
+                body["if_hash"] = json!(h);
+            }
+            let file = ctx
+                .put_json(&format!("/workspaces/{}/vault/vaults/{v}/file", seg(&ws)), &body)
+                .await?;
+            Ok(finalize(json!({ "ok": true, "file": file })))
         }
         "otto_vault_rename" => {
             let ws = ctx.workspace_id.clone().ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
@@ -1267,8 +1387,12 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
         "tools/list" => {
             // The static first-party read-only catalog, plus — when the live-agent
             // gateway is enabled for this workspace — the governed downstream tools.
-            let mut cat = tool_catalog();
-            let gw = ctx.gateway_tools().await;
+            let mut cat = tool_catalog_for_source(ctx.source.as_deref());
+            let gw = if is_vault_docs_reviewer(ctx.source.as_deref()) {
+                Vec::new()
+            } else {
+                ctx.gateway_tools().await
+            };
             if let Some(arr) = cat["tools"].as_array_mut() {
                 for t in gw {
                     arr.push(json!({
@@ -1289,6 +1413,29 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                 .unwrap_or("")
                 .to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            if is_vault_docs_reviewer(ctx.source.as_deref())
+                && VAULT_MUTATION_TOOLS.contains(&name.as_str())
+            {
+                return Some(rpc_ok(
+                    id,
+                    tool_result(
+                        &json!({ "error": "vault mutation tools are disabled for documentation review sessions" }),
+                        true,
+                    ),
+                ));
+            }
+            if is_vault_docs_reviewer(ctx.source.as_deref()) {
+                return Some(match run_reviewer_read(ctx, &name, &args).await {
+                    Ok(value) => {
+                        ctx.audit(&name, &args, true, None).await;
+                        rpc_ok(id, tool_result(&value, false))
+                    }
+                    Err(error) => {
+                        ctx.audit(&name, &args, false, None).await;
+                        rpc_ok(id, tool_result(&json!({"error": error}), true))
+                    }
+                });
+            }
             // A namespaced `mcp__server__tool` is a governed downstream call —
             // route it through the control-plane gateway (which audits it itself).
             if name.starts_with("mcp__") {
@@ -1330,6 +1477,7 @@ struct Creds {
     base: Option<String>,
     session_id: Option<String>,
     workspace_id: Option<String>,
+    source: Option<String>,
 }
 
 /// Find the creds-file path: `--config <path>` / `--config=<path>` in `args`, else
@@ -1366,6 +1514,7 @@ fn parse_creds(body: &str) -> Result<Creds, String> {
         base: s("base"),
         session_id: s("session_id"),
         workspace_id: s("workspace_id"),
+        source: s("source"),
     })
 }
 
@@ -1380,6 +1529,7 @@ fn load_creds(args: &[String]) -> Result<Creds, String> {
                 base: s("OTTO_MCP_BASE"),
                 session_id: s("OTTO_SESSION_ID"),
                 workspace_id: s("OTTO_WORKSPACE_ID"),
+                source: s("OTTO_SESSION_SOURCE"),
             });
         }
     }
@@ -1409,6 +1559,7 @@ pub async fn run() -> Result<(), String> {
     });
     let session_id = creds.session_id;
     let workspace_id = creds.workspace_id;
+    let source = creds.source;
 
     // Open the same SQLite DB the daemon uses, for the audit ledger. Best-effort:
     // if it can't be opened the tools still run, audit just degrades to stderr.
@@ -1431,6 +1582,7 @@ pub async fn run() -> Result<(), String> {
         token,
         session_id,
         workspace_id,
+        source,
         audit,
     };
 
@@ -1592,13 +1744,14 @@ mod tests {
     #[test]
     fn parse_creds_reads_fields_and_requires_token() {
         let c = parse_creds(
-            r#"{"token":"t-1","base":"http://127.0.0.1:7700","session_id":"s-1","workspace_id":"ws-1"}"#,
+            r#"{"token":"t-1","base":"http://127.0.0.1:7700","session_id":"s-1","workspace_id":"ws-1","source":"vault-docs-review"}"#,
         )
         .unwrap();
         assert_eq!(c.token, "t-1");
         assert_eq!(c.base.as_deref(), Some("http://127.0.0.1:7700"));
         assert_eq!(c.session_id.as_deref(), Some("s-1"));
         assert_eq!(c.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(c.source.as_deref(), Some("vault-docs-review"));
         // A token-less document is rejected.
         assert!(parse_creds(r#"{"base":"x"}"#).is_err());
     }
@@ -1713,11 +1866,134 @@ mod tests {
             "otto_vault_graph",
             "otto_vault_okf_validate",
             "otto_vault_write",
+            "otto_vault_write_file",
             "otto_vault_rename",
             "otto_vault_delete",
         ] {
             assert!(names.contains(&t), "catalog missing {t}");
         }
+
+        let write_file = cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "otto_vault_write_file")
+            .unwrap();
+        assert_eq!(
+            write_file["inputSchema"]["required"],
+            json!(["vault_id", "path", "content"])
+        );
+        assert_eq!(write_file["inputSchema"]["properties"]["content"]["type"], json!("string"));
+    }
+
+    #[test]
+    fn vault_docs_review_source_gets_read_only_vault_catalog() {
+        let cat = tool_catalog_for_source(Some("vault-docs-review"));
+        let names: Vec<&str> = cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        for read in ["otto_vault_list", "otto_vault_read", "otto_vault_search"] {
+            assert!(names.contains(&read), "reviewer catalog missing {read}");
+        }
+        for mutation in [
+            "otto_vault_write",
+            "otto_vault_write_file",
+            "otto_vault_rename",
+            "otto_vault_delete",
+        ] {
+            assert!(!names.contains(&mutation), "reviewer catalog leaked {mutation}");
+        }
+
+        let normal = tool_catalog_for_source(Some("vault-docs"));
+        assert!(normal["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "otto_vault_write"));
+    }
+
+    #[test]
+    fn reviewer_read_bridge_maps_only_vault_reads_to_governed_tools() {
+        let (tool, args) = reviewer_read_invoke(
+            "otto_vault_read",
+            &json!({"vault_id": 7, "path": "api/widgets.md"}),
+            "workspace-1",
+        )
+        .expect("vault read must be routed through the governed MCP choke point");
+        assert_eq!(tool, "otto.vault_read");
+        assert_eq!(args["workspace_id"], "workspace-1");
+        assert_eq!(args["vault_id"], 7);
+        assert_eq!(args["path"], "api/widgets.md");
+        assert!(reviewer_read_invoke(
+            "otto_vault_write",
+            &json!({"vault_id": 7, "path": "x.md", "content": "x"}),
+            "workspace-1",
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn vault_docs_review_source_cannot_call_hidden_vault_mutations() {
+        let mut ctx = test_ctx();
+        ctx.source = Some("vault-docs-review".into());
+        let response = handle(
+            &ctx,
+            json!({"jsonrpc":"2.0","id":31,"method":"tools/call","params":{
+                "name":"otto_vault_write","arguments":{"vault_id":1,"path":"x.md","content":"x"}
+            }}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], json!(true));
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("disabled for documentation review"));
+    }
+
+    #[tokio::test]
+    async fn vault_write_file_requires_string_content_but_allows_explicit_empty() {
+        let ctx = test_ctx();
+        for arguments in [
+            json!({ "vault_id": 1, "path": "api.json" }),
+            json!({ "vault_id": 1, "path": "api.json", "content": 7 }),
+        ] {
+            let resp = handle(
+                &ctx,
+                json!({ "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                        "params": { "name": "otto_vault_write_file", "arguments": arguments } }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp["result"]["isError"], json!(true));
+            let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("content"), "got: {text}");
+        }
+
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+                    "params": { "name": "otto_vault_write_file", "arguments": {
+                        "vault_id": 1, "path": "api.json", "content": "{}", "if_hash": 7
+                    } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("if_hash"), "got: {text}");
+
+        let err = run_tool(
+            &ctx,
+            "otto_vault_write_file",
+            &json!({ "vault_id": 1, "path": "api.json", "content": "" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.contains("content"), "explicit empty content must pass argument validation: {err}");
     }
 
     #[tokio::test]
@@ -1870,6 +2146,7 @@ mod tests {
             token: "test-token".to_string(),
             session_id: Some("sess-test".into()),
             workspace_id: Some("ws-test".into()),
+            source: None,
             audit: None,
         }
     }

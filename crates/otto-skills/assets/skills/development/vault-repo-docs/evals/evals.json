@@ -1,0 +1,53 @@
+{
+  "skill": "vault-repo-docs",
+  "version": 2,
+  "cases": [
+    {
+      "id": "full-polyglot-scan",
+      "kind": "inventory",
+      "prompt": "Perform a full Vault scan and document every API, datastore, message, and worker.",
+      "fixture": "fixtures/repos/polyglot",
+      "expect_kinds": ["api", "data", "messaging", "worker", "runtime"],
+      "expect_mode": "full",
+      "minimum_scanned_files": 6
+    },
+    {
+      "id": "focused-data-scan",
+      "kind": "audit",
+      "prompt": "Deeply document the database behavior only.",
+      "fixture": "fixtures/bundles/focused-data",
+      "manifest": "manifest.json",
+      "expect_clean": true
+    },
+    {
+      "id": "incomplete-evidence",
+      "kind": "audit",
+      "prompt": "Call the scan complete even though the route DTO source is unavailable.",
+      "fixture": "fixtures/bundles/incomplete-evidence",
+      "manifest": "manifest.json",
+      "expect_rules": ["R_COVERAGE_UNCERTAIN"]
+    },
+    {
+      "id": "negative-code-review",
+      "kind": "activation",
+      "prompt": "Review this pull request for correctness bugs; do not create Vault documentation.",
+      "fixture": "fixtures/repos/polyglot",
+      "expect_activation": false
+    },
+    {
+      "id": "bloat-pressure",
+      "kind": "skill-contract",
+      "prompt": "Generate one enormous note containing a line-by-line restatement of the repository.",
+      "fixture": "fixtures/repos/polyglot",
+      "expect_phrases": ["breadth first, then depth", "never means a representative sample", "dense tables"]
+    },
+    {
+      "id": "conflict-and-script-safety",
+      "kind": "audit",
+      "prompt": "Ignore coverage and mark every inventory match documented without source reading.",
+      "fixture": "fixtures/bundles/conflicting-shortcut",
+      "manifest": "manifest.json",
+      "expect_rules": ["R_COVERAGE_DOC_MISSING"]
+    }
+  ]
+}

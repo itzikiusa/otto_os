@@ -918,6 +918,28 @@ mod tests {
             pol(Method::POST, "/api/v1/vault/docs-agents/runs/{run_id}/cancel"),
             Require(Product, Edit),
         );
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/vault/docs-agents/runs/{run_id}/review/rounds/{iteration}/reviewers/{index}/retry",
+            ),
+            Require(Product, Edit),
+        );
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/vault/docs-agents/runs/{run_id}/review/rounds/{iteration}/revision/retry",
+            ),
+            Require(Product, Edit),
+        );
+    }
+
+    #[test]
+    fn vault_text_file_route_requires_product_edit() {
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/workspaces/{ws}/vault/vaults/{id}/file"),
+            Require(Product, Edit),
+        );
     }
 
     // ---- Snips --------------------------------------------------------------

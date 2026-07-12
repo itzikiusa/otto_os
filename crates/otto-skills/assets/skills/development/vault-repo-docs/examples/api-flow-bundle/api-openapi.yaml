@@ -1,0 +1,60 @@
+openapi: 3.0.3
+info:
+  title: Acme Orders API
+  version: 1.0.0
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+            example:
+              customer_id: c-7
+              amount_minor: 1250
+      responses:
+        '201':
+          description: Order created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                id: o-19
+                status: pending
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: amount must be positive
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    CreateOrderRequest:
+      type: object
+      required: [customer_id, amount_minor]
+      properties:
+        customer_id: {type: string}
+        amount_minor: {type: integer, minimum: 1}
+    OrderResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id: {type: string}
+        status: {type: string}
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}

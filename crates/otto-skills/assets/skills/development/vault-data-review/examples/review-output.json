@@ -1,0 +1,13 @@
+[
+  {
+    "severity": "major",
+    "category": "data",
+    "summary": "Orders status write path is missing from field impact",
+    "evidence": [
+      {"repo_path": "src/reconcile.rs", "line": 48},
+      {"doc_path": "data/orders.md", "section": "Field-level Impact"}
+    ],
+    "missed_item": "The reconciliation write path for orders.status",
+    "required_fix": "Add the update predicate, transaction/retry behavior, caller flow, and status field impact."
+  }
+]

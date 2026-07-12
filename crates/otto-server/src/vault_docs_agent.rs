@@ -29,9 +29,9 @@
 //! listed in the sidebar Agents group.
 //!
 //! OKF vaults (`vault.okf`): notes MUST be OKF-conformant. claude agents get
-//! the staged `okf-authoring` skill library via `meta.extra_dirs` →
-//! `--add-dir` (see `modules::stage_review_skills`); codex/agy get the skill's
-//! SKILL.md text inlined into the prompt (they can't load out-of-tree skills).
+//! complete staged skill packages: Claude loads the native `.claude/skills`
+//! view through `meta.extra_dirs`; Codex/agy/custom providers read the same
+//! package's provider-neutral `skills/<name>/` tree by explicit prompt path.
 //!
 //! Contract: `docs/contracts/api.md` §"Vault v3 — the docs home" (docs-agents
 //! table); DTOs mirrored in `ui/src/lib/api/types.ts`.
@@ -91,6 +91,116 @@ pub struct VaultDocsSummarizer {
     pub error: Option<String>,
 }
 
+/// One evidence location proving a review finding against either source code
+/// or the generated bundle. At least one complete location is required for
+/// every parsed finding; reviewers cannot submit unsupported prose.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultDocsFindingEvidence {
+    #[serde(default)]
+    pub repo_path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub doc_path: Option<String>,
+    #[serde(default)]
+    pub section: Option<String>,
+}
+
+/// A source-backed omission or defect reported by a review agent.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultDocsFinding {
+    /// `blocking | major | minor`.
+    pub severity: String,
+    pub category: String,
+    pub summary: String,
+    pub evidence: Vec<VaultDocsFindingEvidence>,
+    pub missed_item: String,
+    pub required_fix: String,
+}
+
+/// One reviewer's resolved configuration and live/result state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultDocsReviewer {
+    pub index: usize,
+    pub provider: String,
+    pub model: Option<String>,
+    pub skill: String,
+    pub focus: Option<String>,
+    /// `pending | running | done | error | cancelled | interrupted`.
+    pub state: String,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub findings: Vec<VaultDocsFinding>,
+    pub error: Option<String>,
+}
+
+/// The final author's repair turn after a round that found omissions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultDocsRevision {
+    /// `skipped | pending | running | done | error | cancelled | interrupted`.
+    pub state: String,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub changed_paths: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl Default for VaultDocsRevision {
+    fn default() -> Self {
+        Self {
+            state: "skipped".into(),
+            session_id: None,
+            changed_paths: Vec::new(),
+            error: None,
+        }
+    }
+}
+
+/// One independently visible review/revision iteration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultDocsReviewRound {
+    pub iteration: u8,
+    /// `reviewing | revising | revised | clean | exhausted | error | cancelled |
+    /// interrupted`.
+    pub state: String,
+    pub reviewers: Vec<VaultDocsReviewer>,
+    #[serde(default)]
+    pub revision: VaultDocsRevision,
+}
+
+/// Optional iterative quality gate persisted inside every docs-run payload.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultDocsReview {
+    /// `skipped | pending | reviewing | revising | clean | exhausted | error |
+    /// cancelled | interrupted`.
+    pub state: String,
+    pub max_iterations: u8,
+    pub current_iteration: u8,
+    pub outcome: Option<String>,
+    /// Immutable resolved reviewer templates retained for wire compatibility.
+    /// Live session/state/findings exist only in `rounds[*].reviewers`, avoiding
+    /// two mutable sources of truth in the persisted payload.
+    #[serde(default)]
+    pub reviewers: Vec<VaultDocsReviewer>,
+    #[serde(default)]
+    pub rounds: Vec<VaultDocsReviewRound>,
+}
+
+impl Default for VaultDocsReview {
+    fn default() -> Self {
+        Self {
+            state: "skipped".into(),
+            max_iterations: default_review_iterations(),
+            current_iteration: 0,
+            outcome: None,
+            reviewers: Vec::new(),
+            rounds: Vec::new(),
+        }
+    }
+}
+
 /// A whole docs run — the poll snapshot the UI renders every 1500ms, AND the
 /// durable `payload` persisted per transition in `vault_docs_runs` (hence
 /// `Deserialize` + defaults: rows written before a field existed must load).
@@ -107,10 +217,15 @@ pub struct VaultDocsRun {
     /// Refine turns: the note being edited (`""` for docs runs).
     #[serde(default)]
     pub note_path: String,
-    /// `running | summarizing | done | error | cancelled | interrupted`.
+    /// `running | summarizing | reviewing | revising | done |
+    /// done_with_findings | error | cancelled | interrupted`.
     pub state: String,
     pub agents: Vec<VaultDocsAgent>,
     pub summarizer: VaultDocsSummarizer,
+    /// Defaulted so payloads persisted before iterative review deserialize as
+    /// an explicitly skipped quality gate.
+    #[serde(default)]
+    pub review: VaultDocsReview,
     /// Final note paths in the vault (agent-reported, else server-side diff).
     pub written: Vec<String>,
     pub error: Option<String>,
@@ -132,11 +247,14 @@ pub struct RunReq {
     pub agents: Vec<AgentReq>,
     #[serde(default)]
     pub summarizer: Option<SummarizerReq>,
-    /// Extra library skills injected into every writer + the summarizer
-    /// (staged bundle for claude, SKILL.md inlined for other providers) —
-    /// prepared prompts pass e.g. `vault-repo-docs`. Capped; names validated.
+    /// Extra library skills available to every writer + the summarizer as
+    /// complete staged packages. Prepared prompts pass e.g. `vault-repo-docs`.
+    /// Capped; names validated.
     #[serde(default)]
     pub skills: Vec<String>,
+    /// Optional independent reviewer loop. Omitted means review is skipped.
+    #[serde(default)]
+    pub review: Option<ReviewReq>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +270,33 @@ pub struct SummarizerReq {
     pub provider: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReviewReq {
+    /// Required and 1..=4 when the review block is present.
+    pub reviewers: Vec<ReviewerReq>,
+    #[serde(default = "default_review_iterations")]
+    pub max_iterations: u8,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReviewerReq {
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_reviewer_skill")]
+    pub skill: String,
+    #[serde(default)]
+    pub focus: Option<String>,
+}
+
+fn default_review_iterations() -> u8 {
+    3
+}
+
+fn default_reviewer_skill() -> String {
+    "vault-docs-review".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +351,16 @@ pub struct RunEntry {
 
 /// `retries` index standing for the summarizer (writers use their own index).
 pub const SUM_RETRY_IDX: usize = usize::MAX;
+const REVIEW_RETRY_BASE: usize = 10_000;
+const REVISION_RETRY_BASE: usize = 20_000;
+
+fn reviewer_retry_key(iteration: u8, index: usize) -> usize {
+    REVIEW_RETRY_BASE + usize::from(iteration) * 10 + index
+}
+
+fn revision_retry_key(iteration: u8) -> usize {
+    REVISION_RETRY_BASE + usize::from(iteration)
+}
 
 /// Signal channel into a run's write-behind persister: `None` = "snapshot +
 /// upsert soon" (coalesced), `Some(ack)` = "flush now and ack when durable".
@@ -241,7 +396,10 @@ fn with_run(reg: &RunRegistry, run_id: &str, f: impl FnOnce(&mut VaultDocsRun)) 
 /// True when the run reached a terminal state (guards late stage transitions
 /// from clobbering a cancel that landed while a stage was in flight).
 fn is_terminal(state: &str) -> bool {
-    matches!(state, "done" | "error" | "cancelled" | "interrupted")
+    matches!(
+        state,
+        "done" | "done_with_findings" | "error" | "cancelled" | "interrupted"
+    )
 }
 
 /// Flatten a run into its durable row (payload = the full JSON snapshot).
@@ -395,6 +553,14 @@ pub fn routes() -> Router<ServerCtx> {
             "/vault/docs-agents/runs/{run_id}/summarizer/retry",
             post(retry_summarizer),
         )
+        .route(
+            "/vault/docs-agents/runs/{run_id}/review/rounds/{iteration}/reviewers/{index}/retry",
+            post(retry_reviewer),
+        )
+        .route(
+            "/vault/docs-agents/runs/{run_id}/review/rounds/{iteration}/revision/retry",
+            post(retry_revision),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +594,9 @@ async fn start_run(
     if req.agents.is_empty() || req.agents.len() > 4 {
         return Err(ApiError(Error::Invalid("agents must be 1..=4".into())));
     }
+    if let Some(review) = req.review.as_ref() {
+        validate_review_request(review).map_err(|message| ApiError(Error::Invalid(message)))?;
+    }
     let target_dir = normalize_target_dir(req.target_dir.as_deref().unwrap_or(""))?;
 
     // Provider precedence per agent: request → workspace default → global
@@ -458,6 +627,40 @@ async fn start_run(
         provider: resolve(sum_req.provider.as_deref().unwrap_or("")),
         model: sum_req.model.clone().filter(|m| !m.trim().is_empty()),
     };
+    let review = req
+        .review
+        .as_ref()
+        .map(|requested| VaultDocsReview {
+            state: "pending".into(),
+            max_iterations: requested.max_iterations,
+            current_iteration: 0,
+            outcome: None,
+            reviewers: requested
+                .reviewers
+                .iter()
+                .enumerate()
+                .map(|(index, reviewer)| VaultDocsReviewer {
+                    index,
+                    provider: resolve(&reviewer.provider),
+                    model: reviewer
+                        .model
+                        .clone()
+                        .filter(|model| !model.trim().is_empty()),
+                    skill: reviewer.skill.trim().to_string(),
+                    focus: reviewer
+                        .focus
+                        .clone()
+                        .map(|focus| focus.trim().to_string())
+                        .filter(|focus| !focus.is_empty()),
+                    state: "pending".into(),
+                    session_id: None,
+                    findings: Vec::new(),
+                    error: None,
+                })
+                .collect(),
+            rounds: Vec::new(),
+        })
+        .unwrap_or_default();
 
     let run_id = otto_core::new_id().to_string();
     let multi = writers.len() > 1;
@@ -491,6 +694,7 @@ async fn start_run(
             session_id: None,
             error: None,
         },
+        review,
         written: Vec::new(),
         error: None,
         started_at: chrono::Utc::now().to_rfc3339(),
@@ -529,7 +733,8 @@ async fn start_run(
             .filter(|s| {
                 !s.is_empty()
                     && s.len() <= 64
-                    && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
                     && seen.insert(s.clone())
             })
             .take(4)
@@ -685,6 +890,20 @@ async fn cancel_run(
                 sids.push(s);
             }
         }
+        if let Some(round) = e.run.review.rounds.last() {
+            for reviewer in &round.reviewers {
+                if matches!(reviewer.state.as_str(), "pending" | "running") {
+                    if let Some(sid) = reviewer.session_id.clone() {
+                        sids.push(Id::from(sid));
+                    }
+                }
+            }
+            if matches!(round.revision.state.as_str(), "pending" | "running") {
+                if let Some(sid) = round.revision.session_id.clone() {
+                    sids.push(Id::from(sid));
+                }
+            }
+        }
         (e.run.ws_id.clone(), Arc::clone(&e.cancel), sids)
     };
     crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id), WorkspaceRole::Editor).await?;
@@ -699,6 +918,24 @@ async fn cancel_run(
         }
         if matches!(r.summarizer.state.as_str(), "pending" | "running") {
             r.summarizer.state = "cancelled".into();
+        }
+        if matches!(
+            r.review.state.as_str(),
+            "pending" | "reviewing" | "revising"
+        ) {
+            r.review.state = "cancelled".into();
+            r.review.outcome = Some("cancelled".into());
+        }
+        if let Some(round) = r.review.rounds.last_mut() {
+            round.state = "cancelled".into();
+            for reviewer in &mut round.reviewers {
+                if matches!(reviewer.state.as_str(), "pending" | "running") {
+                    reviewer.state = "cancelled".into();
+                }
+            }
+            if matches!(round.revision.state.as_str(), "pending" | "running") {
+                round.revision.state = "cancelled".into();
+            }
         }
     });
     finish_run(&ctx.vault_docs_runs, &run_id, "cancelled", None);
@@ -742,6 +979,177 @@ async fn retry_summarizer(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<axum::http::StatusCode> {
     retry_target(ctx, user, run_id, SUM_RETRY_IDX).await
+}
+
+async fn retry_reviewer(
+    Path((run_id, iteration, index)): Path<(String, u8, usize)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<axum::http::StatusCode> {
+    retry_review_target(ctx, user, run_id, iteration, Some(index)).await
+}
+
+async fn retry_revision(
+    Path((run_id, iteration)): Path<(String, u8)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<axum::http::StatusCode> {
+    retry_review_target(ctx, user, run_id, iteration, None).await
+}
+
+/// Validate one reviewer/revision retry without mutating the registry. The
+/// handler uses this snapshot to finish any in-flight teardown before the
+/// retry key can become visible to the orchestration loop.
+fn review_retry_target(
+    entry: &RunEntry,
+    iteration: u8,
+    reviewer_index: Option<usize>,
+) -> Result<(Option<String>, usize, String), ApiError> {
+    if is_terminal(&entry.run.state) {
+        return Err(ApiError(Error::Conflict(
+            "run already finished — start a new run instead".into(),
+        )));
+    }
+    if entry.run.review.current_iteration != iteration {
+        return Err(ApiError(Error::Conflict(format!(
+            "review round {iteration} is not active"
+        ))));
+    }
+    let round = entry
+        .run
+        .review
+        .rounds
+        .last()
+        .filter(|round| round.iteration == iteration)
+        .ok_or_else(|| ApiError(Error::NotFound(format!("review round {iteration}"))))?;
+    let (sid, key, state) = match reviewer_index {
+        Some(index) => {
+            if entry.run.state != "reviewing" {
+                return Err(ApiError(Error::Conflict(
+                    "reviewers are not running".into(),
+                )));
+            }
+            let reviewer = round
+                .reviewers
+                .get(index)
+                .ok_or_else(|| ApiError(Error::NotFound(format!("reviewer {index}"))))?;
+            if !matches!(reviewer.state.as_str(), "pending" | "running" | "error") {
+                return Err(ApiError(Error::Conflict(
+                    "reviewer is not active or retryable".into(),
+                )));
+            }
+            (
+                reviewer.session_id.clone(),
+                reviewer_retry_key(iteration, index),
+                reviewer.state.clone(),
+            )
+        }
+        None => {
+            if entry.run.state != "revising"
+                || !matches!(
+                    round.revision.state.as_str(),
+                    "pending" | "running" | "error"
+                )
+            {
+                return Err(ApiError(Error::Conflict(
+                    "revision is not active or retryable".into(),
+                )));
+            }
+            (
+                round.revision.session_id.clone(),
+                revision_retry_key(iteration),
+                round.revision.state.clone(),
+            )
+        }
+    };
+    Ok((sid, key, state))
+}
+
+fn activate_review_retry(
+    entry: &mut RunEntry,
+    iteration: u8,
+    reviewer_index: Option<usize>,
+) -> Result<(Option<String>, usize), ApiError> {
+    let (sid, key, _state) = review_retry_target(entry, iteration, reviewer_index)?;
+    entry.retries.lock().unwrap().insert(key);
+    if let Some(index) = reviewer_index {
+        reset_reviewer_for_retry(&mut entry.run, iteration, index);
+    } else {
+        reset_revision_for_retry(&mut entry.run, iteration);
+    }
+    Ok((sid, key))
+}
+
+async fn retry_review_target(
+    ctx: ServerCtx,
+    user: User,
+    run_id: String,
+    iteration: u8,
+    reviewer_index: Option<usize>,
+) -> ApiResult<axum::http::StatusCode> {
+    let ws_id = {
+        let reg = ctx.vault_docs_runs.lock().unwrap();
+        let entry = reg
+            .get(&run_id)
+            .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
+        entry.run.ws_id.clone()
+    };
+    crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id), WorkspaceRole::Editor).await?;
+    // Snapshot the current target before changing any visible state. A running
+    // turn must be completely torn down before its retry key becomes visible;
+    // otherwise the orchestrator can resume the same final-author id while a
+    // detached grace-kill is still pending and that old kill murders the new
+    // attempt. A failed turn is already idle, so preserve its conversation and
+    // submit the corrective prompt without killing it.
+    let (sid, _retry_key, state) = {
+        let reg = ctx.vault_docs_runs.lock().unwrap();
+        let entry = reg
+            .get(&run_id)
+            .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
+        review_retry_target(entry, iteration, reviewer_index)?
+    };
+    if retry_needs_termination(&state) {
+        if let Some(sid) = sid {
+            terminate_session(ctx.manager.clone(), Id::from(sid)).await;
+        }
+    }
+    let (_sid, _retry_key) = {
+        let mut reg = ctx.vault_docs_runs.lock().unwrap();
+        let entry = reg
+            .get_mut(&run_id)
+            .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
+        activate_review_retry(entry, iteration, reviewer_index)?
+    };
+    persist(&ctx.vault_docs_runs, &run_id);
+    Ok(axum::http::StatusCode::ACCEPTED)
+}
+
+fn retry_needs_termination(state: &str) -> bool {
+    matches!(state, "pending" | "running")
+}
+
+async fn terminate_session(manager: Arc<otto_sessions::SessionManager>, sid: Id) {
+    let _ = manager.input(&sid, b"\x03").await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let _ = manager.input(&sid, b"\x03").await;
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let _ = manager.kill_session(&sid).await;
+}
+
+async fn wait_for_retry_flag(
+    retries: &Arc<Mutex<HashSet<usize>>>,
+    cancel: &Arc<AtomicBool>,
+    key: usize,
+) -> bool {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        if retries.lock().unwrap().remove(&key) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }
 
 async fn retry_target(
@@ -894,7 +1302,30 @@ async fn refine(
     }
     otto_sessions::trust::ensure_trusted(&provider, &vault.root_path);
 
-    let okf_inline = okf_inline_for(&ctx, &vault, &provider);
+    let refine_skill_names = if vault.okf {
+        vec!["okf-authoring".to_string()]
+    } else {
+        Vec::new()
+    };
+    let refine_bundle_dir = otto_context::materialize::default_context_root()
+        .join("vault-docs-skills")
+        .join(format!("refine-{}", otto_core::new_id()));
+    let refine_bundle = (!refine_skill_names.is_empty())
+        .then(|| {
+            crate::modules::stage_skill_packages_at(
+                &ctx.context_library,
+                &refine_skill_names,
+                &refine_bundle_dir,
+            )
+        })
+        .flatten();
+    let refine_fallback = skill_fallbacks(&ctx.context_library, &refine_skill_names);
+    let skill_guidance = skill_package_guidance(
+        &provider,
+        refine_bundle.as_ref(),
+        &refine_skill_names,
+        &refine_fallback,
+    );
     let prompt = build_refine_prompt(
         &req.prompt,
         vault_id,
@@ -902,7 +1333,7 @@ async fn refine(
         &note.meta.hash,
         first_turn.then_some(note.raw.as_str()),
         vault.okf,
-        okf_inline.as_deref(),
+        skill_guidance.as_deref(),
     );
     let (done_path, done_line) = done_marker();
     let prompt = format!("{prompt}{done_line}");
@@ -913,7 +1344,12 @@ async fn refine(
     if let Some(m) = &req.model {
         meta["model"] = Value::String(m.clone());
     }
-    apply_okf_extra_dirs(&ctx, &vault, &provider, &mut meta);
+    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+        &provider,
+        staged_package_root(refine_bundle.as_ref()),
+    ) {
+        meta["extra_dirs"] = dirs;
+    }
 
     // Mark the turn in flight + surface the session id the MOMENT it exists,
     // so `GET refine-session` can attach the live shell while the turn runs.
@@ -955,6 +1391,7 @@ async fn refine(
             session_id: None,
             error: None,
         },
+        review: VaultDocsReview::default(),
         written: Vec::new(),
         error: None,
         started_at: chrono::Utc::now().to_rfc3339(),
@@ -1136,6 +1573,25 @@ fn mark_run_interrupted(run: &mut VaultDocsRun) -> bool {
     if matches!(run.summarizer.state.as_str(), "pending" | "running") {
         run.summarizer.state = "interrupted".into();
     }
+    if matches!(
+        run.review.state.as_str(),
+        "pending" | "reviewing" | "revising"
+    ) {
+        run.review.state = "interrupted".into();
+    }
+    for round in &mut run.review.rounds {
+        if matches!(round.state.as_str(), "reviewing" | "revising") {
+            round.state = "interrupted".into();
+        }
+        for reviewer in &mut round.reviewers {
+            if matches!(reviewer.state.as_str(), "pending" | "running") {
+                reviewer.state = "interrupted".into();
+            }
+        }
+        if matches!(round.revision.state.as_str(), "pending" | "running") {
+            round.revision.state = "interrupted".into();
+        }
+    }
     true
 }
 
@@ -1166,6 +1622,31 @@ fn trash_orphan_drafts(root: &str, run_id: &str) -> bool {
     }
 }
 
+/// Apply restart semantics to one durable row and persist the transformed
+/// nested payload together with the flat state. Keeping this composition in
+/// one seam prevents recovery from updating the list column while leaving a
+/// stale live reviewer/revision inside `payload`.
+async fn persist_interrupted_row(
+    repo: &otto_state::VaultDocsRunsRepo,
+    row: &mut otto_state::VaultDocsRunRow,
+) -> otto_core::Result<Option<VaultDocsRun>> {
+    row.state = "interrupted".into();
+    let run = match serde_json::from_str::<VaultDocsRun>(&row.payload) {
+        Ok(mut run) => {
+            mark_run_interrupted(&mut run);
+            row.payload = serde_json::to_string(&run).unwrap_or_else(|_| row.payload.clone());
+            row.finished_at = run.finished_at.clone();
+            Some(run)
+        }
+        Err(error) => {
+            warn!("vault_docs: recover: bad payload for {}: {}", row.id, error);
+            None
+        }
+    };
+    repo.upsert(row).await?;
+    Ok(run)
+}
+
 /// Startup sweep (spawned once from `ottod` main): every run row still
 /// non-terminal was killed by the restart — mark it `interrupted`, soft-trash
 /// its orphaned `_drafts` dir (multi-writer docs runs), and rescan the touched
@@ -1185,29 +1666,21 @@ pub async fn recover_interrupted(ctx: ServerCtx) {
     let mut marked = 0usize;
     let mut rescan: HashSet<i64> = HashSet::new();
     for mut row in rows {
-        row.state = "interrupted".into();
-        match serde_json::from_str::<VaultDocsRun>(&row.payload) {
-            Ok(mut run) => {
-                mark_run_interrupted(&mut run);
-                row.payload = serde_json::to_string(&run).unwrap_or(row.payload);
-                row.finished_at = run.finished_at.clone();
-                if run.kind == "docs" && run.agents.len() > 1 {
-                    // Vault may be gone/re-scoped — resolve tolerantly.
-                    if let Ok(vault) = ctx.vault.get_scoped(&row.ws_id, row.vault_id).await {
-                        if trash_orphan_drafts(&vault.root_path, &run.id) {
-                            rescan.insert(row.vault_id);
+        match persist_interrupted_row(&repo, &mut row).await {
+            Ok(run) => {
+                if let Some(run) = run {
+                    if run.kind == "docs" && run.agents.len() > 1 {
+                        // Vault may be gone/re-scoped — resolve tolerantly.
+                        if let Ok(vault) = ctx.vault.get_scoped(&row.ws_id, row.vault_id).await {
+                            if trash_orphan_drafts(&vault.root_path, &run.id) {
+                                rescan.insert(row.vault_id);
+                            }
                         }
                     }
                 }
+                marked += 1;
             }
-            // Unparseable payload (should never happen — we wrote it): still
-            // flip the flat state so the run stops counting as live.
-            Err(e) => warn!("vault_docs: recover: bad payload for {}: {}", row.id, e),
-        }
-        if let Err(e) = repo.upsert(&row).await {
-            warn!("vault_docs: recover: persist {}: {}", row.id, e);
-        } else {
-            marked += 1;
+            Err(error) => warn!("vault_docs: recover: persist {}: {}", row.id, error),
         }
     }
     for vault_id in &rescan {
@@ -1251,6 +1724,12 @@ async fn run_docs(
         Some(e) => (Arc::clone(&e.cancel), Arc::clone(&e.retries)),
         None => return,
     };
+    let review_config = reg
+        .lock()
+        .unwrap()
+        .get(&run_id)
+        .map(|entry| entry.run.review.clone())
+        .unwrap_or_default();
     let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
     let m = writers.len();
     let run8: String = run_id.chars().take(8).collect();
@@ -1270,6 +1749,12 @@ async fn run_docs(
             .iter()
             .map(|w| w.provider.clone())
             .chain(std::iter::once(summarizer.provider.clone()))
+            .chain(
+                review_config
+                    .reviewers
+                    .iter()
+                    .map(|reviewer| reviewer.provider.clone()),
+            )
         {
             if trusted.insert(p.clone()) {
                 otto_sessions::trust::ensure_trusted(&p, &vault.root_path);
@@ -1282,33 +1767,32 @@ async fn run_docs(
     let before: HashSet<String> = note_paths(&ctx, vault.id).await;
 
     // Skill vehicles, resolved once: request-selected skills (prepared prompts
-    // pass e.g. `vault-repo-docs`) + `okf-authoring` on OKF vaults. Claude gets
-    // the staged bundle via meta.extra_dirs; every other provider gets the
-    // SKILL.md texts inlined into its prompt.
-    let mut skill_names = skills;
-    if vault.okf && !skill_names.iter().any(|s| s == "okf-authoring") {
-        skill_names.push("okf-authoring".into());
+    // pass e.g. `vault-repo-docs`) + `okf-authoring` on OKF vaults. The complete
+    // packages are staged per run: Claude loads the native view via extra_dirs;
+    // every other provider reads the provider-neutral view by explicit path.
+    let mut author_skill_names = skills;
+    if vault.okf && !author_skill_names.iter().any(|s| s == "okf-authoring") {
+        author_skill_names.push("okf-authoring".into());
     }
-    let okf_bundle = (!skill_names.is_empty())
-        .then(|| crate::modules::stage_review_skills(&ctx.context_library, &skill_names))
+    let mut staged_skill_names = author_skill_names.clone();
+    for reviewer in &review_config.reviewers {
+        if !staged_skill_names.contains(&reviewer.skill) {
+            staged_skill_names.push(reviewer.skill.clone());
+        }
+    }
+    let skill_bundle_dir = otto_context::materialize::default_context_root()
+        .join("vault-docs-skills")
+        .join(&run_id);
+    let skill_bundle = (!staged_skill_names.is_empty())
+        .then(|| {
+            crate::modules::stage_skill_packages_at(
+                &ctx.context_library,
+                &staged_skill_names,
+                &skill_bundle_dir,
+            )
+        })
         .flatten();
-    let okf_text = {
-        let joined = skill_names
-            .iter()
-            .map(|n| skill_inline_text(&ctx.context_library, n))
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n---\n\n");
-        (!joined.is_empty()).then_some(joined)
-    };
-    // Claude sessions load the staged bundle themselves — they only need the
-    // skill NAMES called out so they actually invoke them.
-    let claude_hint = (!skill_names.is_empty()).then(|| {
-        format!(
-            "Skills staged for this task: {} — invoke each relevant one before writing.",
-            skill_names.join(", ")
-        )
-    });
+    let fallback_text = skill_fallbacks(&ctx.context_library, &author_skill_names);
 
     // ---- Stage 1: writers, concurrently (per-writer errors isolated) --------
     let mut set = tokio::task::JoinSet::new();
@@ -1320,6 +1804,12 @@ async fn run_docs(
         let run_id = run_id.clone();
         let run8 = run8.clone();
         let root = vault.root_path.clone();
+        let skill_guidance = skill_package_guidance(
+            &w.provider,
+            skill_bundle.as_ref(),
+            &author_skill_names,
+            &fallback_text,
+        );
         let prompt = build_writer_prompt(
             &prompt,
             vault.id,
@@ -1328,7 +1818,7 @@ async fn run_docs(
             &run8,
             &target_dir,
             vault.okf,
-            inline_for_provider(&w.provider, okf_text.as_deref(), claude_hint.as_deref()),
+            skill_guidance.as_deref(),
             (m == 1).then_some(results_str.as_str()),
         );
         let mut meta = serde_json::json!({
@@ -1339,9 +1829,10 @@ async fn run_docs(
         if let Some(model) = &w.model {
             meta["model"] = Value::String(model.clone());
         }
-        if let Some(dirs) =
-            crate::review_session::review_skills_extra_dirs(&w.provider, okf_bundle.as_deref())
-        {
+        if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+            &w.provider,
+            staged_package_root(skill_bundle.as_ref()),
+        ) {
             meta["extra_dirs"] = dirs;
         }
         let cancel = Arc::clone(&cancel);
@@ -1456,11 +1947,32 @@ async fn run_docs(
         let written = resolve_written(&results_path, &before, &after, &target_dir);
         with_run(&reg, &run_id, |r| r.written = written);
         if any_ok {
-            finish_run(&reg, &run_id, "done", None);
+            let author_sid = reg
+                .lock()
+                .unwrap()
+                .get(&run_id)
+                .and_then(|entry| entry.run.agents.first()?.session_id.clone());
+            complete_review_or_finish(
+                &ctx,
+                &ws,
+                &user,
+                &vault,
+                &reg,
+                &repo,
+                &run_id,
+                &prompt,
+                &target_dir,
+                &writers[0],
+                author_sid,
+                skill_bundle.clone(),
+                Arc::clone(&cancel),
+                Arc::clone(&retries),
+            )
+            .await;
         } else {
             finish_run(&reg, &run_id, "error", Some("writer agent failed".into()));
+            finalize_run(&reg, &repo, &run_id).await;
         }
-        finalize_run(&reg, &repo, &run_id).await;
         let _ = std::fs::remove_file(&results_path);
         return;
     }
@@ -1519,6 +2031,12 @@ async fn run_docs(
     });
     persist(&reg, &run_id);
 
+    let sum_guidance = skill_package_guidance(
+        &summarizer.provider,
+        skill_bundle.as_ref(),
+        &author_skill_names,
+        &fallback_text,
+    );
     let sum_prompt = build_summarizer_prompt(
         &prompt,
         vault.id,
@@ -1526,7 +2044,7 @@ async fn run_docs(
         &target_dir,
         &drafts,
         vault.okf,
-        inline_for_provider(&summarizer.provider, okf_text.as_deref(), claude_hint.as_deref()),
+        sum_guidance.as_deref(),
         &results_str,
     );
     let mut sum_meta = serde_json::json!({
@@ -1537,9 +2055,10 @@ async fn run_docs(
     if let Some(model) = &summarizer.model {
         sum_meta["model"] = Value::String(model.clone());
     }
-    if let Some(dirs) =
-        crate::review_session::review_skills_extra_dirs(&summarizer.provider, okf_bundle.as_deref())
-    {
+    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+        &summarizer.provider,
+        staged_package_root(skill_bundle.as_ref()),
+    ) {
         sum_meta["extra_dirs"] = dirs;
     }
     // Same turn loop as the writers: a user retry (SUM_RETRY_IDX) kills the
@@ -1631,8 +2150,31 @@ async fn run_docs(
     let after = note_paths(&ctx, vault.id).await;
     let written = resolve_written(&results_path, &before, &after, &target_dir);
     with_run(&reg, &run_id, |r| r.written = written);
-    match sum_err {
-        None => finish_run(&reg, &run_id, "done", None),
+    match &sum_err {
+        None => {
+            let author_sid = reg
+                .lock()
+                .unwrap()
+                .get(&run_id)
+                .and_then(|entry| entry.run.summarizer.session_id.clone());
+            complete_review_or_finish(
+                &ctx,
+                &ws,
+                &user,
+                &vault,
+                &reg,
+                &repo,
+                &run_id,
+                &prompt,
+                &target_dir,
+                &summarizer,
+                author_sid,
+                skill_bundle,
+                Arc::clone(&cancel),
+                Arc::clone(&retries),
+            )
+            .await;
+        }
         Some(e) => finish_run(
             &reg,
             &run_id,
@@ -1640,8 +2182,758 @@ async fn run_docs(
             Some(format!("summarizer failed: {e}")),
         ),
     }
-    finalize_run(&reg, &repo, &run_id).await;
+    if sum_err.is_some() {
+        finalize_run(&reg, &repo, &run_id).await;
+    }
     let _ = std::fs::remove_file(&results_path);
+}
+
+fn update_reviewer_state(
+    run: &mut VaultDocsRun,
+    iteration: u8,
+    index: usize,
+    update: impl Fn(&mut VaultDocsReviewer),
+) {
+    if let Some(reviewer) = run
+        .review
+        .rounds
+        .iter_mut()
+        .find(|round| round.iteration == iteration)
+        .and_then(|round| round.reviewers.get_mut(index))
+    {
+        update(reviewer);
+    }
+}
+
+fn reset_reviewer_for_retry(run: &mut VaultDocsRun, iteration: u8, index: usize) {
+    update_reviewer_state(run, iteration, index, |reviewer| {
+        reviewer.state = "pending".into();
+        reviewer.session_id = None;
+        reviewer.error = None;
+        reviewer.findings.clear();
+    });
+}
+
+fn reset_revision_for_retry(run: &mut VaultDocsRun, iteration: u8) {
+    if let Some(round) = run
+        .review
+        .rounds
+        .iter_mut()
+        .find(|round| round.iteration == iteration)
+    {
+        round.revision.state = "pending".into();
+        round.revision.error = None;
+        round.revision.changed_paths.clear();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_review_or_finish(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    user: &User,
+    vault: &otto_vault::VaultRec,
+    reg: &RunRegistry,
+    repo: &otto_state::VaultDocsRunsRepo,
+    run_id: &str,
+    original_request: &str,
+    target_dir: &str,
+    author: &WriterSpec,
+    author_session_id: Option<String>,
+    skill_bundle: Option<crate::modules::StagedSkillPackages>,
+    cancel: Arc<AtomicBool>,
+    retries: Arc<Mutex<HashSet<usize>>>,
+) {
+    let configured = reg
+        .lock()
+        .unwrap()
+        .get(run_id)
+        .map(|entry| entry.run.review.clone())
+        .unwrap_or_default();
+    if configured.state == "skipped" {
+        finish_run(reg, run_id, "done", None);
+        finalize_run(reg, repo, run_id).await;
+        return;
+    }
+    let Some(author_session_id) = author_session_id else {
+        with_run(reg, run_id, |run| {
+            run.review.state = "error".into();
+            run.review.outcome = Some("error".into());
+        });
+        finish_run(
+            reg,
+            run_id,
+            "error",
+            Some("final author session is unavailable for review revisions".into()),
+        );
+        finalize_run(reg, repo, run_id).await;
+        return;
+    };
+
+    let result = run_review_loop(
+        ctx,
+        ws,
+        user,
+        vault,
+        reg,
+        run_id,
+        original_request,
+        target_dir,
+        author,
+        &author_session_id,
+        skill_bundle.as_ref(),
+        cancel,
+        retries,
+    )
+    .await;
+    match result {
+        ReviewLoopResult::Clean => finish_run(reg, run_id, "done", None),
+        ReviewLoopResult::Exhausted => finish_run(reg, run_id, "done_with_findings", None),
+        ReviewLoopResult::Cancelled => finish_run(reg, run_id, "cancelled", None),
+        ReviewLoopResult::Error(error) => {
+            with_run(reg, run_id, |run| {
+                run.review.state = "error".into();
+                run.review.outcome = Some("error".into());
+            });
+            finish_run(reg, run_id, "error", Some(error));
+        }
+    }
+    finalize_run(reg, repo, run_id).await;
+}
+
+enum ReviewLoopResult {
+    Clean,
+    Exhausted,
+    Cancelled,
+    Error(String),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum ReviewTurnKind {
+    Reviewer { iteration: u8, index: usize },
+    Revision { iteration: u8 },
+}
+
+/// Owned request at the agent-session seam. Tests can deterministically write
+/// the requested result artifact without constructing the daemon's full
+/// `ServerCtx`; production still delegates to the managed-session runner.
+struct ReviewTurnRequest {
+    kind: ReviewTurnKind,
+    existing: Option<Id>,
+    title: String,
+    cwd: String,
+    provider: String,
+    meta: Value,
+    prompt: String,
+    result_path: std::path::PathBuf,
+    done_path: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+trait ReviewTurnRunner: Send + Sync {
+    async fn run_turn(
+        &self,
+        request: ReviewTurnRequest,
+        on_ready: Box<dyn FnOnce(Id) + Send>,
+    ) -> Result<(String, Id), String>;
+
+    async fn scan(&self, vault_id: i64);
+}
+
+#[derive(Clone)]
+struct LiveReviewTurnRunner {
+    ctx: ServerCtx,
+    ws: Workspace,
+    user: User,
+}
+
+#[async_trait::async_trait]
+impl ReviewTurnRunner for LiveReviewTurnRunner {
+    async fn run_turn(
+        &self,
+        request: ReviewTurnRequest,
+        on_ready: Box<dyn FnOnce(Id) + Send>,
+    ) -> Result<(String, Id), String> {
+        tracing::debug!(
+            turn = ?request.kind,
+            result_path = %request.result_path.display(),
+            "vault docs review turn starting"
+        );
+        crate::agent_session::run_session_turn_with(
+            &self.ctx,
+            &self.ws,
+            &self.user,
+            request.existing.as_ref(),
+            &request.title,
+            &request.cwd,
+            &request.provider,
+            request.meta,
+            &request.prompt,
+            crate::agent_session::STUCK_IDLE,
+            crate::agent_session::TurnOpts {
+                done_file: Some(request.done_path),
+                quiet_done: Some(QUIET_DONE),
+            },
+            move |sid| on_ready(sid.clone()),
+        )
+        .await
+        .map_err(|error| error.0.to_string())
+    }
+
+    async fn scan(&self, vault_id: i64) {
+        let _ = self.ctx.vault.scan(vault_id).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_review_loop(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    user: &User,
+    vault: &otto_vault::VaultRec,
+    reg: &RunRegistry,
+    run_id: &str,
+    original_request: &str,
+    target_dir: &str,
+    author: &WriterSpec,
+    author_session_id: &str,
+    skill_bundle: Option<&crate::modules::StagedSkillPackages>,
+    cancel: Arc<AtomicBool>,
+    retries: Arc<Mutex<HashSet<usize>>>,
+) -> ReviewLoopResult {
+    let runner: Arc<dyn ReviewTurnRunner> = Arc::new(LiveReviewTurnRunner {
+        ctx: ctx.clone(),
+        ws: ws.clone(),
+        user: user.clone(),
+    });
+    run_review_loop_with_runner(
+        runner,
+        vault.id,
+        &vault.root_path,
+        reg,
+        run_id,
+        original_request,
+        target_dir,
+        author,
+        author_session_id,
+        skill_bundle,
+        cancel,
+        retries,
+    )
+    .await
+}
+
+struct ReviewerSlotArgs {
+    reg: RunRegistry,
+    run_id: String,
+    vault_id: i64,
+    root: String,
+    package_root: String,
+    original_request: String,
+    target_dir: String,
+    iteration: u8,
+    reviewer: VaultDocsReviewer,
+    cancel: Arc<AtomicBool>,
+    retries: Arc<Mutex<HashSet<usize>>>,
+}
+
+/// Run one independent reviewer including its targeted manual-retry state
+/// machine. The round coordinator only joins these slots and decides the next
+/// round action.
+async fn run_reviewer_slot(runner: Arc<dyn ReviewTurnRunner>, args: ReviewerSlotArgs) {
+    let ReviewerSlotArgs {
+        reg,
+        run_id,
+        vault_id,
+        root,
+        package_root,
+        original_request,
+        target_dir,
+        iteration,
+        reviewer,
+        cancel,
+        retries,
+    } = args;
+    let index = reviewer.index;
+    let retry_key = reviewer_retry_key(iteration, index);
+    let results_path = std::env::temp_dir().join(format!(
+        "otto-vaultdocs-review-{run_id}-{iteration}-{index}.json"
+    ));
+    let results_str = results_path.to_string_lossy().to_string();
+    let package_path = std::path::Path::new(&package_root)
+        .join("skills")
+        .join(&reviewer.skill)
+        .join("SKILL.md")
+        .to_string_lossy()
+        .to_string();
+    let prompt = build_reviewer_prompt(
+        &original_request,
+        vault_id,
+        &target_dir,
+        iteration,
+        &reviewer.skill,
+        reviewer.focus.as_deref(),
+        &package_path,
+        &results_str,
+    );
+    let mut meta = serde_json::json!({
+        "source": "vault-docs-review",
+        "vault_id": vault_id,
+        "run_id": run_id.clone(),
+        "iteration": iteration,
+        "reviewer_index": index,
+    });
+    if let Some(model) = &reviewer.model {
+        meta["model"] = Value::String(model.clone());
+    }
+    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+        &reviewer.provider,
+        Some(package_root.as_str()),
+    ) {
+        meta["extra_dirs"] = dirs;
+    }
+    let mut user_retries = 0;
+    'reviewer_attempt: loop {
+        let _ = std::fs::write(&results_path, "");
+        let (done_path, done_line) = done_marker();
+        let attempt_prompt = format!("{prompt}{done_line}");
+        let ready_reg = reg.clone();
+        let ready_run = run_id.clone();
+        let on_ready = move |sid: Id| {
+            let sid = sid.to_string();
+            with_run(&ready_reg, &ready_run, |run| {
+                update_reviewer_state(run, iteration, index, |reviewer| {
+                    reviewer.state = "running".into();
+                    reviewer.session_id = Some(sid.clone());
+                    reviewer.error = None;
+                });
+            });
+            persist(&ready_reg, &ready_run);
+        };
+        let turn = runner
+            .run_turn(
+                ReviewTurnRequest {
+                    kind: ReviewTurnKind::Reviewer { iteration, index },
+                    existing: None,
+                    title: format!("Vault docs: review {iteration}.{}", index + 1),
+                    cwd: root.clone(),
+                    provider: reviewer.provider.clone(),
+                    meta: meta.clone(),
+                    prompt: attempt_prompt,
+                    result_path: results_path.clone(),
+                    done_path: done_path.clone(),
+                },
+                Box::new(on_ready),
+            )
+            .await;
+        let _ = std::fs::remove_file(&done_path);
+        let parsed = match turn {
+            Ok((_reply, sid)) => std::fs::read_to_string(&results_path)
+                .map_err(|error| format!("read reviewer output: {error}"))
+                .and_then(|content| parse_review_findings(&content))
+                .map(|findings| (sid, findings)),
+            Err(error) => Err(error),
+        };
+        let want_retry = retries.lock().unwrap().remove(&retry_key);
+        match parsed {
+            Ok((sid, findings)) => {
+                with_run(&reg, &run_id, |run| {
+                    update_reviewer_state(run, iteration, index, |reviewer| {
+                        reviewer.state = "done".into();
+                        reviewer.session_id = Some(sid.to_string());
+                        reviewer.findings = findings.clone();
+                        reviewer.error = None;
+                    });
+                });
+                persist(&reg, &run_id);
+                break;
+            }
+            Err(_) if cancel.load(Ordering::Relaxed) => {
+                with_run(&reg, &run_id, |run| {
+                    update_reviewer_state(run, iteration, index, |reviewer| {
+                        reviewer.state = "cancelled".into();
+                        reviewer.error = None;
+                    });
+                });
+                persist(&reg, &run_id);
+                break;
+            }
+            Err(_) if want_retry && user_retries < MAX_USER_RETRIES => {
+                user_retries += 1;
+                with_run(&reg, &run_id, |run| {
+                    reset_reviewer_for_retry(run, iteration, index);
+                });
+                persist(&reg, &run_id);
+            }
+            Err(error) => {
+                with_run(&reg, &run_id, |run| {
+                    update_reviewer_state(run, iteration, index, |reviewer| {
+                        reviewer.state = "error".into();
+                        reviewer.error = Some(error.clone());
+                        reviewer.findings.clear();
+                    });
+                });
+                persist(&reg, &run_id);
+                if user_retries >= MAX_USER_RETRIES {
+                    break;
+                }
+                if wait_for_retry_flag(&retries, &cancel, retry_key).await {
+                    user_retries += 1;
+                    with_run(&reg, &run_id, |run| {
+                        reset_reviewer_for_retry(run, iteration, index);
+                    });
+                    persist(&reg, &run_id);
+                    continue 'reviewer_attempt;
+                }
+                with_run(&reg, &run_id, |run| {
+                    update_reviewer_state(run, iteration, index, |reviewer| {
+                        reviewer.state = "cancelled".into();
+                        reviewer.error = None;
+                    });
+                });
+                persist(&reg, &run_id);
+                break;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(results_path);
+}
+
+struct RevisionTurnArgs {
+    reg: RunRegistry,
+    run_id: String,
+    vault_id: i64,
+    root: String,
+    iteration: u8,
+    author: WriterSpec,
+    author_session_id: String,
+    prompt: String,
+    result_path: std::path::PathBuf,
+    cancel: Arc<AtomicBool>,
+    retries: Arc<Mutex<HashSet<usize>>>,
+}
+
+/// Resume the final author for one repair turn, including its independently
+/// retryable result-artifact contract.
+async fn run_revision_turn(
+    runner: Arc<dyn ReviewTurnRunner>,
+    args: RevisionTurnArgs,
+) -> Result<Vec<String>, String> {
+    let RevisionTurnArgs {
+        reg,
+        run_id,
+        vault_id,
+        root,
+        iteration,
+        author,
+        author_session_id,
+        prompt,
+        result_path,
+        cancel,
+        retries,
+    } = args;
+    let mut revision_retries = 0;
+    let result = 'revision_attempt: loop {
+        let _ = std::fs::write(&result_path, "");
+        let (done_path, done_line) = done_marker();
+        let attempt_prompt = format!("{prompt}{done_line}");
+        let ready_reg = reg.clone();
+        let ready_run = run_id.clone();
+        let on_ready = move |sid: Id| {
+            with_run(&ready_reg, &ready_run, |run| {
+                if let Some(round) = run.review.rounds.last_mut() {
+                    round.revision.state = "running".into();
+                    round.revision.session_id = Some(sid.to_string());
+                    round.revision.error = None;
+                }
+            });
+            persist(&ready_reg, &ready_run);
+        };
+        let mut meta = serde_json::json!({
+            "source": "vault-docs",
+            "vault_id": vault_id,
+            "run_id": run_id,
+            "iteration": iteration,
+            "role": "revision",
+        });
+        if let Some(model) = &author.model {
+            meta["model"] = Value::String(model.clone());
+        }
+        let turn = runner
+            .run_turn(
+                ReviewTurnRequest {
+                    kind: ReviewTurnKind::Revision { iteration },
+                    existing: Some(Id::from(author_session_id.clone())),
+                    title: format!("Vault docs: revision {iteration}"),
+                    cwd: root.clone(),
+                    provider: author.provider.clone(),
+                    meta,
+                    prompt: attempt_prompt,
+                    result_path: result_path.clone(),
+                    done_path: done_path.clone(),
+                },
+                Box::new(on_ready),
+            )
+            .await;
+        let _ = std::fs::remove_file(done_path);
+        let parsed = match turn {
+            Ok((_reply, _sid)) => std::fs::read_to_string(&result_path)
+                .map_err(|error| format!("read revision output: {error}"))
+                .and_then(|content| {
+                    parse_results(&content)
+                        .ok_or_else(|| "revision output must contain {\"written\": [...]}".into())
+                }),
+            Err(error) => Err(error),
+        };
+        let want_retry = retries
+            .lock()
+            .unwrap()
+            .remove(&revision_retry_key(iteration));
+        match parsed {
+            Ok(paths) => break Ok(paths),
+            Err(_) if cancel.load(Ordering::Relaxed) => break Err("cancelled".into()),
+            Err(_) if want_retry && revision_retries < MAX_USER_RETRIES => {
+                revision_retries += 1;
+                with_run(&reg, &run_id, |run| {
+                    reset_revision_for_retry(run, iteration);
+                });
+                persist(&reg, &run_id);
+            }
+            Err(error) => {
+                with_run(&reg, &run_id, |run| {
+                    if let Some(round) = run.review.rounds.last_mut() {
+                        round.revision.state = "error".into();
+                        round.revision.error = Some(error.clone());
+                    }
+                });
+                persist(&reg, &run_id);
+                if revision_retries >= MAX_USER_RETRIES {
+                    break Err(error);
+                }
+                if wait_for_retry_flag(&retries, &cancel, revision_retry_key(iteration)).await {
+                    revision_retries += 1;
+                    with_run(&reg, &run_id, |run| {
+                        reset_revision_for_retry(run, iteration);
+                    });
+                    persist(&reg, &run_id);
+                    continue 'revision_attempt;
+                }
+                break Err("cancelled".into());
+            }
+        }
+    };
+    let _ = std::fs::remove_file(result_path);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_review_loop_with_runner(
+    runner: Arc<dyn ReviewTurnRunner>,
+    vault_id: i64,
+    vault_root: &str,
+    reg: &RunRegistry,
+    run_id: &str,
+    original_request: &str,
+    target_dir: &str,
+    author: &WriterSpec,
+    author_session_id: &str,
+    skill_bundle: Option<&crate::modules::StagedSkillPackages>,
+    cancel: Arc<AtomicBool>,
+    retries: Arc<Mutex<HashSet<usize>>>,
+) -> ReviewLoopResult {
+    let (configured_reviewers, max_iterations) = match reg.lock().unwrap().get(run_id) {
+        Some(entry) => (
+            entry.run.review.reviewers.clone(),
+            entry.run.review.max_iterations,
+        ),
+        None => return ReviewLoopResult::Error("review run disappeared".into()),
+    };
+    let Some(packages) = skill_bundle else {
+        return ReviewLoopResult::Error("review skill packages could not be staged".into());
+    };
+    for reviewer in &configured_reviewers {
+        if !packages.files.contains_key(&reviewer.skill) {
+            return ReviewLoopResult::Error(format!(
+                "review skill package '{}' could not be staged",
+                reviewer.skill
+            ));
+        }
+    }
+
+    for iteration in 1..=max_iterations {
+        if cancel.load(Ordering::Relaxed) {
+            return ReviewLoopResult::Cancelled;
+        }
+        let round = fresh_review_round(iteration, &configured_reviewers);
+        with_run(reg, run_id, |run| {
+            if is_terminal(&run.state) {
+                return;
+            }
+            run.state = "reviewing".into();
+            run.review.state = "reviewing".into();
+            run.review.current_iteration = iteration;
+            run.review.rounds.push(round);
+        });
+        persist(reg, run_id);
+
+        let mut set = tokio::task::JoinSet::new();
+        for reviewer in configured_reviewers.iter().cloned() {
+            set.spawn(run_reviewer_slot(
+                Arc::clone(&runner),
+                ReviewerSlotArgs {
+                    reg: reg.clone(),
+                    run_id: run_id.to_string(),
+                    vault_id,
+                    root: vault_root.to_string(),
+                    package_root: packages.root.clone(),
+                    original_request: original_request.to_string(),
+                    target_dir: target_dir.to_string(),
+                    iteration,
+                    reviewer,
+                    cancel: Arc::clone(&cancel),
+                    retries: Arc::clone(&retries),
+                },
+            ));
+        }
+        while set.join_next().await.is_some() {}
+
+        if cancel.load(Ordering::Relaxed) {
+            return ReviewLoopResult::Cancelled;
+        }
+        let reviewers = reg
+            .lock()
+            .unwrap()
+            .get(run_id)
+            .and_then(|entry| entry.run.review.rounds.last())
+            .map(|round| round.reviewers.clone())
+            .unwrap_or_default();
+        match review_round_outcome(&reviewers, iteration, max_iterations) {
+            ReviewRoundOutcome::Clean => {
+                with_run(reg, run_id, |run| {
+                    run.review.state = "clean".into();
+                    run.review.outcome = Some("clean".into());
+                    if let Some(round) = run.review.rounds.last_mut() {
+                        round.state = "clean".into();
+                    }
+                });
+                persist(reg, run_id);
+                return ReviewLoopResult::Clean;
+            }
+            ReviewRoundOutcome::Exhausted => {
+                with_run(reg, run_id, |run| {
+                    run.review.state = "exhausted".into();
+                    run.review.outcome = Some("findings_remain".into());
+                    if let Some(round) = run.review.rounds.last_mut() {
+                        round.state = "exhausted".into();
+                    }
+                });
+                persist(reg, run_id);
+                return ReviewLoopResult::Exhausted;
+            }
+            ReviewRoundOutcome::Error => {
+                let error = reviewers
+                    .iter()
+                    .find_map(|reviewer| reviewer.error.clone())
+                    .unwrap_or_else(|| "one or more reviewers failed".into());
+                with_run(reg, run_id, |run| {
+                    run.review.state = "error".into();
+                    run.review.outcome = Some("error".into());
+                    if let Some(round) = run.review.rounds.last_mut() {
+                        round.state = "error".into();
+                    }
+                });
+                persist(reg, run_id);
+                return ReviewLoopResult::Error(format!("review round {iteration}: {error}"));
+            }
+            ReviewRoundOutcome::Revise => {}
+        }
+
+        let findings = reviewers
+            .iter()
+            .flat_map(|reviewer| reviewer.findings.clone())
+            .collect::<Vec<_>>();
+        let revision_path =
+            std::env::temp_dir().join(format!("otto-vaultdocs-revision-{run_id}-{iteration}.json"));
+        let revision_str = revision_path.to_string_lossy().to_string();
+        let revision_prompt = build_revision_prompt(
+            original_request,
+            vault_id,
+            target_dir,
+            iteration,
+            &findings,
+            &revision_str,
+        );
+        with_run(reg, run_id, |run| {
+            run.state = "revising".into();
+            run.review.state = "revising".into();
+            if let Some(round) = run.review.rounds.last_mut() {
+                round.state = "revising".into();
+                round.revision = VaultDocsRevision {
+                    state: "pending".into(),
+                    session_id: Some(author_session_id.to_string()),
+                    changed_paths: Vec::new(),
+                    error: None,
+                };
+            }
+        });
+        persist(reg, run_id);
+
+        let revision_result = run_revision_turn(
+            Arc::clone(&runner),
+            RevisionTurnArgs {
+                reg: reg.clone(),
+                run_id: run_id.to_string(),
+                vault_id,
+                root: vault_root.to_string(),
+                iteration,
+                author: author.clone(),
+                author_session_id: author_session_id.to_string(),
+                prompt: revision_prompt,
+                result_path: revision_path,
+                cancel: Arc::clone(&cancel),
+                retries: Arc::clone(&retries),
+            },
+        )
+        .await;
+        if cancel.load(Ordering::Relaxed) {
+            return ReviewLoopResult::Cancelled;
+        }
+        match revision_result {
+            Ok(changed_paths) => {
+                runner.scan(vault_id).await;
+                with_run(reg, run_id, |run| {
+                    if let Some(round) = run.review.rounds.last_mut() {
+                        round.state = "revised".into();
+                        round.revision.state = "done".into();
+                        round.revision.changed_paths = changed_paths.clone();
+                        round.revision.error = None;
+                    }
+                    for path in &changed_paths {
+                        if !run.written.contains(path) {
+                            run.written.push(path.clone());
+                        }
+                    }
+                });
+                persist(reg, run_id);
+            }
+            Err(error) => {
+                with_run(reg, run_id, |run| {
+                    run.review.state = "error".into();
+                    run.review.outcome = Some("error".into());
+                    if let Some(round) = run.review.rounds.last_mut() {
+                        round.state = "error".into();
+                        round.revision.state = "error".into();
+                        round.revision.error = Some(error.clone());
+                    }
+                });
+                persist(reg, run_id);
+                return ReviewLoopResult::Error(format!(
+                    "review round {iteration} revision failed: {error}"
+                ));
+            }
+        }
+    }
+    ReviewLoopResult::Exhausted
 }
 
 /// All indexed note paths of a vault (recursive; the fallback-diff universe).
@@ -1695,48 +2987,82 @@ fn skill_inline_text(library: &otto_context::Library, name: &str) -> String {
     otto_skills::bundled_body(name).unwrap_or_default()
 }
 
-/// The `okf-authoring` skill's text (refine path uses just this one).
-fn okf_skill_text(library: &otto_context::Library) -> String {
-    skill_inline_text(library, "okf-authoring")
+fn skill_fallbacks(library: &otto_context::Library, names: &[String]) -> HashMap<String, String> {
+    names
+        .iter()
+        .filter_map(|name| {
+            let body = skill_inline_text(library, name);
+            (!body.is_empty()).then(|| (name.clone(), body))
+        })
+        .collect()
 }
 
-/// The inlined-skill text for this provider: claude gets the short invoke
-/// `hint` (its skills arrive as a staged bundle via extra_dirs); every other
-/// provider gets the full SKILL.md `text` inlined.
-fn inline_for_provider<'a>(
+fn staged_package_root(staged: Option<&crate::modules::StagedSkillPackages>) -> Option<&str> {
+    staged.map(|packages| packages.root.as_str())
+}
+
+/// Provider-specific directions for a materialized multi-file skill bundle.
+/// Claude receives first-class skills through `extra_dirs` and only needs an
+/// invocation reminder. Other providers receive the neutral package root and
+/// a deterministic file manifest, then load `SKILL.md` plus only the resources
+/// it routes them to. If staging failed, preserve the old body-inline fallback.
+fn skill_package_guidance(
     provider: &str,
-    text: Option<&'a str>,
-    hint: Option<&'a str>,
-) -> Option<&'a str> {
-    if provider == "claude" { hint } else { text }
-}
-
-/// Refine-path variant of the OKF plumbing above (single provider, so the
-/// bundle staging + inline decision collapse into two small helpers).
-fn okf_inline_for(ctx: &ServerCtx, vault: &otto_vault::VaultRec, provider: &str) -> Option<String> {
-    if !vault.okf || provider == "claude" {
+    staged: Option<&crate::modules::StagedSkillPackages>,
+    names: &[String],
+    fallback_inline: &HashMap<String, String>,
+) -> Option<String> {
+    if names.is_empty() {
         return None;
     }
-    Some(okf_skill_text(&ctx.context_library)).filter(|t| !t.is_empty())
-}
+    let staged_names = names
+        .iter()
+        .filter(|name| staged.is_some_and(|packages| packages.files.contains_key(*name)))
+        .collect::<Vec<_>>();
+    let mut sections = Vec::new();
 
-/// Attach the staged okf-authoring bundle to a claude session's meta (OKF
-/// vaults only). No-op for other providers — they get the text inlined.
-fn apply_okf_extra_dirs(
-    ctx: &ServerCtx,
-    vault: &otto_vault::VaultRec,
-    provider: &str,
-    meta: &mut Value,
-) {
-    if !vault.okf {
-        return;
+    if !staged_names.is_empty() {
+        if provider == "claude" {
+            sections.push(format!(
+                "Skills staged for this task: {}. You must invoke each relevant skill before writing.",
+                staged_names.iter().map(|name| name.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        } else if let Some(packages) = staged {
+            let root = std::path::Path::new(&packages.root).join("skills");
+            let files = staged_names
+                .iter()
+                .flat_map(|name| {
+                    packages.files[*name]
+                        .iter()
+                        .map(move |path| format!("{name}/{path}"))
+                })
+                .collect::<Vec<_>>();
+            sections.push(format!(
+                "AUTHORING SKILL PACKAGES are available at `{}`. Before working, read each selected \
+                 skill's `SKILL.md`, then read only the references/examples it directs you to; run its \
+                 scripts when the workflow requires them. Package files:\n- {}",
+                root.display(),
+                files.join("\n- ")
+            ));
+        }
     }
-    let bundle =
-        crate::modules::stage_review_skills(&ctx.context_library, &["okf-authoring".into()]);
-    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(provider, bundle.as_deref())
-    {
-        meta["extra_dirs"] = dirs;
+
+    let missing_bodies = names
+        .iter()
+        .filter(|name| !staged.is_some_and(|packages| packages.files.contains_key(*name)))
+        .filter_map(|name| fallback_inline.get(name))
+        .collect::<Vec<_>>();
+    if !missing_bodies.is_empty() {
+        sections.push(
+            missing_bodies
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n\n---\n\n"),
+        );
     }
+
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1763,6 +3089,187 @@ const QUIET_DONE: std::time::Duration = std::time::Duration::from_secs(150);
 /// Cap on user-requested retries per writer/summarizer slot within one run —
 /// a sanity bound, not a policy (each retry is an explicit click).
 const MAX_USER_RETRIES: u32 = 5;
+
+/// Bundled, read-only review methods accepted by the public run request.
+pub const VAULT_REVIEWER_SKILLS: [&str; 5] = [
+    "vault-docs-review",
+    "vault-api-review",
+    "vault-data-review",
+    "vault-runtime-review",
+    "vault-evidence-review",
+];
+
+/// Categories shared by every bundled reviewer finding contract.
+pub const VAULT_REVIEW_CATEGORIES: [&str; 6] =
+    ["coverage", "api", "data", "runtime", "evidence", "quality"];
+
+/// Validate the optional review block before any sessions or durable run rows
+/// are created. Provider resolution follows the same defaults as writers, so
+/// an empty provider is intentionally valid here.
+pub fn validate_review_request(review: &ReviewReq) -> Result<(), String> {
+    if review.reviewers.is_empty() || review.reviewers.len() > 4 {
+        return Err("review.reviewers must be 1..=4 when review is enabled".into());
+    }
+    if !(1..=10).contains(&review.max_iterations) {
+        return Err("review.max_iterations must be 1..=10".into());
+    }
+    for (index, reviewer) in review.reviewers.iter().enumerate() {
+        let skill = reviewer.skill.trim();
+        if !VAULT_REVIEWER_SKILLS.contains(&skill) {
+            return Err(format!(
+                "review.reviewers[{index}] has unknown reviewer skill '{}'; expected one of: {}",
+                reviewer.skill,
+                VAULT_REVIEWER_SKILLS.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Parse the reviewer's result artifact. Only a bare JSON array satisfying the
+/// findings contract is accepted: prose, wrapper objects, incomplete evidence,
+/// and unsupported severities are errors rather than accidental clean verdicts.
+pub fn parse_review_findings(content: &str) -> Result<Vec<VaultDocsFinding>, String> {
+    let findings: Vec<VaultDocsFinding> = serde_json::from_str(content.trim())
+        .map_err(|error| format!("review output must be a valid JSON finding array: {error}"))?;
+    for (index, finding) in findings.iter().enumerate() {
+        if !matches!(finding.severity.as_str(), "blocking" | "major" | "minor") {
+            return Err(format!(
+                "review finding {index} severity must be blocking, major, or minor"
+            ));
+        }
+        if !VAULT_REVIEW_CATEGORIES.contains(&finding.category.as_str()) {
+            return Err(format!(
+                "review finding {index} category must be one of: {}",
+                VAULT_REVIEW_CATEGORIES.join(", ")
+            ));
+        }
+        for (field, value) in [
+            ("summary", finding.summary.as_str()),
+            ("missed_item", finding.missed_item.as_str()),
+            ("required_fix", finding.required_fix.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("review finding {index} requires non-empty {field}"));
+            }
+        }
+        if finding.evidence.is_empty() {
+            return Err(format!(
+                "review finding {index} requires at least one evidence location"
+            ));
+        }
+        for (evidence_index, evidence) in finding.evidence.iter().enumerate() {
+            let repo_complete = evidence
+                .repo_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+                && evidence.line.is_some_and(|line| line > 0);
+            let doc_complete = evidence
+                .doc_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+                && evidence
+                    .section
+                    .as_deref()
+                    .is_some_and(|section| !section.trim().is_empty());
+            if !repo_complete && !doc_complete {
+                return Err(format!(
+                    "review finding {index} evidence {evidence_index} requires repo_path+line or doc_path+section"
+                ));
+            }
+        }
+    }
+    Ok(findings)
+}
+
+/// A round is clean only after every configured reviewer has completed in the
+/// same round and every one returned an empty findings array.
+pub fn all_reviewers_clean(reviewers: &[VaultDocsReviewer]) -> bool {
+    !reviewers.is_empty()
+        && reviewers
+            .iter()
+            .all(|reviewer| reviewer.state == "done" && reviewer.findings.is_empty())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewAction {
+    Pending,
+    Clean,
+    Revise,
+    Exhausted,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReviewRoundOutcome {
+    Clean,
+    Revise,
+    Exhausted,
+    Error,
+}
+
+/// Clone only immutable reviewer configuration into a new independently
+/// visible round. Runtime/result fields never leak from an earlier round.
+fn fresh_review_round(iteration: u8, configured: &[VaultDocsReviewer]) -> VaultDocsReviewRound {
+    VaultDocsReviewRound {
+        iteration,
+        state: "reviewing".into(),
+        reviewers: configured
+            .iter()
+            .map(|reviewer| VaultDocsReviewer {
+                index: reviewer.index,
+                provider: reviewer.provider.clone(),
+                model: reviewer.model.clone(),
+                skill: reviewer.skill.clone(),
+                focus: reviewer.focus.clone(),
+                state: "pending".into(),
+                session_id: None,
+                findings: Vec::new(),
+                error: None,
+            })
+            .collect(),
+        revision: VaultDocsRevision::default(),
+    }
+}
+
+fn review_round_outcome(
+    reviewers: &[VaultDocsReviewer],
+    iteration: u8,
+    max_iterations: u8,
+) -> ReviewRoundOutcome {
+    match next_review_action(reviewers, iteration, max_iterations) {
+        ReviewAction::Clean => ReviewRoundOutcome::Clean,
+        ReviewAction::Revise => ReviewRoundOutcome::Revise,
+        ReviewAction::Exhausted => ReviewRoundOutcome::Exhausted,
+        ReviewAction::Pending | ReviewAction::Error => ReviewRoundOutcome::Error,
+    }
+}
+
+/// Decide the next stage without advancing an incomplete or failed round.
+pub fn next_review_action(
+    reviewers: &[VaultDocsReviewer],
+    current_iteration: u8,
+    max_iterations: u8,
+) -> ReviewAction {
+    if reviewers.is_empty()
+        || reviewers
+            .iter()
+            .any(|reviewer| !matches!(reviewer.state.as_str(), "pending" | "running" | "done"))
+    {
+        ReviewAction::Error
+    } else if reviewers
+        .iter()
+        .any(|reviewer| matches!(reviewer.state.as_str(), "pending" | "running"))
+    {
+        ReviewAction::Pending
+    } else if all_reviewers_clean(reviewers) {
+        ReviewAction::Clean
+    } else if current_iteration >= max_iterations {
+        ReviewAction::Exhausted
+    } else {
+        ReviewAction::Revise
+    }
+}
 
 /// A fresh done-marker path + the prompt line instructing the agent to write
 /// it LAST. Turn completion is transcript-based and only claude has one — for
@@ -2042,6 +3549,87 @@ fn build_refine_prompt(
     p
 }
 
+/// Build an independent review turn. The package is referenced by its staged
+/// path and the only allowed mutation is the server-owned JSON result file.
+#[allow(clippy::too_many_arguments)]
+pub fn build_reviewer_prompt(
+    original_request: &str,
+    vault_id: i64,
+    target_dir: &str,
+    iteration: u8,
+    skill: &str,
+    focus: Option<&str>,
+    package_path: &str,
+    results_path: &str,
+) -> String {
+    let focus = focus
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("\nADDITIONAL FOCUS (narrows, never waives the method):\n{value}\n"))
+        .unwrap_or_default();
+    format!(
+        "OTTO_TASK: vault_docs_review\n\
+         You are an INDEPENDENT REVIEWER in review round {iteration}. Review the current FINAL \
+         documentation under {target} in Otto vault {vault_id} against the original request and \
+         the real repository in your working directory.\n\n\
+         METHOD — open and follow the complete `{skill}` package starting at:\n\
+         `{package_path}`\n\
+         Read its referenced checklists and examples before judging the bundle.{focus}\n\
+         REVIEW RULES — follow exactly:\n\
+         - This is read-only with respect to the vault: never call a vault write, rename, or \
+         delete tool and never repair findings yourself.\n\
+         - Reconcile the current `coverage.md`, final notes, indexes, and deterministic audit \
+         output against real code. Do not blindly repeat audit candidates.\n\
+         - Every finding must be proven by a real repository path and line and/or an exact \
+         documentation path and section. Reject speculative findings and stylistic preferences.\n\
+         - Re-read the current bundle in this round; do not repeat a finding already repaired.\n\
+         - `[]` is clean only after completing every mandatory check in the method.\n\n\
+         OUTPUT — write ONLY one JSON array to `{results_path}`. Each item must have exactly:\n\
+         {{\"severity\":\"blocking|major|minor\",\
+         \"category\":\"coverage|api|data|runtime|evidence|quality\",\
+         \"summary\":\"...\",\"evidence\":[{{\"repo_path\":\"path\",\"line\":1}},\
+         {{\"doc_path\":\"path.md\",\"section\":\"Heading\"}}],\
+         \"missed_item\":\"...\",\"required_fix\":\"...\"}}\n\
+         Missing, malformed, wrapped, or prose-contaminated output is an error.\n\
+         {rules}\n\
+         ORIGINAL REQUEST:\n{original_request}\n",
+        target = dir_display(target_dir),
+        rules = DOCS_STEP_RULES,
+    )
+}
+
+/// Build the resumed final-author repair turn from the combined, persisted
+/// findings of one round.
+pub fn build_revision_prompt(
+    original_request: &str,
+    vault_id: i64,
+    target_dir: &str,
+    iteration: u8,
+    findings: &[VaultDocsFinding],
+    results_path: &str,
+) -> String {
+    let findings_json = serde_json::to_string_pretty(findings).unwrap_or_else(|_| "[]".into());
+    format!(
+        "OTTO_TASK: vault_docs_revise\n\
+         Resume as the FINAL AUTHOR for review round {iteration}. Repair the current final \
+         documentation under {target} in Otto vault {vault_id}.\n\n\
+         REVISION RULES — follow exactly:\n\
+         - Re-read the affected source and current notes; apply every valid required_fix below.\n\
+         - Preserve correct existing material. Resolve the underlying omission, not only its wording.\n\
+         - Refresh `coverage.md`, neighboring `index.md` files, links, examples, diagrams, and text \
+         artifacts affected by a repair.\n\
+         - Run `otto_vault_okf_validate` and the bundle audit; fix every introduced error.\n\
+         - Write through the guarded Otto vault tools only.\n\
+         {rules}\n\
+         FINALLY, write ONLY this JSON shape to `{results_path}` with every vault-relative path \
+         changed in this revision: {{\"written\": [\"path/to/changed.md\", ...]}}\n\n\
+         ORIGINAL REQUEST:\n{original_request}\n\n\
+         COMBINED SOURCE-BACKED FINDINGS:\n{findings_json}\n",
+        target = dir_display(target_dir),
+        rules = DOCS_STEP_RULES,
+    )
+}
+
 /// Parse the agent-written results file TOLERANTLY: accept a bare JSON array,
 /// a `{"written": [...]}` object (direct or buried in prose via the shared
 /// balanced-object extractor), normalize paths (strip `./` and leading `/`),
@@ -2168,13 +3756,75 @@ mod tests {
     #[test]
     fn skills_block_renders_on_non_okf_vaults_too() {
         // Prepared-prompt skills must reach the prompt even when okf=false.
-        let p = build_writer_prompt("x", 1, 1, 2, "run8run8", "", false, Some("SKILL BODY"), None);
+        let p = build_writer_prompt(
+            "x",
+            1,
+            1,
+            2,
+            "run8run8",
+            "",
+            false,
+            Some("SKILL BODY"),
+            None,
+        );
         assert!(p.contains("AUTHORING SKILLS"));
         assert!(p.contains("SKILL BODY"));
         assert!(!p.contains("OKF — this vault is OKF-conformant"));
         // No skills, no OKF → no block at all.
         let n = build_writer_prompt("x", 1, 1, 2, "run8run8", "", false, None, None);
         assert!(!n.contains("AUTHORING SKILLS"));
+    }
+
+    #[test]
+    fn staged_package_guidance_is_provider_specific() {
+        let mut files = std::collections::HashMap::new();
+        files.insert(
+            "okf-authoring".to_string(),
+            vec!["SKILL.md".to_string(), "references/spec.md".to_string()],
+        );
+        let staged = crate::modules::StagedSkillPackages {
+            root: "/tmp/staged-skills".to_string(),
+            files,
+        };
+        let names = vec!["okf-authoring".to_string()];
+        let fallback =
+            std::collections::HashMap::from([("okf-authoring".to_string(), "method".to_string())]);
+
+        let codex = skill_package_guidance("codex", Some(&staged), &names, &fallback).unwrap();
+        assert!(codex.contains("okf-authoring/SKILL.md"));
+        assert!(codex.contains("references/spec.md"));
+        assert!(
+            !codex.contains("method"),
+            "package bodies must not be inlined"
+        );
+
+        let claude = skill_package_guidance("claude", Some(&staged), &names, &fallback).unwrap();
+        assert!(claude.contains("invoke"));
+        assert!(claude.contains("okf-authoring"));
+        assert!(!claude.contains("references/spec.md"));
+    }
+
+    #[test]
+    fn partial_staging_inlines_only_failed_packages() {
+        let staged = crate::modules::StagedSkillPackages {
+            root: "/tmp/staged-skills".to_string(),
+            files: std::collections::HashMap::from([(
+                "okf-authoring".to_string(),
+                vec!["SKILL.md".to_string()],
+            )]),
+        };
+        let names = vec!["okf-authoring".to_string(), "jira-story-writer".to_string()];
+        let fallback = std::collections::HashMap::from([
+            ("okf-authoring".to_string(), "OKF BODY".to_string()),
+            ("jira-story-writer".to_string(), "JIRA BODY".to_string()),
+        ]);
+
+        for provider in ["codex", "claude"] {
+            let guidance =
+                skill_package_guidance(provider, Some(&staged), &names, &fallback).unwrap();
+            assert!(guidance.contains("JIRA BODY"));
+            assert!(!guidance.contains("OKF BODY"));
+        }
     }
 
     #[test]
@@ -2212,7 +3862,7 @@ mod tests {
         assert!(p.contains("### _drafts/docs-run-r/agent-2/c.md"));
         assert!(p.contains("[not inlined — read via otto_vault_read]"));
         assert!(!p.contains("unreachable"));
-        // OKF: validate + index refresh + inlined skill; results file; target dir.
+        // OKF: validate + index refresh + skill guidance; results file; target dir.
         assert!(p.contains("otto_vault_okf_validate"));
         assert!(p.contains(OKF_SKILL));
         assert!(p.contains("/tmp/r.json"));
@@ -2309,13 +3959,412 @@ mod tests {
     }
 
     #[test]
-    fn inline_is_withheld_from_claude_only() {
-        // claude → the short invoke hint; everyone else → the full skill text.
-        assert_eq!(inline_for_provider("claude", Some("text"), Some("hint")), Some("hint"));
-        assert_eq!(inline_for_provider("claude", Some("text"), None), None);
-        assert_eq!(inline_for_provider("codex", Some("text"), Some("hint")), Some("text"));
-        assert_eq!(inline_for_provider("agy", Some("text"), None), Some("text"));
-        assert_eq!(inline_for_provider("codex", None, None), None);
+    fn review_request_defaults_method_and_iterations() {
+        let req: RunReq = serde_json::from_value(serde_json::json!({
+            "prompt": "document everything",
+            "agents": [{"provider": "codex"}],
+            "review": {"reviewers": [{"provider": "claude"}]}
+        }))
+        .unwrap();
+        let review = req.review.as_ref().unwrap();
+        assert_eq!(review.max_iterations, 3);
+        assert_eq!(review.reviewers[0].skill, "vault-docs-review");
+        assert!(validate_review_request(review).is_ok());
+    }
+
+    #[test]
+    fn review_request_validation_is_actionable() {
+        let review = |reviewers: Vec<ReviewerReq>, max_iterations| ReviewReq {
+            reviewers,
+            max_iterations,
+        };
+        let reviewer = |skill: &str| ReviewerReq {
+            provider: "claude".into(),
+            model: None,
+            skill: skill.into(),
+            focus: None,
+        };
+
+        let err = validate_review_request(&review(vec![], 3)).unwrap_err();
+        assert!(err.contains("reviewers must be 1..=4"));
+        let err = validate_review_request(&review(
+            (0..5).map(|_| reviewer("vault-docs-review")).collect(),
+            3,
+        ))
+        .unwrap_err();
+        assert!(err.contains("reviewers must be 1..=4"));
+        let err =
+            validate_review_request(&review(vec![reviewer("vault-docs-review")], 0)).unwrap_err();
+        assert!(err.contains("max_iterations must be 1..=10"));
+        let err =
+            validate_review_request(&review(vec![reviewer("vault-docs-review")], 11)).unwrap_err();
+        assert!(err.contains("max_iterations must be 1..=10"));
+        let err =
+            validate_review_request(&review(vec![reviewer("unknown-review")], 3)).unwrap_err();
+        assert!(err.contains("unknown reviewer skill 'unknown-review'"));
+        assert!(err.contains("vault-docs-review"));
+    }
+
+    fn sample_reviewer(state: &str, findings: Vec<VaultDocsFinding>) -> VaultDocsReviewer {
+        VaultDocsReviewer {
+            index: 0,
+            provider: "claude".into(),
+            model: None,
+            skill: "vault-docs-review".into(),
+            focus: None,
+            state: state.into(),
+            session_id: None,
+            findings,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn review_findings_parser_accepts_empty_and_source_backed_arrays() {
+        assert!(parse_review_findings("[]").unwrap().is_empty());
+        let findings = parse_review_findings(
+            r#"[{
+                "severity":"blocking",
+                "category":"api",
+                "summary":"POST /widgets omits its 422 response body",
+                "evidence":[
+                    {"repo_path":"src/routes/widgets.rs","line":91},
+                    {"doc_path":"widgets/api.md","section":"POST /widgets"}
+                ],
+                "missed_item":"ValidationError response schema and example",
+                "required_fix":"Document the 422 schema/example and add it to OpenAPI"
+            }]"#,
+        )
+        .unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, "blocking");
+        assert_eq!(findings[0].evidence[0].line, Some(91));
+        assert_eq!(
+            findings[0].evidence[1].doc_path.as_deref(),
+            Some("widgets/api.md")
+        );
+    }
+
+    #[test]
+    fn review_findings_parser_rejects_malformed_or_unproven_output() {
+        for malformed in [
+            "not json",
+            r#"{"findings": []}"#,
+            r#"[{"severity":"blocking"}]"#,
+            r#"[{"severity":"urgent","category":"api","summary":"x","evidence":[{"repo_path":"a.rs","line":1}],"missed_item":"x","required_fix":"x"}]"#,
+            r#"[{"severity":"major","category":"banana","summary":"x","evidence":[{"repo_path":"a.rs","line":1}],"missed_item":"x","required_fix":"x"}]"#,
+            r#"[{"severity":"major","category":"api","summary":"x","evidence":[],"missed_item":"x","required_fix":"x"}]"#,
+            r#"[{"severity":"major","category":"api","summary":"x","evidence":[{}],"missed_item":"x","required_fix":"x"}]"#,
+        ] {
+            assert!(
+                parse_review_findings(malformed).is_err(),
+                "must reject: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_round_decision_requires_same_round_clean_and_honors_cap() {
+        let clean = sample_reviewer("done", vec![]);
+        let finding = VaultDocsFinding {
+            severity: "major".into(),
+            category: "data".into(),
+            summary: "Missing write impact".into(),
+            evidence: vec![VaultDocsFindingEvidence {
+                repo_path: Some("src/dao.rs".into()),
+                line: Some(42),
+                doc_path: Some("data/orders.md".into()),
+                section: Some("Writes".into()),
+            }],
+            missed_item: "transaction boundary".into(),
+            required_fix: "Document the transaction boundary".into(),
+        };
+        let dirty = sample_reviewer("done", vec![finding]);
+        let still_running = sample_reviewer("running", vec![]);
+
+        assert!(all_reviewers_clean(&[clean.clone(), clean.clone()]));
+        assert!(!all_reviewers_clean(&[]));
+        assert!(!all_reviewers_clean(&[clean.clone(), dirty.clone()]));
+        assert!(!all_reviewers_clean(&[clean.clone(), still_running]));
+        assert_eq!(next_review_action(&[clean], 1, 3), ReviewAction::Clean);
+        assert_eq!(
+            next_review_action(std::slice::from_ref(&dirty), 1, 3),
+            ReviewAction::Revise
+        );
+        assert_eq!(next_review_action(&[dirty], 3, 3), ReviewAction::Exhausted);
+
+        for state in ["pending", "running"] {
+            let incomplete = sample_reviewer(state, vec![]);
+            assert_eq!(
+                next_review_action(std::slice::from_ref(&incomplete), 1, 3),
+                ReviewAction::Pending
+            );
+            assert_eq!(
+                next_review_action(&[incomplete], 3, 3),
+                ReviewAction::Pending
+            );
+        }
+        for state in ["error", "cancelled", "interrupted"] {
+            let failed = sample_reviewer(state, vec![]);
+            assert_eq!(
+                next_review_action(std::slice::from_ref(&failed), 1, 3),
+                ReviewAction::Error
+            );
+            assert_eq!(next_review_action(&[failed], 3, 3), ReviewAction::Error);
+        }
+        assert_eq!(next_review_action(&[], 1, 3), ReviewAction::Error);
+    }
+
+    #[test]
+    fn review_round_driver_fans_out_fresh_reviewers_and_persists_visible_states() {
+        let configured = vec![
+            sample_reviewer("done", vec![]),
+            VaultDocsReviewer {
+                index: 1,
+                skill: "vault-api-review".into(),
+                focus: Some("request bodies".into()),
+                ..sample_reviewer("error", vec![])
+            },
+        ];
+        let round = fresh_review_round(2, &configured);
+        assert_eq!(round.iteration, 2);
+        assert_eq!(round.state, "reviewing");
+        assert_eq!(round.reviewers.len(), 2);
+        assert!(round.reviewers.iter().all(|reviewer| {
+            reviewer.state == "pending"
+                && reviewer.session_id.is_none()
+                && reviewer.findings.is_empty()
+                && reviewer.error.is_none()
+        }));
+        assert_eq!(round.reviewers[1].skill, "vault-api-review");
+        assert_eq!(round.reviewers[1].focus.as_deref(), Some("request bodies"));
+        assert_eq!(round.revision.state, "skipped");
+    }
+
+    #[test]
+    fn review_round_driver_maps_clean_revision_exhaustion_and_partial_failure() {
+        let clean = vec![sample_reviewer("done", vec![])];
+        assert_eq!(
+            review_round_outcome(&clean, 1, 3),
+            ReviewRoundOutcome::Clean
+        );
+
+        let finding = VaultDocsFinding {
+            severity: "major".into(),
+            category: "api".into(),
+            summary: "Missing body".into(),
+            evidence: vec![VaultDocsFindingEvidence {
+                repo_path: Some("src/api.rs".into()),
+                line: Some(9),
+                doc_path: None,
+                section: None,
+            }],
+            missed_item: "request schema".into(),
+            required_fix: "document it".into(),
+        };
+        let dirty = vec![sample_reviewer("done", vec![finding])];
+        assert_eq!(
+            review_round_outcome(&dirty, 1, 3),
+            ReviewRoundOutcome::Revise
+        );
+        assert_eq!(
+            review_round_outcome(&dirty, 3, 3),
+            ReviewRoundOutcome::Exhausted
+        );
+
+        let partial = vec![
+            sample_reviewer("done", vec![]),
+            sample_reviewer("error", vec![]),
+        ];
+        assert_eq!(
+            review_round_outcome(&partial, 1, 3),
+            ReviewRoundOutcome::Error
+        );
+    }
+
+    #[test]
+    fn retry_terminates_an_inflight_turn_before_signalling_but_keeps_failed_session_live() {
+        assert!(retry_needs_termination("running"));
+        assert!(retry_needs_termination("pending"));
+        assert!(!retry_needs_termination("error"));
+    }
+
+    #[test]
+    fn targeted_failed_slot_retry_preserves_completed_peers_and_round_findings() {
+        let finding = VaultDocsFinding {
+            severity: "major".into(),
+            category: "api".into(),
+            summary: "Missing response".into(),
+            evidence: vec![VaultDocsFindingEvidence {
+                repo_path: Some("src/api.rs".into()),
+                line: Some(7),
+                doc_path: None,
+                section: None,
+            }],
+            missed_item: "response body".into(),
+            required_fix: "document response".into(),
+        };
+        let completed = sample_reviewer("done", vec![finding.clone()]);
+        let mut failed = sample_reviewer("error", vec![]);
+        failed.index = 1;
+        failed.error = Some("malformed JSON".into());
+        let mut run = sample_run("reviewing");
+        run.review = VaultDocsReview {
+            state: "reviewing".into(),
+            max_iterations: 3,
+            current_iteration: 1,
+            outcome: None,
+            reviewers: vec![completed.clone(), failed.clone()],
+            rounds: vec![VaultDocsReviewRound {
+                iteration: 1,
+                state: "reviewing".into(),
+                reviewers: vec![completed, failed],
+                revision: VaultDocsRevision {
+                    state: "error".into(),
+                    session_id: Some("author-1".into()),
+                    changed_paths: vec!["old.md".into()],
+                    error: Some("audit failed".into()),
+                },
+            }],
+        };
+
+        reset_reviewer_for_retry(&mut run, 1, 1);
+        assert_eq!(run.review.reviewers[0].state, "done");
+        assert_eq!(run.review.reviewers[0].findings.len(), 1);
+        assert_eq!(run.review.reviewers[0].findings[0].summary, finding.summary);
+        assert_eq!(run.review.rounds[0].reviewers[0].findings.len(), 1);
+        // Top-level reviewers are immutable resolved configuration snapshots;
+        // only the active round carries mutable live state.
+        assert_eq!(run.review.reviewers[1].state, "error");
+        assert_eq!(
+            run.review.reviewers[1].error.as_deref(),
+            Some("malformed JSON")
+        );
+        assert_eq!(run.review.rounds[0].reviewers[1].state, "pending");
+
+        reset_revision_for_retry(&mut run, 1);
+        assert_eq!(run.review.rounds[0].revision.state, "pending");
+        assert!(run.review.rounds[0].revision.error.is_none());
+        assert!(run.review.rounds[0].revision.changed_paths.is_empty());
+        assert_eq!(run.review.reviewers[0].findings.len(), 1);
+    }
+
+    #[test]
+    fn retry_handler_state_composition_flags_only_the_requested_error_slot() {
+        let finding = VaultDocsFinding {
+            severity: "major".into(),
+            category: "api".into(),
+            summary: "Missing response".into(),
+            evidence: vec![VaultDocsFindingEvidence {
+                repo_path: Some("src/api.rs".into()),
+                line: Some(7),
+                doc_path: None,
+                section: None,
+            }],
+            missed_item: "response body".into(),
+            required_fix: "document response".into(),
+        };
+        let completed = sample_reviewer("done", vec![finding.clone()]);
+        let mut failed = sample_reviewer("error", vec![]);
+        failed.index = 1;
+        failed.session_id = Some("failed-session".into());
+        failed.error = Some("malformed JSON".into());
+        let mut run = sample_run("reviewing");
+        run.review = VaultDocsReview {
+            state: "reviewing".into(),
+            max_iterations: 3,
+            current_iteration: 1,
+            outcome: None,
+            reviewers: vec![completed.clone(), failed.clone()],
+            rounds: vec![VaultDocsReviewRound {
+                iteration: 1,
+                state: "reviewing".into(),
+                reviewers: vec![completed, failed],
+                revision: VaultDocsRevision::default(),
+            }],
+        };
+        let retries = Arc::new(Mutex::new(HashSet::new()));
+        let mut entry = RunEntry {
+            run,
+            cancel: Arc::new(AtomicBool::new(false)),
+            retries: Arc::clone(&retries),
+            persist_tx: None,
+        };
+
+        let (sid, key) = activate_review_retry(&mut entry, 1, Some(1)).unwrap();
+        assert_eq!(sid.as_deref(), Some("failed-session"));
+        assert_eq!(key, reviewer_retry_key(1, 1));
+        assert!(retries.lock().unwrap().contains(&key));
+        assert_eq!(entry.run.review.rounds[0].reviewers[0].state, "done");
+        assert_eq!(
+            entry.run.review.rounds[0].reviewers[0].findings[0].summary,
+            finding.summary
+        );
+        assert_eq!(entry.run.review.rounds[0].reviewers[1].state, "pending");
+        assert!(entry.run.review.rounds[0].reviewers[1].error.is_none());
+
+        let error = activate_review_retry(&mut entry, 2, Some(1)).unwrap_err();
+        assert!(error.0.to_string().contains("not active"));
+    }
+
+    #[test]
+    fn review_prompt_carries_method_focus_evidence_and_result_contract() {
+        let prompt = build_reviewer_prompt(
+            "Document the widget service",
+            9,
+            "widgets",
+            2,
+            "vault-api-review",
+            Some("Prioritize externally consumed contracts"),
+            "/tmp/staged/skills/vault-api-review/SKILL.md",
+            "/tmp/review-round-2-agent-1.json",
+        );
+        assert!(prompt.contains("OTTO_TASK: vault_docs_review"));
+        assert!(prompt.contains("round 2"));
+        assert!(prompt.contains("vault-api-review"));
+        assert!(prompt.contains("/tmp/staged/skills/vault-api-review/SKILL.md"));
+        assert!(prompt.contains("Prioritize externally consumed contracts"));
+        assert!(prompt.contains("real repository path and line"));
+        assert!(prompt.contains("speculative"));
+        assert!(prompt.contains("read-only"));
+        assert!(prompt.contains("missed_item"));
+        assert!(prompt.contains("required_fix"));
+        assert!(prompt.contains("coverage|api|data|runtime|evidence|quality"));
+        assert!(prompt.contains("/tmp/review-round-2-agent-1.json"));
+        assert!(prompt.contains("Document the widget service"));
+    }
+
+    #[test]
+    fn review_revision_prompt_carries_findings_and_changed_path_results_contract() {
+        let finding = VaultDocsFinding {
+            severity: "major".into(),
+            category: "api".into(),
+            summary: "Missing response body".into(),
+            evidence: vec![VaultDocsFindingEvidence {
+                repo_path: Some("src/routes.rs".into()),
+                line: Some(8),
+                doc_path: Some("api/widgets.md".into()),
+                section: Some("POST /widgets".into()),
+            }],
+            missed_item: "422 schema".into(),
+            required_fix: "Add schema and example".into(),
+        };
+        let prompt = build_revision_prompt(
+            "Document the widget service",
+            9,
+            "widgets",
+            2,
+            &[finding],
+            "/tmp/revision-round-2.json",
+        );
+        assert!(prompt.contains("OTTO_TASK: vault_docs_revise"));
+        assert!(prompt.contains("Missing response body"));
+        assert!(prompt.contains("Add schema and example"));
+        assert!(prompt.contains("coverage.md"));
+        assert!(prompt.contains("index.md"));
+        assert!(prompt.contains("otto_vault_okf_validate"));
+        assert!(prompt.contains(r#"{"written": ["path/to/changed.md", ...]}"#));
+        assert!(prompt.contains("/tmp/revision-round-2.json"));
     }
 
     fn sample_run(state: &str) -> VaultDocsRun {
@@ -2367,6 +4416,7 @@ mod tests {
                 session_id: None,
                 error: None,
             },
+            review: VaultDocsReview::default(),
             written: vec![],
             error: None,
             started_at: "2026-07-12T10:00:00Z".into(),
@@ -2374,9 +4424,307 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    #[allow(clippy::type_complexity)]
+    struct ScriptedReviewTurnRunner {
+        outputs:
+            Arc<Mutex<HashMap<ReviewTurnKind, std::collections::VecDeque<Result<String, String>>>>>,
+        seen: Arc<Mutex<Vec<ReviewTurnKind>>>,
+        scans: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ScriptedReviewTurnRunner {
+        fn with_outputs(
+            outputs: impl IntoIterator<Item = (ReviewTurnKind, Vec<Result<&'static str, &'static str>>)>,
+        ) -> Self {
+            let outputs = outputs
+                .into_iter()
+                .map(|(kind, values)| {
+                    (
+                        kind,
+                        values
+                            .into_iter()
+                            .map(|value| value.map(str::to_string).map_err(str::to_string))
+                            .collect(),
+                    )
+                })
+                .collect();
+            Self {
+                outputs: Arc::new(Mutex::new(outputs)),
+                ..Self::default()
+            }
+        }
+
+        fn attempts(&self, kind: &ReviewTurnKind) -> usize {
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|seen| *seen == kind)
+                .count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ReviewTurnRunner for ScriptedReviewTurnRunner {
+        async fn run_turn(
+            &self,
+            request: ReviewTurnRequest,
+            on_ready: Box<dyn FnOnce(Id) + Send>,
+        ) -> Result<(String, Id), String> {
+            self.seen.lock().unwrap().push(request.kind.clone());
+            let sid = Id::from(format!("test-{:?}", request.kind));
+            on_ready(sid.clone());
+            let output = self
+                .outputs
+                .lock()
+                .unwrap()
+                .get_mut(&request.kind)
+                .and_then(std::collections::VecDeque::pop_front)
+                .unwrap_or_else(|| Err(format!("no scripted output for {:?}", request.kind)))?;
+            std::fs::write(&request.result_path, output)
+                .map_err(|error| format!("write scripted output: {error}"))?;
+            Ok(("scripted".into(), sid))
+        }
+
+        async fn scan(&self, _vault_id: i64) {
+            self.scans.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn review_loop_fixture(
+        max_iterations: u8,
+        reviewer_count: usize,
+    ) -> (
+        RunRegistry,
+        Arc<AtomicBool>,
+        Arc<Mutex<HashSet<usize>>>,
+        crate::modules::StagedSkillPackages,
+        String,
+    ) {
+        let reviewers = (0..reviewer_count)
+            .map(|index| VaultDocsReviewer {
+                index,
+                ..sample_reviewer("pending", vec![])
+            })
+            .collect::<Vec<_>>();
+        let mut run = sample_run("running");
+        run.id = format!("test-review-{}", otto_core::new_id());
+        let run_id = run.id.clone();
+        run.review = VaultDocsReview {
+            state: "pending".into(),
+            max_iterations,
+            current_iteration: 0,
+            outcome: None,
+            reviewers,
+            rounds: vec![],
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let retries = Arc::new(Mutex::new(HashSet::new()));
+        let reg = new_run_registry();
+        reg.lock().unwrap().insert(
+            run.id.clone(),
+            RunEntry {
+                run,
+                cancel: Arc::clone(&cancel),
+                retries: Arc::clone(&retries),
+                persist_tx: None,
+            },
+        );
+        let packages = crate::modules::StagedSkillPackages {
+            root: "/tmp/test-vault-review-skills".into(),
+            files: HashMap::from([("vault-docs-review".into(), vec!["SKILL.md".into()])]),
+        };
+        (reg, cancel, retries, packages, run_id)
+    }
+
+    const REVIEW_FINDING_JSON: &str = r#"[{
+        "severity":"major","category":"api","summary":"Missing response body",
+        "evidence":[{"repo_path":"src/api.rs","line":7}],
+        "missed_item":"response body","required_fix":"document response"
+    }]"#;
+
+    #[tokio::test]
+    async fn review_loop_runs_dirty_revision_then_all_reviewers_clean() {
+        let runner = ScriptedReviewTurnRunner::with_outputs([
+            (
+                ReviewTurnKind::Reviewer {
+                    iteration: 1,
+                    index: 0,
+                },
+                vec![Ok("[]")],
+            ),
+            (
+                ReviewTurnKind::Reviewer {
+                    iteration: 1,
+                    index: 1,
+                },
+                vec![Ok(REVIEW_FINDING_JSON)],
+            ),
+            (
+                ReviewTurnKind::Revision { iteration: 1 },
+                vec![Ok(r#"{"written":["docs/api.md","coverage.md"]}"#)],
+            ),
+            (
+                ReviewTurnKind::Reviewer {
+                    iteration: 2,
+                    index: 0,
+                },
+                vec![Ok("[]")],
+            ),
+            (
+                ReviewTurnKind::Reviewer {
+                    iteration: 2,
+                    index: 1,
+                },
+                vec![Ok("[]")],
+            ),
+        ]);
+        let (reg, cancel, retries, packages, run_id) = review_loop_fixture(3, 2);
+        let result = run_review_loop_with_runner(
+            Arc::new(runner.clone()),
+            1,
+            "/tmp",
+            &reg,
+            &run_id,
+            "document everything",
+            "docs",
+            &WriterSpec {
+                provider: "claude".into(),
+                model: None,
+            },
+            "author-1",
+            Some(&packages),
+            cancel,
+            retries,
+        )
+        .await;
+        assert!(matches!(result, ReviewLoopResult::Clean));
+        let run = reg.lock().unwrap().get(&run_id).unwrap().run.clone();
+        assert_eq!(run.review.state, "clean");
+        assert_eq!(run.review.current_iteration, 2);
+        assert_eq!(run.review.rounds.len(), 2);
+        assert_eq!(run.review.rounds[0].state, "revised");
+        assert_eq!(run.review.rounds[0].revision.state, "done");
+        assert_eq!(
+            run.review.rounds[0].revision.changed_paths,
+            vec!["docs/api.md", "coverage.md"]
+        );
+        assert_eq!(run.review.rounds[1].state, "clean");
+        assert!(run.review.rounds[1]
+            .reviewers
+            .iter()
+            .all(|reviewer| reviewer.findings.is_empty()));
+        assert_eq!(runner.scans.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn review_loop_exhausts_exactly_at_user_iteration_limit() {
+        let runner = ScriptedReviewTurnRunner::with_outputs([
+            (
+                ReviewTurnKind::Reviewer {
+                    iteration: 1,
+                    index: 0,
+                },
+                vec![Ok(REVIEW_FINDING_JSON)],
+            ),
+            (
+                ReviewTurnKind::Revision { iteration: 1 },
+                vec![Ok(r#"{"written":["docs/api.md"]}"#)],
+            ),
+            (
+                ReviewTurnKind::Reviewer {
+                    iteration: 2,
+                    index: 0,
+                },
+                vec![Ok(REVIEW_FINDING_JSON)],
+            ),
+        ]);
+        let (reg, cancel, retries, packages, run_id) = review_loop_fixture(2, 1);
+        let result = run_review_loop_with_runner(
+            Arc::new(runner),
+            1,
+            "/tmp",
+            &reg,
+            &run_id,
+            "document everything",
+            "docs",
+            &WriterSpec {
+                provider: "claude".into(),
+                model: None,
+            },
+            "author-1",
+            Some(&packages),
+            cancel,
+            retries,
+        )
+        .await;
+        assert!(matches!(result, ReviewLoopResult::Exhausted));
+        let run = reg.lock().unwrap().get(&run_id).unwrap().run.clone();
+        assert_eq!(run.review.state, "exhausted");
+        assert_eq!(run.review.rounds.len(), 2);
+        assert_eq!(run.review.rounds[1].state, "exhausted");
+        assert_eq!(run.review.rounds[1].revision.state, "skipped");
+    }
+
+    #[tokio::test]
+    async fn malformed_reviewer_output_is_not_clean_and_consumes_targeted_retry() {
+        let kind = ReviewTurnKind::Reviewer {
+            iteration: 1,
+            index: 0,
+        };
+        let runner = ScriptedReviewTurnRunner::with_outputs([(
+            kind.clone(),
+            vec![Ok("not-json"), Ok("[]")],
+        )]);
+        let (reg, cancel, retries, packages, run_id) = review_loop_fixture(1, 1);
+        retries.lock().unwrap().insert(reviewer_retry_key(1, 0));
+        let result = run_review_loop_with_runner(
+            Arc::new(runner.clone()),
+            1,
+            "/tmp",
+            &reg,
+            &run_id,
+            "document everything",
+            "docs",
+            &WriterSpec {
+                provider: "claude".into(),
+                model: None,
+            },
+            "author-1",
+            Some(&packages),
+            cancel,
+            retries,
+        )
+        .await;
+        assert!(matches!(result, ReviewLoopResult::Clean));
+        assert_eq!(runner.attempts(&kind), 2);
+        let run = reg.lock().unwrap().get(&run_id).unwrap().run.clone();
+        assert_eq!(run.review.rounds[0].reviewers[0].state, "done");
+        assert!(run.review.rounds[0].reviewers[0].findings.is_empty());
+    }
+
     #[test]
     fn interrupted_sweep_flips_only_non_terminal_states() {
         let mut run = sample_run("running");
+        let reviewer = sample_reviewer("running", vec![]);
+        run.review = VaultDocsReview {
+            state: "reviewing".into(),
+            max_iterations: 3,
+            current_iteration: 1,
+            outcome: None,
+            reviewers: vec![reviewer.clone()],
+            rounds: vec![VaultDocsReviewRound {
+                iteration: 1,
+                state: "revising".into(),
+                reviewers: vec![reviewer],
+                revision: VaultDocsRevision {
+                    state: "pending".into(),
+                    ..VaultDocsRevision::default()
+                },
+            }],
+        };
         assert!(mark_run_interrupted(&mut run));
         assert_eq!(run.state, "interrupted");
         assert!(run.finished_at.is_some());
@@ -2386,11 +4734,19 @@ mod tests {
         assert_eq!(run.agents[1].state, "interrupted");
         assert_eq!(run.agents[2].state, "interrupted");
         assert_eq!(run.summarizer.state, "interrupted");
+        assert_eq!(run.review.state, "interrupted");
+        assert_eq!(run.review.reviewers[0].state, "running");
+        assert_eq!(run.review.rounds[0].state, "interrupted");
+        assert_eq!(run.review.rounds[0].reviewers[0].state, "interrupted");
+        assert_eq!(run.review.rounds[0].revision.state, "interrupted");
 
         // Terminal runs are untouched (idempotent across sweeps).
         let mut done = sample_run("done");
         assert!(!mark_run_interrupted(&mut done));
         assert_eq!(done.state, "done");
+        let mut exhausted = sample_run("done_with_findings");
+        assert!(!mark_run_interrupted(&mut exhausted));
+        assert_eq!(exhausted.state, "done_with_findings");
         let mut twice = sample_run("running");
         mark_run_interrupted(&mut twice);
         assert!(!mark_run_interrupted(&mut twice));
@@ -2400,6 +4756,61 @@ mod tests {
         single.summarizer.state = "skipped".into();
         mark_run_interrupted(&mut single);
         assert_eq!(single.summarizer.state, "skipped");
+    }
+
+    #[tokio::test]
+    async fn interrupted_recovery_persists_flat_and_nested_review_states() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(false),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let repo = otto_state::VaultDocsRunsRepo::new(pool);
+        let reviewer = sample_reviewer("running", vec![]);
+        let mut run = sample_run("reviewing");
+        run.review = VaultDocsReview {
+            state: "reviewing".into(),
+            max_iterations: 3,
+            current_iteration: 1,
+            outcome: None,
+            reviewers: vec![reviewer.clone()],
+            rounds: vec![VaultDocsReviewRound {
+                iteration: 1,
+                state: "revising".into(),
+                reviewers: vec![reviewer],
+                revision: VaultDocsRevision {
+                    state: "running".into(),
+                    session_id: Some("author-1".into()),
+                    ..VaultDocsRevision::default()
+                },
+            }],
+        };
+        let mut row = run_row(&run);
+        repo.upsert(&row).await.unwrap();
+
+        let recovered = persist_interrupted_row(&repo, &mut row)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, "interrupted");
+        assert_eq!(recovered.review.state, "interrupted");
+        assert_eq!(recovered.review.rounds[0].state, "interrupted");
+        assert_eq!(recovered.review.rounds[0].reviewers[0].state, "interrupted");
+        assert_eq!(recovered.review.rounds[0].revision.state, "interrupted");
+
+        let durable = repo.get(&run.id).await.unwrap().unwrap();
+        assert_eq!(durable.state, "interrupted");
+        assert!(durable.finished_at.is_some());
+        let payload: VaultDocsRun = serde_json::from_str(&durable.payload).unwrap();
+        assert_eq!(payload.review.rounds[0].revision.state, "interrupted");
     }
 
     #[test]
@@ -2416,6 +4827,9 @@ mod tests {
         let run: VaultDocsRun = serde_json::from_str(legacy).unwrap();
         assert_eq!(run.kind, "docs");
         assert_eq!(run.note_path, "");
+        assert_eq!(run.review.state, "skipped");
+        assert_eq!(run.review.max_iterations, 3);
+        assert!(run.review.rounds.is_empty());
         // And a full round-trip preserves the new fields.
         let mut run = sample_run("running");
         run.kind = "refine".into();
@@ -2471,6 +4885,7 @@ mod tests {
                 session_id: None,
                 error: None,
             },
+            review: VaultDocsReview::default(),
             written: vec![],
             error: None,
             started_at: "t".into(),

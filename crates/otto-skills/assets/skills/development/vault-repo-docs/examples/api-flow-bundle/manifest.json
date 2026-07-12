@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "repo": "/work/acme-orders",
+  "commit": "31f4c2a",
+  "generated_at": "2026-07-12T09:00:00Z",
+  "mode": "full",
+  "requested_changed_since": null,
+  "fallback_reason": null,
+  "scanned_files": ["src/http.rs"],
+  "exclusions": [],
+  "counts": {"files_scanned": 1, "files_excluded": 0, "candidates": 1, "by_kind": {"api": 1}},
+  "candidates": [
+    {
+      "id": "api:5ad60d3fea49",
+      "kind": "api",
+      "name": ".route(\"/orders\", post(create_order))",
+      "signature": "POST /orders",
+      "method": "POST",
+      "route": "/orders",
+      "path": "src/http.rs",
+      "line": 42,
+      "evidence": "src/http.rs:42"
+    }
+  ]
+}

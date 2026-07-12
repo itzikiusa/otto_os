@@ -34,7 +34,8 @@ is `docs/contracts/api.md` → *Vault v3 — the docs home*.
 | Find things | FTS5 search with `tag:` / `path:` / `type:` operators; vault notes also appear in **global ⌘F** |
 | See the shape of it | A Canvas2D graph view with a Web-Worker Barnes-Hut layout, built for 100k notes / millions of edges |
 | Standardize docs | **OKF v0.1**: deterministic validator (E1–E3 / W1–W5), reserved `index.md`/`log.md`, concept templates, index generation |
-| Let agents use it | `otto_vault_*` MCP session tools (read + Editor-gated write) and outward `otto.vault_*` control-plane tools |
+| Let agents use it | `otto_vault_*` MCP session tools (read + Editor-gated Markdown and guarded text-artifact writes) and outward `otto.vault_*` control-plane tools |
+| Verify generated docs | Optional 1–4 independent reviewers, each with its own provider/model/method/focus, iterating visibly with the final author (default 3 rounds) |
 | Stay safe | Deletion is a move to `<vault>/.trash/`; rename rewrites links across the vault; writes are optimistic-concurrency checked |
 
 ---
@@ -50,12 +51,12 @@ is `docs/contracts/api.md` → *Vault v3 — the docs home*.
 | · OKF | `crates/otto-vault/src/okf.rs` | E1–E3 / W1–W5 conformance + `index.md` generation |
 | · HTTP | `crates/otto-vault/src/http.rs` | The `/workspaces/{ws}/vault/*` router |
 | Persistence | `crates/otto-state/migrations/0103_vault_docs.sql` | `vaults`, `vault_notes`, `vault_links`, `vault_tags`, `vault_files` (+ runtime FTS5 `vault_fts`); the same migration **dropped** the v2 vector/backends/code tables |
-| MCP (session) | `crates/ottod/src/mcp_tools.rs` | `otto_vault_list/dir/read/search/backlinks/tags/graph/okf_validate` + `write/rename/delete` |
+| MCP (session) | `crates/ottod/src/mcp_tools.rs` | `otto_vault_list/dir/read/search/backlinks/tags/graph/okf_validate` + `write/write_file/rename/delete`; reviewer sessions receive the read-only subset |
 | MCP (outward) | `crates/otto-server/src/mcp_outward.rs` | `otto.vault_*` — reads default-enabled, writes approval-gated |
 | Global search | `crates/otto-server/src/routes/search.rs` | ⌘F fans out to `vault_fts` (`kind: "vault_note"`) |
 | UI | `ui/src/modules/vault/` | `VaultPage` + `FileTree`, `NoteView`, `mdRender`, `RightPanel`, `SearchPanel`, `TagsPanel`, `Switcher`, `NewNoteDialog`, `GraphView` + `graph.worker.ts`, store `vault.svelte.ts` |
 | Contracts (authoritative) | `docs/contracts/api.md` → *Vault v3 — the docs home* | The REST surface; DTOs mirrored in `ui/src/lib/api/types.ts` |
-| Bundled skills | `okf-authoring`, `vault-repo-docs` | The OKF doctrine for agents; "index a repo" = write a linked OKF bundle into the vault |
+| Bundled skills | `okf-authoring`, `vault-repo-docs`, `vault-{docs,api,data,runtime,evidence}-review` | Complete author/reviewer packages with focused references, scripts, examples, and evals |
 
 In the app, the Vault is the **Vault** item in the left nav (globe icon); the
 route is `#/vault`. Vaults are a **global library** (like connections): every
@@ -299,11 +300,11 @@ exposes:
 `index.md`/`log.md` are flagged `reserved` everywhere: excluded from the
 switcher and (by default) the graph, never validated as concepts, searchable
 but marked. The OKF `type` drives the `type:` search operator and graph
-grouping. Two bundled skills make agents fluent: **`okf-authoring`** (the full
-OKF doctrine — produce/maintain/consume, augment-don't-rewrite, validate via
-tool not eyeballs) and **`vault-repo-docs`** ("index a repo" = read the code
-and write a linked OKF bundle — services/, endpoints/, decisions/, runbooks/ —
-into the vault, then validate).
+grouping. Complete bundled skill packages make agents fluent:
+**`okf-authoring`** covers produce/maintain/consume and deterministic quality
+gates; **`vault-repo-docs`** covers source inventory, coverage, deep API/data/
+runtime documentation, and source verification; five `vault-*-review` methods
+independently check the generated bundle (§6b).
 
 ### 4.7 Graph view
 
@@ -401,49 +402,116 @@ classified **DANGEROUS** — off by default and approval-gated by the control
 plane like every other write. See
 [`./mcp-control-plane.md`](./mcp-control-plane.md).
 
-## 6b. Docs agents — AI writes the documentation
+## 6b. Docs agents — write, review, revise
 
-Two agent surfaces live directly in the vault, reusing the standard agent
-infrastructure (managed sessions with the otto MCP tools, provider/model
-selection from the shared registry, inline live terminals):
+Two authoring surfaces live directly in the vault, reusing managed agent
+sessions, the shared provider registry, Otto MCP tools, and inline terminals:
 
-- **Docs agent (create)** — the ✨ toolbar button (or a folder's context menu →
-  "Docs agent here"). Configure 1–4 writer agents (per-agent provider + model)
-  and a summarizer, describe what to document, Run. **Prepared prompts**: a
-  template picker (repo deep-dive, flow catalog, API+OpenAPI, datastores
-  audit, messaging map, incremental "changes since last scan") — pick one,
-  fill the repo path, Insert, edit freely. Templates demand a flow inventory
-  and ONE NOTE PER FLOW (all flows) with an explicit anti-bloat bar, and they
-  attach library skills to the run (`RunReq.skills`, e.g. `vault-repo-docs`);
-  the form shows every injected skill as a clickable chip that opens the
-  skill's full text. Full scans record `commit:`/`scanned_at:` in
-  overview.md's frontmatter so the update template can diff from there. Writers fan out as REAL
-  sessions (each row has an Open toggle mounting its live terminal, multiple at
-  once). With one writer it writes final notes straight into the target folder;
-  with several, each drafts under `_drafts/docs-run-*/agent-N/` and the
-  summarizer consolidates into final notes, after which drafts are moved to
-  `.trash/`. Finished runs list every written note as a link. Runs are
-  **durable** (`vault_docs_runs`): the Runs section lists current + history
-  newest-first and survives tab switches and daemon restarts (a restart flips
-  non-terminal runs to `interrupted` and soft-trashes orphaned drafts). While
-  anything is running the vault topbar shows the pulsing **"N agent runs
-  active"** chip from any view.
-- **Refine with AI (edit)** — the ✨ button in an open note's header opens a
-  drawer: one resumable session per note; each Send applies an instruction to
-  the note via `otto_vault_write` with optimistic `if_hash` (conflicts re-read
-  and re-apply). The note view reloads after each turn unless you have unsaved
-  edits.
+- **Docs agent (create)** — the ✨ toolbar button (or a folder context menu →
+  **Docs agent here**). Configure 1–4 writers (provider + optional model), a
+  summarizer, an optional review roster, and the request. Prepared prompts
+  cover repo deep-dive, flow catalog, API+OpenAPI, datastores, messaging, and
+  incremental updates. With one writer, it writes finals directly; with
+  several, writers draft independently and the summarizer becomes the final
+  author. Finished runs link every written note.
+- **Refine with AI (edit)** — the ✨ button on an open note starts one resumable
+  session per note. Each turn applies the instruction with optimistic
+  `if_hash`; the view reloads after success unless local edits are unsaved.
 
-**OKF enforcement**: on OKF vaults every agent is instructed to produce
-conformant notes (frontmatter `type` + one-sentence `description`, markdown
-links, index/log conventions) — claude sessions get the bundled `okf-authoring`
-skill via `--add-dir`, codex/agy get the skill text inlined — and the
-summarizer must run `otto_vault_okf_validate` and fix every error before
-finishing.
+### Optional reviewer loop
 
-Routes: `POST …/vault/vaults/{id}/docs-agents/run`, `GET /vault/docs-agents/runs/{run_id}`,
-`POST /vault/docs-agents/runs/{run_id}/cancel`, `POST …/docs-agents/refine`,
-`GET …/docs-agents/refine-session?path=` (see `docs/contracts/api.md`).
+**Review outcomes** is off by default, so existing runs are unchanged. Enable
+it to configure 1–4 reviewers. Each row has:
+
+- provider and optional model;
+- method: **Generic — complete bundle** (`vault-docs-review`), **API contracts
+  and flows**, **Datastores and impact**, **Runtime, workers and messaging**, or
+  **Evidence and coverage**;
+- optional free-text **Focus**, layered on the method's mandatory checklist.
+
+The first row uses the current default provider and the generic method.
+**Maximum review iterations** defaults to 3 and accepts 1–10. Reviewers inspect
+the final bundle independently and in parallel. If all return a valid clean
+verdict in the same round, the run stops early. Otherwise the same final-author
+session repairs the findings, refreshes coverage/indexes, validates, and the
+next round reviews the revision. Reaching the cap preserves the latest docs and
+finishes `done_with_findings`; it does not pretend the remaining findings were
+resolved.
+
+The run panel is the audit ledger visible to the caller: round N of the cap,
+each reviewer's provider/model/method/focus/status, live terminal, findings and
+source/bundle evidence, then the final-author revision status/session and
+changed paths. `reviewing` and `revising` count as active states for the topbar
+chip and 1.5 s polling. `done` means review was skipped or all reviewers were
+clean; `done_with_findings` means the cap was exhausted.
+
+A malformed/missing reviewer result or failed revision remains visible as an
+`error` in that slot and pauses the same run. **Retry reviewer** / **Retry
+revision** replaces only the active slot (up to five user retries), preserving
+completed peers, findings, and docs. **Cancel** remains available and
+terminates active embedded sessions. After a daemon restart, active
+author/review/revision states become `interrupted`; completed history remains
+readable, and orphaned writer drafts are soft-trashed.
+
+Reviewer sessions are enforced read-only, not merely instructed to be: their
+MCP catalog and dispatcher omit/deny Vault write, text-file write, rename, and
+delete. Only the final author modifies the bundle during iterations.
+
+### What a full scan must prove
+
+Prepared repo templates stage `vault-repo-docs` and require deterministic
+accounting before prose:
+
+1. Run the package's `inventory_repo.py` against the real repository and store
+   its JSON as `manifest.json`.
+2. Create `coverage.md`; reconcile every discovered candidate exactly once as
+   `documented`, `irrelevant`, `generated`, or `uncertain`, with `file:line`
+   evidence, destination link, and a concrete reason. Candidates discovered
+   manually are added to both manifest and ledger. A zero-candidate result for
+   a non-empty source tree requires manual inspection.
+3. Treat inventory matches as leads, then trace registration, contracts,
+   implementations, migrations/queries, and tests. A summary mention is not
+   coverage.
+4. Run OKF validation and `audit_repo_bundle.py`, fix its findings, and perform
+   a second source pass. Any remaining `uncertain` row means the scan is
+   explicitly partial.
+
+The API gate requires every operation's auth, parameters, real request body +
+example, success response body + example, material error bodies, validation,
+side effects, flow link, and source citation. `api-openapi.yaml` must contain
+matching operations and concrete schemas/examples — no empty stubs.
+
+The data gate requires every touched table/collection/key pattern's purpose
+and grain, known fields/types, real read and write paths, query/access patterns,
+indexes/TTL, transaction/consistency behavior, joins, field-level impact paths,
+examples/diagrams where useful, and citations. Unknowns are labeled, never
+guessed. Runtime coverage also inventories messages, workers, reconciliation,
+startup/shutdown, retries, idempotency, and external side effects.
+
+### Skills and guarded artifacts
+
+`okf-authoring`, `vault-repo-docs`, and the five reviewer methods are complete
+packages: concise `SKILL.md` entrypoints plus focused references, deterministic
+scripts, realistic examples, and eval fixtures. Every provider receives the
+whole package per run. Claude uses the native `.claude/skills/<name>/` view;
+other providers receive the provider-neutral `skills/<name>/` path and file
+manifest. The prompt falls back to inline `SKILL.md` only for an individual
+package that could not be staged. The skill viewer exposes the package file
+list and can open its resources.
+
+Markdown continues through guarded `otto_vault_write`. OpenAPI and other UTF-8
+documentation artifacts use `otto_vault_write_file` / `PUT
+…/vault/vaults/{id}/file` with `{path,content,if_hash?}`. It accepts only
+`.yaml`, `.yml`, `.json`, `.d2`, `.mmd`, `.txt`, and `.csv`, up to 4 MiB, and
+returns `{path,size,hash}`. It uses the same traversal, hidden-segment,
+symlink-escape, optimistic-concurrency, parent-creation, and rescan boundary as
+note writes. Markdown and binary content are rejected on this endpoint.
+
+Routes: `POST …/vault/vaults/{id}/docs-agents/run`, `GET
+/vault/docs-agents/runs/{run_id}`, per-writer/summarizer/reviewer/revision retry
+routes, `POST /vault/docs-agents/runs/{run_id}/cancel`, `POST
+…/docs-agents/refine`, and `GET …/docs-agents/refine-session?path=`. Exact
+request/response shapes and route paths are in `docs/contracts/api.md`.
 
 ## 7. The memories layer (what remains of v1/v2)
 
@@ -474,6 +542,12 @@ keyword-proxy remain. Contract: `docs/contracts/api.md` → *Memory layer*.
 - FTS5 search with operators; server-side fuzzy switcher; scalable graph.
 - OKF: deterministic validation, index generation, templates, reserved files,
   `type`-driven grouping/filtering; agent skills for authoring + repo docs.
+- Auditable full scans: saved candidate manifest + coverage ledger, deep
+  API/OpenAPI and datastore gates, deterministic bundle audit, and second
+  source-verification pass.
+- Optional iterative review: 1–4 separately configured reviewers, visible
+  findings/revisions, early clean stop, and a user-selected 1–10 round cap
+  (default 3).
 - Full MCP read/write access with RBAC + approval gates.
 
 **Limitations / honest caveats**
@@ -515,7 +589,9 @@ PDF annotation, community plugins.
   `javascript:` URLs, so a hostile note can't script the app.
 - **MCP writes are governed** — session tools act as the session owner
   (Editor gate applies); outward write tools are off by default and
-  approval-gated.
+  approval-gated. Vault docs reviewer sessions are a stricter read-only class:
+  their catalog and dispatcher deny write/write-file/rename/delete even when
+  the owning user is an Editor.
 - **Local-first** — files and the index never leave the machine; no API keys,
   no network calls, nothing to configure.
 
@@ -534,6 +610,13 @@ PDF annotation, community plugins.
 | `index.md` missing from switcher/graph | Reserved OKF files are excluded by default; the graph has a **Reserved files** toggle. |
 | Graph shows a **truncated** chip | The full-mode server edge budget (default 2M, degree-prioritized) was hit; use the filters/local mode or raise `?edge_budget=`. |
 | Writes fail with 403 | Vault mutations need workspace **Editor** (Product:Edit); reads only View. |
+| A docs run is `reviewing` / `revising` longer than expected | Open the current round and its inline terminal. These are active states and continue polling. Use the slot's targeted retry only when it is pending/running/error; five user retries exhaust that slot and end the run `error`. |
+| Reviewer or revision shows **error** | Missing/malformed reviewer JSON or a failed agent turn is never treated as clean. The run is paused with completed peers/findings/docs preserved. Retry that reviewer/revision, or Cancel; do not start over unless you want a new run. |
+| Run finishes **done_with_findings** | The configured iteration cap was reached with unresolved findings. The latest revisions are preserved; inspect the last round, raise/focus reviewers in a new run, or address the listed required fixes. |
+| Run becomes **interrupted** after restarting Otto | Active writer/summarizer/reviewer/revision sessions cannot survive daemon restart. Their durable run history remains, active nested slots are marked interrupted, and orphaned writer drafts are moved to `.trash/`. Start a new run from that result. |
+| Full scan claims completion but `coverage.md` has `uncertain` rows or the bundle audit fails | It is partial by contract. Re-run source inspection, reconcile every manifest candidate, fix API/data/runtime depth findings, and only then refresh the scan marker. |
+| `api-openapi.yaml` cannot be written | Use `otto_vault_write_file` (not Markdown `otto_vault_write`). The file must be UTF-8, an allowed text extension, ≤4 MiB, and use the current `if_hash` when replacing it. Reviewer sessions intentionally do not have this tool. |
+| Guarded text-artifact write returns 409 | The `if_hash` is stale (or `""` was used but the file already exists). Re-read the asset and retry deliberately; concurrent writes are serialized so exactly one matching update wins. |
 | OKF errors on `index.md`/`log.md` frontmatter | E3: only the bundle-root `index.md` may carry frontmatter, and only `okf_version`; `log.md` never has frontmatter. |
 
 ## 11. Related docs

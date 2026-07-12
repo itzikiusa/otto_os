@@ -109,6 +109,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 mime_guess = "2"
+rustix = { version = "1", features = ["fs"] }
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tempfile = "3"

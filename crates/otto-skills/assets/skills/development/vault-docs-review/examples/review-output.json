@@ -1,0 +1,13 @@
+[
+  {
+    "severity": "blocking",
+    "category": "coverage",
+    "summary": "The reconciliation worker is absent from coverage",
+    "evidence": [
+      {"repo_path": "src/workers.rs", "line": 31},
+      {"doc_path": "coverage.md", "section": "Coverage"}
+    ],
+    "missed_item": "The hourly reconciliation worker and its flow",
+    "required_fix": "Add the candidate row and document registration, scan scope, locking, retries, and shutdown behavior."
+  }
+]

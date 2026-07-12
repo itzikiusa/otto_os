@@ -1995,6 +1995,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | GET /workspaces/{ws}/vault/vaults/{id}/dir | ws viewer | `?path=` | `VaultDirListing` — one level: dirs (with child counts), notes, attachments |
 | GET /workspaces/{ws}/vault/vaults/{id}/note | ws viewer | `?path=` | `VaultNote{meta, raw, outgoing}` |
 | PUT /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `{path, content, if_hash?}` | `VaultNoteMeta` — create/update; parent folders auto-created; `if_hash` mismatch → 409 (optimistic concurrency; `""` = must-not-exist) |
+| PUT /workspaces/{ws}/vault/vaults/{id}/file | ws editor | `{path, content, if_hash?}` | `{path,size,hash}` — create/update a guarded UTF-8 documentation artifact (`.yaml/.yml/.json/.d2/.mmd/.txt/.csv`, max 4 MiB); parent folders auto-created; same optimistic-concurrency, traversal, hidden-segment, and symlink-escape guards as note writes. Markdown stays on `/note`; binary files are rejected. |
 | DELETE /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `?path=` | 204 — soft delete → `<vault>/.trash/` (never destroys files) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rename | ws editor | `{from, to}` | `VaultRenameResult{links_updated}` — file OR folder move; rewrites every referencing wikilink/markdown link across the vault on disk (style-preserving); case-only renames use a two-step move |
 | POST /workspaces/{ws}/vault/vaults/{id}/folder | ws editor | `{path}` | 204 |
@@ -2018,49 +2019,106 @@ Notes:
   the switcher and (by default) the graph.
 - Notes >4 MiB are indexed metadata-only (no FTS body).
 
-### Docs agents (AI writers into a vault)
+### Docs agents (AI writers + optional iterative reviewers)
 
-Launch 1–4 WRITER agents (per-agent provider/model) as managed sessions that
-write notes into a vault through the session-injected otto MCP vault tools
-(`otto_vault_write` etc.). The sessions are BACKGROUND/EMBEDDED
-(`meta.source:"vault-docs"` is in `BACKGROUND_SESSION_SOURCES`): they never
-appear in the sidebar Agents group or the tiled grid — they open only as inline
-terminals inside the Vault view's run panel (and follow background-session
-retention). A single writer writes final notes directly into `target_dir`; with
->1 writers each drafts under `_drafts/docs-run-<run8>/agent-<n>/` and a
-SUMMARIZER session consolidates the drafts into `target_dir`, after which the
-server moves the whole drafts dir into `<vault>/.trash/` and rescans.
+Launch 1–4 writer agents (per-agent provider/model) as managed sessions that
+write into a vault through the session-injected Otto MCP tools. The sessions
+are background/embedded (`meta.source:"vault-docs"`): they appear only as
+inline terminals in the Vault run panel. A single writer writes finals directly
+into `target_dir`; with >1 writers, each writes under
+`_drafts/docs-run-<run8>/agent-<n>/` and a summarizer consolidates the drafts,
+after which the server soft-moves the draft tree to `<vault>/.trash/` and
+rescans.
 
-Run state lives in an in-memory registry while a run is LIVE and is
-write-through mirrored to SQLite (`vault_docs_runs`) at every transition — runs
-SURVIVE daemon restarts as history. Each refine turn is recorded as a
-`kind:"refine"` run (one agent entry, `note_path` set) so edits share the same
-history. On startup, any row still `running|summarizing` was killed by the
-restart: it (and its non-terminal agents/summarizer) flips to `interrupted`,
-and a multi-writer run's orphaned `_drafts/docs-run-*` dir is soft-moved to
-`<vault>/.trash/` + the vault rescanned. Cancel stops orchestrating between
-stages; it never kills the agent sessions. The refine turn runs in a DETACHED
-server task — a client disconnect mid-turn cannot strand a `running` row — and
-the per-note session registry is rehydrated from the newest persisted refine
-turn after a restart. `written` = the final agent's reported results (a temp
-JSON file), falling back to a server-side before/after diff of note paths under
-`target_dir`. OKF vaults: agents are REQUIRED to produce OKF-conformant notes —
-claude gets the staged `okf-authoring` skill via `meta.extra_dirs`
-(`--add-dir`), codex/agy get the SKILL.md text inlined in the prompt. DTOs
-(`VaultDocsRun{kind, note_path, …}`, `VaultDocsAgent`, `VaultDocsSummarizer`)
-are mirrored in `ui/src/lib/api/types.ts`; run/agent/summarizer states include
-`interrupted`.
+Run state is live in memory and write-through mirrored to SQLite
+(`vault_docs_runs`) at every transition. Each refine turn is also recorded as a
+`kind:"refine"` run. On startup, any row still
+`running|summarizing|reviewing|revising` and every active nested slot become
+`interrupted`; orphaned multi-writer drafts are soft-trashed. Cancel stops
+orchestration and terminates active writer, summarizer, reviewer, and revision
+sessions after a Ctrl+C grace period. The detached refine task cannot be
+stranded by a client disconnect, and its per-note session is rehydrated from
+history after restart. `written` comes from the final author's JSON result,
+with a server-side before/after note-path diff as fallback.
+
+Requested author and reviewer skills are staged as **complete packages** per
+run (Library first, then the operator's global skill, then the compiled-in
+bundle). The tree exposes both `.claude/skills/<name>/` and provider-neutral
+`skills/<name>/`, preserving references, scripts, examples, assets, and evals.
+Claude receives the root via `meta.extra_dirs`; other providers receive exact
+package paths and file manifests. If one package cannot be staged, only that
+package falls back to its `SKILL.md` text. OKF vaults auto-add
+`okf-authoring`; prepared repo scans add `vault-repo-docs`.
+
+An optional independent review gate starts after the final author finishes.
+One to four reviewers run in parallel per round. Reviewers are read-only Vault
+sessions (`meta.source:"vault-docs-review"`): both the MCP catalog and
+dispatcher deny `otto_vault_write`, `otto_vault_write_file`,
+`otto_vault_rename`, and `otto_vault_delete`. Each reviewer must emit a
+structured JSON finding array; missing or malformed output is an error, never a
+clean verdict. All reviewers returning `[]` in the same round finishes the run
+`done`. Otherwise the same final-author session repairs the bundle and the
+cycle repeats. Exhausting the configured limit finishes
+`done_with_findings`. A reviewer/revision failure remains visibly `error` and
+pauses the same run for targeted retry or cancel; completed peers, findings,
+and docs are preserved.
+
+Optional request block (omission skips review):
+
+```json
+{
+  "review": {
+    "max_iterations": 3,
+    "reviewers": [
+      {
+        "provider": "claude",
+        "model": "sonnet",
+        "skill": "vault-api-review",
+        "focus": "Prioritize externally consumed contracts"
+      }
+    ]
+  }
+}
+```
+
+`reviewers` is required and contains 1–4 rows. `max_iterations` defaults to 3
+and accepts 1–10. `skill` defaults to `vault-docs-review` and must be one of
+`vault-docs-review`, `vault-api-review`, `vault-data-review`,
+`vault-runtime-review`, or `vault-evidence-review`. Optional `focus` adds a
+lens without removing the selected method's mandatory checks.
+
+The response/persisted DTOs are mirrored in `ui/src/lib/api/types.ts`:
+
+- `VaultDocsRun.review = {state,max_iterations,current_iteration,outcome,
+  reviewers,rounds}`. Top-level `reviewers` are the immutable resolved templates;
+  live session/state/findings exist only in each round, preventing contradictory
+  duplicate snapshots. Old rows deserialize as `state:"skipped"`.
+- Each round is `{iteration,state,reviewers,revision}`. Reviewers carry
+  `{index,provider,model,skill,focus,state,session_id,findings,error}`;
+  revisions carry `{state,session_id,changed_paths,error}`.
+- A finding is `{severity:"blocking|major|minor",category,summary,evidence[],
+  missed_item,required_fix}`. Evidence is
+  `{repo_path?,line?,doc_path?,section?}` and must identify source or bundle
+  proof.
+- Run states: `running|summarizing|reviewing|revising|done|
+  done_with_findings|error|cancelled|interrupted`. Review states:
+  `skipped|pending|reviewing|revising|clean|exhausted|error|cancelled|
+  interrupted`. Round states additionally use `revised` for a repaired
+  historical round. Reviewer states: `pending|running|done|error|cancelled|
+  interrupted`; revision states also allow `skipped`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/run | ws editor | `{prompt, target_dir?, agents: [{provider, model?}] (1..=4), summarizer?: {provider?, model?}, skills?: string[]}` | `VaultDocsRun` — initial snapshot, `state:"running"`; `summarizer.state:"skipped"` when 1 writer; the durable row exists before this returns. `skills` (≤4, name-validated) are library skills injected into every writer + the summarizer: staged bundle via extra_dirs for claude, SKILL.md inlined for other providers; `okf-authoring` is auto-added on OKF vaults |
-| GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/runs | ws viewer | `?limit=` (default 50, cap 200) | `VaultDocsRun[]` — docs + refine runs newest-first; live runs carry their fresher in-memory snapshot |
-| GET /vault/docs-agents/runs/{run_id} | ws viewer (the run's ws, re-checked) | — | `VaultDocsRun` — the UI polls every 1500ms while `running\|summarizing`; served from the durable row when not live (history / after a restart, where it reads `interrupted`) |
-| POST /vault/docs-agents/runs/{run_id}/agents/{index}/retry | ws editor (the run's ws, re-checked) | — | `202` — LIVE-run retry of one stuck writer (mirrors PR-review agent retry): kills its session (Ctrl+C grace, then kill) and the orchestrator re-spawns a FRESH session with the same prompt; the slot shows `pending` until the new session is up. `409` when the run is terminal or the writer isn't running/pending (max 5 user retries per slot). |
-| POST /vault/docs-agents/runs/{run_id}/summarizer/retry | ws editor (the run's ws, re-checked) | — | `202` — same, for the consolidation stage; only while the run is `summarizing`. A summarizer that ultimately FAILS leaves the `_drafts/docs-run-*` dir in place (the writers' work is preserved for manual consolidation). |
-| POST /vault/docs-agents/runs/{run_id}/cancel | ws editor (the run's ws, re-checked) | — | 204 — marks the run `cancelled`, flips every still-pending/running agent + summarizer to `cancelled`, stops orchestrating AND terminates their sessions (Ctrl+C grace, then kill — vault-docs sessions are embedded-only, so cancel is the user's only kill switch); finished agents keep `done`/`error`. 404 once terminal (evicted from the live registry) |
-| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — LONG request (returns when the turn completes); ONE resumed session per (vault, note), rehydrated from history after a restart; `provider` honored on the FIRST turn only |
-| GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws viewer | `?path=` | `{session_id: string\|null, running: boolean}` — poll right after POSTing refine to attach the live shell |
+| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/run | ws editor | `{prompt, target_dir?, agents: [{provider, model?}] (1..=4), summarizer?: {provider?, model?}, skills?: string[], review?: {reviewers: [{provider, model?, skill?, focus?}] (1..=4), max_iterations?: 1..=10}}` | `VaultDocsRun` — initial `state:"running"`; `summarizer.state:"skipped"` with one writer; the durable row exists before return. `skills` (≤4, name-validated) are complete packages staged for every provider. Review is optional and starts after authoring. |
+| GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/runs | ws viewer | `?limit=` (default 50, cap 200) | `VaultDocsRun[]` — docs + refine runs newest-first; live runs carry their fresher in-memory snapshot. |
+| GET /vault/docs-agents/runs/{run_id} | ws viewer (the run's ws, re-checked) | — | `VaultDocsRun` — the UI polls every 1500ms while `running\|summarizing\|reviewing\|revising`; durable history is used when not live. |
+| POST /vault/docs-agents/runs/{run_id}/agents/{index}/retry | ws editor (the run's ws, re-checked) | — | `202` — retries one active writer with a fresh session; `409` for a terminal/non-running slot; max 5 user retries per slot. |
+| POST /vault/docs-agents/runs/{run_id}/summarizer/retry | ws editor (the run's ws, re-checked) | — | `202` — same for the active summarizer; failed consolidation preserves its drafts. |
+| POST /vault/docs-agents/runs/{run_id}/review/rounds/{iteration}/reviewers/{index}/retry | ws editor (the run's ws, re-checked) | — | `202` — retries only the active `pending\|running\|error` reviewer in the current `reviewing` round. Completed peers/findings/docs remain. `409` for a stale round, wrong stage, non-retryable slot, or terminal run; max 5 user retries per slot, then terminal `error`. |
+| POST /vault/docs-agents/runs/{run_id}/review/rounds/{iteration}/revision/retry | ws editor (the run's ws, re-checked) | — | `202` — retries only the active `pending\|running\|error` final-author revision in the current `revising` round; same preservation, conflict, and retry-cap semantics. |
+| POST /vault/docs-agents/runs/{run_id}/cancel | ws editor (the run's ws, re-checked) | — | 204 — marks the run/review/current round and active nested slots `cancelled`, stops orchestration, and terminates active sessions; finished slots keep their results. 404 once terminal. |
+| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — long request; one resumed session per (vault, note), rehydrated after restart; `provider` is honored on the first turn only. |
+| GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws viewer | `?path=` | `{session_id: string\|null, running: boolean}` — poll after posting refine to attach the live shell. |
 
 ## Message Brokers (Kafka viewer)
 

@@ -111,6 +111,182 @@ test('ui: docs-agents panel runs and shows per-agent rows', async ({ page }) => 
   await expect(panel).toContainText(/done|error/i, { timeout: 30_000 });
 });
 
+test('ui: optional reviewers submit exact config and show the live review round', async ({
+  page,
+}) => {
+  const reviewRun = {
+    id: 'review-ui-1',
+    ws_id: workspaceId,
+    vault_id: vaultId,
+    kind: 'docs',
+    prompt: 'Review-config payload',
+    target_dir: '',
+    note_path: '',
+    state: 'reviewing',
+    agents: [
+      {
+        index: 0,
+        name: 'writer-1 · claude',
+        provider: 'claude',
+        model: null,
+        state: 'done',
+        session_id: null,
+        error: null,
+        drafts: [],
+      },
+    ],
+    summarizer: {
+      provider: 'claude',
+      model: null,
+      state: 'skipped',
+      session_id: null,
+      error: null,
+    },
+    review: {
+      state: 'reviewing',
+      max_iterations: 3,
+      current_iteration: 1,
+      outcome: null,
+      reviewers: [],
+      rounds: [
+        {
+          iteration: 1,
+          state: 'reviewing',
+          reviewers: [
+            {
+              index: 0,
+              provider: 'claude',
+              model: null,
+              skill: 'vault-docs-review',
+              focus: null,
+              state: 'done',
+              session_id: null,
+              findings: [],
+              error: null,
+            },
+            {
+              index: 1,
+              provider: 'claude',
+              model: 'sonnet',
+              skill: 'vault-api-review',
+              focus: 'Request and response bodies',
+              state: 'done',
+              session_id: null,
+              findings: [
+                {
+                  severity: 'major',
+                  category: 'api-contract',
+                  summary: 'Create request body is missing',
+                  evidence: [
+                    { repo_path: 'src/routes/orders.rs', line: 42, doc_path: null, section: null },
+                  ],
+                  missed_item: 'CreateOrder request fields',
+                  required_fix: 'Document every field and add a JSON example.',
+                },
+              ],
+              error: null,
+            },
+          ],
+          revision: { state: 'pending', session_id: null, changed_paths: [], error: null },
+        },
+      ],
+    },
+    written: ['services/orders.md'],
+    error: null,
+    started_at: new Date().toISOString(),
+    finished_at: null,
+  };
+  const noReviewRun = {
+    ...reviewRun,
+    id: 'review-ui-no-review',
+    prompt: 'No-review payload',
+    state: 'done',
+    review: {
+      state: 'skipped',
+      max_iterations: 3,
+      current_iteration: 0,
+      outcome: null,
+      reviewers: [],
+      rounds: [],
+    },
+    finished_at: new Date().toISOString(),
+  };
+
+  await page.addInitScript(
+    ({ first, reviewed }) => {
+      const realFetch = window.fetch.bind(window);
+      const state = { submissions: [] as Record<string, unknown>[] };
+      (window as unknown as { __vaultReviewE2E: typeof state }).__vaultReviewE2E = state;
+      window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(
+          typeof input === 'string' || input instanceof URL ? String(input) : input.url,
+          location.href,
+        );
+        const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+        if (url.pathname.endsWith('/docs-agents/run') && method === 'POST') {
+          state.submissions.push(JSON.parse(String(init?.body ?? '{}')));
+          return Response.json(state.submissions.length === 1 ? first : reviewed);
+        }
+        if (url.pathname.endsWith(`/vault/docs-agents/runs/${reviewed.id}`)) {
+          return Response.json(reviewed);
+        }
+        return realFetch(input, init);
+      };
+    },
+    { first: noReviewRun, reviewed: reviewRun },
+  );
+
+  await openPage(page, 'vault');
+  await page.locator('button[title^="Docs agent"]').click();
+  const panel = page.locator('.docs-agents');
+  await expect(panel).toBeVisible({ timeout: 15_000 });
+  await panel.locator('textarea').fill('No-review payload');
+  await expect(panel.getByRole('checkbox', { name: 'Review outcomes' })).not.toBeChecked();
+  await panel.getByRole('button', { name: /^Run$/i }).click();
+  const submissions = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __vaultReviewE2E: { submissions: Record<string, unknown>[] } })
+          .__vaultReviewE2E.submissions,
+    );
+  await expect.poll(async () => (await submissions()).length).toBe(1);
+  expect((await submissions())[0]).not.toHaveProperty('review');
+  await panel.getByRole('button', { name: 'New run' }).click();
+
+  await panel.locator('textarea').fill('Review-config payload');
+  await panel.getByRole('checkbox', { name: 'Review outcomes' }).check();
+  await expect(panel.locator('.reviewer-config-row')).toHaveCount(1);
+  await expect(panel.getByLabel('Maximum review iterations')).toHaveValue('3');
+
+  await panel.getByRole('button', { name: /add reviewer/i }).click();
+  const focused = panel.locator('.reviewer-config-row').nth(1);
+  await focused.getByLabel('Review method').selectOption('vault-api-review');
+  await focused.getByLabel('Reviewer model').fill('sonnet');
+  await focused.getByLabel('Review focus').fill('Request and response bodies');
+  await panel.getByRole('button', { name: /^Run$/i }).click();
+
+  await expect.poll(async () => (await submissions()).length).toBe(2);
+  expect((await submissions())[1]).toMatchObject({
+    prompt: 'Review-config payload',
+    review: {
+      max_iterations: 3,
+      reviewers: [
+        { provider: 'claude', skill: 'vault-docs-review' },
+        {
+          provider: 'claude',
+          model: 'sonnet',
+          skill: 'vault-api-review',
+          focus: 'Request and response bodies',
+        },
+      ],
+    },
+  });
+  await expect(panel.locator('.review-progress')).toContainText('Review round 1 of 3');
+  await expect(panel.locator('.reviewer-card')).toHaveCount(2);
+  await expect(panel).toContainText('Create request body is missing');
+  await expect(panel).toContainText('src/routes/orders.rs:42');
+});
+
 test('ui: refine drawer mounts on an open note', async ({ page }) => {
   await openPage(page, 'vault');
   const tree = page.locator('.tree');

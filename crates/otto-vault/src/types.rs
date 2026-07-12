@@ -95,6 +95,22 @@ pub struct NoteFull {
     pub outgoing: Vec<OutgoingLink>,
 }
 
+/// Metadata returned after writing a guarded, non-Markdown text artifact.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultTextFile {
+    pub path: String,
+    pub size: i64,
+    pub hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct WriteTextFileReq {
+    pub path: String,
+    pub content: String,
+    #[serde(default)]
+    pub if_hash: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Backlink {
     pub path: String,

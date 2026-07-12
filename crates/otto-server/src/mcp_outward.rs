@@ -485,6 +485,19 @@ async fn outward_enabled(ctx: &ServerCtx) -> bool {
         .unwrap_or(false)
 }
 
+/// Internal session-scoped MCP credentials are not an outward integration and
+/// therefore do not depend on the admin's outward-server toggle/tool list. Their
+/// immutable per-token scope has already run before this check. External MCP
+/// tokens retain the existing master-toggle + enabled-tool behavior.
+fn mcp_tool_enabled_for_token(
+    internal: bool,
+    outward_on: bool,
+    globally_enabled: &[String],
+    short: &str,
+) -> bool {
+    internal || (outward_on && globally_enabled.iter().any(|tool| tool == short))
+}
+
 async fn require_approval_dangerous(ctx: &ServerCtx) -> bool {
     SettingsRepo::new(ctx.pool.clone())
         .get("mcp_require_approval_dangerous")
@@ -689,11 +702,15 @@ pub(crate) async fn governed_invoke(
         }
     }
 
-    if !outward_enabled(ctx).await {
-        return Ok(deny_audit(ctx, &mut audit, "the Otto MCP server is disabled").await);
-    }
-    if !enabled_tools(ctx).await.contains(&short) {
-        return Ok(deny_audit(ctx, &mut audit, "this tool is not enabled on the Otto MCP server").await);
+    let outward_on = outward_enabled(ctx).await;
+    let enabled = enabled_tools(ctx).await;
+    if !mcp_tool_enabled_for_token(auth.mcp_internal, outward_on, &enabled, &short) {
+        let reason = if outward_on {
+            "this tool is not enabled on the Otto MCP server"
+        } else {
+            "the Otto MCP server is disabled"
+        };
+        return Ok(deny_audit(ctx, &mut audit, reason).await);
     }
 
     let dangerous = DANGEROUS.contains(&short.as_str());
@@ -1837,6 +1854,18 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str().map(String::from))
             .collect()
+    }
+
+    #[test]
+    fn internal_reviewer_scope_does_not_depend_on_outward_server_toggle() {
+        assert!(mcp_tool_enabled_for_token(true, false, &[], "vault_read"));
+        assert!(!mcp_tool_enabled_for_token(false, false, &[], "vault_read"));
+        assert!(mcp_tool_enabled_for_token(
+            false,
+            true,
+            &["vault_read".to_string()],
+            "vault_read",
+        ));
     }
 
     #[test]

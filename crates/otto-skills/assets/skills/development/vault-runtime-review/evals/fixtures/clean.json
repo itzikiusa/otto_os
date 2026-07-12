@@ -1,0 +1,1 @@
+{"repo":[{"path":"src/outbox.rs","line":93,"text":"retry(5).then_mark_failed()"}],"bundle":[{"path":"flows/publish-order.md","section":"Failure behavior","text":"Trigger, five-attempt backoff, terminal state, idempotency, observability, and shutdown documented"}],"expected_findings":[]}

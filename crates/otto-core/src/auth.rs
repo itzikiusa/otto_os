@@ -167,6 +167,15 @@ pub struct AuthContext {
     /// may call mutating ones) — the mechanism behind multiple MCP tokens with
     /// different accesses.
     pub mcp_scope: Option<McpScope>,
+    /// True only for Otto-minted, per-session internal MCP credentials. These
+    /// credentials still use the `mcp_only` route choke point, but may execute
+    /// their persisted scope even when the outward MCP server is disabled.
+    /// The value is resolved from the persisted token kind, never from process
+    /// environment or an MCP creds document.
+    pub mcp_internal: bool,
+    /// Immutable session binding carried by an internal MCP credential. `None`
+    /// for login/API/share/external-MCP tokens.
+    pub mcp_session_id: Option<Id>,
 }
 
 impl AuthContext {
@@ -433,6 +442,8 @@ mod tests {
             scope: None,
             mcp_only: false,
             mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
         };
         assert_eq!(ctx.real_user.id, ctx.effective_user.id);
         assert_eq!(ctx.real_user.username, ctx.effective_user.username);
@@ -458,6 +469,8 @@ mod tests {
             }),
             mcp_only: false,
             mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
         };
         assert!(ctx.is_scoped());
         let scope = ctx.scope.expect("scoped token must carry a SessionScope");

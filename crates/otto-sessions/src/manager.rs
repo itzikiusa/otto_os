@@ -84,6 +84,7 @@ fn write_codex_creds(
     token: &str,
     base: &str,
     workspace_id: &str,
+    source: Option<&str>,
 ) -> std::io::Result<std::path::PathBuf> {
     let path = codex_creds_path(session_id);
     if let Some(parent) = path.parent() {
@@ -94,6 +95,7 @@ fn write_codex_creds(
         "base": base,
         "session_id": session_id.to_string(),
         "workspace_id": workspace_id,
+        "source": source,
     })
     .to_string();
     std::fs::write(&path, body)?;
@@ -105,6 +107,39 @@ fn write_codex_creds(
     Ok(path)
 }
 
+/// Build the environment consumed by the first-party MCP subprocess for
+/// Claude/agy/grok sessions. Keep the session source in this pure builder: the
+/// docs-review read-only policy depends on it, and every env-based provider
+/// must receive the same policy context.
+fn otto_tools_env(
+    session: &Session,
+    token: &str,
+    base: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("OTTO_MCP_TOKEN".to_string(), token.to_string());
+    env.insert("OTTO_MCP_BASE".to_string(), base.to_string());
+    env.insert("OTTO_SESSION_ID".to_string(), session.id.to_string());
+    env.insert(
+        "OTTO_WORKSPACE_ID".to_string(),
+        session.workspace_id.to_string(),
+    );
+    if let Some(source) = session
+        .meta
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+    {
+        env.insert("OTTO_SESSION_SOURCE".to_string(), source.to_string());
+    }
+    env
+}
+
+#[derive(Default)]
+struct OttoToolsInjection {
+    args: Vec<String>,
+    env: std::collections::BTreeMap<String, String>,
+}
+
 /// One row of the live process table: (pid, ppid, cumulative CPU ms).
 type ProcRow = (u32, u32, u64);
 
@@ -112,7 +147,10 @@ type ProcRow = (u32, u32, u64);
 /// Used by the idle-suspend sweep; a failed/absent `ps` yields an empty table
 /// (the sweep then behaves exactly as before the guard existed).
 fn process_table() -> Vec<ProcRow> {
-    let out = match std::process::Command::new("ps").args(["-axo", "pid=,ppid=,time="]).output() {
+    let out = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,time="])
+        .output()
+    {
         Ok(o) if o.status.success() => o.stdout,
         _ => return Vec::new(),
     };
@@ -137,7 +175,11 @@ fn parse_ps_time_ms(s: &str) -> Option<u64> {
     };
     let parts: Vec<&str> = rest.split(':').collect();
     let (h, m, sec) = match parts.as_slice() {
-        [h, m, s] => (h.parse::<u64>().ok()?, m.parse::<u64>().ok()?, s.parse::<f64>().ok()?),
+        [h, m, s] => (
+            h.parse::<u64>().ok()?,
+            m.parse::<u64>().ok()?,
+            s.parse::<f64>().ok()?,
+        ),
         [m, s] => (0, m.parse::<u64>().ok()?, s.parse::<f64>().ok()?),
         _ => return None,
     };
@@ -243,8 +285,16 @@ fn scan_codex_rollout(
 /// Recursively collect `*.jsonl` rollout files under `root` modified at/after
 /// `cutoff`. Bounded depth (the layout is `YYYY/MM/DD/`); the cutoff keeps the
 /// scan cheap even with a deep history.
-fn recent_codex_rollouts(root: &std::path::Path, cutoff: std::time::SystemTime) -> Vec<std::path::PathBuf> {
-    fn walk(dir: &std::path::Path, cutoff: std::time::SystemTime, out: &mut Vec<std::path::PathBuf>, depth: usize) {
+fn recent_codex_rollouts(
+    root: &std::path::Path,
+    cutoff: std::time::SystemTime,
+) -> Vec<std::path::PathBuf> {
+    fn walk(
+        dir: &std::path::Path,
+        cutoff: std::time::SystemTime,
+        out: &mut Vec<std::path::PathBuf>,
+        depth: usize,
+    ) {
         if depth > 5 {
             return;
         }
@@ -276,7 +326,10 @@ fn recent_codex_rollouts(root: &std::path::Path, cutoff: std::time::SystemTime) 
 
 /// If `path` is a TOP-LEVEL codex rollout whose recorded cwd == `cwd`, return its
 /// session UUID and file mtime. Reads only the first line (`session_meta`).
-fn codex_rollout_match(path: &std::path::Path, cwd: &str) -> Option<(String, std::time::SystemTime)> {
+fn codex_rollout_match(
+    path: &std::path::Path,
+    cwd: &str,
+) -> Option<(String, std::time::SystemTime)> {
     use std::io::BufRead;
     let file = std::fs::File::open(path).ok()?;
     let mut first = String::new();
@@ -969,7 +1022,9 @@ impl SessionManager {
         };
 
         let cwd = std::path::PathBuf::from(&session.cwd);
-        let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
         let data_dir = home.join("Library/Application Support/Otto");
         // Resolve the git dir so commits in a worktree (whose .git lives outside
         // cwd) still work. Best-effort; absent for non-repos.
@@ -977,7 +1032,8 @@ impl SessionManager {
         if let Some(gitdir) = resolve_git_common_dir(&cwd).await {
             extra.push(gitdir);
         }
-        let policy = otto_sandbox::SandboxPolicy::for_agent(&cwd, &home, &data_dir, &extra, network);
+        let policy =
+            otto_sandbox::SandboxPolicy::for_agent(&cwd, &home, &data_dir, &extra, network);
         let (program, args) = policy.wrap(&spec.program, &spec.args);
         spec.program = program;
         spec.args = args;
@@ -1006,51 +1062,70 @@ impl SessionManager {
     }
 
     /// When the `otto` MCP server is enabled for the workspace (default on), mint a
-    /// per-session token and attach the server to the session — for Claude/agy by
-    /// writing the workspace `.mcp.json`, for Codex by returning per-spawn `-c`
-    /// overrides (Codex doesn't read `.mcp.json`).
+    /// per-session token and attach the server to the session. Claude/agy/grok
+    /// discover an identity-neutral workspace launcher and inherit the credential
+    /// from their own process environment; Codex receives per-spawn `-c` overrides
+    /// because it does not read `.mcp.json`.
     ///
-    /// The token is a per-session auth token (the existing token system) minted for
-    /// the session's owner; its row id is recorded in `mcp_tokens` so it is revoked
-    /// when the session is removed. The tools authorize as the owner, confined to
-    /// what the tools expose (read-only data + read-only DB queries). Best-effort:
-    /// any failure here is logged and never blocks the spawn.
+    /// Author sessions receive the existing owner API token. Vault reviewer
+    /// sessions receive a persisted, session/workspace-bound MCP capability whose
+    /// server-enforced scope contains only Vault reads. The row id is recorded in
+    /// `mcp_tokens` so it is revoked on restart/removal. Best-effort: any failure
+    /// here is logged and never blocks the spawn.
     ///
-    /// Returns extra spawn args to append to the launch command (the Codex `-c`
-    /// overrides); empty for every other provider.
-    async fn maybe_enable_otto_tools(&self, session: &Session) -> Vec<String> {
+    /// Returns per-spawn args plus identity-bearing environment. Shared launcher
+    /// files remain identity-neutral; every provider's MCP child inherits this
+    /// session's own credential from its parent process.
+    async fn maybe_enable_otto_tools(&self, session: &Session) -> OttoToolsInjection {
         if !self.otto_mcp_enabled(&session.workspace_id).await {
-            return Vec::new();
+            return OttoToolsInjection::default();
         }
         let Some(auth) = &self.auth else {
-            return Vec::new(); // feature wired off (no token minter)
+            return OttoToolsInjection::default(); // feature wired off (no token minter)
         };
+        // A restart replaces the previous in-process token before minting a new
+        // one. (After a daemon restart the old raw secret is gone with the PTY;
+        // the fixed TTL remains the final backstop.)
+        self.revoke_mcp_token(&session.created_by, &session.id)
+            .await;
         // Mint a per-session token for the owner. Labeled so it is identifiable
         // in the token list and revoked on session removal.
         let label = format!("otto-mcp:{}", session.id);
-        let (token, info) = match auth.issue_api_token(&session.created_by, Some(&label)).await {
+        let reviewer = session
+            .meta
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            == Some("vault-docs-review");
+        let issued = if reviewer {
+            auth.issue_vault_reviewer_token(
+                &session.created_by,
+                Some(&label),
+                &session.id,
+                &session.workspace_id,
+            )
+            .await
+        } else {
+            auth.issue_api_token(&session.created_by, Some(&label))
+                .await
+                .map(|(token, info)| (token, info.id))
+        };
+        let (token, token_id) = match issued {
             Ok(pair) => pair,
             Err(e) => {
                 tracing::warn!("otto MCP tools: mint token failed: {e}");
-                return Vec::new();
+                return OttoToolsInjection::default();
             }
         };
-        self.mcp_tokens.insert(session.id.clone(), info.id);
+        self.mcp_tokens.insert(session.id.clone(), token_id);
 
-        let mut env = std::collections::BTreeMap::new();
-        env.insert("OTTO_MCP_TOKEN".to_string(), token.clone());
-        env.insert("OTTO_MCP_BASE".to_string(), self.ingest_base.clone());
-        env.insert("OTTO_SESSION_ID".to_string(), session.id.to_string());
-        env.insert(
-            "OTTO_WORKSPACE_ID".to_string(),
-            session.workspace_id.to_string(),
-        );
+        let env = otto_tools_env(session, &token, &self.ingest_base);
         let server = crate::mcp::OttoToolsServer {
             command: self.mcp_tools_bin.clone(),
             args: vec!["mcp-tools".to_string()],
-            env,
+            env: env.clone(),
         };
-        // Claude / agy read the workspace `.mcp.json`.
+        // Claude / agy read the identity-neutral workspace `.mcp.json`; their
+        // session-specific token and routing values come from the spawn env.
         if let Err(e) = crate::mcp::enable_otto_tools(&session.cwd, &server) {
             tracing::warn!("otto MCP tools: write .mcp.json failed: {e}");
         }
@@ -1069,17 +1144,27 @@ impl SessionManager {
                 &token,
                 &self.ingest_base,
                 &session.workspace_id,
+                session
+                    .meta
+                    .get("source")
+                    .and_then(serde_json::Value::as_str),
             ) {
                 Ok(path) => {
-                    return crate::mcp::codex_mcp_inject_args(
-                        &self.mcp_tools_bin,
-                        &path.to_string_lossy(),
-                    );
+                    return OttoToolsInjection {
+                        args: crate::mcp::codex_mcp_inject_args(
+                            &self.mcp_tools_bin,
+                            &path.to_string_lossy(),
+                        ),
+                        env,
+                    };
                 }
                 Err(e) => tracing::warn!("otto MCP tools: write codex creds failed: {e}"),
             }
         }
-        Vec::new()
+        OttoToolsInjection {
+            args: Vec::new(),
+            env,
+        }
     }
 
     /// Revoke the per-session MCP token minted for `session_id` (if any), and
@@ -1092,6 +1177,9 @@ impl SessionManager {
             if let Some(auth) = &self.auth {
                 if let Err(e) = auth.revoke_api_token(owner, &token_id).await {
                     tracing::warn!("otto MCP tools: revoke token failed: {e}");
+                }
+                if let Err(e) = auth.revoke_vault_reviewer_token(owner, &token_id).await {
+                    tracing::warn!("otto reviewer MCP token: revoke failed: {e}");
                 }
             }
         }
@@ -1147,9 +1235,7 @@ impl SessionManager {
                 let sid = uuid::Uuid::new_v4().to_string();
                 let mut spec = self.providers.build_spec(&provider, &sid, &cwd, false)?;
                 // Append --add-dir args from req.meta.extra_dirs
-                let meta_val = req
-                    .meta.clone()
-                    .unwrap_or(serde_json::json!({}));
+                let meta_val = req.meta.clone().unwrap_or(serde_json::json!({}));
                 spec.args.extend(add_dir_args(&provider, &meta_val));
                 spec.args.extend(model_args(&provider, &meta_val));
                 // Record the provider_session_id NOW only when Otto assigns it
@@ -1253,7 +1339,9 @@ impl SessionManager {
             // opted in (`otto_mcp_enabled`), mint a per-session token and inject
             // the `otto` MCP entry alongside the user/browser servers. Opt-in,
             // best-effort — never blocks spawn.
-            spec.args.extend(self.maybe_enable_otto_tools(&session).await);
+            let otto_tools = self.maybe_enable_otto_tools(&session).await;
+            spec.args.extend(otto_tools.args);
+            spec.env.extend(otto_tools.env);
             // Otto context provisioning: materialize the workspace's active
             // skills + soul + context into this CLI's native form. Best-effort —
             // the hook logs and swallows its own errors, never blocking spawn.
@@ -1263,8 +1351,7 @@ impl SessionManager {
             // (leaving one agent stuck "pending"); a focused diff review needs no
             // workspace skills/soul; and provisioning also pollutes the repo with
             // .otto-managed.json / CLAUDE.md.
-            let is_review =
-                session.meta.get("source").and_then(|v| v.as_str()) == Some("review");
+            let is_review = session.meta.get("source").and_then(|v| v.as_str()) == Some("review");
             if !is_review {
                 if let Some(hook) = &self.pre_spawn_hook {
                     // Materialize the workspace context into its out-of-tree
@@ -1285,8 +1372,16 @@ impl SessionManager {
         // Restore the saved grid from `pty_cols` / `pty_rows` in the session's
         // metadata (written by `resize()`). Falls back to 80×24 when absent or
         // out-of-range so the very first spawn still gets a sane default.
-        let saved_cols = session.meta.get("pty_cols").and_then(|v| v.as_u64()).map(|v| v as u16);
-        let saved_rows = session.meta.get("pty_rows").and_then(|v| v.as_u64()).map(|v| v as u16);
+        let saved_cols = session
+            .meta
+            .get("pty_cols")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
+        let saved_rows = session
+            .meta
+            .get("pty_rows")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
         let (grid_cols, grid_rows) = resolve_grid(saved_cols, saved_rows);
 
         // OS-level confinement (opt-in via the `process_sandbox` setting), applied
@@ -1356,7 +1451,8 @@ impl SessionManager {
             let claimed = repo.provider_session_ids().await.unwrap_or_default();
             let captured = match provider.as_str() {
                 "codex" => {
-                    capture_codex_session_id(&codex_sessions_root(), &cwd, spawn_time, &claimed).await
+                    capture_codex_session_id(&codex_sessions_root(), &cwd, spawn_time, &claimed)
+                        .await
                 }
                 "agy" => capture_agy_session_id(&agy_cli_root(), &cwd, spawn_time, &claimed).await,
                 _ => None,
@@ -1575,7 +1671,9 @@ impl SessionManager {
                 .map(|(k, _)| (k.clone(), serde_json::Value::Null))
                 .collect();
             if !nulls.is_empty() {
-                self.repo.merge_meta(id, &serde_json::Value::Object(nulls)).await?;
+                self.repo
+                    .merge_meta(id, &serde_json::Value::Object(nulls))
+                    .await?;
             }
             self.repo.merge_meta(id, &patch).await?;
         }
@@ -1671,10 +1769,7 @@ impl SessionManager {
         // compiled-in default when not set or when the key is absent.
         let grace = if let Some(ref sr) = self.settings {
             match sr.get("idle_suspend_grace_secs").await {
-                Ok(Some(v)) => v
-                    .as_u64()
-                    .map(Duration::from_secs)
-                    .unwrap_or(SUSPEND_GRACE),
+                Ok(Some(v)) => v.as_u64().map(Duration::from_secs).unwrap_or(SUSPEND_GRACE),
                 _ => SUSPEND_GRACE,
             }
         } else {
@@ -1828,20 +1923,18 @@ impl SessionManager {
             };
             let verdict = crate::lifecycle::check_resumability(home, &s.provider, &s.cwd, psid);
             match verdict {
-                crate::lifecycle::Resumability::Gone => {
-                    match self.remove(&s.id).await {
-                        Ok(()) => {
-                            pruned += 1;
-                            tracing::info!(
-                                session = %s.id,
-                                provider = %s.provider,
-                                title = %s.title,
-                                "pruned un-resumable session (provider transcript gone)"
-                            );
-                        }
-                        Err(e) => tracing::warn!(session = %s.id, "prune remove failed: {e}"),
+                crate::lifecycle::Resumability::Gone => match self.remove(&s.id).await {
+                    Ok(()) => {
+                        pruned += 1;
+                        tracing::info!(
+                            session = %s.id,
+                            provider = %s.provider,
+                            title = %s.title,
+                            "pruned un-resumable session (provider transcript gone)"
+                        );
                     }
-                }
+                    Err(e) => tracing::warn!(session = %s.id, "prune remove failed: {e}"),
+                },
                 // Exists or Unknown → keep. We never prune what we can't verify.
                 crate::lifecycle::Resumability::Exists
                 | crate::lifecycle::Resumability::Unknown => {}
@@ -1926,10 +2019,7 @@ impl SessionManager {
     /// activity is older than `max_age`, so closed tickets don't accumulate in
     /// the DB forever. Uses [`remove`](Self::remove) so clients drop the row
     /// from the Archived view. Returns the number deleted.
-    pub async fn purge_old_archived_channel_sessions(
-        &self,
-        max_age: std::time::Duration,
-    ) -> usize {
+    pub async fn purge_old_archived_channel_sessions(&self, max_age: std::time::Duration) -> usize {
         let stale = match self
             .repo
             .list_archived_channel_sessions_older_than(max_age)
@@ -2015,8 +2105,10 @@ impl SessionManager {
                     self.providers
                         .build_spec(&session.provider, &sid, &session.cwd, resume)?;
                 // Append --add-dir and --model args from session.meta.
-                spec.args.extend(add_dir_args(&session.provider, &session.meta));
-                spec.args.extend(model_args(&session.provider, &session.meta));
+                spec.args
+                    .extend(add_dir_args(&session.provider, &session.meta));
+                spec.args
+                    .extend(model_args(&session.provider, &session.meta));
                 // Re-apply the out-of-tree context injection so a resumed session
                 // keeps its bundle (no Workspace here — the bundle persists and is
                 // read back). Mirrors the create() path's `before_spawn`.
@@ -2032,6 +2124,9 @@ impl SessionManager {
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
             crate::trust::ensure_trusted(&session.provider, &session.cwd);
+            let otto_tools = self.maybe_enable_otto_tools(&session).await;
+            spec.args.extend(otto_tools.args);
+            spec.env.extend(otto_tools.env);
             // Re-wire the per-session ingest env (the hooks config persists in
             // the workspace from the initial spawn).
             spec.env.extend(self.ingest_env(&session.id));
@@ -2039,8 +2134,16 @@ impl SessionManager {
         // Restore the saved grid — the client will confirm its own size via a
         // Resize frame on connect, but we want the PTY and emulator to agree
         // with what the user last had so the first snapshot is correctly framed.
-        let saved_cols = session.meta.get("pty_cols").and_then(|v| v.as_u64()).map(|v| v as u16);
-        let saved_rows = session.meta.get("pty_rows").and_then(|v| v.as_u64()).map(|v| v as u16);
+        let saved_cols = session
+            .meta
+            .get("pty_cols")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
+        let saved_rows = session
+            .meta
+            .get("pty_rows")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
         let (grid_cols, grid_rows) = resolve_grid(saved_cols, saved_rows);
         // OS-level confinement on resume too (mirrors create()).
         self.apply_sandbox(&mut spec, &session).await;
@@ -2195,24 +2298,41 @@ fn sandbox_decision(
     if kind != SessionKind::Agent {
         return None;
     }
-    if !cfg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !cfg
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
     let providers: Vec<String> = cfg
         .get("providers")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_else(|| {
-            ["claude", "codex", "agy", "shell"].iter().map(|s| s.to_string()).collect()
+            ["claude", "codex", "agy", "shell"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         });
     if !providers.iter().any(|p| p == provider) {
         return None;
     }
-    Some(match cfg.get("network").and_then(|v| v.as_str()).unwrap_or("full") {
-        "none" => otto_sandbox::NetworkPolicy::None,
-        "loopback" => otto_sandbox::NetworkPolicy::LoopbackOnly,
-        _ => otto_sandbox::NetworkPolicy::Full,
-    })
+    Some(
+        match cfg
+            .get("network")
+            .and_then(|v| v.as_str())
+            .unwrap_or("full")
+        {
+            "none" => otto_sandbox::NetworkPolicy::None,
+            "loopback" => otto_sandbox::NetworkPolicy::LoopbackOnly,
+            _ => otto_sandbox::NetworkPolicy::Full,
+        },
+    )
 }
 
 /// Resolve a repo's git **common dir** (absolute, canonicalized) for `cwd`, so
@@ -2237,7 +2357,11 @@ async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::Path
         return None;
     }
     let p = std::path::Path::new(&s);
-    let abs = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    };
     Some(std::fs::canonicalize(&abs).unwrap_or(abs))
 }
 
@@ -2248,10 +2372,66 @@ mod tests {
     use otto_state::NewSession;
 
     #[test]
+    fn codex_creds_preserve_session_source_for_mcp_policy() {
+        let session_id = new_id();
+        let path = write_codex_creds(
+            &session_id,
+            "token",
+            "http://127.0.0.1:7700",
+            "workspace",
+            Some("vault-docs-review"),
+        )
+        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["source"], serde_json::json!("vault-docs-review"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn env_based_mcp_providers_preserve_reviewer_source() {
+        let mut session = Session {
+            id: new_id(),
+            workspace_id: new_id(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "reviewer".into(),
+            status: SessionStatus::Idle,
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: new_id(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta: serde_json::json!({"source": "vault-docs-review"}),
+        };
+        for provider in ["claude", "agy", "grok"] {
+            session.provider = provider.into();
+            let env = otto_tools_env(&session, "token", "http://127.0.0.1:7700");
+            assert_eq!(
+                env.get("OTTO_SESSION_SOURCE").map(String::as_str),
+                Some("vault-docs-review"),
+                "provider {provider} lost the reviewer MCP policy source"
+            );
+        }
+        session.meta = serde_json::json!({"source": "vault-docs"});
+        assert_eq!(
+            otto_tools_env(&session, "token", "base")
+                .get("OTTO_SESSION_SOURCE")
+                .map(String::as_str),
+            Some("vault-docs")
+        );
+    }
+
+    #[test]
     fn ps_time_parses_all_shapes() {
         assert_eq!(parse_ps_time_ms("0:00.05"), Some(50));
         assert_eq!(parse_ps_time_ms("1:30.00"), Some(90_000));
-        assert_eq!(parse_ps_time_ms("2:03:04"), Some(2 * 3_600_000 + 3 * 60_000 + 4_000));
+        assert_eq!(
+            parse_ps_time_ms("2:03:04"),
+            Some(2 * 3_600_000 + 3 * 60_000 + 4_000)
+        );
         assert_eq!(parse_ps_time_ms("1-00:00:01"), Some(86_400_000 + 1_000));
         assert_eq!(parse_ps_time_ms("garbage"), None);
     }
@@ -2287,8 +2467,13 @@ mod tests {
             .bind(&user).bind("u").bind("x").bind("U").bind(&now)
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
-            .bind(&ws_id).bind("w").bind("/tmp").bind(&now)
-            .execute(&pool).await.unwrap();
+            .bind(&ws_id)
+            .bind("w")
+            .bind("/tmp")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let repo = SessionsRepo::new(pool);
         let (events, _rx) = broadcast::channel(16);
@@ -2336,7 +2521,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let day = tmp.path().join("2026/06/25");
         let top = write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
-        let sub = write_rollout(&day, "b.jsonl", "BBB", "/work/proj", "codex-tui", "subagent");
+        let sub = write_rollout(
+            &day,
+            "b.jsonl",
+            "BBB",
+            "/work/proj",
+            "codex-tui",
+            "subagent",
+        );
         let other = write_rollout(&day, "c.jsonl", "CCC", "/elsewhere", "codex-tui", "user");
 
         assert_eq!(
@@ -2344,8 +2536,14 @@ mod tests {
             Some("AAA".to_string())
         );
         // Subagent thread and wrong-cwd rollouts are not matched.
-        assert_eq!(codex_rollout_match(&sub, "/work/proj").map(|(s, _)| s), None);
-        assert_eq!(codex_rollout_match(&other, "/work/proj").map(|(s, _)| s), None);
+        assert_eq!(
+            codex_rollout_match(&sub, "/work/proj").map(|(s, _)| s),
+            None
+        );
+        assert_eq!(
+            codex_rollout_match(&other, "/work/proj").map(|(s, _)| s),
+            None
+        );
     }
 
     #[test]
@@ -2354,7 +2552,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let day = tmp.path().join("2026/06/25");
         write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
-        write_rollout(&day, "b.jsonl", "BBB", "/work/proj", "codex-tui", "subagent");
+        write_rollout(
+            &day,
+            "b.jsonl",
+            "BBB",
+            "/work/proj",
+            "codex-tui",
+            "subagent",
+        );
         write_rollout(&day, "c.jsonl", "CCC", "/elsewhere", "codex-tui", "user");
         let floor = std::time::SystemTime::UNIX_EPOCH;
 
@@ -2366,7 +2571,10 @@ mod tests {
         );
         // Once AAA is claimed by another session, there's nothing left to claim.
         let claimed: HashSet<&str> = ["AAA"].into_iter().collect();
-        assert_eq!(scan_codex_rollout(tmp.path(), "/work/proj", floor, &claimed), None);
+        assert_eq!(
+            scan_codex_rollout(tmp.path(), "/work/proj", floor, &claimed),
+            None
+        );
     }
 
     #[test]
@@ -2396,12 +2604,20 @@ mod tests {
         assert_eq!(scan_agy_conversation(root, "/other", floor, &none), None);
         // Already claimed by another session → skip.
         let claimed: HashSet<&str> = ["AAA"].into_iter().collect();
-        assert_eq!(scan_agy_conversation(root, "/work/proj", floor, &claimed), None);
+        assert_eq!(
+            scan_agy_conversation(root, "/work/proj", floor, &claimed),
+            None
+        );
         // Unknown cwd → nothing.
         assert_eq!(scan_agy_conversation(root, "/nope", floor, &none), None);
     }
 
-    async fn seed_session(repo: &SessionsRepo, ws: &Workspace, user: &Id, psid: Option<&str>) -> Id {
+    async fn seed_session(
+        repo: &SessionsRepo,
+        ws: &Workspace,
+        user: &Id,
+        psid: Option<&str>,
+    ) -> Id {
         let s = repo
             .create(NewSession {
                 workspace_id: ws.id.clone(),
@@ -2588,17 +2804,29 @@ mod tests {
 
         // cols = 501 is above MAX_COLS (500) → default 80
         let (c, _) = resolve_grid(Some(501), Some(24));
-        assert_eq!(c, otto_pty::DEFAULT_COLS, "oversized cols should yield default");
+        assert_eq!(
+            c,
+            otto_pty::DEFAULT_COLS,
+            "oversized cols should yield default"
+        );
     }
 
     /// Rows out-of-range fall back to the default.
     #[test]
     fn resolve_grid_rows_out_of_range_falls_back() {
         let (_, r) = resolve_grid(Some(80), Some(1));
-        assert_eq!(r, otto_pty::DEFAULT_ROWS, "rows below MIN_ROWS should yield default");
+        assert_eq!(
+            r,
+            otto_pty::DEFAULT_ROWS,
+            "rows below MIN_ROWS should yield default"
+        );
 
         let (_, r) = resolve_grid(Some(80), Some(201));
-        assert_eq!(r, otto_pty::DEFAULT_ROWS, "rows above MAX_ROWS should yield default");
+        assert_eq!(
+            r,
+            otto_pty::DEFAULT_ROWS,
+            "rows above MAX_ROWS should yield default"
+        );
     }
 
     /// `None` values yield the defaults.
@@ -2720,7 +2948,11 @@ mod tests {
         assert_eq!(sandbox_decision(&on, SessionKind::Connection, "ssh"), None);
         // Disabled (or absent) → never.
         assert_eq!(
-            sandbox_decision(&serde_json::json!({"enabled": false}), SessionKind::Agent, "claude"),
+            sandbox_decision(
+                &serde_json::json!({"enabled": false}),
+                SessionKind::Agent,
+                "claude"
+            ),
             None
         );
         assert_eq!(
@@ -2729,18 +2961,29 @@ mod tests {
         );
         // An explicit provider allowlist excludes others.
         let only_codex = serde_json::json!({"enabled": true, "providers": ["codex"]});
-        assert_eq!(sandbox_decision(&only_codex, SessionKind::Agent, "claude"), None);
+        assert_eq!(
+            sandbox_decision(&only_codex, SessionKind::Agent, "claude"),
+            None
+        );
         assert_eq!(
             sandbox_decision(&only_codex, SessionKind::Agent, "codex"),
             Some(NetworkPolicy::Full)
         );
         // Network posture parsing (default = full).
         assert_eq!(
-            sandbox_decision(&serde_json::json!({"enabled": true, "network": "loopback"}), SessionKind::Agent, "shell"),
+            sandbox_decision(
+                &serde_json::json!({"enabled": true, "network": "loopback"}),
+                SessionKind::Agent,
+                "shell"
+            ),
             Some(NetworkPolicy::LoopbackOnly)
         );
         assert_eq!(
-            sandbox_decision(&serde_json::json!({"enabled": true, "network": "none"}), SessionKind::Agent, "shell"),
+            sandbox_decision(
+                &serde_json::json!({"enabled": true, "network": "none"}),
+                SessionKind::Agent,
+                "shell"
+            ),
             Some(NetworkPolicy::None)
         );
     }
@@ -2766,35 +3009,74 @@ mod tests {
         };
 
         // Foreground (no meta.source), transcript GONE → must be KEPT.
-        let fg = repo.create(mk("Messi", "psid-fg", serde_json::json!({}))).await.unwrap();
-        repo.update_status(&fg.id, SessionStatus::Reconnectable).await.unwrap();
+        let fg = repo
+            .create(mk("Messi", "psid-fg", serde_json::json!({})))
+            .await
+            .unwrap();
+        repo.update_status(&fg.id, SessionStatus::Reconnectable)
+            .await
+            .unwrap();
         // Foreground with an unknown source, transcript GONE → also KEPT.
         let fg2 = repo
-            .create(mk("Ronaldo", "psid-fg2", serde_json::json!({"source": "someday-new"})))
+            .create(mk(
+                "Ronaldo",
+                "psid-fg2",
+                serde_json::json!({"source": "someday-new"}),
+            ))
             .await
             .unwrap();
-        repo.update_status(&fg2.id, SessionStatus::Exited).await.unwrap();
+        repo.update_status(&fg2.id, SessionStatus::Exited)
+            .await
+            .unwrap();
         // Background (channel ticket), transcript GONE → pruned as before.
         let bg = repo
-            .create(mk("ticket", "psid-bg", serde_json::json!({"source": "channel"})))
+            .create(mk(
+                "ticket",
+                "psid-bg",
+                serde_json::json!({"source": "channel"}),
+            ))
             .await
             .unwrap();
-        repo.update_status(&bg.id, SessionStatus::Exited).await.unwrap();
+        repo.update_status(&bg.id, SessionStatus::Exited)
+            .await
+            .unwrap();
         // Background whose transcript still EXISTS → kept (unchanged behavior).
         let bg_live = repo
-            .create(mk("review", "psid-live", serde_json::json!({"source": "review"})))
+            .create(mk(
+                "review",
+                "psid-live",
+                serde_json::json!({"source": "review"}),
+            ))
             .await
             .unwrap();
-        repo.update_status(&bg_live.id, SessionStatus::Exited).await.unwrap();
-        let proj = home.path().join(".claude").join("projects").join("-tmp-proj");
+        repo.update_status(&bg_live.id, SessionStatus::Exited)
+            .await
+            .unwrap();
+        let proj = home
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("-tmp-proj");
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(proj.join("psid-live.jsonl"), "{}\n").unwrap();
 
         let pruned = mgr.prune_dead_sessions_with_home(home.path()).await;
         assert_eq!(pruned, 1, "exactly the gone-transcript background session");
-        assert!(repo.get(&fg.id).await.is_ok(), "foreground survives a gone transcript");
-        assert!(repo.get(&fg2.id).await.is_ok(), "unknown-source foreground survives too");
-        assert!(repo.get(&bg.id).await.is_err(), "channel session with gone transcript is pruned");
-        assert!(repo.get(&bg_live.id).await.is_ok(), "existing transcript keeps a background session");
+        assert!(
+            repo.get(&fg.id).await.is_ok(),
+            "foreground survives a gone transcript"
+        );
+        assert!(
+            repo.get(&fg2.id).await.is_ok(),
+            "unknown-source foreground survives too"
+        );
+        assert!(
+            repo.get(&bg.id).await.is_err(),
+            "channel session with gone transcript is pruned"
+        );
+        assert!(
+            repo.get(&bg_live.id).await.is_ok(),
+            "existing transcript keeps a background session"
+        );
     }
 }

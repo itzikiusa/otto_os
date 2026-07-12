@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -19,7 +19,14 @@ use otto_core::domain::{User, WorkspaceRole};
 use otto_core::{Error, Id};
 
 use crate::engine::VaultEngine;
+use crate::scan::MAX_FTS_BYTES;
 use crate::types::*;
+
+/// A JSON string byte may expand to six encoded bytes (`\u00XX`). Allow that
+/// worst case for decoded content through the 4 MiB engine cap, plus bounded
+/// path/hash framing. Keep the larger transport limit local to this route; the
+/// engine remains the authoritative decoded-content limit.
+const TEXT_FILE_JSON_BODY_LIMIT: usize = MAX_FTS_BYTES as usize * 6 + 64 * 1024;
 
 /// Host-application context required by the vault router.
 pub trait VaultCtx: Clone + Send + Sync + 'static {
@@ -220,6 +227,20 @@ async fn write_note<C: VaultCtx>(
     ))
 }
 
+async fn write_text_file<C: VaultCtx>(
+    State(c): State<C>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(WsVaultPath { ws, id }): Path<WsVaultPath>,
+    Json(req): Json<WriteTextFileReq>,
+) -> ApiResult<Json<VaultTextFile>> {
+    require(&c, &user, &ws, WorkspaceRole::Editor).await?;
+    Ok(Json(
+        c.vault()
+            .write_text_file(&ws, id, &req.path, &req.content, req.if_hash.as_deref())
+            .await?,
+    ))
+}
+
 async fn delete_note<C: VaultCtx>(
     State(c): State<C>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -358,6 +379,11 @@ pub fn router<C: VaultCtx>() -> Router<C> {
         .route(
             "/workspaces/{ws}/vault/vaults/{id}/note",
             get(note::<C>).put(write_note::<C>).delete(delete_note::<C>),
+        )
+        .route(
+            "/workspaces/{ws}/vault/vaults/{id}/file",
+            axum::routing::put(write_text_file::<C>)
+                .layer(DefaultBodyLimit::max(TEXT_FILE_JSON_BODY_LIMIT)),
         )
         .route("/workspaces/{ws}/vault/vaults/{id}/rename", post(rename::<C>))
         .route("/workspaces/{ws}/vault/vaults/{id}/folder", post(folder::<C>))
