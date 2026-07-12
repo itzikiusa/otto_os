@@ -220,11 +220,37 @@ pub fn install_into(library: &Library, name: &str) -> io::Result<bool> {
 /// where references, scripts, examples, and eval fixtures must travel with
 /// `SKILL.md`. Callers own destination cleanup.
 pub fn copy_bundled_into(name: &str, dest: &Path) -> io::Result<bool> {
+    if !is_safe_skill_name(name) {
+        return Ok(false);
+    }
     let Some((skill_dir, _cat)) = bundled_dir(name) else {
         return Ok(false);
     };
+    match std::fs::symlink_metadata(dest) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("skill destination is a symlink: {}", dest.display()),
+            ));
+        }
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("skill destination already exists: {}", dest.display()),
+            ));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     seed_dir(skill_dir, dest)?;
     Ok(true)
+}
+
+fn is_safe_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Recursively copy an embedded skill `Dir` into `dest`, creating parents.
@@ -369,5 +395,37 @@ mod tests {
         assert!(dest.join("scripts/skill_review.py").is_file());
         assert!(dest.join("examples/excellent-skill/SKILL.md").is_file());
         assert!(!copy_bundled_into("../skills-reviewer", &dest).unwrap());
+        assert!(!copy_bundled_into("/skills-reviewer", &dest).unwrap());
+    }
+
+    #[test]
+    fn bundled_skill_tree_rejects_symlink_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let dest = dir.path().join("skill-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &dest).unwrap();
+
+        #[cfg(unix)]
+        {
+            let err = copy_bundled_into("skills-reviewer", &dest).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(!outside.join("SKILL.md").exists());
+        }
+    }
+
+    #[test]
+    fn bundled_skill_tree_preserves_executable_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("commit-message");
+        assert!(copy_bundled_into("commit-message", &dest).unwrap());
+        let script = dest.join("scripts/prepare-commit-context.sh");
+        assert!(script.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(std::fs::metadata(script).unwrap().permissions().mode() & 0o111, 0);
+        }
     }
 }

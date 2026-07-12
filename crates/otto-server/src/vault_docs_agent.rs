@@ -910,12 +910,12 @@ async fn refine(
             )
         })
         .flatten();
-    let refine_fallback = vault.okf.then(|| okf_skill_text(&ctx.context_library));
+    let refine_fallback = skill_fallbacks(&ctx.context_library, &refine_skill_names);
     let skill_guidance = skill_package_guidance(
         &provider,
-        refine_bundle.as_deref(),
+        refine_bundle.as_ref(),
         &refine_skill_names,
-        refine_fallback.as_deref(),
+        &refine_fallback,
     );
     let prompt = build_refine_prompt(
         &req.prompt,
@@ -935,9 +935,10 @@ async fn refine(
     if let Some(m) = &req.model {
         meta["model"] = Value::String(m.clone());
     }
-    if let Some(dirs) =
-        crate::review_session::review_skills_extra_dirs(&provider, refine_bundle.as_deref())
-    {
+    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+        &provider,
+        staged_package_root(refine_bundle.as_ref()),
+    ) {
         meta["extra_dirs"] = dirs;
     }
 
@@ -1327,15 +1328,7 @@ async fn run_docs(
             )
         })
         .flatten();
-    let fallback_text = {
-        let joined = skill_names
-            .iter()
-            .map(|n| skill_inline_text(&ctx.context_library, n))
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n---\n\n");
-        (!joined.is_empty()).then_some(joined)
-    };
+    let fallback_text = skill_fallbacks(&ctx.context_library, &skill_names);
 
     // ---- Stage 1: writers, concurrently (per-writer errors isolated) --------
     let mut set = tokio::task::JoinSet::new();
@@ -1349,9 +1342,9 @@ async fn run_docs(
         let root = vault.root_path.clone();
         let skill_guidance = skill_package_guidance(
             &w.provider,
-            skill_bundle.as_deref(),
+            skill_bundle.as_ref(),
             &skill_names,
-            fallback_text.as_deref(),
+            &fallback_text,
         );
         let prompt = build_writer_prompt(
             &prompt,
@@ -1372,9 +1365,10 @@ async fn run_docs(
         if let Some(model) = &w.model {
             meta["model"] = Value::String(model.clone());
         }
-        if let Some(dirs) =
-            crate::review_session::review_skills_extra_dirs(&w.provider, skill_bundle.as_deref())
-        {
+        if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+            &w.provider,
+            staged_package_root(skill_bundle.as_ref()),
+        ) {
             meta["extra_dirs"] = dirs;
         }
         let cancel = Arc::clone(&cancel);
@@ -1554,9 +1548,9 @@ async fn run_docs(
 
     let sum_guidance = skill_package_guidance(
         &summarizer.provider,
-        skill_bundle.as_deref(),
+        skill_bundle.as_ref(),
         &skill_names,
-        fallback_text.as_deref(),
+        &fallback_text,
     );
     let sum_prompt = build_summarizer_prompt(
         &prompt,
@@ -1576,12 +1570,10 @@ async fn run_docs(
     if let Some(model) = &summarizer.model {
         sum_meta["model"] = Value::String(model.clone());
     }
-    if let Some(dirs) =
-        crate::review_session::review_skills_extra_dirs(
-            &summarizer.provider,
-            skill_bundle.as_deref(),
-        )
-    {
+    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(
+        &summarizer.provider,
+        staged_package_root(skill_bundle.as_ref()),
+    ) {
         sum_meta["extra_dirs"] = dirs;
     }
     // Same turn loop as the writers: a user retry (SUM_RETRY_IDX) kills the
@@ -1737,6 +1729,20 @@ fn skill_inline_text(library: &otto_context::Library, name: &str) -> String {
     otto_skills::bundled_body(name).unwrap_or_default()
 }
 
+fn skill_fallbacks(library: &otto_context::Library, names: &[String]) -> HashMap<String, String> {
+    names
+        .iter()
+        .filter_map(|name| {
+            let body = skill_inline_text(library, name);
+            (!body.is_empty()).then(|| (name.clone(), body))
+        })
+        .collect()
+}
+
+fn staged_package_root(staged: Option<&crate::modules::StagedSkillPackages>) -> Option<&str> {
+    staged.map(|packages| packages.root.as_str())
+}
+
 /// Provider-specific directions for a materialized multi-file skill bundle.
 /// Claude receives first-class skills through `extra_dirs` and only needs an
 /// invocation reminder. Other providers receive the neutral package root and
@@ -1744,57 +1750,55 @@ fn skill_inline_text(library: &otto_context::Library, name: &str) -> String {
 /// it routes them to. If staging failed, preserve the old body-inline fallback.
 fn skill_package_guidance(
     provider: &str,
-    bundle: Option<&str>,
+    staged: Option<&crate::modules::StagedSkillPackages>,
     names: &[String],
-    fallback_inline: Option<&str>,
+    fallback_inline: &HashMap<String, String>,
 ) -> Option<String> {
     if names.is_empty() {
         return None;
     }
-    let Some(bundle) = bundle.filter(|p| !p.is_empty()) else {
-        return fallback_inline.filter(|s| !s.is_empty()).map(str::to_string);
-    };
-    if provider == "claude" {
-        return Some(format!(
-            "Skills staged for this task: {}. You must invoke each relevant skill before writing.",
-            names.join(", ")
-        ));
-    }
+    let staged_names = names
+        .iter()
+        .filter(|name| staged.is_some_and(|packages| packages.files.contains_key(*name)))
+        .collect::<Vec<_>>();
+    let mut sections = Vec::new();
 
-    let root = std::path::Path::new(bundle).join("skills");
-    let mut files = Vec::<String>::new();
-    for name in names {
-        collect_package_files(&root.join(name), &root, &mut files);
-    }
-    files.sort();
-    files.dedup();
-    Some(format!(
-        "AUTHORING SKILL PACKAGES are available at `{}`. Before working, read each selected \
-         skill's `SKILL.md`, then read only the references/examples it directs you to; run its \
-         scripts when the workflow requires them. Package files:\n- {}",
-        root.display(),
-        files.join("\n- ")
-    ))
-}
-
-fn collect_package_files(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(kind) = entry.file_type() else { continue };
-        if kind.is_dir() {
-            collect_package_files(&path, root, out);
-        } else if kind.is_file() {
-            if let Ok(rel) = path.strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
-            }
+    if !staged_names.is_empty() {
+        if provider == "claude" {
+            sections.push(format!(
+                "Skills staged for this task: {}. You must invoke each relevant skill before writing.",
+                staged_names.iter().map(|name| name.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        } else if let Some(packages) = staged {
+            let root = std::path::Path::new(&packages.root).join("skills");
+            let files = staged_names
+                .iter()
+                .flat_map(|name| {
+                    packages.files[*name]
+                        .iter()
+                        .map(move |path| format!("{name}/{path}"))
+                })
+                .collect::<Vec<_>>();
+            sections.push(format!(
+                "AUTHORING SKILL PACKAGES are available at `{}`. Before working, read each selected \
+                 skill's `SKILL.md`, then read only the references/examples it directs you to; run its \
+                 scripts when the workflow requires them. Package files:\n- {}",
+                root.display(),
+                files.join("\n- ")
+            ));
         }
     }
-}
 
-/// The `okf-authoring` skill's text (refine path uses just this one).
-fn okf_skill_text(library: &otto_context::Library) -> String {
-    skill_inline_text(library, "okf-authoring")
+    let missing_bodies = names
+        .iter()
+        .filter(|name| !staged.is_some_and(|packages| packages.files.contains_key(*name)))
+        .filter_map(|name| fallback_inline.get(name))
+        .collect::<Vec<_>>();
+    if !missing_bodies.is_empty() {
+        sections.push(missing_bodies.into_iter().cloned().collect::<Vec<_>>().join("\n\n---\n\n"));
+    }
+
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2237,23 +2241,51 @@ mod tests {
 
     #[test]
     fn staged_package_guidance_is_provider_specific() {
-        let dir = tempfile::tempdir().unwrap();
-        let skill = dir.path().join("skills/okf-authoring");
-        std::fs::create_dir_all(skill.join("references")).unwrap();
-        std::fs::write(skill.join("SKILL.md"), "method").unwrap();
-        std::fs::write(skill.join("references/spec.md"), "spec").unwrap();
-        let root = dir.path().to_string_lossy();
+        let mut files = std::collections::HashMap::new();
+        files.insert(
+            "okf-authoring".to_string(),
+            vec!["SKILL.md".to_string(), "references/spec.md".to_string()],
+        );
+        let staged = crate::modules::StagedSkillPackages {
+            root: "/tmp/staged-skills".to_string(),
+            files,
+        };
         let names = vec!["okf-authoring".to_string()];
+        let fallback =
+            std::collections::HashMap::from([("okf-authoring".to_string(), "method".to_string())]);
 
-        let codex = skill_package_guidance("codex", Some(&root), &names, None).unwrap();
+        let codex = skill_package_guidance("codex", Some(&staged), &names, &fallback).unwrap();
         assert!(codex.contains("okf-authoring/SKILL.md"));
         assert!(codex.contains("references/spec.md"));
         assert!(!codex.contains("method"), "package bodies must not be inlined");
 
-        let claude = skill_package_guidance("claude", Some(&root), &names, None).unwrap();
+        let claude = skill_package_guidance("claude", Some(&staged), &names, &fallback).unwrap();
         assert!(claude.contains("invoke"));
         assert!(claude.contains("okf-authoring"));
         assert!(!claude.contains("references/spec.md"));
+    }
+
+    #[test]
+    fn partial_staging_inlines_only_failed_packages() {
+        let staged = crate::modules::StagedSkillPackages {
+            root: "/tmp/staged-skills".to_string(),
+            files: std::collections::HashMap::from([(
+                "okf-authoring".to_string(),
+                vec!["SKILL.md".to_string()],
+            )]),
+        };
+        let names = vec!["okf-authoring".to_string(), "jira-story-writer".to_string()];
+        let fallback = std::collections::HashMap::from([
+            ("okf-authoring".to_string(), "OKF BODY".to_string()),
+            ("jira-story-writer".to_string(), "JIRA BODY".to_string()),
+        ]);
+
+        for provider in ["codex", "claude"] {
+            let guidance =
+                skill_package_guidance(provider, Some(&staged), &names, &fallback).unwrap();
+            assert!(guidance.contains("JIRA BODY"));
+            assert!(!guidance.contains("OKF BODY"));
+        }
     }
 
     #[test]
