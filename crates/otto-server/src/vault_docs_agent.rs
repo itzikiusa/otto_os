@@ -29,9 +29,9 @@
 //! listed in the sidebar Agents group.
 //!
 //! OKF vaults (`vault.okf`): notes MUST be OKF-conformant. claude agents get
-//! the staged `okf-authoring` skill library via `meta.extra_dirs` →
-//! `--add-dir` (see `modules::stage_review_skills`); codex/agy get the skill's
-//! SKILL.md text inlined into the prompt (they can't load out-of-tree skills).
+//! complete staged skill packages: Claude loads the native `.claude/skills`
+//! view through `meta.extra_dirs`; Codex/agy/custom providers read the same
+//! package's provider-neutral `skills/<name>/` tree by explicit prompt path.
 //!
 //! Contract: `docs/contracts/api.md` §"Vault v3 — the docs home" (docs-agents
 //! table); DTOs mirrored in `ui/src/lib/api/types.ts`.
@@ -132,9 +132,9 @@ pub struct RunReq {
     pub agents: Vec<AgentReq>,
     #[serde(default)]
     pub summarizer: Option<SummarizerReq>,
-    /// Extra library skills injected into every writer + the summarizer
-    /// (staged bundle for claude, SKILL.md inlined for other providers) —
-    /// prepared prompts pass e.g. `vault-repo-docs`. Capped; names validated.
+    /// Extra library skills available to every writer + the summarizer as
+    /// complete staged packages. Prepared prompts pass e.g. `vault-repo-docs`.
+    /// Capped; names validated.
     #[serde(default)]
     pub skills: Vec<String>,
 }
@@ -894,7 +894,29 @@ async fn refine(
     }
     otto_sessions::trust::ensure_trusted(&provider, &vault.root_path);
 
-    let okf_inline = okf_inline_for(&ctx, &vault, &provider);
+    let refine_skill_names = vault
+        .okf
+        .then(|| vec!["okf-authoring".to_string()])
+        .unwrap_or_default();
+    let refine_bundle_dir = otto_context::materialize::default_context_root()
+        .join("vault-docs-skills")
+        .join(format!("refine-{}", otto_core::new_id()));
+    let refine_bundle = (!refine_skill_names.is_empty())
+        .then(|| {
+            crate::modules::stage_skill_packages_at(
+                &ctx.context_library,
+                &refine_skill_names,
+                &refine_bundle_dir,
+            )
+        })
+        .flatten();
+    let refine_fallback = vault.okf.then(|| okf_skill_text(&ctx.context_library));
+    let skill_guidance = skill_package_guidance(
+        &provider,
+        refine_bundle.as_deref(),
+        &refine_skill_names,
+        refine_fallback.as_deref(),
+    );
     let prompt = build_refine_prompt(
         &req.prompt,
         vault_id,
@@ -902,7 +924,7 @@ async fn refine(
         &note.meta.hash,
         first_turn.then_some(note.raw.as_str()),
         vault.okf,
-        okf_inline.as_deref(),
+        skill_guidance.as_deref(),
     );
     let (done_path, done_line) = done_marker();
     let prompt = format!("{prompt}{done_line}");
@@ -913,7 +935,11 @@ async fn refine(
     if let Some(m) = &req.model {
         meta["model"] = Value::String(m.clone());
     }
-    apply_okf_extra_dirs(&ctx, &vault, &provider, &mut meta);
+    if let Some(dirs) =
+        crate::review_session::review_skills_extra_dirs(&provider, refine_bundle.as_deref())
+    {
+        meta["extra_dirs"] = dirs;
+    }
 
     // Mark the turn in flight + surface the session id the MOMENT it exists,
     // so `GET refine-session` can attach the live shell while the turn runs.
@@ -1282,17 +1308,26 @@ async fn run_docs(
     let before: HashSet<String> = note_paths(&ctx, vault.id).await;
 
     // Skill vehicles, resolved once: request-selected skills (prepared prompts
-    // pass e.g. `vault-repo-docs`) + `okf-authoring` on OKF vaults. Claude gets
-    // the staged bundle via meta.extra_dirs; every other provider gets the
-    // SKILL.md texts inlined into its prompt.
+    // pass e.g. `vault-repo-docs`) + `okf-authoring` on OKF vaults. The complete
+    // packages are staged per run: Claude loads the native view via extra_dirs;
+    // every other provider reads the provider-neutral view by explicit path.
     let mut skill_names = skills;
     if vault.okf && !skill_names.iter().any(|s| s == "okf-authoring") {
         skill_names.push("okf-authoring".into());
     }
-    let okf_bundle = (!skill_names.is_empty())
-        .then(|| crate::modules::stage_review_skills(&ctx.context_library, &skill_names))
+    let skill_bundle_dir = otto_context::materialize::default_context_root()
+        .join("vault-docs-skills")
+        .join(&run_id);
+    let skill_bundle = (!skill_names.is_empty())
+        .then(|| {
+            crate::modules::stage_skill_packages_at(
+                &ctx.context_library,
+                &skill_names,
+                &skill_bundle_dir,
+            )
+        })
         .flatten();
-    let okf_text = {
+    let fallback_text = {
         let joined = skill_names
             .iter()
             .map(|n| skill_inline_text(&ctx.context_library, n))
@@ -1301,14 +1336,6 @@ async fn run_docs(
             .join("\n\n---\n\n");
         (!joined.is_empty()).then_some(joined)
     };
-    // Claude sessions load the staged bundle themselves — they only need the
-    // skill NAMES called out so they actually invoke them.
-    let claude_hint = (!skill_names.is_empty()).then(|| {
-        format!(
-            "Skills staged for this task: {} — invoke each relevant one before writing.",
-            skill_names.join(", ")
-        )
-    });
 
     // ---- Stage 1: writers, concurrently (per-writer errors isolated) --------
     let mut set = tokio::task::JoinSet::new();
@@ -1320,6 +1347,12 @@ async fn run_docs(
         let run_id = run_id.clone();
         let run8 = run8.clone();
         let root = vault.root_path.clone();
+        let skill_guidance = skill_package_guidance(
+            &w.provider,
+            skill_bundle.as_deref(),
+            &skill_names,
+            fallback_text.as_deref(),
+        );
         let prompt = build_writer_prompt(
             &prompt,
             vault.id,
@@ -1328,7 +1361,7 @@ async fn run_docs(
             &run8,
             &target_dir,
             vault.okf,
-            inline_for_provider(&w.provider, okf_text.as_deref(), claude_hint.as_deref()),
+            skill_guidance.as_deref(),
             (m == 1).then_some(results_str.as_str()),
         );
         let mut meta = serde_json::json!({
@@ -1340,7 +1373,7 @@ async fn run_docs(
             meta["model"] = Value::String(model.clone());
         }
         if let Some(dirs) =
-            crate::review_session::review_skills_extra_dirs(&w.provider, okf_bundle.as_deref())
+            crate::review_session::review_skills_extra_dirs(&w.provider, skill_bundle.as_deref())
         {
             meta["extra_dirs"] = dirs;
         }
@@ -1519,6 +1552,12 @@ async fn run_docs(
     });
     persist(&reg, &run_id);
 
+    let sum_guidance = skill_package_guidance(
+        &summarizer.provider,
+        skill_bundle.as_deref(),
+        &skill_names,
+        fallback_text.as_deref(),
+    );
     let sum_prompt = build_summarizer_prompt(
         &prompt,
         vault.id,
@@ -1526,7 +1565,7 @@ async fn run_docs(
         &target_dir,
         &drafts,
         vault.okf,
-        inline_for_provider(&summarizer.provider, okf_text.as_deref(), claude_hint.as_deref()),
+        sum_guidance.as_deref(),
         &results_str,
     );
     let mut sum_meta = serde_json::json!({
@@ -1538,7 +1577,10 @@ async fn run_docs(
         sum_meta["model"] = Value::String(model.clone());
     }
     if let Some(dirs) =
-        crate::review_session::review_skills_extra_dirs(&summarizer.provider, okf_bundle.as_deref())
+        crate::review_session::review_skills_extra_dirs(
+            &summarizer.provider,
+            skill_bundle.as_deref(),
+        )
     {
         sum_meta["extra_dirs"] = dirs;
     }
@@ -1695,48 +1737,64 @@ fn skill_inline_text(library: &otto_context::Library, name: &str) -> String {
     otto_skills::bundled_body(name).unwrap_or_default()
 }
 
+/// Provider-specific directions for a materialized multi-file skill bundle.
+/// Claude receives first-class skills through `extra_dirs` and only needs an
+/// invocation reminder. Other providers receive the neutral package root and
+/// a deterministic file manifest, then load `SKILL.md` plus only the resources
+/// it routes them to. If staging failed, preserve the old body-inline fallback.
+fn skill_package_guidance(
+    provider: &str,
+    bundle: Option<&str>,
+    names: &[String],
+    fallback_inline: Option<&str>,
+) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let Some(bundle) = bundle.filter(|p| !p.is_empty()) else {
+        return fallback_inline.filter(|s| !s.is_empty()).map(str::to_string);
+    };
+    if provider == "claude" {
+        return Some(format!(
+            "Skills staged for this task: {}. You must invoke each relevant skill before writing.",
+            names.join(", ")
+        ));
+    }
+
+    let root = std::path::Path::new(bundle).join("skills");
+    let mut files = Vec::<String>::new();
+    for name in names {
+        collect_package_files(&root.join(name), &root, &mut files);
+    }
+    files.sort();
+    files.dedup();
+    Some(format!(
+        "AUTHORING SKILL PACKAGES are available at `{}`. Before working, read each selected \
+         skill's `SKILL.md`, then read only the references/examples it directs you to; run its \
+         scripts when the workflow requires them. Package files:\n- {}",
+        root.display(),
+        files.join("\n- ")
+    ))
+}
+
+fn collect_package_files(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() {
+            collect_package_files(&path, root, out);
+        } else if kind.is_file() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+}
+
 /// The `okf-authoring` skill's text (refine path uses just this one).
 fn okf_skill_text(library: &otto_context::Library) -> String {
     skill_inline_text(library, "okf-authoring")
-}
-
-/// The inlined-skill text for this provider: claude gets the short invoke
-/// `hint` (its skills arrive as a staged bundle via extra_dirs); every other
-/// provider gets the full SKILL.md `text` inlined.
-fn inline_for_provider<'a>(
-    provider: &str,
-    text: Option<&'a str>,
-    hint: Option<&'a str>,
-) -> Option<&'a str> {
-    if provider == "claude" { hint } else { text }
-}
-
-/// Refine-path variant of the OKF plumbing above (single provider, so the
-/// bundle staging + inline decision collapse into two small helpers).
-fn okf_inline_for(ctx: &ServerCtx, vault: &otto_vault::VaultRec, provider: &str) -> Option<String> {
-    if !vault.okf || provider == "claude" {
-        return None;
-    }
-    Some(okf_skill_text(&ctx.context_library)).filter(|t| !t.is_empty())
-}
-
-/// Attach the staged okf-authoring bundle to a claude session's meta (OKF
-/// vaults only). No-op for other providers — they get the text inlined.
-fn apply_okf_extra_dirs(
-    ctx: &ServerCtx,
-    vault: &otto_vault::VaultRec,
-    provider: &str,
-    meta: &mut Value,
-) {
-    if !vault.okf {
-        return;
-    }
-    let bundle =
-        crate::modules::stage_review_skills(&ctx.context_library, &["okf-authoring".into()]);
-    if let Some(dirs) = crate::review_session::review_skills_extra_dirs(provider, bundle.as_deref())
-    {
-        meta["extra_dirs"] = dirs;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2178,6 +2236,27 @@ mod tests {
     }
 
     #[test]
+    fn staged_package_guidance_is_provider_specific() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("skills/okf-authoring");
+        std::fs::create_dir_all(skill.join("references")).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "method").unwrap();
+        std::fs::write(skill.join("references/spec.md"), "spec").unwrap();
+        let root = dir.path().to_string_lossy();
+        let names = vec!["okf-authoring".to_string()];
+
+        let codex = skill_package_guidance("codex", Some(&root), &names, None).unwrap();
+        assert!(codex.contains("okf-authoring/SKILL.md"));
+        assert!(codex.contains("references/spec.md"));
+        assert!(!codex.contains("method"), "package bodies must not be inlined");
+
+        let claude = skill_package_guidance("claude", Some(&root), &names, None).unwrap();
+        assert!(claude.contains("invoke"));
+        assert!(claude.contains("okf-authoring"));
+        assert!(!claude.contains("references/spec.md"));
+    }
+
+    #[test]
     fn summarizer_prompt_inlines_drafts_under_the_cap() {
         let drafts = vec![
             (
@@ -2212,7 +2291,7 @@ mod tests {
         assert!(p.contains("### _drafts/docs-run-r/agent-2/c.md"));
         assert!(p.contains("[not inlined — read via otto_vault_read]"));
         assert!(!p.contains("unreachable"));
-        // OKF: validate + index refresh + inlined skill; results file; target dir.
+        // OKF: validate + index refresh + skill guidance; results file; target dir.
         assert!(p.contains("otto_vault_okf_validate"));
         assert!(p.contains(OKF_SKILL));
         assert!(p.contains("/tmp/r.json"));
@@ -2306,16 +2385,6 @@ mod tests {
         assert!(normalize_target_dir("a/../b").is_err());
         assert!(normalize_target_dir(".trash/x").is_err());
         assert!(normalize_target_dir("a\\b").is_err());
-    }
-
-    #[test]
-    fn inline_is_withheld_from_claude_only() {
-        // claude → the short invoke hint; everyone else → the full skill text.
-        assert_eq!(inline_for_provider("claude", Some("text"), Some("hint")), Some("hint"));
-        assert_eq!(inline_for_provider("claude", Some("text"), None), None);
-        assert_eq!(inline_for_provider("codex", Some("text"), Some("hint")), Some("text"));
-        assert_eq!(inline_for_provider("agy", Some("text"), None), Some("text"));
-        assert_eq!(inline_for_provider("codex", None, None), None);
     }
 
     fn sample_run(state: &str) -> VaultDocsRun {

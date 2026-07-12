@@ -1524,17 +1524,11 @@ fn slug_skill_name(name: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
-/// Stage the given review-lens skills into a shared out-of-tree bundle laid out
-/// as claude's `.claude/skills/<name>/`, and return that bundle dir. Wired into
-/// CLAUDE review agents via `meta.extra_dirs` → `--add-dir=<bundle>` (see
-/// `review_session::review_skills_extra_dirs`), it makes the skills resolve as
-/// FIRST-CLASS skills so claude's reflexive `Skill(test-review)` succeeds.
-///
-/// This is a CLAUDE-ONLY vehicle. codex has no first-class out-of-tree skills
-/// (and would scavenge this bundle and run the wrong skill), and agy loads
-/// `.agents/skills`, not the `.claude/skills` layout written here — so for those
-/// providers the bundle is withheld and the lens method travels INLINE in the
-/// prompt instead (see `compose_review_lens_prompt`).
+/// Materialize complete skill packages into `bundle`, with two views:
+/// `.claude/skills/<name>/` for Claude's first-class `--add-dir` loader and
+/// `skills/<name>/` for provider-neutral, explicit file reads from prompts.
+/// References, scripts, examples, assets, and eval metadata travel with
+/// `SKILL.md`; no provider is limited to a lossy body-only copy.
 ///
 /// Why a dedicated bundle (not the repo cwd): review sessions deliberately skip
 /// context materialization (see `SessionManager` spawn), and a reviewed repo
@@ -1543,14 +1537,17 @@ fn slug_skill_name(name: &str) -> String {
 /// against the live CLI. The bundle holds ONLY review skills — never the data dir
 /// (secrets/DB) — so add-dir grants no sensitive access.
 ///
-/// Sources, per skill: the Otto Library (canonical, multi-file with
-/// references/assets), else the operator's global `~/.claude/skills/<name>`.
-/// Re-copied each run (clean overwrite) so edits propagate. Best-effort: returns
-/// `None` when nothing could be staged (review still runs off the inlined text).
-pub(crate) fn stage_review_skills(library: &otto_context::Library, names: &[String]) -> Option<String> {
+/// Sources, per skill: the Otto Library, the operator's global Claude skills,
+/// then the compiled-in `otto-skills` tree. Re-copied cleanly so edits and
+/// bundled upgrades propagate. Best-effort: unknown skills are skipped.
+pub(crate) fn stage_skill_packages_at(
+    library: &otto_context::Library,
+    names: &[String],
+    bundle: &std::path::Path,
+) -> Option<String> {
     use std::path::Path;
-    let bundle = otto_context::materialize::default_context_root().join("review-skills");
-    let skills_root = bundle.join(".claude").join("skills");
+    let neutral_root = bundle.join("skills");
+    let claude_root = bundle.join(".claude").join("skills");
     let mut staged = 0usize;
     let mut seen = std::collections::HashSet::<&str>::new();
     for name in names {
@@ -1571,16 +1568,39 @@ pub(crate) fn stage_review_skills(library: &otto_context::Library, names: &[Stri
                 let d = Path::new(&home).join(".claude/skills").join(name);
                 d.is_dir().then_some(d)
             });
-        let Some(src) = src else { continue };
-        let dest = skills_root.join(name);
-        let _ = std::fs::remove_dir_all(&dest); // clean re-copy so edits propagate
-        if let Err(e) = crate::plugins::copy_dir(&src, &dest) {
-            tracing::warn!(skill = %name, "stage_review_skills: copy failed: {e}");
+        let neutral = neutral_root.join(name);
+        let _ = std::fs::remove_dir_all(&neutral);
+        let copied = match src {
+            Some(src) => crate::plugins::copy_dir(&src, &neutral).map(|_| true),
+            None => otto_skills::copy_bundled_into(name, &neutral).map_err(|e| e.to_string()),
+        };
+        match copied {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                tracing::warn!(skill = %name, "stage_skill_packages: copy failed: {e}");
+                continue;
+            }
+        }
+        let claude = claude_root.join(name);
+        let _ = std::fs::remove_dir_all(&claude);
+        if let Err(e) = crate::plugins::copy_dir(&neutral, &claude) {
+            tracing::warn!(skill = %name, "stage_skill_packages: claude view failed: {e}");
             continue;
         }
         staged += 1;
     }
     (staged > 0).then(|| bundle.to_string_lossy().into_owned())
+}
+
+/// Backward-compatible shared bundle for the PR/skill review engine. Vault
+/// docs runs use [`stage_skill_packages_at`] with a run-specific directory.
+pub(crate) fn stage_review_skills(
+    library: &otto_context::Library,
+    names: &[String],
+) -> Option<String> {
+    let bundle = otto_context::materialize::default_context_root().join("review-skills");
+    stage_skill_packages_at(library, names, &bundle)
 }
 
 /// Registry key for one review agent's cancel flag ("{review_id}:{index}").
@@ -3357,6 +3377,33 @@ mod review_lens_prompt_tests {
         assert!(lower.contains("do not search for"));
         assert!(out.contains("METHOD"));
         assert!(out.contains("TASK"));
+    }
+}
+
+#[cfg(test)]
+mod staged_skill_package_tests {
+    use super::stage_skill_packages_at;
+
+    #[test]
+    fn bundled_fallback_materializes_native_and_neutral_views() {
+        let tmp = tempfile::tempdir().unwrap();
+        let library = otto_context::Library::new(tmp.path().join("library"));
+        let bundle = tmp.path().join("bundle");
+        let staged = stage_skill_packages_at(
+            &library,
+            &["skills-reviewer".to_string()],
+            &bundle,
+        );
+        assert_eq!(staged.as_deref(), Some(bundle.to_string_lossy().as_ref()));
+        for root in [bundle.join("skills"), bundle.join(".claude/skills")] {
+            assert!(root.join("skills-reviewer/SKILL.md").is_file());
+            assert!(root
+                .join("skills-reviewer/references/review-rubric.md")
+                .is_file());
+            assert!(root
+                .join("skills-reviewer/scripts/skill_review.py")
+                .is_file());
+        }
     }
 }
 

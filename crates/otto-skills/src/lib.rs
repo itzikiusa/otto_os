@@ -213,6 +213,20 @@ pub fn install_into(library: &Library, name: &str) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Materialize one compiled-in skill's complete file tree at `dest`.
+///
+/// Unlike [`install_into`], this does not touch the Library and never removes
+/// an existing destination. It is used for per-run, out-of-tree skill bundles
+/// where references, scripts, examples, and eval fixtures must travel with
+/// `SKILL.md`. Callers own destination cleanup.
+pub fn copy_bundled_into(name: &str, dest: &Path) -> io::Result<bool> {
+    let Some((skill_dir, _cat)) = bundled_dir(name) else {
+        return Ok(false);
+    };
+    seed_dir(skill_dir, dest)?;
+    Ok(true)
+}
+
 /// Recursively copy an embedded skill `Dir` into `dest`, creating parents.
 /// `.sh` files get the executable bit on Unix.
 fn seed_dir(src: &Dir<'_>, dest: &Path) -> io::Result<()> {
@@ -343,5 +357,17 @@ mod tests {
 
         assert_eq!(install_state(&lib, "grill"), Some(InstallState::UpToDate));
         assert!(!install_into(&lib, "not-a-skill").unwrap());
+    }
+
+    #[test]
+    fn bundled_skill_tree_materializes_all_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("skills-reviewer");
+        assert!(copy_bundled_into("skills-reviewer", &dest).unwrap());
+        assert!(dest.join("SKILL.md").is_file());
+        assert!(dest.join("references/review-rubric.md").is_file());
+        assert!(dest.join("scripts/skill_review.py").is_file());
+        assert!(dest.join("examples/excellent-skill/SKILL.md").is_file());
+        assert!(!copy_bundled_into("../skills-reviewer", &dest).unwrap());
     }
 }
