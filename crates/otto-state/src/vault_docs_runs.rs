@@ -22,7 +22,8 @@ pub struct VaultDocsRunRow {
     pub ws_id: String,
     /// `docs` | `refine`.
     pub kind: String,
-    /// `running | summarizing | done | error | cancelled | interrupted`.
+    /// `running | summarizing | reviewing | revising | done |
+    /// done_with_findings | error | cancelled | interrupted`.
     pub state: String,
     pub prompt: String,
     pub target_dir: String,
@@ -139,7 +140,8 @@ impl VaultDocsRunsRepo {
     /// Every non-terminal row — the startup interrupted-sweep input.
     pub async fn list_unfinished(&self) -> Result<Vec<VaultDocsRunRow>> {
         let rows = sqlx::query(
-            "SELECT * FROM vault_docs_runs WHERE state IN ('running', 'summarizing')",
+            "SELECT * FROM vault_docs_runs
+             WHERE state IN ('running', 'summarizing', 'reviewing', 'revising')",
         )
         .fetch_all(&self.pool)
         .await
@@ -224,15 +226,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unfinished_means_running_or_summarizing() {
+    async fn unfinished_means_running_summarizing_reviewing_or_revising() {
         let repo = VaultDocsRunsRepo::new(mem_pool().await);
         for (id, state) in [
             ("r1", "running"),
             ("r2", "summarizing"),
-            ("r3", "done"),
-            ("r4", "error"),
-            ("r5", "cancelled"),
-            ("r6", "interrupted"),
+            ("r3", "reviewing"),
+            ("r4", "revising"),
+            ("r5", "done"),
+            ("r6", "done_with_findings"),
+            ("r7", "error"),
+            ("r8", "cancelled"),
+            ("r9", "interrupted"),
         ] {
             repo.upsert(&row(id, 1, "docs", state, "2026-07-12T10:00:00Z"))
                 .await
@@ -246,6 +251,6 @@ mod tests {
             .map(|r| r.id)
             .collect();
         ids.sort();
-        assert_eq!(ids, vec!["r1", "r2"]);
+        assert_eq!(ids, vec!["r1", "r2", "r3", "r4"]);
     }
 }

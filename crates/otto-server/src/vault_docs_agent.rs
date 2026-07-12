@@ -91,6 +91,113 @@ pub struct VaultDocsSummarizer {
     pub error: Option<String>,
 }
 
+/// One evidence location proving a review finding against either source code
+/// or the generated bundle. At least one complete location is required for
+/// every parsed finding; reviewers cannot submit unsupported prose.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultDocsFindingEvidence {
+    #[serde(default)]
+    pub repo_path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub doc_path: Option<String>,
+    #[serde(default)]
+    pub section: Option<String>,
+}
+
+/// A source-backed omission or defect reported by a review agent.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultDocsFinding {
+    /// `blocking | major | minor`.
+    pub severity: String,
+    pub category: String,
+    pub summary: String,
+    pub evidence: Vec<VaultDocsFindingEvidence>,
+    pub missed_item: String,
+    pub required_fix: String,
+}
+
+/// One reviewer's resolved configuration and live/result state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultDocsReviewer {
+    pub index: usize,
+    pub provider: String,
+    pub model: Option<String>,
+    pub skill: String,
+    pub focus: Option<String>,
+    /// `pending | running | done | error | cancelled | interrupted`.
+    pub state: String,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub findings: Vec<VaultDocsFinding>,
+    pub error: Option<String>,
+}
+
+/// The final author's repair turn after a round that found omissions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultDocsRevision {
+    /// `skipped | pending | running | done | error | cancelled | interrupted`.
+    pub state: String,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub changed_paths: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl Default for VaultDocsRevision {
+    fn default() -> Self {
+        Self {
+            state: "skipped".into(),
+            session_id: None,
+            changed_paths: Vec::new(),
+            error: None,
+        }
+    }
+}
+
+/// One independently visible review/revision iteration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultDocsReviewRound {
+    pub iteration: u8,
+    /// `reviewing | revising | clean | exhausted | error | cancelled |
+    /// interrupted`.
+    pub state: String,
+    pub reviewers: Vec<VaultDocsReviewer>,
+    #[serde(default)]
+    pub revision: VaultDocsRevision,
+}
+
+/// Optional iterative quality gate persisted inside every docs-run payload.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultDocsReview {
+    /// `skipped | pending | reviewing | revising | clean | exhausted | error |
+    /// cancelled | interrupted`.
+    pub state: String,
+    pub max_iterations: u8,
+    pub current_iteration: u8,
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub reviewers: Vec<VaultDocsReviewer>,
+    #[serde(default)]
+    pub rounds: Vec<VaultDocsReviewRound>,
+}
+
+impl Default for VaultDocsReview {
+    fn default() -> Self {
+        Self {
+            state: "skipped".into(),
+            max_iterations: default_review_iterations(),
+            current_iteration: 0,
+            outcome: None,
+            reviewers: Vec::new(),
+            rounds: Vec::new(),
+        }
+    }
+}
+
 /// A whole docs run — the poll snapshot the UI renders every 1500ms, AND the
 /// durable `payload` persisted per transition in `vault_docs_runs` (hence
 /// `Deserialize` + defaults: rows written before a field existed must load).
@@ -107,10 +214,15 @@ pub struct VaultDocsRun {
     /// Refine turns: the note being edited (`""` for docs runs).
     #[serde(default)]
     pub note_path: String,
-    /// `running | summarizing | done | error | cancelled | interrupted`.
+    /// `running | summarizing | reviewing | revising | done |
+    /// done_with_findings | error | cancelled | interrupted`.
     pub state: String,
     pub agents: Vec<VaultDocsAgent>,
     pub summarizer: VaultDocsSummarizer,
+    /// Defaulted so payloads persisted before iterative review deserialize as
+    /// an explicitly skipped quality gate.
+    #[serde(default)]
+    pub review: VaultDocsReview,
     /// Final note paths in the vault (agent-reported, else server-side diff).
     pub written: Vec<String>,
     pub error: Option<String>,
@@ -137,6 +249,9 @@ pub struct RunReq {
     /// Capped; names validated.
     #[serde(default)]
     pub skills: Vec<String>,
+    /// Optional independent reviewer loop. Omitted means review is skipped.
+    #[serde(default)]
+    pub review: Option<ReviewReq>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +267,33 @@ pub struct SummarizerReq {
     pub provider: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReviewReq {
+    /// Required and 1..=4 when the review block is present.
+    pub reviewers: Vec<ReviewerReq>,
+    #[serde(default = "default_review_iterations")]
+    pub max_iterations: u8,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReviewerReq {
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_reviewer_skill")]
+    pub skill: String,
+    #[serde(default)]
+    pub focus: Option<String>,
+}
+
+fn default_review_iterations() -> u8 {
+    3
+}
+
+fn default_reviewer_skill() -> String {
+    "vault-docs-review".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,7 +383,10 @@ fn with_run(reg: &RunRegistry, run_id: &str, f: impl FnOnce(&mut VaultDocsRun)) 
 /// True when the run reached a terminal state (guards late stage transitions
 /// from clobbering a cancel that landed while a stage was in flight).
 fn is_terminal(state: &str) -> bool {
-    matches!(state, "done" | "error" | "cancelled" | "interrupted")
+    matches!(
+        state,
+        "done" | "done_with_findings" | "error" | "cancelled" | "interrupted"
+    )
 }
 
 /// Flatten a run into its durable row (payload = the full JSON snapshot).
@@ -428,6 +573,9 @@ async fn start_run(
     if req.agents.is_empty() || req.agents.len() > 4 {
         return Err(ApiError(Error::Invalid("agents must be 1..=4".into())));
     }
+    if let Some(review) = req.review.as_ref() {
+        validate_review_request(review).map_err(|message| ApiError(Error::Invalid(message)))?;
+    }
     let target_dir = normalize_target_dir(req.target_dir.as_deref().unwrap_or(""))?;
 
     // Provider precedence per agent: request → workspace default → global
@@ -458,6 +606,40 @@ async fn start_run(
         provider: resolve(sum_req.provider.as_deref().unwrap_or("")),
         model: sum_req.model.clone().filter(|m| !m.trim().is_empty()),
     };
+    let review = req
+        .review
+        .as_ref()
+        .map(|requested| VaultDocsReview {
+            state: "pending".into(),
+            max_iterations: requested.max_iterations,
+            current_iteration: 0,
+            outcome: None,
+            reviewers: requested
+                .reviewers
+                .iter()
+                .enumerate()
+                .map(|(index, reviewer)| VaultDocsReviewer {
+                    index,
+                    provider: resolve(&reviewer.provider),
+                    model: reviewer
+                        .model
+                        .clone()
+                        .filter(|model| !model.trim().is_empty()),
+                    skill: reviewer.skill.trim().to_string(),
+                    focus: reviewer
+                        .focus
+                        .clone()
+                        .map(|focus| focus.trim().to_string())
+                        .filter(|focus| !focus.is_empty()),
+                    state: "pending".into(),
+                    session_id: None,
+                    findings: Vec::new(),
+                    error: None,
+                })
+                .collect(),
+            rounds: Vec::new(),
+        })
+        .unwrap_or_default();
 
     let run_id = otto_core::new_id().to_string();
     let multi = writers.len() > 1;
@@ -491,6 +673,7 @@ async fn start_run(
             session_id: None,
             error: None,
         },
+        review,
         written: Vec::new(),
         error: None,
         started_at: chrono::Utc::now().to_rfc3339(),
@@ -529,7 +712,8 @@ async fn start_run(
             .filter(|s| {
                 !s.is_empty()
                     && s.len() <= 64
-                    && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
                     && seen.insert(s.clone())
             })
             .take(4)
@@ -982,6 +1166,7 @@ async fn refine(
             session_id: None,
             error: None,
         },
+        review: VaultDocsReview::default(),
         written: Vec::new(),
         error: None,
         started_at: chrono::Utc::now().to_rfc3339(),
@@ -1162,6 +1347,30 @@ fn mark_run_interrupted(run: &mut VaultDocsRun) -> bool {
     }
     if matches!(run.summarizer.state.as_str(), "pending" | "running") {
         run.summarizer.state = "interrupted".into();
+    }
+    if matches!(
+        run.review.state.as_str(),
+        "pending" | "reviewing" | "revising"
+    ) {
+        run.review.state = "interrupted".into();
+    }
+    for reviewer in &mut run.review.reviewers {
+        if matches!(reviewer.state.as_str(), "pending" | "running") {
+            reviewer.state = "interrupted".into();
+        }
+    }
+    for round in &mut run.review.rounds {
+        if matches!(round.state.as_str(), "reviewing" | "revising") {
+            round.state = "interrupted".into();
+        }
+        for reviewer in &mut round.reviewers {
+            if matches!(reviewer.state.as_str(), "pending" | "running") {
+                reviewer.state = "interrupted".into();
+            }
+        }
+        if matches!(round.revision.state.as_str(), "pending" | "running") {
+            round.revision.state = "interrupted".into();
+        }
     }
     true
 }
@@ -1795,7 +2004,13 @@ fn skill_package_guidance(
         .filter_map(|name| fallback_inline.get(name))
         .collect::<Vec<_>>();
     if !missing_bodies.is_empty() {
-        sections.push(missing_bodies.into_iter().cloned().collect::<Vec<_>>().join("\n\n---\n\n"));
+        sections.push(
+            missing_bodies
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n\n---\n\n"),
+        );
     }
 
     (!sections.is_empty()).then(|| sections.join("\n\n"))
@@ -1825,6 +2040,142 @@ const QUIET_DONE: std::time::Duration = std::time::Duration::from_secs(150);
 /// Cap on user-requested retries per writer/summarizer slot within one run —
 /// a sanity bound, not a policy (each retry is an explicit click).
 const MAX_USER_RETRIES: u32 = 5;
+
+/// Bundled, read-only review methods accepted by the public run request.
+pub const VAULT_REVIEWER_SKILLS: [&str; 5] = [
+    "vault-docs-review",
+    "vault-api-review",
+    "vault-data-review",
+    "vault-runtime-review",
+    "vault-evidence-review",
+];
+
+/// Categories shared by every bundled reviewer finding contract.
+pub const VAULT_REVIEW_CATEGORIES: [&str; 6] =
+    ["coverage", "api", "data", "runtime", "evidence", "quality"];
+
+/// Validate the optional review block before any sessions or durable run rows
+/// are created. Provider resolution follows the same defaults as writers, so
+/// an empty provider is intentionally valid here.
+pub fn validate_review_request(review: &ReviewReq) -> Result<(), String> {
+    if review.reviewers.is_empty() || review.reviewers.len() > 4 {
+        return Err("review.reviewers must be 1..=4 when review is enabled".into());
+    }
+    if !(1..=10).contains(&review.max_iterations) {
+        return Err("review.max_iterations must be 1..=10".into());
+    }
+    for (index, reviewer) in review.reviewers.iter().enumerate() {
+        let skill = reviewer.skill.trim();
+        if !VAULT_REVIEWER_SKILLS.contains(&skill) {
+            return Err(format!(
+                "review.reviewers[{index}] has unknown reviewer skill '{}'; expected one of: {}",
+                reviewer.skill,
+                VAULT_REVIEWER_SKILLS.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Parse the reviewer's result artifact. Only a bare JSON array satisfying the
+/// findings contract is accepted: prose, wrapper objects, incomplete evidence,
+/// and unsupported severities are errors rather than accidental clean verdicts.
+pub fn parse_review_findings(content: &str) -> Result<Vec<VaultDocsFinding>, String> {
+    let findings: Vec<VaultDocsFinding> = serde_json::from_str(content.trim())
+        .map_err(|error| format!("review output must be a valid JSON finding array: {error}"))?;
+    for (index, finding) in findings.iter().enumerate() {
+        if !matches!(finding.severity.as_str(), "blocking" | "major" | "minor") {
+            return Err(format!(
+                "review finding {index} severity must be blocking, major, or minor"
+            ));
+        }
+        if !VAULT_REVIEW_CATEGORIES.contains(&finding.category.as_str()) {
+            return Err(format!(
+                "review finding {index} category must be one of: {}",
+                VAULT_REVIEW_CATEGORIES.join(", ")
+            ));
+        }
+        for (field, value) in [
+            ("summary", finding.summary.as_str()),
+            ("missed_item", finding.missed_item.as_str()),
+            ("required_fix", finding.required_fix.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("review finding {index} requires non-empty {field}"));
+            }
+        }
+        if finding.evidence.is_empty() {
+            return Err(format!(
+                "review finding {index} requires at least one evidence location"
+            ));
+        }
+        for (evidence_index, evidence) in finding.evidence.iter().enumerate() {
+            let repo_complete = evidence
+                .repo_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+                && evidence.line.is_some_and(|line| line > 0);
+            let doc_complete = evidence
+                .doc_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+                && evidence
+                    .section
+                    .as_deref()
+                    .is_some_and(|section| !section.trim().is_empty());
+            if !repo_complete && !doc_complete {
+                return Err(format!(
+                    "review finding {index} evidence {evidence_index} requires repo_path+line or doc_path+section"
+                ));
+            }
+        }
+    }
+    Ok(findings)
+}
+
+/// A round is clean only after every configured reviewer has completed in the
+/// same round and every one returned an empty findings array.
+pub fn all_reviewers_clean(reviewers: &[VaultDocsReviewer]) -> bool {
+    !reviewers.is_empty()
+        && reviewers
+            .iter()
+            .all(|reviewer| reviewer.state == "done" && reviewer.findings.is_empty())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewAction {
+    Pending,
+    Clean,
+    Revise,
+    Exhausted,
+    Error,
+}
+
+/// Decide the next stage without advancing an incomplete or failed round.
+pub fn next_review_action(
+    reviewers: &[VaultDocsReviewer],
+    current_iteration: u8,
+    max_iterations: u8,
+) -> ReviewAction {
+    if reviewers.is_empty()
+        || reviewers
+            .iter()
+            .any(|reviewer| !matches!(reviewer.state.as_str(), "pending" | "running" | "done"))
+    {
+        ReviewAction::Error
+    } else if reviewers
+        .iter()
+        .any(|reviewer| matches!(reviewer.state.as_str(), "pending" | "running"))
+    {
+        ReviewAction::Pending
+    } else if all_reviewers_clean(reviewers) {
+        ReviewAction::Clean
+    } else if current_iteration >= max_iterations {
+        ReviewAction::Exhausted
+    } else {
+        ReviewAction::Revise
+    }
+}
 
 /// A fresh done-marker path + the prompt line instructing the agent to write
 /// it LAST. Turn completion is transcript-based and only claude has one — for
@@ -2104,6 +2455,87 @@ fn build_refine_prompt(
     p
 }
 
+/// Build an independent review turn. The package is referenced by its staged
+/// path and the only allowed mutation is the server-owned JSON result file.
+#[allow(clippy::too_many_arguments)]
+pub fn build_reviewer_prompt(
+    original_request: &str,
+    vault_id: i64,
+    target_dir: &str,
+    iteration: u8,
+    skill: &str,
+    focus: Option<&str>,
+    package_path: &str,
+    results_path: &str,
+) -> String {
+    let focus = focus
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("\nADDITIONAL FOCUS (narrows, never waives the method):\n{value}\n"))
+        .unwrap_or_default();
+    format!(
+        "OTTO_TASK: vault_docs_review\n\
+         You are an INDEPENDENT REVIEWER in review round {iteration}. Review the current FINAL \
+         documentation under {target} in Otto vault {vault_id} against the original request and \
+         the real repository in your working directory.\n\n\
+         METHOD — open and follow the complete `{skill}` package starting at:\n\
+         `{package_path}`\n\
+         Read its referenced checklists and examples before judging the bundle.{focus}\n\
+         REVIEW RULES — follow exactly:\n\
+         - This is read-only with respect to the vault: never call a vault write, rename, or \
+         delete tool and never repair findings yourself.\n\
+         - Reconcile the current `coverage.md`, final notes, indexes, and deterministic audit \
+         output against real code. Do not blindly repeat audit candidates.\n\
+         - Every finding must be proven by a real repository path and line and/or an exact \
+         documentation path and section. Reject speculative findings and stylistic preferences.\n\
+         - Re-read the current bundle in this round; do not repeat a finding already repaired.\n\
+         - `[]` is clean only after completing every mandatory check in the method.\n\n\
+         OUTPUT — write ONLY one JSON array to `{results_path}`. Each item must have exactly:\n\
+         {{\"severity\":\"blocking|major|minor\",\
+         \"category\":\"coverage|api|data|runtime|evidence|quality\",\
+         \"summary\":\"...\",\"evidence\":[{{\"repo_path\":\"path\",\"line\":1}},\
+         {{\"doc_path\":\"path.md\",\"section\":\"Heading\"}}],\
+         \"missed_item\":\"...\",\"required_fix\":\"...\"}}\n\
+         Missing, malformed, wrapped, or prose-contaminated output is an error.\n\
+         {rules}\n\
+         ORIGINAL REQUEST:\n{original_request}\n",
+        target = dir_display(target_dir),
+        rules = DOCS_STEP_RULES,
+    )
+}
+
+/// Build the resumed final-author repair turn from the combined, persisted
+/// findings of one round.
+pub fn build_revision_prompt(
+    original_request: &str,
+    vault_id: i64,
+    target_dir: &str,
+    iteration: u8,
+    findings: &[VaultDocsFinding],
+    results_path: &str,
+) -> String {
+    let findings_json = serde_json::to_string_pretty(findings).unwrap_or_else(|_| "[]".into());
+    format!(
+        "OTTO_TASK: vault_docs_revise\n\
+         Resume as the FINAL AUTHOR for review round {iteration}. Repair the current final \
+         documentation under {target} in Otto vault {vault_id}.\n\n\
+         REVISION RULES — follow exactly:\n\
+         - Re-read the affected source and current notes; apply every valid required_fix below.\n\
+         - Preserve correct existing material. Resolve the underlying omission, not only its wording.\n\
+         - Refresh `coverage.md`, neighboring `index.md` files, links, examples, diagrams, and text \
+         artifacts affected by a repair.\n\
+         - Run `otto_vault_okf_validate` and the bundle audit; fix every introduced error.\n\
+         - Write through the guarded Otto vault tools only.\n\
+         {rules}\n\
+         FINALLY, write ONLY this JSON shape to `{results_path}` with every vault-relative path \
+         changed in this revision: {{\"written\": [\"path/to/changed.md\", ...]}}\n\n\
+         ORIGINAL REQUEST:\n{original_request}\n\n\
+         COMBINED SOURCE-BACKED FINDINGS:\n{findings_json}\n",
+        target = dir_display(target_dir),
+        rules = DOCS_STEP_RULES,
+    )
+}
+
 /// Parse the agent-written results file TOLERANTLY: accept a bare JSON array,
 /// a `{"written": [...]}` object (direct or buried in prose via the shared
 /// balanced-object extractor), normalize paths (strip `./` and leading `/`),
@@ -2230,7 +2662,17 @@ mod tests {
     #[test]
     fn skills_block_renders_on_non_okf_vaults_too() {
         // Prepared-prompt skills must reach the prompt even when okf=false.
-        let p = build_writer_prompt("x", 1, 1, 2, "run8run8", "", false, Some("SKILL BODY"), None);
+        let p = build_writer_prompt(
+            "x",
+            1,
+            1,
+            2,
+            "run8run8",
+            "",
+            false,
+            Some("SKILL BODY"),
+            None,
+        );
         assert!(p.contains("AUTHORING SKILLS"));
         assert!(p.contains("SKILL BODY"));
         assert!(!p.contains("OKF — this vault is OKF-conformant"));
@@ -2257,7 +2699,10 @@ mod tests {
         let codex = skill_package_guidance("codex", Some(&staged), &names, &fallback).unwrap();
         assert!(codex.contains("okf-authoring/SKILL.md"));
         assert!(codex.contains("references/spec.md"));
-        assert!(!codex.contains("method"), "package bodies must not be inlined");
+        assert!(
+            !codex.contains("method"),
+            "package bodies must not be inlined"
+        );
 
         let claude = skill_package_guidance("claude", Some(&staged), &names, &fallback).unwrap();
         assert!(claude.contains("invoke"));
@@ -2419,6 +2864,223 @@ mod tests {
         assert!(normalize_target_dir("a\\b").is_err());
     }
 
+    #[test]
+    fn review_request_defaults_method_and_iterations() {
+        let req: RunReq = serde_json::from_value(serde_json::json!({
+            "prompt": "document everything",
+            "agents": [{"provider": "codex"}],
+            "review": {"reviewers": [{"provider": "claude"}]}
+        }))
+        .unwrap();
+        let review = req.review.as_ref().unwrap();
+        assert_eq!(review.max_iterations, 3);
+        assert_eq!(review.reviewers[0].skill, "vault-docs-review");
+        assert!(validate_review_request(review).is_ok());
+    }
+
+    #[test]
+    fn review_request_validation_is_actionable() {
+        let review = |reviewers: Vec<ReviewerReq>, max_iterations| ReviewReq {
+            reviewers,
+            max_iterations,
+        };
+        let reviewer = |skill: &str| ReviewerReq {
+            provider: "claude".into(),
+            model: None,
+            skill: skill.into(),
+            focus: None,
+        };
+
+        let err = validate_review_request(&review(vec![], 3)).unwrap_err();
+        assert!(err.contains("reviewers must be 1..=4"));
+        let err = validate_review_request(&review(
+            (0..5).map(|_| reviewer("vault-docs-review")).collect(),
+            3,
+        ))
+        .unwrap_err();
+        assert!(err.contains("reviewers must be 1..=4"));
+        let err =
+            validate_review_request(&review(vec![reviewer("vault-docs-review")], 0)).unwrap_err();
+        assert!(err.contains("max_iterations must be 1..=10"));
+        let err =
+            validate_review_request(&review(vec![reviewer("vault-docs-review")], 11)).unwrap_err();
+        assert!(err.contains("max_iterations must be 1..=10"));
+        let err =
+            validate_review_request(&review(vec![reviewer("unknown-review")], 3)).unwrap_err();
+        assert!(err.contains("unknown reviewer skill 'unknown-review'"));
+        assert!(err.contains("vault-docs-review"));
+    }
+
+    fn sample_reviewer(state: &str, findings: Vec<VaultDocsFinding>) -> VaultDocsReviewer {
+        VaultDocsReviewer {
+            index: 0,
+            provider: "claude".into(),
+            model: None,
+            skill: "vault-docs-review".into(),
+            focus: None,
+            state: state.into(),
+            session_id: None,
+            findings,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn review_findings_parser_accepts_empty_and_source_backed_arrays() {
+        assert!(parse_review_findings("[]").unwrap().is_empty());
+        let findings = parse_review_findings(
+            r#"[{
+                "severity":"blocking",
+                "category":"api",
+                "summary":"POST /widgets omits its 422 response body",
+                "evidence":[
+                    {"repo_path":"src/routes/widgets.rs","line":91},
+                    {"doc_path":"widgets/api.md","section":"POST /widgets"}
+                ],
+                "missed_item":"ValidationError response schema and example",
+                "required_fix":"Document the 422 schema/example and add it to OpenAPI"
+            }]"#,
+        )
+        .unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, "blocking");
+        assert_eq!(findings[0].evidence[0].line, Some(91));
+        assert_eq!(
+            findings[0].evidence[1].doc_path.as_deref(),
+            Some("widgets/api.md")
+        );
+    }
+
+    #[test]
+    fn review_findings_parser_rejects_malformed_or_unproven_output() {
+        for malformed in [
+            "not json",
+            r#"{"findings": []}"#,
+            r#"[{"severity":"blocking"}]"#,
+            r#"[{"severity":"urgent","category":"api","summary":"x","evidence":[{"repo_path":"a.rs","line":1}],"missed_item":"x","required_fix":"x"}]"#,
+            r#"[{"severity":"major","category":"banana","summary":"x","evidence":[{"repo_path":"a.rs","line":1}],"missed_item":"x","required_fix":"x"}]"#,
+            r#"[{"severity":"major","category":"api","summary":"x","evidence":[],"missed_item":"x","required_fix":"x"}]"#,
+            r#"[{"severity":"major","category":"api","summary":"x","evidence":[{}],"missed_item":"x","required_fix":"x"}]"#,
+        ] {
+            assert!(
+                parse_review_findings(malformed).is_err(),
+                "must reject: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_round_decision_requires_same_round_clean_and_honors_cap() {
+        let clean = sample_reviewer("done", vec![]);
+        let finding = VaultDocsFinding {
+            severity: "major".into(),
+            category: "data".into(),
+            summary: "Missing write impact".into(),
+            evidence: vec![VaultDocsFindingEvidence {
+                repo_path: Some("src/dao.rs".into()),
+                line: Some(42),
+                doc_path: Some("data/orders.md".into()),
+                section: Some("Writes".into()),
+            }],
+            missed_item: "transaction boundary".into(),
+            required_fix: "Document the transaction boundary".into(),
+        };
+        let dirty = sample_reviewer("done", vec![finding]);
+        let still_running = sample_reviewer("running", vec![]);
+
+        assert!(all_reviewers_clean(&[clean.clone(), clean.clone()]));
+        assert!(!all_reviewers_clean(&[]));
+        assert!(!all_reviewers_clean(&[clean.clone(), dirty.clone()]));
+        assert!(!all_reviewers_clean(&[clean.clone(), still_running]));
+        assert_eq!(next_review_action(&[clean], 1, 3), ReviewAction::Clean);
+        assert_eq!(
+            next_review_action(&[dirty.clone()], 1, 3),
+            ReviewAction::Revise
+        );
+        assert_eq!(next_review_action(&[dirty], 3, 3), ReviewAction::Exhausted);
+
+        for state in ["pending", "running"] {
+            let incomplete = sample_reviewer(state, vec![]);
+            assert_eq!(
+                next_review_action(&[incomplete.clone()], 1, 3),
+                ReviewAction::Pending
+            );
+            assert_eq!(
+                next_review_action(&[incomplete], 3, 3),
+                ReviewAction::Pending
+            );
+        }
+        for state in ["error", "cancelled", "interrupted"] {
+            let failed = sample_reviewer(state, vec![]);
+            assert_eq!(
+                next_review_action(&[failed.clone()], 1, 3),
+                ReviewAction::Error
+            );
+            assert_eq!(next_review_action(&[failed], 3, 3), ReviewAction::Error);
+        }
+        assert_eq!(next_review_action(&[], 1, 3), ReviewAction::Error);
+    }
+
+    #[test]
+    fn review_prompt_carries_method_focus_evidence_and_result_contract() {
+        let prompt = build_reviewer_prompt(
+            "Document the widget service",
+            9,
+            "widgets",
+            2,
+            "vault-api-review",
+            Some("Prioritize externally consumed contracts"),
+            "/tmp/staged/skills/vault-api-review/SKILL.md",
+            "/tmp/review-round-2-agent-1.json",
+        );
+        assert!(prompt.contains("OTTO_TASK: vault_docs_review"));
+        assert!(prompt.contains("round 2"));
+        assert!(prompt.contains("vault-api-review"));
+        assert!(prompt.contains("/tmp/staged/skills/vault-api-review/SKILL.md"));
+        assert!(prompt.contains("Prioritize externally consumed contracts"));
+        assert!(prompt.contains("real repository path and line"));
+        assert!(prompt.contains("speculative"));
+        assert!(prompt.contains("read-only"));
+        assert!(prompt.contains("missed_item"));
+        assert!(prompt.contains("required_fix"));
+        assert!(prompt.contains("coverage|api|data|runtime|evidence|quality"));
+        assert!(prompt.contains("/tmp/review-round-2-agent-1.json"));
+        assert!(prompt.contains("Document the widget service"));
+    }
+
+    #[test]
+    fn review_revision_prompt_carries_findings_and_changed_path_results_contract() {
+        let finding = VaultDocsFinding {
+            severity: "major".into(),
+            category: "api".into(),
+            summary: "Missing response body".into(),
+            evidence: vec![VaultDocsFindingEvidence {
+                repo_path: Some("src/routes.rs".into()),
+                line: Some(8),
+                doc_path: Some("api/widgets.md".into()),
+                section: Some("POST /widgets".into()),
+            }],
+            missed_item: "422 schema".into(),
+            required_fix: "Add schema and example".into(),
+        };
+        let prompt = build_revision_prompt(
+            "Document the widget service",
+            9,
+            "widgets",
+            2,
+            &[finding],
+            "/tmp/revision-round-2.json",
+        );
+        assert!(prompt.contains("OTTO_TASK: vault_docs_revise"));
+        assert!(prompt.contains("Missing response body"));
+        assert!(prompt.contains("Add schema and example"));
+        assert!(prompt.contains("coverage.md"));
+        assert!(prompt.contains("index.md"));
+        assert!(prompt.contains("otto_vault_okf_validate"));
+        assert!(prompt.contains(r#"{"written": ["path/to/changed.md", ...]}"#));
+        assert!(prompt.contains("/tmp/revision-round-2.json"));
+    }
+
     fn sample_run(state: &str) -> VaultDocsRun {
         VaultDocsRun {
             id: "run-12345678".into(),
@@ -2468,6 +3130,7 @@ mod tests {
                 session_id: None,
                 error: None,
             },
+            review: VaultDocsReview::default(),
             written: vec![],
             error: None,
             started_at: "2026-07-12T10:00:00Z".into(),
@@ -2478,6 +3141,23 @@ mod tests {
     #[test]
     fn interrupted_sweep_flips_only_non_terminal_states() {
         let mut run = sample_run("running");
+        let reviewer = sample_reviewer("running", vec![]);
+        run.review = VaultDocsReview {
+            state: "reviewing".into(),
+            max_iterations: 3,
+            current_iteration: 1,
+            outcome: None,
+            reviewers: vec![reviewer.clone()],
+            rounds: vec![VaultDocsReviewRound {
+                iteration: 1,
+                state: "revising".into(),
+                reviewers: vec![reviewer],
+                revision: VaultDocsRevision {
+                    state: "pending".into(),
+                    ..VaultDocsRevision::default()
+                },
+            }],
+        };
         assert!(mark_run_interrupted(&mut run));
         assert_eq!(run.state, "interrupted");
         assert!(run.finished_at.is_some());
@@ -2487,11 +3167,19 @@ mod tests {
         assert_eq!(run.agents[1].state, "interrupted");
         assert_eq!(run.agents[2].state, "interrupted");
         assert_eq!(run.summarizer.state, "interrupted");
+        assert_eq!(run.review.state, "interrupted");
+        assert_eq!(run.review.reviewers[0].state, "interrupted");
+        assert_eq!(run.review.rounds[0].state, "interrupted");
+        assert_eq!(run.review.rounds[0].reviewers[0].state, "interrupted");
+        assert_eq!(run.review.rounds[0].revision.state, "interrupted");
 
         // Terminal runs are untouched (idempotent across sweeps).
         let mut done = sample_run("done");
         assert!(!mark_run_interrupted(&mut done));
         assert_eq!(done.state, "done");
+        let mut exhausted = sample_run("done_with_findings");
+        assert!(!mark_run_interrupted(&mut exhausted));
+        assert_eq!(exhausted.state, "done_with_findings");
         let mut twice = sample_run("running");
         mark_run_interrupted(&mut twice);
         assert!(!mark_run_interrupted(&mut twice));
@@ -2517,6 +3205,9 @@ mod tests {
         let run: VaultDocsRun = serde_json::from_str(legacy).unwrap();
         assert_eq!(run.kind, "docs");
         assert_eq!(run.note_path, "");
+        assert_eq!(run.review.state, "skipped");
+        assert_eq!(run.review.max_iterations, 3);
+        assert!(run.review.rounds.is_empty());
         // And a full round-trip preserves the new fields.
         let mut run = sample_run("running");
         run.kind = "refine".into();
@@ -2572,6 +3263,7 @@ mod tests {
                 session_id: None,
                 error: None,
             },
+            review: VaultDocsReview::default(),
             written: vec![],
             error: None,
             started_at: "t".into(),
