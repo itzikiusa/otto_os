@@ -13,11 +13,17 @@
   import Terminal from '../../lib/components/Terminal.svelte';
   import { api } from '../../lib/api/client';
   import { contextApi } from '../../lib/api/context';
-  import type { VaultDocsRun } from '../../lib/api/types';
+  import type {
+    VaultDocsFindingEvidence,
+    VaultDocsReviewSkill,
+    VaultDocsRun,
+  } from '../../lib/api/types';
   import {
     cancelDocsRun,
     docsRun as getDocsRun,
     retryDocsAgent,
+    retryDocsReviewer,
+    retryDocsRevision,
     retryDocsSummarizer,
     runDocsAgents,
   } from '../../lib/api/vault';
@@ -31,11 +37,34 @@
     model: string;
   }
 
+  interface ReviewerRow extends AgentRow {
+    skill: VaultDocsReviewSkill;
+    focus: string;
+  }
+
+  const REVIEW_METHODS: { value: VaultDocsReviewSkill; label: string }[] = [
+    { value: 'vault-docs-review', label: 'Generic — complete bundle' },
+    { value: 'vault-api-review', label: 'API contracts and flows' },
+    { value: 'vault-data-review', label: 'Datastores and impact' },
+    { value: 'vault-runtime-review', label: 'Runtime, workers and messaging' },
+    { value: 'vault-evidence-review', label: 'Evidence and coverage' },
+  ];
+
+  const newReviewer = (): ReviewerRow => ({
+    provider: defaultAgentProvider(),
+    model: '',
+    skill: 'vault-docs-review',
+    focus: '',
+  });
+
   // -- form ---------------------------------------------------------------------
   let prompt = $state('');
   let targetDir = $state('');
   let agents = $state<AgentRow[]>([{ provider: defaultAgentProvider(), model: '' }]);
   let sumProvider = $state(defaultAgentProvider());
+  let reviewEnabled = $state(false);
+  let reviewers = $state<ReviewerRow[]>([newReviewer()]);
+  let maxReviewIterations = $state(3);
   let starting = $state(false);
 
   // Prepared prompts — pick a template, fill the repo path, Insert. The
@@ -70,7 +99,11 @@
 
   const providers = $derived(agentProviders());
   const run = $derived(vault.docsRun);
-  const isActive = (r: VaultDocsRun) => r.state === 'running' || r.state === 'summarizing';
+  const isActive = (r: VaultDocsRun) =>
+    r.state === 'running' ||
+    r.state === 'summarizing' ||
+    r.state === 'reviewing' ||
+    r.state === 'revising';
   const active = $derived(run != null && isActive(run));
   /** Anything (selected or listed) still moving → the poll keeps ticking. */
   const anyActive = $derived((run != null && isActive(run)) || vault.docsRuns.some(isActive));
@@ -86,6 +119,36 @@
 
   function removeAgent(i: number): void {
     if (agents.length > 1) agents = agents.filter((_, x) => x !== i);
+  }
+
+  function addReviewer(): void {
+    if (reviewers.length < 4) reviewers = [...reviewers, newReviewer()];
+  }
+
+  function removeReviewer(i: number): void {
+    if (reviewers.length > 1) reviewers = reviewers.filter((_, x) => x !== i);
+  }
+
+  function evidenceLabel(evidence: VaultDocsFindingEvidence): string {
+    const source = evidence.repo_path || evidence.doc_path || 'Evidence';
+    const location = evidence.line ? `:${evidence.line}` : evidence.section ? ` · ${evidence.section}` : '';
+    return `${source}${location}`;
+  }
+
+  function reviewStateLabel(r: VaultDocsRun): string {
+    if (r.review.state === 'clean') return 'Review complete';
+    if (r.review.state === 'exhausted') return 'Review limit reached';
+    if (r.review.state === 'error') return 'Review failed';
+    if (r.review.state === 'cancelled') return 'Review cancelled';
+    if (r.review.state === 'interrupted') return 'Review interrupted';
+    if (r.review.state === 'pending') return 'Review queued';
+    return `Review round ${Math.max(r.review.current_iteration, 1)} of ${r.review.max_iterations}`;
+  }
+
+  const displayState = (state: string): string => state.replaceAll('_', ' ');
+
+  function reviewIterationLimit(value: number): number {
+    return Number.isFinite(value) ? Math.min(10, Math.max(1, Math.round(value))) : 3;
   }
 
   // -- run + polling ---------------------------------------------------------------
@@ -133,6 +196,17 @@
         agents: agents.map((a) => ({ provider: a.provider, model: a.model.trim() || undefined })),
         summarizer: agents.length > 1 ? { provider: sumProvider } : undefined,
         skills: tplSkills.length ? tplSkills : undefined,
+        review: reviewEnabled
+          ? {
+              max_iterations: reviewIterationLimit(maxReviewIterations),
+              reviewers: reviewers.map((reviewer) => ({
+                provider: reviewer.provider,
+                model: reviewer.model.trim() || undefined,
+                skill: reviewer.skill,
+                focus: reviewer.focus.trim() || undefined,
+              })),
+            }
+          : undefined,
       });
       openTerminals = new Set();
       void vault.refreshDocsRuns();
@@ -159,6 +233,36 @@
       toasts.error('Retry', e instanceof Error ? e.message : String(e));
     } finally {
       retrying = { ...retrying, [String(target)]: false };
+    }
+  }
+
+  async function retryReviewer(iteration: number, index: number): Promise<void> {
+    const r = vault.docsRun;
+    const key = `reviewer-${iteration}-${index}`;
+    if (!r || retrying[key]) return;
+    retrying = { ...retrying, [key]: true };
+    try {
+      await retryDocsReviewer(r.id, iteration, index);
+      startPoll();
+    } catch (e) {
+      toasts.error('Retry reviewer', e instanceof Error ? e.message : String(e));
+    } finally {
+      retrying = { ...retrying, [key]: false };
+    }
+  }
+
+  async function retryRevision(iteration: number): Promise<void> {
+    const r = vault.docsRun;
+    const key = `revision-${iteration}`;
+    if (!r || retrying[key]) return;
+    retrying = { ...retrying, [key]: true };
+    try {
+      await retryDocsRevision(r.id, iteration);
+      startPoll();
+    } catch (e) {
+      toasts.error('Retry revision', e instanceof Error ? e.message : String(e));
+    } finally {
+      retrying = { ...retrying, [key]: false };
     }
   }
 
@@ -308,6 +412,83 @@
         </label>
       {/if}
 
+      <section class="review-config" class:enabled={reviewEnabled}>
+        <div class="review-config-head">
+          <div>
+            <strong>Review outcomes</strong>
+            <span>Independent agents check the final bundle before the run finishes.</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" bind:checked={reviewEnabled} aria-label="Review outcomes" />
+            <span aria-hidden="true"></span>
+          </label>
+        </div>
+
+        {#if reviewEnabled}
+          <div class="review-settings">
+            <div class="review-setting-title">
+              <span>Reviewer agents ({reviewers.length}/4)</span>
+              <label class="iteration-field">
+                Maximum review iterations
+                <input
+                  type="number"
+                  min="1"
+                  max="10"
+                  bind:value={maxReviewIterations}
+                  onchange={() => (maxReviewIterations = reviewIterationLimit(maxReviewIterations))}
+                  aria-label="Maximum review iterations"
+                />
+              </label>
+            </div>
+            {#each reviewers as reviewer, i (i)}
+              <div class="reviewer-config-row">
+                <span class="reviewer-number">{i + 1}</span>
+                <div class="reviewer-fields">
+                  <div class="reviewer-main-fields">
+                    <select bind:value={reviewer.provider} aria-label="Reviewer provider">
+                      {#each providers as p (p)}
+                        <option value={p}>{p}</option>
+                      {/each}
+                    </select>
+                    <input
+                      bind:value={reviewer.model}
+                      placeholder="model (optional)"
+                      aria-label="Reviewer model"
+                    />
+                    <select class="review-method" bind:value={reviewer.skill} aria-label="Review method">
+                      {#each REVIEW_METHODS as method (method.value)}
+                        <option value={method.value}>{method.label}</option>
+                      {/each}
+                    </select>
+                    <button
+                      class="icon-btn"
+                      title="Remove reviewer"
+                      aria-label="Remove reviewer"
+                      disabled={reviewers.length <= 1}
+                      onclick={() => removeReviewer(i)}
+                    >
+                      <Icon name="x" size={12} />
+                    </button>
+                  </div>
+                  <input
+                    class="review-focus"
+                    bind:value={reviewer.focus}
+                    placeholder="Optional focus — e.g. request/response bodies"
+                    aria-label="Review focus"
+                  />
+                </div>
+              </div>
+            {/each}
+            {#if reviewers.length < 4}
+              <button class="add-agent" onclick={addReviewer}>+ add reviewer</button>
+            {/if}
+            <p class="review-hint">
+              Review stops early when every reviewer reports no findings in the same round.
+            </p>
+          </div>
+        {/if}
+      </section>
+
       {#if runSkills.length > 0}
         <div class="fld">
           <span>Skills injected into this run — click to view</span>
@@ -335,7 +516,7 @@
           title={run.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
         >
           {#if active}<span class="spinner-xs"></span>{/if}
-          {run.state}
+          {displayState(run.state)}
         </span>
         <span class="kind-chip">{run.kind}</span>
         <span class="run-meta" title={run.prompt}>
@@ -456,6 +637,177 @@
         {/if}
       </div>
 
+      {#if run.kind === 'docs' && run.review && run.review.state !== 'skipped'}
+        <section class="review-ledger">
+          <div class="review-progress">
+            <div>
+              <span class="review-eyebrow">Independent review</span>
+              <strong>{reviewStateLabel(run)}</strong>
+            </div>
+            <span class="pill st-{run.review.state}">
+              {#if run.review.state === 'reviewing' || run.review.state === 'revising'}
+                <span class="spinner-xs"></span>
+              {/if}
+              {run.review.state}
+            </span>
+          </div>
+
+          {#if run.review.state === 'clean'}
+            <div class="review-outcome clean">
+              Every reviewer returned a valid clean verdict in round {run.review.current_iteration}.
+            </div>
+          {:else if run.review.state === 'exhausted'}
+            <div class="review-outcome exhausted">
+              <strong>Review limit reached.</strong> Findings remain after {run.review.max_iterations}
+              iteration{run.review.max_iterations === 1 ? '' : 's'}; the run kept the latest revisions
+              and evidence below.
+            </div>
+          {:else if run.review.outcome}
+            <div class="review-outcome">Outcome: {run.review.outcome.replaceAll('_', ' ')}</div>
+          {/if}
+
+          <div class="review-rounds">
+            {#each run.review.rounds as round (round.iteration)}
+              <article class="review-round" class:current={round.iteration === run.review.current_iteration}>
+                <header class="review-round-head">
+                  <span class="round-number">{round.iteration}</span>
+                  <div>
+                    <strong>Round {round.iteration}</strong>
+                    <span>
+                      {round.reviewers.length} reviewer{round.reviewers.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <span class="grow"></span>
+                  <span class="pill st-{round.state}">{round.state}</span>
+                </header>
+
+                <div class="reviewer-list">
+                  {#each round.reviewers as reviewer (reviewer.index)}
+                    <div class="reviewer-card">
+                      <div class="agent-top">
+                        <span class="agent-name">{reviewer.skill}</span>
+                        <span class="chip">
+                          {reviewer.provider}{reviewer.model ? ' · ' + reviewer.model : ''}
+                        </span>
+                        <span class="grow"></span>
+                        {#if reviewer.session_id}
+                          <button
+                            class="ghost small"
+                            onclick={() => void toggleTerminal(reviewer.session_id)}
+                          >
+                            {openTerminals.has(reviewer.session_id) ? 'Hide' : 'Open'}
+                          </button>
+                        {/if}
+                        {#if active && (reviewer.state === 'pending' || reviewer.state === 'running')}
+                          <button
+                            class="ghost small"
+                            disabled={retrying[`reviewer-${round.iteration}-${reviewer.index}`]}
+                            onclick={() => void retryReviewer(round.iteration, reviewer.index)}
+                          >
+                            {retrying[`reviewer-${round.iteration}-${reviewer.index}`]
+                              ? 'Retrying…'
+                              : 'Retry reviewer'}
+                          </button>
+                        {/if}
+                        <span class="pill st-{reviewer.state}">
+                          {#if reviewer.state === 'running'}<span class="spinner-xs"></span>{/if}
+                          {reviewer.state}
+                        </span>
+                      </div>
+                      {#if reviewer.focus}
+                        <p class="review-focus-label">Focus: {reviewer.focus}</p>
+                      {/if}
+                      {#if reviewer.error}
+                        <p class="agent-err">{reviewer.error}</p>
+                      {/if}
+                      {#if reviewer.findings.length === 0 && reviewer.state === 'done'}
+                        <p class="clean-verdict"><Icon name="check" size={11} /> No findings</p>
+                      {:else if reviewer.findings.length > 0}
+                        <div class="finding-list">
+                          {#each reviewer.findings as finding, findingIndex (`${reviewer.index}-${findingIndex}`)}
+                            <div class="finding">
+                              <div class="finding-head">
+                                <span class="severity sev-{finding.severity}">{finding.severity}</span>
+                                <span class="finding-category">{finding.category}</span>
+                              </div>
+                              <strong>{finding.summary}</strong>
+                              <p><span>Missed:</span> {finding.missed_item}</p>
+                              <p><span>Required fix:</span> {finding.required_fix}</p>
+                              {#if finding.evidence.length > 0}
+                                <div class="evidence-list">
+                                  {#each finding.evidence as evidence}
+                                    <span class="evidence">{evidenceLabel(evidence)}</span>
+                                  {/each}
+                                </div>
+                              {/if}
+                            </div>
+                          {/each}
+                        </div>
+                      {/if}
+                      {#if reviewer.session_id && openTerminals.has(reviewer.session_id)}
+                        <div class="term">
+                          {#key reviewer.session_id}
+                            <Terminal sessionId={reviewer.session_id} preferDom />
+                          {/key}
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+
+                {#if round.revision.state !== 'skipped'}
+                  <div class="revision-card">
+                    <div class="agent-top">
+                      <span class="revision-mark"><Icon name="edit" size={11} /></span>
+                      <span class="agent-name">Final author revision</span>
+                      <span class="grow"></span>
+                      {#if round.revision.session_id}
+                        <button
+                          class="ghost small"
+                          onclick={() => void toggleTerminal(round.revision.session_id)}
+                        >
+                          {openTerminals.has(round.revision.session_id) ? 'Hide' : 'Open'}
+                        </button>
+                      {/if}
+                      {#if active && (round.revision.state === 'pending' || round.revision.state === 'running')}
+                        <button
+                          class="ghost small"
+                          disabled={retrying[`revision-${round.iteration}`]}
+                          onclick={() => void retryRevision(round.iteration)}
+                        >
+                          {retrying[`revision-${round.iteration}`] ? 'Retrying…' : 'Retry revision'}
+                        </button>
+                      {/if}
+                      <span class="pill st-{round.revision.state}">
+                        {#if round.revision.state === 'running'}<span class="spinner-xs"></span>{/if}
+                        {round.revision.state}
+                      </span>
+                    </div>
+                    {#if round.revision.error}
+                      <p class="agent-err">{round.revision.error}</p>
+                    {/if}
+                    {#if round.revision.changed_paths.length > 0}
+                      <div class="changed-paths">
+                        {#each round.revision.changed_paths as path (path)}
+                          <span>{path}</span>
+                        {/each}
+                      </div>
+                    {/if}
+                    {#if round.revision.session_id && openTerminals.has(round.revision.session_id)}
+                      <div class="term">
+                        {#key round.revision.session_id}
+                          <Terminal sessionId={round.revision.session_id} preferDom />
+                        {/key}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </article>
+            {/each}
+          </div>
+        </section>
+      {/if}
+
       {#if run.written.length > 0}
         <div class="written">
           <span class="written-title">
@@ -484,7 +836,7 @@
               title={r.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
             >
               {#if isActive(r)}<span class="spinner-xs"></span>{/if}
-              {r.state}
+              {displayState(r.state)}
             </span>
             <span class="kind-chip">{r.kind}</span>
             <span class="run-row-text">
@@ -680,6 +1032,161 @@
   .sum-select {
     max-width: 200px;
   }
+  .review-config {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel, #1c1c1e);
+    overflow: hidden;
+  }
+  .review-config.enabled {
+    border-color: color-mix(in srgb, var(--accent, #7a9cff) 45%, var(--border));
+  }
+  .review-config-head {
+    min-height: 48px;
+    padding: 9px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .review-config-head > div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .review-config-head strong {
+    color: var(--text);
+    font-size: 12.5px;
+  }
+  .review-config-head span {
+    color: var(--text-dim);
+    font-size: 11.5px;
+    line-height: 1.35;
+  }
+  .switch {
+    position: relative;
+    flex: none;
+    width: 34px;
+    height: 20px;
+  }
+  .switch input {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .switch span {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-dim) 24%, transparent);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  .switch span::after {
+    content: '';
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    left: 2px;
+    top: 2px;
+    background: var(--text-dim);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .switch input:focus-visible + span {
+    outline: 2px solid var(--accent, #7a9cff);
+    outline-offset: 2px;
+  }
+  .switch input:checked + span {
+    background: var(--accent, #4c6fff);
+    border-color: transparent;
+  }
+  .switch input:checked + span::after {
+    transform: translateX(14px);
+    background: white;
+  }
+  .review-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px 12px;
+    border-top: 1px solid var(--border);
+  }
+  .review-setting-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--text-dim);
+    font-size: 11.5px;
+  }
+  .iteration-field {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .iteration-field input {
+    width: 54px;
+    padding: 5px 7px;
+  }
+  .reviewer-config-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .reviewer-number,
+  .round-number {
+    width: 22px;
+    height: 22px;
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--accent-dim, rgba(90, 120, 255, 0.14));
+    color: var(--accent, #9ab4ff);
+    font: 700 10.5px var(--font-mono, monospace);
+  }
+  .reviewer-fields {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .reviewer-main-fields {
+    display: grid;
+    grid-template-columns: minmax(90px, 0.8fr) minmax(100px, 0.9fr) minmax(180px, 1.6fr) auto;
+    gap: 5px;
+  }
+  .reviewer-main-fields select,
+  .reviewer-main-fields input,
+  .review-focus,
+  .iteration-field input {
+    min-width: 0;
+    background: var(--panel-2, #222);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 7px 8px;
+  }
+  .review-focus {
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .review-hint {
+    margin: 0 0 0 30px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.4;
+  }
   .icon-btn {
     display: inline-flex;
     background: none;
@@ -822,6 +1329,196 @@
     overscroll-behavior: contain;
   }
 
+  /* Review iterations form a compact audit ledger: reviewers first, then the
+     author repair, so the quality loop is readable without opening terminals. */
+  .review-ledger {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--panel, #1c1c1e);
+  }
+  .review-progress {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 11px 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .review-progress > div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .review-progress strong {
+    font-size: 13px;
+  }
+  .review-eyebrow {
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .review-outcome {
+    margin: 10px 12px 0;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 7px 9px;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  .review-outcome.clean {
+    color: #7fc97f;
+    border-color: rgba(127, 201, 127, 0.35);
+    background: rgba(127, 201, 127, 0.06);
+  }
+  .review-outcome.exhausted {
+    color: #d7a953;
+    border-color: rgba(215, 169, 83, 0.35);
+    background: rgba(215, 169, 83, 0.06);
+  }
+  .review-rounds {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px 12px;
+  }
+  .review-round {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--panel-2, #222);
+  }
+  .review-round.current {
+    border-color: color-mix(in srgb, var(--accent, #7a9cff) 45%, var(--border));
+  }
+  .review-round-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .review-round-head > div {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .review-round-head strong {
+    font-size: 12px;
+  }
+  .review-round-head div span {
+    color: var(--text-dim);
+    font-size: 10.5px;
+  }
+  .reviewer-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 0 8px 8px;
+  }
+  .reviewer-card,
+  .revision-card {
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--panel, #1c1c1e);
+    padding: 8px 9px;
+  }
+  .revision-card {
+    margin: 0 8px 8px;
+    border-style: dashed;
+  }
+  .revision-mark {
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    display: inline-grid;
+    place-items: center;
+    color: var(--accent, #9ab4ff);
+    background: var(--accent-dim, rgba(90, 120, 255, 0.14));
+  }
+  .review-focus-label,
+  .clean-verdict {
+    margin: 6px 0 0;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  .clean-verdict {
+    color: #7fc97f;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .finding-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 7px;
+  }
+  .finding {
+    border-left: 2px solid var(--border);
+    padding: 3px 0 3px 8px;
+  }
+  .finding-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+  }
+  .finding > strong {
+    font-size: 11.5px;
+    line-height: 1.4;
+  }
+  .finding p {
+    margin: 3px 0 0;
+    color: var(--text-dim);
+    font-size: 10.75px;
+    line-height: 1.4;
+  }
+  .finding p span {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .severity {
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .sev-blocking,
+  .sev-major {
+    color: #e88;
+    background: rgba(214, 86, 72, 0.12);
+  }
+  .sev-minor {
+    color: #d7a953;
+    background: rgba(215, 169, 83, 0.12);
+  }
+  .finding-category {
+    color: var(--text-dim);
+    font: 10px var(--font-mono, monospace);
+  }
+  .evidence-list,
+  .changed-paths {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .evidence,
+  .changed-paths span {
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 6px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+    font: 10px var(--font-mono, monospace);
+    overflow-wrap: anywhere;
+  }
+
   /* status pills */
   .pill {
     font-size: 10px;
@@ -845,11 +1542,23 @@
     border: 1px dashed color-mix(in srgb, var(--text-dim) 45%, transparent);
   }
   .st-running,
-  .st-summarizing {
+  .st-summarizing,
+  .st-reviewing,
+  .st-revising {
     background: var(--accent-dim, rgba(90, 120, 255, 0.14));
     color: var(--accent, #9ab4ff);
   }
   .st-done {
+    background: rgba(127, 201, 127, 0.14);
+    color: #7fc97f;
+  }
+  .st-done_with_findings,
+  .st-exhausted {
+    background: rgba(215, 169, 83, 0.12);
+    color: #d7a953;
+  }
+  .st-clean,
+  .st-revised {
     background: rgba(127, 201, 127, 0.14);
     color: #7fc97f;
   }
@@ -984,5 +1693,24 @@
   }
   .note-link:hover {
     text-decoration: underline;
+  }
+
+  @media (max-width: 680px) {
+    .inner {
+      padding-inline: 14px;
+    }
+    .review-setting-title {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+    .reviewer-main-fields {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    }
+    .review-method {
+      grid-column: 1 / 3;
+    }
+    .run-row-when {
+      display: none;
+    }
   }
 </style>

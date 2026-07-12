@@ -44,6 +44,7 @@ const BACKGROUND_SOURCES = new Set([
   'workflow',
   'insights',
   'vault-docs',
+  'vault-docs-review',
 ]);
 
 /** A user-facing foreground session (sidebar-listable). */
@@ -162,8 +163,8 @@ class WorkspaceStore {
           // they're viewed inline under their run in the Workflows page.
           s.meta.source !== 'workflow' &&
           s.meta.source !== 'db_assist' &&
-          // Vault docs/refine writers live embedded in the Vault view only.
-          s.meta.source !== 'vault-docs') ||
+          // Vault docs writers/reviewers live embedded in the Vault view only.
+          (s.meta.source !== 'vault-docs' && s.meta.source !== 'vault-docs-review')) ||
         this.openTabs.includes(s.id),
     ),
   );
@@ -278,8 +279,9 @@ class WorkspaceStore {
         // list (a busy workspace can have hundreds). Still openable from the
         // run's step detail via `openSession`, which reads `this.sessions`.
         s.meta.source !== 'workflow' &&
-        // Vault docs/refine writers are embedded-only (Vault runs panel).
-        s.meta.source !== 'vault-docs',
+        // Vault docs writers/reviewers are embedded-only (Vault runs panel).
+        s.meta.source !== 'vault-docs' &&
+        s.meta.source !== 'vault-docs-review',
     ),
   );
 
@@ -304,7 +306,8 @@ class WorkspaceStore {
         s.meta.source !== 'mockup_assist' &&
         s.meta.source !== 'db_assist' &&
         s.meta.source !== 'workflow' &&
-        s.meta.source !== 'vault-docs',
+        s.meta.source !== 'vault-docs' &&
+        s.meta.source !== 'vault-docs-review',
     ).length,
   );
 
@@ -325,7 +328,8 @@ class WorkspaceStore {
         s.meta.source !== 'mockup_assist' &&
         s.meta.source !== 'db_assist' &&
         s.meta.source !== 'workflow' &&
-        s.meta.source !== 'vault-docs',
+        s.meta.source !== 'vault-docs' &&
+        s.meta.source !== 'vault-docs-review',
     ).length,
   );
 

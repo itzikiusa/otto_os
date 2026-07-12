@@ -123,7 +123,9 @@ class VaultStore {
 
   /** Runs still moving — drives the topbar "agents running" chip. */
   get activeDocsRuns(): VaultDocsRun[] {
-    return this.docsRuns.filter((r) => r.state === 'running' || r.state === 'summarizing');
+    return this.docsRuns.filter((r) =>
+      ['running', 'summarizing', 'reviewing', 'revising'].includes(r.state),
+    );
   }
 
   /** Provider label for a `_drafts/docs-run-<run8>/agent-<n>` folder row —

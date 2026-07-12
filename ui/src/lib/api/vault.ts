@@ -8,6 +8,7 @@ import type {
   VaultBacklink,
   VaultDirListing,
   VaultDocsRun,
+  VaultDocsReviewSkill,
   VaultGraphPayload,
   VaultNote,
   VaultNoteMeta,
@@ -134,6 +135,15 @@ export interface VaultDocsRunReq {
   /** Library skills injected into every writer + summarizer (≤4; prepared
    *  prompts pass e.g. `vault-repo-docs`; okf-authoring auto-adds on OKF). */
   skills?: string[];
+  review?: {
+    reviewers: {
+      provider: string;
+      model?: string;
+      skill?: VaultDocsReviewSkill;
+      focus?: string;
+    }[];
+    max_iterations?: number;
+  };
 }
 
 export function runDocsAgents(ws: string, id: number, body: VaultDocsRunReq) {
@@ -162,6 +172,20 @@ export function retryDocsAgent(runId: string, index: number) {
 
 export function retryDocsSummarizer(runId: string) {
   return api.post<void>(`/vault/docs-agents/runs/${enc(runId)}/summarizer/retry`, {});
+}
+
+export function retryDocsReviewer(runId: string, iteration: number, index: number) {
+  return api.post<void>(
+    `/vault/docs-agents/runs/${enc(runId)}/review/rounds/${iteration}/reviewers/${index}/retry`,
+    {},
+  );
+}
+
+export function retryDocsRevision(runId: string, iteration: number) {
+  return api.post<void>(
+    `/vault/docs-agents/runs/${enc(runId)}/review/rounds/${iteration}/revision/retry`,
+    {},
+  );
 }
 
 /** LONG request — resolves when the refine turn completes. */
