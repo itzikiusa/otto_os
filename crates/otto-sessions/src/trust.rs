@@ -5,8 +5,10 @@
 //! them trusted in each CLI's own config before spawning:
 //! - claude: `~/.claude.json` → `projects.<path>.hasTrustDialogAccepted`
 //! - codex:  `~/.codex/config.toml` → `[projects."<path>"] trust_level`
+//! - grok:   `~/.grok/trusted_folders.toml` → folder-trust grant (MCP/hooks/LSP)
 //!
-//! Unknown providers are left alone (best effort, never fatal).
+//! Unknown providers are left alone (best effort, never fatal). The runtime
+//! [`crate::prompt_guard`] still auto-accepts residual prompts for custom CLIs.
 
 use std::path::PathBuf;
 
@@ -15,6 +17,7 @@ pub fn ensure_trusted(provider: &str, cwd: &str) {
     let result = match provider {
         "claude" => trust_claude(cwd),
         "codex" => trust_codex(cwd),
+        "grok" => trust_grok(cwd),
         _ => Ok(()),
     };
     if let Err(e) = result {
@@ -110,17 +113,73 @@ fn trust_codex(cwd: &str) -> Result<(), String> {
     let path = dir.join("config.toml");
     let current = std::fs::read_to_string(&path).unwrap_or_default();
 
-    let header = format!("[projects.\"{cwd}\"]");
-    if current.contains(&header) {
+    // Trust every path spelling codex might compare (literal + resolved +
+    // /private variants) — same rationale as claude. A single literal entry
+    // leaves sessions blocked when the CLI records a resolved cwd.
+    let mut next = current;
+    let mut changed = false;
+    for variant in path_variants(cwd) {
+        let header = format!("[projects.\"{variant}\"]");
+        if next.contains(&header) {
+            continue;
+        }
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&format!("\n{header}\ntrust_level = \"trusted\"\n"));
+        changed = true;
+    }
+    if !changed {
         return Ok(());
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let mut next = current;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    next.push_str(&format!("\n{header}\ntrust_level = \"trusted\"\n"));
     std::fs::write(&path, next).map_err(|e| format!("write {}: {e}", path.display()))?;
     tracing::info!(cwd, "pre-trusted folder for codex");
+    Ok(())
+}
+
+/// Pre-trust `cwd` in Grok's unified folder-trust store so sessions don't stall
+/// on "Trust the authors of this folder…?" when the workspace has repo-local
+/// `.mcp.json` / hooks / LSP config (Otto often writes `.mcp.json` itself).
+///
+/// Format mirrors what `/hooks-trust` / `--trust` persist: a table-per-path
+/// under `folders."<path>"` with `trusted = true` and an ISO `decided_at`.
+/// Grok refuses over-broad roots (home / `/`); we skip those too.
+fn trust_grok(cwd: &str) -> Result<(), String> {
+    // Never record home or filesystem root — Grok rejects them and they would
+    // also be dangerously broad.
+    let home_str = home()?.to_string_lossy().into_owned();
+    let dir = home()?.join(".grok");
+    let path = dir.join("trusted_folders.toml");
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut next = current;
+    let mut changed = false;
+    for variant in path_variants(cwd) {
+        if variant.is_empty() || variant == "/" || variant == home_str {
+            continue;
+        }
+        let header = format!("[folders.\"{variant}\"]");
+        if next.contains(&header) {
+            continue;
+        }
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&format!(
+            "\n{header}\ntrusted = true\ndecided_at = \"{now}\"\n"
+        ));
+        changed = true;
+    }
+    if !changed {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    // Atomic-ish write: temp + rename (same dir so rename is atomic on APFS).
+    let tmp = path.with_extension("toml.otto-tmp");
+    std::fs::write(&tmp, &next).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename onto {}: {e}", path.display()))?;
+    tracing::info!(cwd, "pre-trusted folder for grok");
     Ok(())
 }

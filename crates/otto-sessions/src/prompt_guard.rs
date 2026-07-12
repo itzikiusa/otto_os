@@ -35,6 +35,23 @@ const ENTER: &[u8] = b"\r";
 /// would have sufficed.
 const SELECT_YES: &[u8] = b"1\r";
 
+/// Shared folder-trust / first-run prompts used by custom providers (e.g. grok)
+/// and as a fallback for CLIs Otto doesn't have a dedicated table for. Kept
+/// narrow so ordinary agent output never matches.
+const GENERIC_FOLDER: Approval = Approval {
+    needles: &[
+        "do you trust the files in this folder",
+        "trust the authors of this folder",
+        "trust this folder",
+        "trust this directory",
+        "allow access to this folder",
+        "grant access to this directory",
+        "allow these servers to start",
+    ],
+    // `y` + Enter covers both y/N prompts and select-style defaults.
+    keys: b"y\r",
+};
+
 /// Per-provider approval table. Keystrokes are validated by the integration
 /// tests in `otto-server/tests`; update here if a CLI changes its wording.
 fn approvals_for(provider: &str) -> &'static [Approval] {
@@ -69,7 +86,11 @@ fn approvals_for(provider: &str) -> &'static [Approval] {
             },
             CONTINUE,
         ],
-        _ => &[],
+        // Grok (custom provider) + any other non-shell CLI: folder-trust and
+        // first-run dialogs. Shell is excluded so a plain terminal never gets
+        // synthetic keystrokes injected into user typing.
+        "shell" => &[],
+        _ => &[GENERIC_FOLDER, CONTINUE],
     }
 }
 
@@ -270,11 +291,32 @@ mod tests {
     }
 
     #[test]
-    fn ignores_normal_output_and_unknown_providers() {
+    fn ignores_normal_output_and_shell() {
         assert_eq!(detect_approval("claude", "running the test suite now…"), None);
         assert_eq!(detect_approval("claude", "the folder structure looks fine"), None);
-        // A provider with no approval table never matches.
+        // Shell never gets synthetic keystrokes.
         assert_eq!(detect_approval("shell", "do you trust the files in this folder"), None);
+    }
+
+    #[test]
+    fn detects_grok_and_custom_provider_folder_trust() {
+        // Grok's repo-local MCP/hooks gate (exact wording from the CLI).
+        assert_eq!(
+            detect_approval(
+                "grok",
+                "trust the authors of this folder and allow these servers to start? [y/n]"
+            ),
+            Some(&b"y\r"[..])
+        );
+        // Any other custom provider gets the same generic backstop.
+        assert_eq!(
+            detect_approval("opencode", "do you trust the files in this folder?"),
+            Some(&b"y\r"[..])
+        );
+        assert_eq!(
+            detect_approval("grok", "press enter to continue"),
+            Some(ENTER)
+        );
     }
 
     #[test]

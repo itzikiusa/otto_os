@@ -376,21 +376,33 @@ that, both best-effort and never fatal:
      for `/var` and `/tmp`) so a resolved-path comparison can't re-trigger the
      dialog. Written atomically (temp file + rename).
    - **codex** → `~/.codex/config.toml` → `[projects."<path>"] trust_level =
-     "trusted"`.
-   - Unknown providers (incl. `agy`) are left alone here.
+     "trusted"` (every path variant, same as claude).
+   - **grok** → `~/.grok/trusted_folders.toml` → folder-trust grant (the same
+     store `/hooks-trust` / `--trust` write). Needed because Otto often
+     materializes `.mcp.json` in the cwd, which triggers Grok's "Trust the
+     authors of this folder…?" gate. Over-broad roots (home, `/`) are skipped.
+   - Other unknown providers are left alone here.
 
 2. **Prompt-guard (runtime backstop, `prompt_guard.rs`).** An `OutputScanner`
    watches each session's PTY output; when a **known approval prompt** for the
    provider appears in the recent tail it writes the accepting keystroke back.
    Detection is intentionally narrow — specific full phrases (e.g. *"do you trust
-   the files in this folder"*, *"allow codex to work in this folder"*, *"press
-   enter to continue"*) so it never injects keys into the agent's real work on a
-   false positive — and it is debounced per session (≤ once / 5 s). claude is
-   accepted with `1\r` (select "Yes"); codex/agy with `\r`. This catches what
+   the files in this folder"*, *"allow codex to work in this folder"*, *"trust
+   the authors of this folder"*, *"press enter to continue"*) so it never injects
+   keys into the agent's real work on a false positive — and it is debounced per
+   session (≤ once / 5 s). claude is accepted with `1\r` (select "Yes");
+   codex/agy with `\r`; **custom providers (incl. grok)** with `y\r` plus the
+   shared continue phrases. `shell` is never auto-approved. This catches what
    pre-trust can't: providers without a known trust config and unexpected
    first-run dialogs. Anything it does *not* match is caught by the analysis
    stuck-detector (idle → retry → notify), so no prompt hangs forever. Each
    auto-approval is recorded on the session's activity trail.
+
+   **Recommended Grok custom-provider args** (Settings → Providers):
+   `args: --session-id {sid} --always-approve`, `resume_args: --resume {sid}`.
+   Optionally pin in `~/.grok/config.toml`: `[ui] permission_mode = "always-approve"`
+   and `[hints] project_picker_disabled = true` so sessions started from home /
+   Desktop / `/tmp` don't open the "choose a project folder" picker.
 
 ---
 
