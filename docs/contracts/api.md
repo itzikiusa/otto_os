@@ -1974,7 +1974,10 @@ Notes:
 A **vault** is a registered local directory of markdown files (it may be a live
 Obsidian vault). Files are the source of truth; SQLite holds a derived, rebuildable
 index (notes, wikilinks/markdown links, tags, FTS5). No embeddings anywhere.
-Workspace-scoped: reads = ws viewer (`Product:View`), writes = ws editor
+Vaults are a **GLOBAL library** (like connections): every workspace sees every
+vault — the `{ws}` in the path is auth context only (`ws_id` on the row is
+provenance, not a boundary; `root_path` is globally unique, app-enforced).
+Roles: reads = ws viewer (`Product:View`), writes = ws editor
 (`Product:Edit`); the read-shaped POSTs `search` and `okf/validate` are View-gated.
 DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 `VaultBacklink`, `VaultSearchHit`, `VaultSwitchHit`, `VaultTagCount`,
@@ -2050,10 +2053,12 @@ are mirrored in `ui/src/lib/api/types.ts`; run/agent/summarizer states include
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/run | ws editor | `{prompt, target_dir?, agents: [{provider, model?}] (1..=4), summarizer?: {provider?, model?}}` | `VaultDocsRun` — initial snapshot, `state:"running"`; `summarizer.state:"skipped"` when 1 writer; the durable row exists before this returns |
+| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/run | ws editor | `{prompt, target_dir?, agents: [{provider, model?}] (1..=4), summarizer?: {provider?, model?}, skills?: string[]}` | `VaultDocsRun` — initial snapshot, `state:"running"`; `summarizer.state:"skipped"` when 1 writer; the durable row exists before this returns. `skills` (≤4, name-validated) are library skills injected into every writer + the summarizer: staged bundle via extra_dirs for claude, SKILL.md inlined for other providers; `okf-authoring` is auto-added on OKF vaults |
 | GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/runs | ws viewer | `?limit=` (default 50, cap 200) | `VaultDocsRun[]` — docs + refine runs newest-first; live runs carry their fresher in-memory snapshot |
 | GET /vault/docs-agents/runs/{run_id} | ws viewer (the run's ws, re-checked) | — | `VaultDocsRun` — the UI polls every 1500ms while `running\|summarizing`; served from the durable row when not live (history / after a restart, where it reads `interrupted`) |
-| POST /vault/docs-agents/runs/{run_id}/cancel | ws editor (the run's ws, re-checked) | — | 204 — marks the run `cancelled` + stops orchestrating (agent sessions stay open); 404 once terminal (evicted from the live registry) |
+| POST /vault/docs-agents/runs/{run_id}/agents/{index}/retry | ws editor (the run's ws, re-checked) | — | `202` — LIVE-run retry of one stuck writer (mirrors PR-review agent retry): kills its session (Ctrl+C grace, then kill) and the orchestrator re-spawns a FRESH session with the same prompt; the slot shows `pending` until the new session is up. `409` when the run is terminal or the writer isn't running/pending (max 5 user retries per slot). |
+| POST /vault/docs-agents/runs/{run_id}/summarizer/retry | ws editor (the run's ws, re-checked) | — | `202` — same, for the consolidation stage; only while the run is `summarizing`. A summarizer that ultimately FAILS leaves the `_drafts/docs-run-*` dir in place (the writers' work is preserved for manual consolidation). |
+| POST /vault/docs-agents/runs/{run_id}/cancel | ws editor (the run's ws, re-checked) | — | 204 — marks the run `cancelled`, flips every still-pending/running agent + summarizer to `cancelled`, stops orchestrating AND terminates their sessions (Ctrl+C grace, then kill — vault-docs sessions are embedded-only, so cancel is the user's only kill switch); finished agents keep `done`/`error`. 404 once terminal (evicted from the live registry) |
 | POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — LONG request (returns when the turn completes); ONE resumed session per (vault, note), rehydrated from history after a restart; `provider` honored on the FIRST turn only |
 | GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws viewer | `?path=` | `{session_id: string\|null, running: boolean}` — poll right after POSTing refine to attach the live shell |
 

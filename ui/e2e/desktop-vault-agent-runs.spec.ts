@@ -114,11 +114,13 @@ test('ui: a run survives a full page reload as history and reopens', async ({ pa
   // The run is in the Runs section too (server-persisted list).
   await expect(panel.locator('.runs-section')).toContainText('RELOAD-SURVIVOR run');
 
-  // FULL reload — in-memory UI state is gone; the server list brings it back.
+  // FULL reload — in-memory UI state is gone; the PERSISTED VIEW brings the
+  // docs-agents center back automatically (no toggle click — clicking now
+  // would collapse the restored view), and the server list restores the run.
   await page.reload();
   await openPage(page, 'vault');
-  await page.locator('button[title^="Docs agent"]').click();
   const panel2 = page.locator('.docs-agents');
+  await expect(panel2).toBeVisible({ timeout: 15_000 });
   await expect(panel2.locator('.runs-section')).toContainText('RELOAD-SURVIVOR run', {
     timeout: 15_000,
   });

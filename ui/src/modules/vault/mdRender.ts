@@ -33,6 +33,24 @@ export function slugifyHeading(text: string): string {
 
 const IMG_EXT = /\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i;
 
+// Diagram fences render as live diagrams in the reading view (NoteView's
+// post-render pass feeds them to the lazy mermaid/D2 bridges). Agents often
+// emit mermaid WITHOUT a language tag, so a bare fence whose first line is a
+// mermaid grammar keyword ("flowchart LR", "sequenceDiagram", …) counts too.
+const MERMAID_START =
+  /^\s*(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie\b|mindmap|timeline|quadrantChart|gitGraph|sankey-beta|xychart-beta|block-beta|C4Context|C4Container|C4Component|C4Dynamic)\b/;
+
+/** 'mermaid' | 'd2' when a fenced block should render as a diagram. */
+export function diagramKind(lang: string | null, text: string): 'mermaid' | 'd2' | null {
+  if (lang === 'mermaid') return 'mermaid';
+  if (lang === 'd2') return 'd2';
+  if (!lang) {
+    const first = text.split('\n').find((l) => l.trim().length > 0) ?? '';
+    if (MERMAID_START.test(first)) return 'mermaid';
+  }
+  return null;
+}
+
 /** Build a per-note renderer map from its indexed outgoing links. */
 export function resolverFrom(outgoing: VaultOutgoingLink[]): (raw: string) => string | null {
   const map = new Map<string, string | null>();
@@ -171,6 +189,12 @@ function makeMarked(ctx: RenderCtx): Marked {
       },
       code({ text, lang }) {
         const l = (lang || '').trim().split(/\s+/)[0] || null;
+        const diagram = diagramKind(l?.toLowerCase() ?? null, text);
+        if (diagram) {
+          // Source travels as text content (survives the sanitizer); the
+          // post-render pass swaps it for the rendered SVG.
+          return `<div class="diagram-block" data-diagram="${diagram}"><pre class="diagram-src">${esc(text)}</pre></div>\n`;
+        }
         const hlLang = l && langFromPath(`x.${l}`) ? l : l;
         const lines = text.split('\n').map((line) => highlightLine(line, hlLang)).join('\n');
         return `<pre><code class="hljs">${lines}</code></pre>\n`;

@@ -20,7 +20,7 @@ const TAG_ATTRS: Record<string, Set<string>> = {
   ol: new Set(['start']),
   td: new Set(['colspan', 'rowspan', 'align']),
   th: new Set(['colspan', 'rowspan', 'align']),
-  div: new Set(['data-embed-path', 'data-path']),
+  div: new Set(['data-embed-path', 'data-path', 'data-diagram']),
   span: new Set(['data-tag', 'data-path']),
 };
 /** data-* carriers the renderer itself emits on anchors. */

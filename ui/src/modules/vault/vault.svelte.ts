@@ -36,11 +36,22 @@ import type {
   VaultSwitchHit,
   VaultTagCount,
 } from '../../lib/api/types';
+import { authedBlobUrl } from '../../lib/api/client';
+import { assetPath } from '../../lib/api/vault';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { toasts } from '../../lib/toast.svelte';
 
 export type LeftMode = 'files' | 'search' | 'tags';
-export type CenterMode = 'note' | 'graph' | 'empty' | 'docs-agents';
+export type CenterMode = 'note' | 'graph' | 'empty' | 'docs-agents' | 'file';
+
+/** One open page in the vault center pane (persisted per vault). */
+export interface VaultTab {
+  kind: 'note' | 'file';
+  path: string;
+}
+
+/** Text files bigger than this render a "too large" notice, not the body. */
+const MAX_TEXT_FILE = 2_000_000;
 
 /** A row of the flattened, lazily-loaded file tree. */
 export interface TreeNode {
@@ -54,6 +65,7 @@ export interface TreeNode {
 
 const LAST_VAULT_KEY = 'otto_vault_last';
 const VIEW_MODE_KEY = 'otto_vault_view';
+const TABS_KEY = 'otto_vault_tabs';
 
 class VaultStore {
   vaults = $state<Vault[]>([]);
@@ -78,6 +90,18 @@ class VaultStore {
   conflict = $state(false);
   backlinks = $state<VaultBacklink[]>([]);
 
+  // Open tabs — multiple notes/files at once, persisted per vault (survives
+  // module switches AND app restarts; restored in select()).
+  tabs = $state<VaultTab[]>([]);
+  activeTab = $state(-1);
+
+  // Non-markdown file viewer (centerMode 'file').
+  filePath = $state<string | null>(null);
+  fileText = $state<string | null>(null);
+  fileBlobUrl = $state<string | null>(null);
+  fileLoading = $state(false);
+  fileError = $state('');
+
   // Search / tags panels.
   searchQuery = $state('');
   searchHits = $state<VaultSearchHit[]>([]);
@@ -97,14 +121,41 @@ class VaultStore {
   /** Target-folder prefill for the docs-agent form ("Docs agent here"). */
   docsAgentsDir = $state('');
 
+  /** Runs still moving — drives the topbar "agents running" chip. */
+  get activeDocsRuns(): VaultDocsRun[] {
+    return this.docsRuns.filter((r) => r.state === 'running' || r.state === 'summarizing');
+  }
+
+  /** Provider label for a `_drafts/docs-run-<run8>/agent-<n>` folder row —
+   *  the tree shows WHICH agent wrote each drafts folder. */
+  draftAgentLabel(path: string): string | null {
+    const m = /^_drafts\/docs-run-([A-Za-z0-9]+)\/agent-(\d+)$/.exec(path);
+    if (!m) return null;
+    const run = this.docsRuns.find((r) => r.id.startsWith(m[1]));
+    const a = run?.agents[Number(m[2]) - 1];
+    if (!a) return null;
+    return a.model ? `${a.provider} · ${a.model}` : a.provider;
+  }
+
   /** Refresh the persisted runs list (newest-first; live runs overlaid). */
   async refreshDocsRuns(): Promise<void> {
     if (!this.current) return;
     const vaultId = this.current.id;
+    const wasActive = new Set(this.activeDocsRuns.map((r) => r.id));
     try {
       const runs = await listDocsRuns(this.wsId, vaultId);
       // Async guard: drop the result if the vault changed under us.
-      if (this.current?.id === vaultId) this.docsRuns = runs;
+      if (this.current?.id !== vaultId) return;
+      this.docsRuns = runs;
+      // A run just finished (possibly launched outside this UI, e.g. over
+      // MCP) — its drafts were consolidated/trashed, so refresh the tree.
+      const finished = runs.some(
+        (r) => wasActive.has(r.id) && r.state !== 'running' && r.state !== 'summarizing',
+      );
+      if (finished) {
+        void this.refreshTree();
+        void this.refreshStatus();
+      }
     } catch {
       /* transient — the view's poll retries */
     }
@@ -128,7 +179,13 @@ class VaultStore {
     this.loading = true;
     try {
       this.vaults = await listVaults(this.wsId);
-      const lastId = Number(localStorage.getItem(`${LAST_VAULT_KEY}:${this.wsId}`) || 0);
+      // Vaults are GLOBAL (the ws in the URL is auth context only) — the
+      // last-vault choice and per-vault view keys are ws-independent too.
+      const lastId = Number(
+        localStorage.getItem(LAST_VAULT_KEY) ??
+          localStorage.getItem(`${LAST_VAULT_KEY}:${this.wsId}`) ??
+          0,
+      );
       const pick = this.vaults.find((v) => v.id === lastId) ?? this.vaults[0] ?? null;
       if (pick) await this.select(pick.id);
       else {
@@ -144,6 +201,15 @@ class VaultStore {
 
   async select(id: number): Promise<void> {
     const v = this.vaults.find((x) => x.id === id) ?? null;
+    // Re-entering the SAME vault (module switch / workspace reload): keep the
+    // whole view — open tabs, note, center mode — and just refresh the data.
+    // Resetting here is what used to lose the user's page on every tab switch.
+    if (v && this.current?.id === v.id && this.roots.length > 0) {
+      this.current = v;
+      void this.refreshStatus();
+      void this.refreshDocsRuns();
+      return;
+    }
     this.current = v;
     this.note = null;
     this.notePath = null;
@@ -153,18 +219,28 @@ class VaultStore {
     this.docsRun = null;
     this.docsRuns = [];
     this.docsAgentsDir = '';
+    this.tabs = [];
+    this.activeTab = -1;
+    this.clearFileView();
     this.centerMode = 'empty';
     if (!v) return;
-    localStorage.setItem(`${LAST_VAULT_KEY}:${this.wsId}`, String(v.id));
+    localStorage.setItem(LAST_VAULT_KEY, String(v.id));
     this.editing = localStorage.getItem(`${VIEW_MODE_KEY}:${v.id}`) === 'edit';
-    await Promise.all([this.loadRoot(), this.refreshStatus()]);
+    await Promise.all([this.loadRoot(), this.refreshStatus(), this.refreshDocsRuns()]);
     void this.loadTags();
+    await this.restoreView();
   }
 
   startPolling(): void {
     this.stopPolling();
     this.pollTimer = setInterval(() => {
-      if (this.current && !document.hidden) void this.refreshStatus();
+      if (this.current && !document.hidden) {
+        void this.refreshStatus();
+        // Keep the runs list fresh even when the Docs agent view isn't
+        // mounted — the topbar chip is the always-visible signal that
+        // agents are writing into this vault right now.
+        void this.refreshDocsRuns();
+      }
     }, 5000);
   }
 
@@ -176,10 +252,20 @@ class VaultStore {
   async refreshStatus(): Promise<void> {
     if (!this.current) return;
     try {
-      const prev = this.status?.scan_state;
+      const prev = this.status;
       this.status = await vaultStatus(this.wsId, this.current.id);
-      // A scan just finished → refresh the visible tree + note backlinks.
-      if (prev === 'scanning' && this.status.scan_state === 'idle') {
+      // Refresh the visible tree when a scan just finished — OR when the
+      // note/link counts moved without us ever OBSERVING a 'scanning' state:
+      // agents writing over MCP trigger fast server-side scans that complete
+      // between two polls, which used to leave the tree stale until a manual
+      // refresh.
+      const scanFinished = prev?.scan_state === 'scanning' && this.status.scan_state === 'idle';
+      const countsMoved =
+        prev != null &&
+        (prev.notes !== this.status.notes ||
+          prev.links !== this.status.links ||
+          prev.unresolved !== this.status.unresolved);
+      if (scanFinished || countsMoved) {
         void this.refreshTree();
         void this.loadTags();
         if (this.notePath) void this.reloadBacklinks();
@@ -268,8 +354,23 @@ class VaultStore {
     return out;
   }
 
-  /** Refresh every loaded level (after create/rename/delete or a scan). */
+  private treeRefreshing = false;
+
+  /** Refresh every loaded level (after create/rename/delete or a scan).
+   *  Overlap-guarded: during an agent write burst the 5s status poll can
+   *  request refreshes faster than a deep tree walks — drop, don't stack
+   *  (the next poll refreshes again anyway). */
   async refreshTree(): Promise<void> {
+    if (!this.current || this.treeRefreshing) return;
+    this.treeRefreshing = true;
+    try {
+      await this.refreshTreeInner();
+    } finally {
+      this.treeRefreshing = false;
+    }
+  }
+
+  private async refreshTreeInner(): Promise<void> {
     if (!this.current) return;
     const id = this.current.id;
     const refresh = async (nodes: TreeNode[], path: string, depth: number): Promise<TreeNode[]> => {
@@ -287,7 +388,15 @@ class VaultStore {
 
   // -- note open / edit / save -----------------------------------------------------
 
-  async open(path: string, opts: { edit?: boolean } = {}): Promise<void> {
+  async open(path: string, opts: { edit?: boolean; newTab?: boolean } = {}): Promise<void> {
+    if (!this.current) return;
+    this.claimTab({ kind: 'note', path }, opts.newTab);
+    await this.openNoteInPlace(path, opts);
+    this.persistView();
+  }
+
+  /** Load a note into the center pane WITHOUT touching tab bookkeeping. */
+  private async openNoteInPlace(path: string, opts: { edit?: boolean } = {}): Promise<void> {
     if (!this.current) return;
     if (this.dirty && this.notePath && !this.conflict) await this.saveNow();
     try {
@@ -302,6 +411,147 @@ class VaultStore {
       void this.reloadBacklinks();
     } catch (e) {
       toasts.error(`Open ${path}: ${msg(e)}`);
+    }
+  }
+
+  // -- tabs (persisted view) -----------------------------------------------------
+
+  /** Activate an existing tab for `t`, replace the active tab, or push a new
+   *  one. `newTab` forces a fresh tab (⌘/middle-click). */
+  private claimTab(t: VaultTab, newTab = false): void {
+    const existing = this.tabs.findIndex((x) => x.kind === t.kind && x.path === t.path);
+    if (existing >= 0) {
+      this.activeTab = existing;
+      return;
+    }
+    if (newTab || this.activeTab < 0 || this.tabs.length === 0) {
+      this.tabs = [...this.tabs, t];
+      this.activeTab = this.tabs.length - 1;
+    } else {
+      const tabs = [...this.tabs];
+      tabs[this.activeTab] = t;
+      this.tabs = tabs;
+    }
+  }
+
+  async activateTab(i: number): Promise<void> {
+    const t = this.tabs[i];
+    if (!t) return;
+    this.activeTab = i;
+    if (t.kind === 'note') await this.openNoteInPlace(t.path);
+    else await this.loadFile(t.path);
+    this.persistView();
+  }
+
+  async closeTab(i: number): Promise<void> {
+    const t = this.tabs[i];
+    if (!t) return;
+    const wasActive = i === this.activeTab;
+    this.tabs = this.tabs.filter((_, x) => x !== i);
+    if (this.activeTab > i) this.activeTab -= 1;
+    if (wasActive) {
+      if (this.tabs.length > 0) {
+        await this.activateTab(Math.min(i, this.tabs.length - 1));
+        return; // activateTab persisted
+      }
+      this.activeTab = -1;
+      this.note = null;
+      this.notePath = null;
+      this.clearFileView();
+      if (this.centerMode === 'note' || this.centerMode === 'file') this.centerMode = 'empty';
+    }
+    this.persistView();
+  }
+
+  private viewKey(): string {
+    return `${TABS_KEY}:${this.current?.id ?? 0}`;
+  }
+
+  /** Persist tabs + active tab + center mode — the "come back to my page"
+   *  contract, including across full app restarts. */
+  persistView(): void {
+    if (!this.current) return;
+    localStorage.setItem(
+      this.viewKey(),
+      JSON.stringify({ tabs: this.tabs, active: this.activeTab, mode: this.centerMode }),
+    );
+  }
+
+  private async restoreView(): Promise<void> {
+    if (!this.current) return;
+    let saved: { tabs?: unknown; active?: unknown; mode?: unknown } = {};
+    try {
+      saved = JSON.parse(localStorage.getItem(this.viewKey()) ?? '{}');
+    } catch {
+      /* corrupt blob — start clean */
+    }
+    const tabs = (Array.isArray(saved.tabs) ? saved.tabs : []).filter(
+      (t): t is VaultTab =>
+        !!t &&
+        typeof t === 'object' &&
+        ((t as VaultTab).kind === 'note' || (t as VaultTab).kind === 'file') &&
+        typeof (t as VaultTab).path === 'string',
+    );
+    this.tabs = tabs;
+    const active = typeof saved.active === 'number' ? saved.active : tabs.length - 1;
+    this.activeTab = Math.min(Math.max(active, -1), tabs.length - 1);
+    if (saved.mode === 'graph') {
+      this.centerMode = 'graph';
+    } else if (saved.mode === 'docs-agents') {
+      this.centerMode = 'docs-agents';
+    } else if (this.activeTab >= 0) {
+      await this.activateTab(this.activeTab);
+    }
+  }
+
+  // -- non-markdown file viewer ---------------------------------------------------
+
+  async openFile(path: string, opts: { newTab?: boolean } = {}): Promise<void> {
+    if (!this.current) return;
+    // Leaving a dirty note for a file view must not lose the edit.
+    if (this.dirty && this.notePath && !this.conflict) await this.saveNow();
+    this.claimTab({ kind: 'file', path }, opts.newTab);
+    await this.loadFile(path);
+    this.persistView();
+  }
+
+  private clearFileView(): void {
+    if (this.fileBlobUrl) URL.revokeObjectURL(this.fileBlobUrl);
+    this.filePath = null;
+    this.fileText = null;
+    this.fileBlobUrl = null;
+    this.fileError = '';
+    this.fileLoading = false;
+  }
+
+  private async loadFile(path: string): Promise<void> {
+    if (!this.current) return;
+    const vaultId = this.current.id;
+    this.clearFileView();
+    this.filePath = path;
+    this.fileLoading = true;
+    this.centerMode = 'file';
+    try {
+      const url = await authedBlobUrl(assetPath(this.wsId, vaultId, path));
+      // Async guards: user may have switched files/vaults while fetching.
+      if (this.filePath !== path || this.current?.id !== vaultId) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      this.fileBlobUrl = url;
+      if (!/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico|pdf)$/i.test(path)) {
+        const blob = await (await fetch(url)).blob();
+        if (this.filePath !== path) return;
+        if (blob.size > MAX_TEXT_FILE) {
+          this.fileError = `File is too large to display (${(blob.size / 1024 / 1024).toFixed(1)} MB)`;
+        } else {
+          this.fileText = await blob.text();
+        }
+      }
+    } catch (e) {
+      if (this.filePath === path) this.fileError = msg(e);
+    } finally {
+      if (this.filePath === path) this.fileLoading = false;
     }
   }
 
@@ -395,6 +645,15 @@ class VaultStore {
     try {
       const r = await renameVaultPath(this.wsId, this.current.id, from, to);
       toasts.success(r.links_updated === 1 ? '1 link updated' : `${r.links_updated} links updated`);
+      // Keep open tabs pointing at the moved path (file or whole folder).
+      this.tabs = this.tabs.map((t) =>
+        t.path === from
+          ? { ...t, path: to }
+          : t.path.startsWith(`${from}/`)
+            ? { ...t, path: to + t.path.slice(from.length) }
+            : t,
+      );
+      this.persistView();
       if (this.notePath === from) {
         await this.open(to);
       } else if (this.notePath?.startsWith(`${from}/`)) {
@@ -411,6 +670,8 @@ class VaultStore {
     try {
       await deleteVaultNote(this.wsId, this.current.id, path);
       toasts.success(`Moved to .trash: ${path}`);
+      const i = this.tabs.findIndex((t) => t.path === path || t.path.startsWith(`${path}/`));
+      if (i >= 0) await this.closeTab(i);
       if (this.notePath === path) {
         this.note = null;
         this.notePath = null;
@@ -429,6 +690,7 @@ class VaultStore {
   openDocsAgents(dir = ''): void {
     this.docsAgentsDir = dir;
     this.centerMode = 'docs-agents';
+    this.persistView();
   }
 
   // -- search / tags / switcher ---------------------------------------------------------

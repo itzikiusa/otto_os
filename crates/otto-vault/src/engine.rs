@@ -121,17 +121,18 @@ impl VaultEngine {
     }
 
     pub async fn list(&self, ws: &str) -> Result<Vec<VaultRec>> {
-        self.store.list_vaults(ws).await
+        // Vaults are a GLOBAL library (like connections): every workspace sees
+        // them all. `ws` stays in the signature for the route shape/RBAC only.
+        let _ = ws;
+        self.store.list_vaults().await
     }
 
-    /// Vault fetch scoped to a workspace (routes pass the path `{ws}` so one
-    /// workspace can't address another's vault by id).
+    /// Vault fetch. Vaults are GLOBAL: `ws` is the caller's workspace (already
+    /// role-checked by the route) and no longer restricts which vault an id
+    /// may address — `ws_id` on the row is provenance, not a boundary.
     pub async fn get_scoped(&self, ws: &str, id: i64) -> Result<VaultRec> {
-        let v = self.store.get_vault(id).await?;
-        if v.ws_id != ws {
-            return Err(Error::NotFound("vault".into()));
-        }
-        Ok(v)
+        let _ = ws;
+        self.store.get_vault(id).await
     }
 
     pub async fn patch(&self, ws: &str, id: i64, name: Option<&str>, okf: Option<bool>) -> Result<VaultRec> {
@@ -434,7 +435,9 @@ impl VaultEngine {
             })
             .collect();
         out.sort_by_key(|e| e.name.to_lowercase());
-        entries.sort_by_key(|e| e.name.to_lowercase());
+        // Reserved scaffolding (index.md, log.md) leads its folder — it's the
+        // entry point a reader wants first, not an alphabetical mid-list row.
+        entries.sort_by_key(|e| (!e.reserved, e.name.to_lowercase()));
         out.extend(entries);
         Ok(DirListing { path: rel, entries: out })
     }

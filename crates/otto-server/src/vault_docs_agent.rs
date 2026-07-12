@@ -72,7 +72,7 @@ pub struct VaultDocsAgent {
     pub name: String,
     pub provider: String,
     pub model: Option<String>,
-    /// `pending | running | done | error`.
+    /// `pending | running | done | error | cancelled`.
     pub state: String,
     pub session_id: Option<String>,
     pub error: Option<String>,
@@ -85,7 +85,7 @@ pub struct VaultDocsAgent {
 pub struct VaultDocsSummarizer {
     pub provider: String,
     pub model: Option<String>,
-    /// `pending | running | done | error | skipped | interrupted`.
+    /// `pending | running | done | error | skipped | interrupted | cancelled`.
     pub state: String,
     pub session_id: Option<String>,
     pub error: Option<String>,
@@ -132,6 +132,11 @@ pub struct RunReq {
     pub agents: Vec<AgentReq>,
     #[serde(default)]
     pub summarizer: Option<SummarizerReq>,
+    /// Extra library skills injected into every writer + the summarizer
+    /// (staged bundle for claude, SKILL.md inlined for other providers) —
+    /// prepared prompts pass e.g. `vault-repo-docs`. Capped; names validated.
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,10 +195,17 @@ pub struct RefineSessionResp {
 pub struct RunEntry {
     pub run: VaultDocsRun,
     pub cancel: Arc<AtomicBool>,
+    /// User-requested retries by writer index (`SUM_RETRY_IDX` = summarizer).
+    /// The retry endpoint kills the target's session and inserts here; the
+    /// orchestrator's turn loop consumes one entry per re-spawn.
+    pub retries: Arc<Mutex<HashSet<usize>>>,
     /// Signal into the run's write-behind persister (`None` in unit tests,
     /// which have no runtime).
     pub persist_tx: Option<PersistTx>,
 }
+
+/// `retries` index standing for the summarizer (writers use their own index).
+pub const SUM_RETRY_IDX: usize = usize::MAX;
 
 /// Signal channel into a run's write-behind persister: `None` = "snapshot +
 /// upsert soon" (coalesced), `Some(ack)` = "flush now and ack when durable".
@@ -375,6 +387,14 @@ pub fn routes() -> Router<ServerCtx> {
         // the caller's role against it (policy row: /vault/docs-agents/*).
         .route("/vault/docs-agents/runs/{run_id}", get(get_run))
         .route("/vault/docs-agents/runs/{run_id}/cancel", post(cancel_run))
+        .route(
+            "/vault/docs-agents/runs/{run_id}/agents/{index}/retry",
+            post(retry_agent),
+        )
+        .route(
+            "/vault/docs-agents/runs/{run_id}/summarizer/retry",
+            post(retry_summarizer),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +509,7 @@ async fn start_run(
         RunEntry {
             run: run.clone(),
             cancel: Arc::new(AtomicBool::new(false)),
+            retries: Arc::new(Mutex::new(HashSet::new())),
             persist_tx: Some(persist_tx),
         },
     );
@@ -497,6 +518,23 @@ async fn start_run(
     if let Err(e) = repo.upsert(&run_row(&run)).await {
         warn!("vault_docs: persist new run {run_id}: {e}");
     }
+
+    // Sanitize requested skills: simple names only (the stager also guards),
+    // deduped, at most 4 — a prepared prompt sends one or two.
+    let skills: Vec<String> = {
+        let mut seen = HashSet::new();
+        req.skills
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 64
+                    && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && seen.insert(s.clone())
+            })
+            .take(4)
+            .collect()
+    };
 
     tokio::spawn(run_docs(
         ctx.clone(),
@@ -508,6 +546,7 @@ async fn start_run(
         target_dir,
         writers,
         summarizer,
+        skills,
     ));
 
     Ok(Json(run))
@@ -617,27 +656,162 @@ async fn list_runs(
     Ok(Json(runs))
 }
 
-/// `POST /vault/docs-agents/runs/{run_id}/cancel` — trip the flag and mark the
+/// `POST /vault/docs-agents/runs/{run_id}/cancel` — trip the flag, mark the
 /// run cancelled NOW (the UI must not keep polling a "running" corpse while a
-/// long writer turn drains). The agent sessions are NOT killed — they're real,
-/// visible sessions the user can inspect/close; we only stop orchestrating.
+/// long writer turn drains), and KILL the writer/summarizer sessions. The
+/// cancel flag alone only stops orchestration BETWEEN stages — a writer mid-
+/// turn would keep producing drafts for minutes, and vault-docs sessions are
+/// embedded-only (hidden from the sidebar), so this endpoint is the only kill
+/// switch the user has.
 async fn cancel_run(
     Path(run_id): Path<String>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<axum::http::StatusCode> {
-    let (ws_id, cancel) = {
+    let (ws_id, cancel, session_ids) = {
         let reg = ctx.vault_docs_runs.lock().unwrap();
         let e = reg
             .get(&run_id)
             .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
-        (e.run.ws_id.clone(), Arc::clone(&e.cancel))
+        let mut sids: Vec<Id> = e
+            .run
+            .agents
+            .iter()
+            .filter(|a| matches!(a.state.as_str(), "pending" | "running"))
+            .filter_map(|a| a.session_id.clone())
+            .collect();
+        if matches!(e.run.summarizer.state.as_str(), "pending" | "running") {
+            if let Some(s) = e.run.summarizer.session_id.clone() {
+                sids.push(s);
+            }
+        }
+        (e.run.ws_id.clone(), Arc::clone(&e.cancel), sids)
     };
     crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id), WorkspaceRole::Editor).await?;
     cancel.store(true, Ordering::Relaxed);
+    // Reflect the cancel on every still-moving agent NOW — a cancelled run
+    // must never keep showing RUNNING chips (finished agents keep done/error).
+    with_run(&ctx.vault_docs_runs, &run_id, |r| {
+        for a in &mut r.agents {
+            if matches!(a.state.as_str(), "pending" | "running") {
+                a.state = "cancelled".into();
+            }
+        }
+        if matches!(r.summarizer.state.as_str(), "pending" | "running") {
+            r.summarizer.state = "cancelled".into();
+        }
+    });
     finish_run(&ctx.vault_docs_runs, &run_id, "cancelled", None);
     persist(&ctx.vault_docs_runs, &run_id);
+    // Best-effort, detached: the response must not wait on PTY teardown.
+    // Ctrl+C first — TUIs that front a detached worker (grok's leader) abort
+    // the in-flight request on interrupt, which a hard PTY kill alone might
+    // orphan — then the kill after a short grace.
+    for sid in session_ids {
+        let manager = ctx.manager.clone();
+        tokio::spawn(async move {
+            let _ = manager.input(&sid, b"\x03").await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let _ = manager.input(&sid, b"\x03").await;
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            let _ = manager.kill_session(&sid).await;
+        });
+    }
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// `POST /vault/docs-agents/runs/{run_id}/agents/{index}/retry` — LIVE-run
+/// retry for one stuck/failed writer, exactly like a PR-review agent retry:
+/// flag the slot, kill its current session (Ctrl+C grace, then kill) so the
+/// in-flight turn errors out, and the orchestrator's turn loop re-spawns a
+/// FRESH session with the same prompt. 409 once the run is terminal (history
+/// runs re-run via a new run) or when the slot isn't still moving.
+async fn retry_agent(
+    Path((run_id, index)): Path<(String, usize)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<axum::http::StatusCode> {
+    retry_target(ctx, user, run_id, index).await
+}
+
+/// `POST /vault/docs-agents/runs/{run_id}/summarizer/retry` — same, for the
+/// consolidation stage.
+async fn retry_summarizer(
+    Path(run_id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<axum::http::StatusCode> {
+    retry_target(ctx, user, run_id, SUM_RETRY_IDX).await
+}
+
+async fn retry_target(
+    ctx: ServerCtx,
+    user: User,
+    run_id: String,
+    index: usize,
+) -> ApiResult<axum::http::StatusCode> {
+    let (ws_id, sid, retries) = {
+        let reg = ctx.vault_docs_runs.lock().unwrap();
+        let e = reg
+            .get(&run_id)
+            .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
+        if is_terminal(&e.run.state) {
+            return Err(ApiError(Error::Conflict(
+                "run already finished — start a new run instead".into(),
+            )));
+        }
+        let sid = if index == SUM_RETRY_IDX {
+            if e.run.state != "summarizing"
+                || !matches!(e.run.summarizer.state.as_str(), "running" | "pending")
+            {
+                return Err(ApiError(Error::Conflict(
+                    "summarizer is not running".into(),
+                )));
+            }
+            e.run.summarizer.session_id.clone()
+        } else {
+            let a = e
+                .run
+                .agents
+                .get(index)
+                .ok_or_else(|| ApiError(Error::NotFound(format!("writer {index}"))))?;
+            if !matches!(a.state.as_str(), "running" | "pending") {
+                return Err(ApiError(Error::Conflict(
+                    "writer is not running — cancel and start a new run".into(),
+                )));
+            }
+            a.session_id.clone()
+        };
+        (e.run.ws_id.clone(), sid, Arc::clone(&e.retries))
+    };
+    crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id), WorkspaceRole::Editor).await?;
+    retries.lock().unwrap().insert(index);
+    // Reflect immediately — the UI's poll shows "pending" while the fresh
+    // session spins up.
+    with_run(&ctx.vault_docs_runs, &run_id, |r| {
+        if index == SUM_RETRY_IDX {
+            r.summarizer.state = "pending".into();
+            r.summarizer.error = None;
+        } else if let Some(a) = r.agents.get_mut(index) {
+            a.state = "pending".into();
+            a.error = None;
+        }
+    });
+    persist(&ctx.vault_docs_runs, &run_id);
+    // Kill the current session so the in-flight turn errors and the loop
+    // consumes the retry flag. Same interrupt-then-kill dance as cancel.
+    if let Some(sid) = sid {
+        let manager = ctx.manager.clone();
+        let sid = Id::from(sid);
+        tokio::spawn(async move {
+            let _ = manager.input(&sid, b"\x03").await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let _ = manager.input(&sid, b"\x03").await;
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            let _ = manager.kill_session(&sid).await;
+        });
+    }
+    Ok(axum::http::StatusCode::ACCEPTED)
 }
 
 /// The note's most recent persisted refine session, IF that session still
@@ -730,6 +904,8 @@ async fn refine(
         vault.okf,
         okf_inline.as_deref(),
     );
+    let (done_path, done_line) = done_marker();
+    let prompt = format!("{prompt}{done_line}");
     let mut meta = serde_json::json!({
         "source": "vault-docs",
         "vault_id": vault_id,
@@ -825,7 +1001,7 @@ async fn refine(
         let root = vault.root_path.clone();
         let provider = provider.clone();
         tokio::spawn(async move {
-            let turn = crate::agent_session::run_session_turn(
+            let turn = crate::agent_session::run_session_turn_with(
                 &ctx,
                 &ws,
                 &user,
@@ -836,9 +1012,14 @@ async fn refine(
                 meta,
                 &prompt,
                 crate::agent_session::STUCK_IDLE,
+                crate::agent_session::TurnOpts {
+                    done_file: Some(done_path.clone()),
+                    quiet_done: Some(QUIET_DONE),
+                },
                 on_ready,
             )
             .await;
+            let _ = std::fs::remove_file(&done_path);
 
             // The turn is over either way — clear `running` + finish the
             // recorded turn (this task survives a client disconnect, so the
@@ -1063,10 +1244,11 @@ async fn run_docs(
     target_dir: String,
     writers: Vec<WriterSpec>,
     summarizer: WriterSpec,
+    skills: Vec<String>,
 ) {
     let reg = ctx.vault_docs_runs.clone();
-    let cancel = match reg.lock().unwrap().get(&run_id) {
-        Some(e) => Arc::clone(&e.cancel),
+    let (cancel, retries) = match reg.lock().unwrap().get(&run_id) {
+        Some(e) => (Arc::clone(&e.cancel), Arc::clone(&e.retries)),
         None => return,
     };
     let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
@@ -1099,18 +1281,34 @@ async fn run_docs(
     let _ = ctx.vault.scan(vault.id).await;
     let before: HashSet<String> = note_paths(&ctx, vault.id).await;
 
-    // OKF vehicles, resolved once: the staged skill bundle for claude (via
-    // meta.extra_dirs) and the inlined SKILL.md text for everyone else.
-    let okf_bundle = vault
-        .okf
-        .then(|| {
-            crate::modules::stage_review_skills(&ctx.context_library, &["okf-authoring".into()])
-        })
+    // Skill vehicles, resolved once: request-selected skills (prepared prompts
+    // pass e.g. `vault-repo-docs`) + `okf-authoring` on OKF vaults. Claude gets
+    // the staged bundle via meta.extra_dirs; every other provider gets the
+    // SKILL.md texts inlined into its prompt.
+    let mut skill_names = skills;
+    if vault.okf && !skill_names.iter().any(|s| s == "okf-authoring") {
+        skill_names.push("okf-authoring".into());
+    }
+    let okf_bundle = (!skill_names.is_empty())
+        .then(|| crate::modules::stage_review_skills(&ctx.context_library, &skill_names))
         .flatten();
-    let okf_text = vault
-        .okf
-        .then(|| okf_skill_text(&ctx.context_library))
-        .filter(|t| !t.is_empty());
+    let okf_text = {
+        let joined = skill_names
+            .iter()
+            .map(|n| skill_inline_text(&ctx.context_library, n))
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        (!joined.is_empty()).then_some(joined)
+    };
+    // Claude sessions load the staged bundle themselves — they only need the
+    // skill NAMES called out so they actually invoke them.
+    let claude_hint = (!skill_names.is_empty()).then(|| {
+        format!(
+            "Skills staged for this task: {} — invoke each relevant one before writing.",
+            skill_names.join(", ")
+        )
+    });
 
     // ---- Stage 1: writers, concurrently (per-writer errors isolated) --------
     let mut set = tokio::task::JoinSet::new();
@@ -1130,7 +1328,7 @@ async fn run_docs(
             &run8,
             &target_dir,
             vault.okf,
-            inline_for_provider(&w.provider, okf_text.as_deref()),
+            inline_for_provider(&w.provider, okf_text.as_deref(), claude_hint.as_deref()),
             (m == 1).then_some(results_str.as_str()),
         );
         let mut meta = serde_json::json!({
@@ -1146,53 +1344,91 @@ async fn run_docs(
         {
             meta["extra_dirs"] = dirs;
         }
+        let cancel = Arc::clone(&cancel);
+        let retries = Arc::clone(&retries);
         set.spawn(async move {
-            let ready_reg = reg.clone();
-            let ready_run = run_id.clone();
-            let on_ready = move |sid: &Id| {
-                let sid = sid.to_string();
-                with_run(&ready_reg, &ready_run, |r| {
-                    if let Some(a) = r.agents.get_mut(i) {
-                        a.state = "running".into();
-                        a.session_id = Some(sid);
+            // Turn loop: normally one pass. A user retry kills the session and
+            // flags the slot — the resulting Err consumes the flag and this
+            // loop re-spawns a FRESH session with the same prompt (new done-
+            // marker each attempt; the old one is embedded in the old prompt).
+            let mut user_retries: u32 = 0;
+            let ok = loop {
+                let (done_path, done_line) = done_marker();
+                let attempt_prompt = format!("{prompt}{done_line}");
+                let ready_reg = reg.clone();
+                let ready_run = run_id.clone();
+                let on_ready = move |sid: &Id| {
+                    let sid = sid.to_string();
+                    with_run(&ready_reg, &ready_run, |r| {
+                        if let Some(a) = r.agents.get_mut(i) {
+                            a.state = "running".into();
+                            a.session_id = Some(sid);
+                        }
+                    });
+                    // Durable ASAP: a restart mid-turn must still know the session.
+                    persist(&ready_reg, &ready_run);
+                };
+                let res = crate::agent_session::run_session_turn_with(
+                    &ctx,
+                    &ws,
+                    &user,
+                    None,
+                    &format!("Vault docs: writer {}/{}", i + 1, m),
+                    &root,
+                    &w.provider,
+                    meta.clone(),
+                    &attempt_prompt,
+                    crate::agent_session::STUCK_IDLE,
+                    crate::agent_session::TurnOpts {
+                        done_file: Some(done_path.clone()),
+                        quiet_done: Some(QUIET_DONE),
+                    },
+                    on_ready,
+                )
+                .await;
+                let _ = std::fs::remove_file(&done_path);
+                let want_retry = retries.lock().unwrap().remove(&i);
+                match res {
+                    Ok((_reply, sid)) => {
+                        with_run(&reg, &run_id, |r| {
+                            if let Some(a) = r.agents.get_mut(i) {
+                                a.state = "done".into();
+                                a.session_id = Some(sid.to_string());
+                            }
+                        });
+                        break true;
                     }
-                });
-                // Durable ASAP: a restart mid-turn must still know the session.
-                persist(&ready_reg, &ready_run);
-            };
-            let res = crate::agent_session::run_session_turn(
-                &ctx,
-                &ws,
-                &user,
-                None,
-                &format!("Vault docs: writer {}/{}", i + 1, m),
-                &root,
-                &w.provider,
-                meta,
-                &prompt,
-                crate::agent_session::STUCK_IDLE,
-                on_ready,
-            )
-            .await;
-            let ok = match res {
-                Ok((_reply, sid)) => {
-                    with_run(&reg, &run_id, |r| {
-                        if let Some(a) = r.agents.get_mut(i) {
-                            a.state = "done".into();
-                            a.session_id = Some(sid.to_string());
+                    Err(e) => {
+                        // A cancel KILLS the session — the resulting "vanished"/
+                        // "exited" error is expected, not a writer failure.
+                        if cancel.load(Ordering::Relaxed) {
+                            with_run(&reg, &run_id, |r| {
+                                if let Some(a) = r.agents.get_mut(i) {
+                                    a.state = "cancelled".into();
+                                }
+                            });
+                            break false;
                         }
-                    });
-                    true
-                }
-                Err(e) => {
-                    warn!("vault_docs: writer {} failed: {}", i + 1, e.0);
-                    with_run(&reg, &run_id, |r| {
-                        if let Some(a) = r.agents.get_mut(i) {
-                            a.state = "error".into();
-                            a.error = Some(e.0.to_string());
+                        if want_retry && user_retries < MAX_USER_RETRIES {
+                            user_retries += 1;
+                            with_run(&reg, &run_id, |r| {
+                                if let Some(a) = r.agents.get_mut(i) {
+                                    a.state = "pending".into();
+                                    a.error = None;
+                                }
+                            });
+                            persist(&reg, &run_id);
+                            continue;
                         }
-                    });
-                    false
+                        warn!("vault_docs: writer {} failed: {}", i + 1, e.0);
+                        with_run(&reg, &run_id, |r| {
+                            if let Some(a) = r.agents.get_mut(i) {
+                                a.state = "error".into();
+                                a.error = Some(e.0.to_string());
+                            }
+                        });
+                        break false;
+                    }
                 }
             };
             persist(&reg, &run_id);
@@ -1290,7 +1526,7 @@ async fn run_docs(
         &target_dir,
         &drafts,
         vault.okf,
-        inline_for_provider(&summarizer.provider, okf_text.as_deref()),
+        inline_for_provider(&summarizer.provider, okf_text.as_deref(), claude_hint.as_deref()),
         &results_str,
     );
     let mut sum_meta = serde_json::json!({
@@ -1306,45 +1542,71 @@ async fn run_docs(
     {
         sum_meta["extra_dirs"] = dirs;
     }
-    let ready_reg = reg.clone();
-    let ready_run = run_id.clone();
-    let on_ready = move |sid: &Id| {
-        let sid = sid.to_string();
-        with_run(&ready_reg, &ready_run, |r| {
-            r.summarizer.session_id = Some(sid);
-        });
-        persist(&ready_reg, &ready_run);
-    };
-    let sum_res = crate::agent_session::run_session_turn(
-        &ctx,
-        &ws,
-        &user,
-        None,
-        "Vault docs: summarizer",
-        &vault.root_path,
-        &summarizer.provider,
-        sum_meta,
-        &sum_prompt,
-        crate::agent_session::STUCK_IDLE,
-        on_ready,
-    )
-    .await;
-
-    let sum_err = match sum_res {
-        Ok((_reply, sid)) => {
-            with_run(&reg, &run_id, |r| {
-                r.summarizer.state = "done".into();
-                r.summarizer.session_id = Some(sid.to_string());
+    // Same turn loop as the writers: a user retry (SUM_RETRY_IDX) kills the
+    // session; the Err consumes the flag and a fresh summarizer re-spawns.
+    let mut sum_user_retries: u32 = 0;
+    let sum_err = loop {
+        let (sum_done_path, sum_done_line) = done_marker();
+        let attempt_prompt = format!("{sum_prompt}{sum_done_line}");
+        let ready_reg = reg.clone();
+        let ready_run = run_id.clone();
+        let on_ready = move |sid: &Id| {
+            let sid = sid.to_string();
+            with_run(&ready_reg, &ready_run, |r| {
+                r.summarizer.state = "running".into();
+                r.summarizer.session_id = Some(sid);
             });
-            None
-        }
-        Err(e) => {
-            warn!("vault_docs: summarizer failed: {}", e.0);
-            with_run(&reg, &run_id, |r| {
-                r.summarizer.state = "error".into();
-                r.summarizer.error = Some(e.0.to_string());
-            });
-            Some(e.0.to_string())
+            persist(&ready_reg, &ready_run);
+        };
+        let sum_res = crate::agent_session::run_session_turn_with(
+            &ctx,
+            &ws,
+            &user,
+            None,
+            "Vault docs: summarizer",
+            &vault.root_path,
+            &summarizer.provider,
+            sum_meta.clone(),
+            &attempt_prompt,
+            crate::agent_session::STUCK_IDLE,
+            crate::agent_session::TurnOpts {
+                done_file: Some(sum_done_path.clone()),
+                quiet_done: Some(QUIET_DONE),
+            },
+            on_ready,
+        )
+        .await;
+        let _ = std::fs::remove_file(&sum_done_path);
+        let want_retry = retries.lock().unwrap().remove(&SUM_RETRY_IDX);
+        match sum_res {
+            Ok((_reply, sid)) => {
+                with_run(&reg, &run_id, |r| {
+                    r.summarizer.state = "done".into();
+                    r.summarizer.session_id = Some(sid.to_string());
+                });
+                break None;
+            }
+            Err(e) => {
+                if cancel.load(Ordering::Relaxed) {
+                    with_run(&reg, &run_id, |r| r.summarizer.state = "cancelled".into());
+                    break Some(e.0.to_string());
+                }
+                if want_retry && sum_user_retries < MAX_USER_RETRIES {
+                    sum_user_retries += 1;
+                    with_run(&reg, &run_id, |r| {
+                        r.summarizer.state = "pending".into();
+                        r.summarizer.error = None;
+                    });
+                    persist(&reg, &run_id);
+                    continue;
+                }
+                warn!("vault_docs: summarizer failed: {}", e.0);
+                with_run(&reg, &run_id, |r| {
+                    r.summarizer.state = "error".into();
+                    r.summarizer.error = Some(e.0.to_string());
+                });
+                break Some(e.0.to_string());
+            }
         }
     };
     persist(&reg, &run_id);
@@ -1353,12 +1615,17 @@ async fn run_docs(
     // std::fs::rename is atomic within a filesystem; a cross-device rename (or
     // a missing drafts dir, e.g. the E2E stub) fails and is deliberately
     // ignored — a leftover `_drafts/` is harmless and user-visible.
-    let src = std::path::Path::new(&vault.root_path)
-        .join("_drafts")
-        .join(format!("docs-run-{run8}"));
-    let trash = std::path::Path::new(&vault.root_path).join(".trash");
-    let _ = std::fs::create_dir_all(&trash);
-    let _ = std::fs::rename(&src, trash.join(format!("docs-run-{run8}")));
+    // A FAILED summarizer keeps the drafts in place: they are the only copy of
+    // the writers' work at that point, and the user can consolidate manually
+    // or re-run from them.
+    if sum_err.is_none() {
+        let src = std::path::Path::new(&vault.root_path)
+            .join("_drafts")
+            .join(format!("docs-run-{run8}"));
+        let trash = std::path::Path::new(&vault.root_path).join(".trash");
+        let _ = std::fs::create_dir_all(&trash);
+        let _ = std::fs::rename(&src, trash.join(format!("docs-run-{run8}")));
+    }
     let _ = ctx.vault.scan(vault.id).await;
 
     let after = note_paths(&ctx, vault.id).await;
@@ -1417,21 +1684,31 @@ fn resolve_written(
 // OKF helpers
 // ---------------------------------------------------------------------------
 
-/// The `okf-authoring` skill's instructional text for inlining: Library /
-/// operator dirs first (via the shared review resolver), else the compiled-in
-/// bundled copy in `otto-skills`.
-fn okf_skill_text(library: &otto_context::Library) -> String {
-    let t = crate::modules::resolve_skill_inline(library, "okf-authoring");
+/// A skill's instructional text for inlining: Library / operator dirs first
+/// (via the shared review resolver), else the compiled-in bundled copy in
+/// `otto-skills`.
+fn skill_inline_text(library: &otto_context::Library, name: &str) -> String {
+    let t = crate::modules::resolve_skill_inline(library, name);
     if !t.is_empty() {
         return t;
     }
-    otto_skills::bundled_body("okf-authoring").unwrap_or_default()
+    otto_skills::bundled_body(name).unwrap_or_default()
 }
 
-/// The inlined-skill text for this provider: `None` for claude (it gets the
-/// staged bundle via extra_dirs instead), the SKILL.md text otherwise.
-fn inline_for_provider<'a>(provider: &str, okf_text: Option<&'a str>) -> Option<&'a str> {
-    (provider != "claude").then_some(okf_text).flatten()
+/// The `okf-authoring` skill's text (refine path uses just this one).
+fn okf_skill_text(library: &otto_context::Library) -> String {
+    skill_inline_text(library, "okf-authoring")
+}
+
+/// The inlined-skill text for this provider: claude gets the short invoke
+/// `hint` (its skills arrive as a staged bundle via extra_dirs); every other
+/// provider gets the full SKILL.md `text` inlined.
+fn inline_for_provider<'a>(
+    provider: &str,
+    text: Option<&'a str>,
+    hint: Option<&'a str>,
+) -> Option<&'a str> {
+    if provider == "claude" { hint } else { text }
 }
 
 /// Refine-path variant of the OKF plumbing above (single provider, so the
@@ -1465,6 +1742,45 @@ fn apply_okf_extra_dirs(
 // ---------------------------------------------------------------------------
 // Pure helpers + prompt builders (unit-tested; no DB / no agent)
 // ---------------------------------------------------------------------------
+
+/// Execution rules appended to every docs-agent prompt (writer, summarizer,
+/// refine). Mirrors the workflow engine's WF_STEP_RULES: run completion is
+/// detected when the TURN ends, so an agent that fans work out to sub-agents
+/// gets marked done while its background workers are still writing — exactly
+/// the "DONE but 7 agents still running" failure observed live.
+const DOCS_STEP_RULES: &str = "\nEXECUTION RULES:\n\
+    - Do ALL of the work yourself in THIS turn. Do NOT spawn, launch, or \
+    delegate to sub-agents, background agents, parallel workers, or the Task \
+    tool. No run_in_background, no fan-out — you are the only agent.\n\
+    - Do NOT end your turn until the work is fully complete. Never stop early \
+    to \"wait for\" something you started.\n";
+
+/// Non-transcript providers (codex/agy/grok/custom): this much PTY silence
+/// after the prompt landed = the turn is over (a WORKING TUI keeps painting).
+/// Belt to the done-marker's suspenders — see `done_marker`.
+const QUIET_DONE: std::time::Duration = std::time::Duration::from_secs(150);
+
+/// Cap on user-requested retries per writer/summarizer slot within one run —
+/// a sanity bound, not a policy (each retry is an explicit click).
+const MAX_USER_RETRIES: u32 = 5;
+
+/// A fresh done-marker path + the prompt line instructing the agent to write
+/// it LAST. Turn completion is transcript-based and only claude has one — for
+/// every other provider this file (or `QUIET_DONE` silence) is what flips a
+/// finished writer to `done` instead of "running until the 10h idle trip"
+/// (the live "codex/grok finished but still RUNNING" bug).
+fn done_marker() -> (std::path::PathBuf, String) {
+    let path =
+        std::env::temp_dir().join(format!("otto-vaultdocs-done-{}.txt", otto_core::new_id()));
+    let _ = std::fs::write(&path, "");
+    let line = format!(
+        "\nLAST OF ALL — strictly after every other step above is complete — write your ONE-LINE \
+         summary as plain text to this exact filesystem path: `{}`. Writing this file ends your \
+         turn; never write it early.\n",
+        path.display()
+    );
+    (path, line)
+}
 
 /// The vault-relative drafts folder for writer `n` (1-based) of a run.
 fn draft_dir(run8: &str, n: usize) -> String {
@@ -1513,27 +1829,32 @@ fn cap_chars(s: &str, cap: usize) -> (String, bool) {
 /// non-claude providers `inline` carries the full okf-authoring SKILL.md text;
 /// claude instead has the skill staged first-class via extra_dirs.
 fn okf_block(okf: bool, inline: Option<&str>) -> String {
-    if !okf {
-        return String::new();
+    let mut b = String::new();
+    if okf {
+        b.push_str(
+            "\nOKF — this vault is OKF-conformant and EVERY note you write MUST comply:\n\
+             - YAML frontmatter on every note with at least `type:` (concept/service/endpoint/\
+             dataset/decision/runbook/metric/…) and a one-sentence `description:`.\n\
+             - Internal references use standard markdown links (relative, `.md`).\n\
+             - Keep each folder's `index.md` listing its children up to date.\n",
+        );
     }
-    let mut b = String::from(
-        "\nOKF — this vault is OKF-conformant and EVERY note you write MUST comply:\n\
-         - YAML frontmatter on every note with at least `type:` (concept/service/endpoint/\
-         dataset/decision/runbook/metric/…) and a one-sentence `description:`.\n\
-         - Internal references use standard markdown links (relative, `.md`).\n\
-         - Keep each folder's `index.md` listing its children up to date.\n",
-    );
+    // `inline` carries EVERY skill selected for this run (okf-authoring plus
+    // any prepared-prompt skills like vault-repo-docs) for providers that
+    // can't load a staged bundle; claude gets the bundle via extra_dirs and
+    // only the invoke hint below.
     match inline {
         Some(text) => {
-            b.push_str("\n--- OKF AUTHORING SKILL (follow this method exactly) ---\n");
+            b.push_str("\n--- AUTHORING SKILLS (follow these methods exactly) ---\n");
             b.push_str(text);
-            b.push_str("\n--- END OKF AUTHORING SKILL ---\n");
+            b.push_str("\n--- END AUTHORING SKILLS ---\n");
         }
-        None => {
+        None if okf => {
             b.push_str(
                 "You have the `okf-authoring` skill available — invoke it before writing.\n",
             );
         }
+        None => {}
     }
     b
 }
@@ -1590,6 +1911,7 @@ fn build_writer_prompt(
             ));
         }
     }
+    p.push_str(DOCS_STEP_RULES);
     p.push_str(&okf_block(okf, okf_inline));
     if let Some(rp) = results_path {
         p.push_str(&format!(
@@ -1638,6 +1960,7 @@ fn build_summarizer_prompt(
              EVERY error it reports.\n",
         ));
     }
+    p.push_str(DOCS_STEP_RULES);
     p.push_str(&okf_block(okf, okf_inline));
     p.push_str(&format!(
         "\nFINALLY, write a results file to this exact filesystem path: `{results_path}` \
@@ -1710,6 +2033,7 @@ fn build_refine_prompt(
              headings survive unless the instruction says otherwise.\n",
         );
     }
+    p.push_str(DOCS_STEP_RULES);
     p.push_str(&okf_block(okf, okf_inline));
     p.push_str(&format!(
         "\nCURRENT CONTENT:\n{inlined}\n\nInstruction:\n{user_prompt}\n\n\
@@ -1833,12 +2157,24 @@ mod tests {
     #[test]
     fn okf_block_inlines_skill_for_non_claude() {
         let p = build_writer_prompt("x", 1, 1, 2, "run8run8", "", true, Some(OKF_SKILL), None);
-        assert!(p.contains("OKF AUTHORING SKILL"));
+        assert!(p.contains("AUTHORING SKILLS"));
         assert!(p.contains(OKF_SKILL));
         // And the claude variant carries the skill NAME, not the body.
         let c = build_writer_prompt("x", 1, 1, 2, "run8run8", "", true, None, None);
         assert!(c.contains("okf-authoring"));
         assert!(!c.contains(OKF_SKILL));
+    }
+
+    #[test]
+    fn skills_block_renders_on_non_okf_vaults_too() {
+        // Prepared-prompt skills must reach the prompt even when okf=false.
+        let p = build_writer_prompt("x", 1, 1, 2, "run8run8", "", false, Some("SKILL BODY"), None);
+        assert!(p.contains("AUTHORING SKILLS"));
+        assert!(p.contains("SKILL BODY"));
+        assert!(!p.contains("OKF — this vault is OKF-conformant"));
+        // No skills, no OKF → no block at all.
+        let n = build_writer_prompt("x", 1, 1, 2, "run8run8", "", false, None, None);
+        assert!(!n.contains("AUTHORING SKILLS"));
     }
 
     #[test]
@@ -1974,10 +2310,12 @@ mod tests {
 
     #[test]
     fn inline_is_withheld_from_claude_only() {
-        assert_eq!(inline_for_provider("claude", Some("text")), None);
-        assert_eq!(inline_for_provider("codex", Some("text")), Some("text"));
-        assert_eq!(inline_for_provider("agy", Some("text")), Some("text"));
-        assert_eq!(inline_for_provider("codex", None), None);
+        // claude → the short invoke hint; everyone else → the full skill text.
+        assert_eq!(inline_for_provider("claude", Some("text"), Some("hint")), Some("hint"));
+        assert_eq!(inline_for_provider("claude", Some("text"), None), None);
+        assert_eq!(inline_for_provider("codex", Some("text"), Some("hint")), Some("text"));
+        assert_eq!(inline_for_provider("agy", Some("text"), None), Some("text"));
+        assert_eq!(inline_for_provider("codex", None, None), None);
     }
 
     fn sample_run(state: &str) -> VaultDocsRun {
@@ -2143,6 +2481,7 @@ mod tests {
             RunEntry {
                 run,
                 cancel: Arc::new(AtomicBool::new(false)),
+                retries: Arc::new(Mutex::new(HashSet::new())),
                 persist_tx: None,
             },
         );

@@ -58,9 +58,11 @@ is `docs/contracts/api.md` → *Vault v3 — the docs home*.
 | Bundled skills | `okf-authoring`, `vault-repo-docs` | The OKF doctrine for agents; "index a repo" = write a linked OKF bundle into the vault |
 
 In the app, the Vault is the **Vault** item in the left nav (globe icon); the
-route is `#/vault`. Everything is workspace-scoped; RBAC rides the existing
-**Product** feature class (reads = View, writes = Edit — including View-gated
-read-shaped POSTs for `search` and `okf/validate`).
+route is `#/vault`. Vaults are a **global library** (like connections): every
+workspace sees every vault — the `{ws}` in the routes is auth context only.
+RBAC rides the existing **Product** feature class (reads = View, writes =
+Edit — including View-gated read-shaped POSTs for `search` and
+`okf/validate`).
 
 ### The derived index, in one screen
 
@@ -100,8 +102,10 @@ No external setup, accounts, or dependencies. From the Vault page:
 3. Registration kicks a **full scan**; the header shows "Indexing vault…" while
    `scan_state = scanning`, then note/link/unresolved counts.
 
-A workspace can register **multiple vaults**; the header button switches
-between them (the last selection is remembered per workspace). **Unregister
+You can register **multiple vaults** — all of them visible from every
+workspace (global library; a root path can be registered only once). The
+header button switches between them (the last selection is remembered
+globally). **Unregister
 vault (keeps files)** removes only the registration + index — files on disk are
 never touched. **Rescan** (toolbar / context menu) forces a full incremental
 pass.
@@ -128,6 +132,16 @@ Three-pane, Obsidian-style layout: left sidebar (Files / Search / Tags), center
 OKF). Both side panes are drag-resizable and persisted; the status bar shows
 **backlinks · words · characters · OKF badge · vault root path**. On phones the
 layout stacks (left pane becomes a top strip).
+
+The center pane is **tabbed**: every opened note/file is a tab (⌘-click or
+middle-click a tree row — or its context menu → "Open in new tab" — to open
+WITHOUT replacing the current tab; × or middle-click a tab closes it). Tabs,
+the active tab, and the center mode (note / file / graph / docs-agents) are
+**persisted per vault** — switching to another module and back, or fully
+restarting the app, restores exactly the view you left, including a
+docs-agents run you were watching. When any docs-agent run is active, the
+topbar shows a pulsing **"N agent runs active"** chip regardless of the
+current view — click it to jump to the runs.
 
 ### 4.1 File explorer
 
@@ -191,6 +205,28 @@ iframes, or event handlers survive), with the Obsidian constructs:
 - **Tags** — inline `#tag` renders as a chip; clicking it runs a `tag:` search.
 - **Frontmatter** is stripped from the body (the Properties panel shows it);
   code blocks are syntax-highlighted.
+- **Diagrams** — ` ```mermaid ` and ` ```d2 ` fences render as live diagrams
+  (lazy-loaded, same engines as the Canvas). A **bare fence whose first line
+  is a mermaid grammar keyword** (`flowchart LR`, `sequenceDiagram`, …) also
+  renders — agents often omit the language tag. Parse errors keep the source
+  visible with the error message above it.
+
+### 4.2b Non-markdown file viewers
+
+Clicking a non-`.md` file in the tree opens it in a matching viewer (same
+tabs / persistence as notes):
+
+- **OpenAPI / Swagger** (`.json`/`.yaml`/`.yml` with an `openapi`/`swagger` +
+  `paths` root) — a structured spec view: info header, servers, operations
+  grouped by tag with method chips, parameters table, request-body schema
+  tree ($ref-resolved, cycle-guarded), examples, and responses. A **Source**
+  toggle shows the raw file.
+- **JSON** — pretty-printed + syntax-highlighted.
+- **CSV / TSV** — rendered as a table (quote-aware, first 5000 rows).
+- **Images** (`png/jpg/gif/webp/svg/…`) and **PDF** — displayed inline via an
+  authenticated blob URL.
+- **Everything else** — syntax-highlighted code (language from the
+  extension), capped at 10k lines / 2 MB with a truncation notice.
 
 ### 4.3 Right panel — backlinks, outgoing, outline, properties
 
@@ -373,13 +409,25 @@ selection from the shared registry, inline live terminals):
 
 - **Docs agent (create)** — the ✨ toolbar button (or a folder's context menu →
   "Docs agent here"). Configure 1–4 writer agents (per-agent provider + model)
-  and a summarizer, describe what to document, Run. Writers fan out as REAL
+  and a summarizer, describe what to document, Run. **Prepared prompts**: a
+  template picker (repo deep-dive, flow catalog, API+OpenAPI, datastores
+  audit, messaging map, incremental "changes since last scan") — pick one,
+  fill the repo path, Insert, edit freely. Templates demand a flow inventory
+  and ONE NOTE PER FLOW (all flows) with an explicit anti-bloat bar, and they
+  attach library skills to the run (`RunReq.skills`, e.g. `vault-repo-docs`);
+  the form shows every injected skill as a clickable chip that opens the
+  skill's full text. Full scans record `commit:`/`scanned_at:` in
+  overview.md's frontmatter so the update template can diff from there. Writers fan out as REAL
   sessions (each row has an Open toggle mounting its live terminal, multiple at
   once). With one writer it writes final notes straight into the target folder;
   with several, each drafts under `_drafts/docs-run-*/agent-N/` and the
   summarizer consolidates into final notes, after which drafts are moved to
   `.trash/`. Finished runs list every written note as a link. Runs are
-  in-memory (poll-based; they don't survive a daemon restart — the sessions do).
+  **durable** (`vault_docs_runs`): the Runs section lists current + history
+  newest-first and survives tab switches and daemon restarts (a restart flips
+  non-terminal runs to `interrupted` and soft-trashes orphaned drafts). While
+  anything is running the vault topbar shows the pulsing **"N agent runs
+  active"** chip from any view.
 - **Refine with AI (edit)** — the ✨ button in an open note's header opens a
   drawer: one resumable session per note; each Send applies an instruction to
   the note via `otto_vault_write` with optimistic `if_hash` (conflicts re-read
@@ -415,7 +463,7 @@ keyword-proxy remain. Contract: `docs/contracts/api.md` → *Memory layer*.
 
 **Capabilities**
 
-- Multiple vaults per workspace; a vault is any local folder of markdown —
+- Multiple vaults, global across workspaces; a vault is any local folder of markdown —
   a live Obsidian vault works unmodified, and stays portable (nothing Otto adds
   to your files except edits you ask for).
 - Derived-only index: everything in SQLite is rebuildable from disk; `.trash/`
@@ -480,6 +528,8 @@ PDF annotation, community plugins.
 | Edits made in Obsidian don't show immediately | No fs watcher — they appear within one 5 s status-poll cycle while the page is open (or at the next read). Hit **Rescan** to force it. |
 | A link renders dashed (unresolved) after a rename | The rename made that basename ambiguous (two files now share it) — vault-wide re-resolve surfaces this instead of guessing. Qualify the link with its path. |
 | Clicking an unresolved link asks to create a note | That's the feature — Obsidian-style click-to-create for ghost links. |
+| **"Diagram error: Refused to evaluate a string as JavaScript…"** on a D2 diagram | The packaged app's CSP blocked D2's engine — it needs `'wasm-unsafe-eval'` (WASM) and `'unsafe-eval'` (its worker's ELK layout loader uses `new Function`). Both are in `apps/desktop/src-tauri/tauri.conf.json`'s `script-src` **deliberately**: script SOURCES stay `'self'`-only and rendered markdown is sanitized, so don't remove them without replacing the D2 engine. Mermaid never needed either. |
+| A diagram shows "Diagram error: Parse error …" with the source | The agent wrote invalid mermaid (unquoted special chars in labels is the usual cause). The source stays visible by design; the prepared-prompt templates instruct agents to verify fences before finishing. |
 | Big note isn't found by body search | Notes >4 MiB are metadata-only in the index (title/tags/links still work). |
 | `index.md` missing from switcher/graph | Reserved OKF files are excluded by default; the graph has a **Reserved files** toggle. |
 | Graph shows a **truncated** chip | The full-mode server edge budget (default 2M, degree-prioritized) was hit; use the filters/local mode or raise `?edge_budget=`. |

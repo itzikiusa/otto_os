@@ -242,11 +242,13 @@ async fn path_traversal_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn workspace_scoping() {
+async fn vaults_are_global_across_workspaces() {
+    // Vaults are a GLOBAL library (like connections): another workspace sees
+    // and can address the same vault — ws_id is provenance, not a boundary.
     let eng = engine().await;
     let (_td, id) = fixture_vault(&eng).await;
-    assert!(eng.note("other-ws", id, "index.md").await.is_err());
-    assert!(eng.list("other-ws").await.unwrap().is_empty());
+    assert!(eng.note("other-ws", id, "index.md").await.is_ok());
+    assert_eq!(eng.list("other-ws").await.unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

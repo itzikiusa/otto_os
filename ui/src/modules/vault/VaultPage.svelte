@@ -9,6 +9,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
   import FileTree from './FileTree.svelte';
+  import FileViewer from './FileViewer.svelte';
   import GraphView from './GraphView.svelte';
   import NewNoteDialog from './NewNoteDialog.svelte';
   import NoteView from './NoteView.svelte';
@@ -25,6 +26,7 @@
   let leftW = $state(Number(localStorage.getItem(LEFT_W_KEY)) || 250);
   let rightW = $state(Number(localStorage.getItem(RIGHT_W_KEY)) || 280);
   let rightOpen = $state(localStorage.getItem('otto_vault_right_open') !== '0');
+  let leftOpen = $state(localStorage.getItem('otto_vault_left_open') !== '0');
   let resizing = $state(false);
 
   function startResize(e: MouseEvent, side: 'left' | 'right'): void {
@@ -160,6 +162,16 @@
 
 <div class="vault-page" class:resizing>
   <header class="topbar">
+    <button
+      class="tool"
+      title={leftOpen ? 'Hide file tree' : 'Show file tree'}
+      onclick={() => {
+        leftOpen = !leftOpen;
+        localStorage.setItem('otto_vault_left_open', leftOpen ? '1' : '0');
+      }}
+    >
+      <Icon name="panel" size={14} />
+    </button>
     <button class="vault-pick" onclick={(e) => vaultMenu(e)} title="Switch vault">
       <Icon name="globe" size={14} />
       <span>{vault.current?.name ?? 'No vault'}</span>
@@ -172,6 +184,23 @@
       <span class="scan-chip">Indexing vault…</span>
     {:else if scanError}
       <span class="scan-chip err" title={vault.status?.scan_state}>index error</span>
+    {/if}
+    {#if vault.activeDocsRuns.length > 0}
+      <!-- Always-visible signal that agents are writing into this vault right
+           now (runs may be launched from here, MCP, or a workflow) — clicking
+           jumps to the Docs agent view where each run can be watched. -->
+      <button
+        class="run-chip"
+        title={vault.activeDocsRuns
+          .map((r) => (r.kind === 'refine' ? `refine: ${r.note_path}` : r.prompt))
+          .join('\n')}
+        onclick={() => vault.openDocsAgents('')}
+      >
+        <Icon name="zap" size={12} />
+        {vault.activeDocsRuns.length === 1
+          ? '1 agent run active'
+          : `${vault.activeDocsRuns.length} agent runs active`}
+      </button>
     {/if}
     <div class="spacer"></div>
     {#if vault.current}
@@ -186,8 +215,10 @@
         class="tool"
         class:active={vault.centerMode === 'graph'}
         title="Graph view"
-        onclick={() =>
-          (vault.centerMode = vault.centerMode === 'graph' ? (vault.note ? 'note' : 'empty') : 'graph')}
+        onclick={() => {
+          vault.centerMode = vault.centerMode === 'graph' ? (vault.note ? 'note' : 'empty') : 'graph';
+          vault.persistView();
+        }}
       >
         <Icon name="share" size={14} />
       </button>
@@ -195,10 +226,14 @@
         class="tool"
         class:active={vault.centerMode === 'docs-agents'}
         title="Docs agent — have agents write documentation into this vault"
-        onclick={() =>
-          vault.centerMode === 'docs-agents'
-            ? (vault.centerMode = vault.note ? 'note' : 'empty')
-            : vault.openDocsAgents('')}
+        onclick={() => {
+          if (vault.centerMode === 'docs-agents') {
+            vault.centerMode = vault.note ? 'note' : 'empty';
+            vault.persistView();
+          } else {
+            vault.openDocsAgents('');
+          }
+        }}
       >
         <Icon name="zap" size={14} />
       </button>
@@ -233,6 +268,7 @@
     </div>
   {:else if vault.current}
     <div class="panes">
+      {#if leftOpen}
       <aside class="left" style="width:{leftW}px">
         <div class="left-modes">
           <button
@@ -273,12 +309,51 @@
       </aside>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="resizer" onmousedown={(e) => startResize(e, 'left')}></div>
+      {/if}
 
       <main class="center">
+        {#if vault.tabs.length > 0}
+          <div class="tabstrip" role="tablist">
+            {#each vault.tabs as t, i (t.kind + ':' + t.path)}
+              <div
+                class="vtab"
+                class:active={i === vault.activeTab &&
+                  (vault.centerMode === 'note' || vault.centerMode === 'file')}
+                role="tab"
+                tabindex="0"
+                aria-selected={i === vault.activeTab}
+                title={t.path}
+                onclick={() => void vault.activateTab(i)}
+                onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && void vault.activateTab(i)}
+                onauxclick={(e) => {
+                  if (e.button === 1) void vault.closeTab(i);
+                }}
+              >
+                <Icon name={t.kind === 'note' ? 'note' : 'file'} size={12} />
+                <span class="vtab-name">
+                  {t.kind === 'note'
+                    ? (t.path.split('/').pop() ?? t.path).replace(/\.md$/i, '')
+                    : (t.path.split('/').pop() ?? t.path)}
+                </span>
+                <button
+                  class="vtab-close"
+                  title="Close tab"
+                  aria-label="Close tab"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    void vault.closeTab(i);
+                  }}>×</button
+                >
+              </div>
+            {/each}
+          </div>
+        {/if}
         {#if vault.centerMode === 'graph'}
           <GraphView />
         {:else if vault.centerMode === 'docs-agents'}
           <DocsAgentsView />
+        {:else if vault.centerMode === 'file' && vault.filePath}
+          <FileViewer />
         {:else if vault.centerMode === 'note' && vault.note}
           <NoteView />
         {:else}
@@ -419,6 +494,23 @@
     color: #e88;
     animation: none;
   }
+  .run-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--accent, #9ab4ff);
+    background: var(--accent-dim, rgba(90, 120, 255, 0.14));
+    border: 1px solid var(--accent, #7a9cff);
+    border-radius: 999px;
+    padding: 2px 9px;
+    cursor: pointer;
+    white-space: nowrap;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .run-chip:hover {
+    animation: none;
+  }
   @keyframes pulse {
     50% {
       opacity: 0.45;
@@ -501,6 +593,65 @@
   .center > :global(*) {
     flex: 1;
     min-height: 0;
+  }
+  /* The tab strip is chrome, not content — never let it stretch. */
+  .center > .tabstrip {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    padding: 4px 8px 0;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+  .vtab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px 4px 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+    background: none;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 7px 7px 0 0;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    max-width: 220px;
+  }
+  .vtab:hover {
+    background: var(--hover, rgba(127, 127, 127, 0.12));
+  }
+  .vtab.active {
+    color: var(--text);
+    background: var(--panel-2, #222);
+    border-color: var(--border);
+  }
+  .vtab-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .vtab-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+  }
+  .vtab-close:hover {
+    background: var(--hover, rgba(127, 127, 127, 0.2));
+    color: var(--text);
   }
   .center-empty {
     display: flex;

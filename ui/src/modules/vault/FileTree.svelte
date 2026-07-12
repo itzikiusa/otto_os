@@ -25,12 +25,29 @@
   let renameValue = $state('');
   let dragOver = $state<string | null>(null);
 
-  function rowClick(n: TreeNode): void {
+  /** Mode-aware selection — only the pane actually shown highlights its row. */
+  function isActive(n: TreeNode): boolean {
+    return vault.centerMode === 'note'
+      ? vault.notePath === n.entry.path
+      : vault.centerMode === 'file' && vault.filePath === n.entry.path;
+  }
+
+  function rowClick(n: TreeNode, e?: MouseEvent | KeyboardEvent): void {
     if (n.entry.kind === 'dir') {
       void vault.toggleDir(n);
-    } else if (n.entry.kind === 'note') {
-      void vault.open(n.entry.path);
+      return;
     }
+    // ⌘/Ctrl-click (or middle-click via onauxclick) → open in a NEW tab.
+    const newTab = !!e && (e.metaKey || e.ctrlKey);
+    if (n.entry.kind === 'note') void vault.open(n.entry.path, { newTab });
+    else void vault.openFile(n.entry.path, { newTab });
+  }
+
+  function rowAuxClick(n: TreeNode, e: MouseEvent): void {
+    if (e.button !== 1 || n.entry.kind === 'dir') return;
+    e.preventDefault();
+    if (n.entry.kind === 'note') void vault.open(n.entry.path, { newTab: true });
+    else void vault.openFile(n.entry.path, { newTab: true });
   }
 
   function startRename(n: TreeNode): void {
@@ -51,6 +68,19 @@
   function menu(e: MouseEvent, n: TreeNode): void {
     const isDir = n.entry.kind === 'dir';
     ctxMenu.show(e, [
+      ...(isDir
+        ? []
+        : [
+            {
+              label: 'Open in new tab',
+              icon: n.entry.kind === 'note' ? 'note' : 'file',
+              action: () =>
+                n.entry.kind === 'note'
+                  ? void vault.open(n.entry.path, { newTab: true })
+                  : void vault.openFile(n.entry.path, { newTab: true }),
+            },
+            { separator: true },
+          ]),
       ...(isDir
         ? [
             { label: 'New note here', icon: 'note', action: () => onNewNote(n.entry.path) },
@@ -114,16 +144,17 @@
       {#snippet row(n: TreeNode)}
         <div
           class="row {n.entry.kind}"
-          class:active={vault.notePath === n.entry.path}
+          class:active={isActive(n)}
           class:reserved={n.entry.reserved}
           class:drag-over={dragOver === n.entry.path}
           style="padding-inline-start: {8 + n.depth * 14}px"
           role="treeitem"
-          aria-selected={vault.notePath === n.entry.path}
+          aria-selected={isActive(n)}
           tabindex="0"
           draggable={n.entry.kind !== 'dir'}
-          onclick={() => rowClick(n)}
-          onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && rowClick(n)}
+          onclick={(e) => rowClick(n, e)}
+          onauxclick={(e) => rowAuxClick(n, e)}
+          onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && rowClick(n, e)}
           oncontextmenu={(e) => menu(e, n)}
           ondragstart={(e) => onDragStart(e, n)}
           ondragover={(e) => {
@@ -148,6 +179,12 @@
           <span class="name" title={n.entry.path}>
             {n.entry.kind === 'note' ? n.entry.name.replace(/\.md$/i, '') : n.entry.name}
           </span>
+          {#if n.entry.kind === 'dir'}
+            {@const prov = vault.draftAgentLabel(n.entry.path)}
+            {#if prov}
+              <span class="prov" title="Writer agent">{prov}</span>
+            {/if}
+          {/if}
           {#if renaming === n.entry.path}
             <!-- svelte-ignore a11y_autofocus -->
             <input
@@ -237,6 +274,17 @@
   .count {
     font-size: 10px;
     color: var(--text-dim);
+  }
+  .prov {
+    font-size: 10px;
+    color: var(--accent, #9ab4ff);
+    background: var(--accent-dim, rgba(90, 120, 255, 0.12));
+    border-radius: 999px;
+    padding: 0 7px;
+    white-space: nowrap;
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .rename {
     position: absolute;

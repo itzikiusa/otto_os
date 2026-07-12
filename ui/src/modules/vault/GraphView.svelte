@@ -65,7 +65,9 @@
   let showTags = $state(true);
   let showOrphans = $state(true);
   let showGhosts = $state(true);
-  let showReserved = $state(true);
+  // Reserved scaffolding (index.md / log.md) is navigation, not knowledge —
+  // off by default so the graph shows real notes; the toggle brings them back.
+  let showReserved = $state(false);
   let groupBy = $state<'folder' | 'type'>('folder');
   let depth = $state(2); // local mode only
 

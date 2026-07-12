@@ -53,6 +53,17 @@ impl Store {
     // -- vaults -------------------------------------------------------------
 
     pub async fn create_vault(&self, ws: &str, name: &str, root: &str, okf: bool) -> Result<i64> {
+        // Vaults are global — enforce root uniqueness ACROSS workspaces here
+        // (the table's UNIQUE(ws_id, root_path) is a pre-global relic; a
+        // migration can't retro-tighten it without risking existing rows).
+        let dup = sqlx::query("SELECT 1 FROM vaults WHERE root_path = ?")
+            .bind(root)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("vault.create.dup"))?;
+        if dup.is_some() {
+            return Err(Error::Conflict(format!("vault already registered at {root}")));
+        }
         let r = sqlx::query(
             "INSERT INTO vaults (ws_id, name, root_path, okf, created_at) VALUES (?,?,?,?,?)",
         )
@@ -92,12 +103,19 @@ impl Store {
          (SELECT COUNT(*) FROM vault_notes n WHERE n.vault_id = v.id) AS notes, \
          (SELECT COUNT(*) FROM vault_links l WHERE l.vault_id = v.id) AS links";
 
-    pub async fn list_vaults(&self, ws: &str) -> Result<Vec<VaultRec>> {
-        let rows = sqlx::query(&format!("SELECT {} FROM vaults v WHERE v.ws_id = ? ORDER BY v.id", Self::VAULT_COLS))
-            .bind(ws)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("vault.list"))?;
+    pub async fn list_vaults(&self) -> Result<Vec<VaultRec>> {
+        // GLOBAL list — vaults are a cross-workspace library. Dedup by
+        // root_path (lowest id wins) in case pre-global rows registered the
+        // same folder from two workspaces.
+        let rows = sqlx::query(&format!(
+            "SELECT {} FROM vaults v \
+             WHERE v.id IN (SELECT MIN(id) FROM vaults GROUP BY root_path) \
+             ORDER BY v.id",
+            Self::VAULT_COLS
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("vault.list"))?;
         Ok(rows.iter().map(Self::vault_from_row).collect())
     }
 

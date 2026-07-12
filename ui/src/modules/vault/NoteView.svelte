@@ -8,6 +8,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { authedBlobUrl } from '../../lib/api/client';
   import { assetPath, vaultNote } from '../../lib/api/vault';
+  import { ui } from '../../lib/stores/ui.svelte';
+  import { renderMermaid } from '../canvas/mermaid';
+  import { renderD2 } from '../canvas/d2';
   import { renderNote, resolverFrom, slugifyHeading, stripFrontmatter } from './mdRender';
   import RefineDrawer from './RefineDrawer.svelte';
   import { vault } from './vault.svelte';
@@ -118,6 +121,41 @@
           })
           .catch(() => el.classList.add('embed-error')),
       );
+    }
+  });
+
+  // -- diagram blocks: render mermaid / D2 fences to inline SVG -----------------
+  // mdRender emits <div class="diagram-block" data-diagram=…><pre>src</pre></div>;
+  // swap each for the rendered SVG (lazy-loaded libs). On error keep the source
+  // visible with the parse message — never a blank hole in the note.
+  let diagramSeq = 0;
+  $effect(() => {
+    void rendered;
+    const host = readEl;
+    if (!host) return;
+    for (const el of Array.from(host.querySelectorAll('div.diagram-block:not([data-rendered])'))) {
+      el.setAttribute('data-rendered', '1');
+      const kind = el.getAttribute('data-diagram');
+      const src = el.querySelector('pre.diagram-src')?.textContent ?? '';
+      const id = `vault-diag-${++diagramSeq}`;
+      untrack(() => {
+        const render =
+          kind === 'd2'
+            ? renderD2(id, src, { dark: ui.resolvedScheme === 'dark' })
+            : renderMermaid(id, src);
+        void render.then(({ svg, error }) => {
+          if (!el.isConnected) return;
+          if (svg) {
+            el.innerHTML = svg;
+            el.classList.add('diagram-ok');
+          } else {
+            const err = document.createElement('div');
+            err.className = 'diagram-error';
+            err.textContent = `Diagram error: ${error ?? 'unknown'}`;
+            el.prepend(err);
+          }
+        });
+      });
     }
   });
 
@@ -335,7 +373,10 @@
     min-height: 0;
     overflow-y: auto;
     padding: 18px 26px 60px;
-    max-width: 860px;
+    /* Use the space the user gives us: folding the side panes widens the
+       measure up to 1240px instead of stranding it at a fixed 860px column.
+       96% keeps a breathing gutter at every pane width. */
+    max-width: min(1240px, 96%);
     width: 100%;
     margin: 0 auto;
     line-height: 1.6;
@@ -405,6 +446,34 @@
   }
   .read :global(pre) {
     overflow-x: auto;
+  }
+  .read :global(div.diagram-block) {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    margin: 10px 0;
+    background: var(--panel, rgba(127, 127, 127, 0.04));
+    overflow-x: auto;
+  }
+  .read :global(div.diagram-block.diagram-ok) {
+    display: flex;
+    justify-content: center;
+    /* Mermaid's `neutral` theme assumes a light surface — keep the figure
+       readable in dark mode too (reads as an embedded light figure). */
+    background: #fdfdfd;
+  }
+  .read :global(div.diagram-block svg) {
+    max-width: 100%;
+    height: auto;
+  }
+  .read :global(div.diagram-error) {
+    color: #e88;
+    font-size: 12px;
+    margin-bottom: 8px;
+  }
+  .read :global(pre.diagram-src) {
+    margin: 0;
+    font-size: 12px;
   }
   .read :global(table) {
     border-collapse: collapse;

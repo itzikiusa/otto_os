@@ -12,10 +12,18 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { api } from '../../lib/api/client';
+  import { contextApi } from '../../lib/api/context';
   import type { VaultDocsRun } from '../../lib/api/types';
-  import { cancelDocsRun, docsRun as getDocsRun, runDocsAgents } from '../../lib/api/vault';
+  import {
+    cancelDocsRun,
+    docsRun as getDocsRun,
+    retryDocsAgent,
+    retryDocsSummarizer,
+    runDocsAgents,
+  } from '../../lib/api/vault';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { toasts } from '../../lib/toast.svelte';
+  import { DOCS_TEMPLATES } from './docsTemplates';
   import { vault } from './vault.svelte';
 
   interface AgentRow {
@@ -29,6 +37,36 @@
   let agents = $state<AgentRow[]>([{ provider: defaultAgentProvider(), model: '' }]);
   let sumProvider = $state(defaultAgentProvider());
   let starting = $state(false);
+
+  // Prepared prompts — pick a template, fill the repo path, Insert. The
+  // template's skills ride the run (RunReq.skills) and show as chips below.
+  let tplId = $state('');
+  let tplRepo = $state('');
+  let tplSkills = $state<string[]>([]);
+  const tpl = $derived(DOCS_TEMPLATES.find((t) => t.id === tplId) ?? null);
+
+  function applyTemplate(): void {
+    if (!tpl) return;
+    prompt = tpl.build(tplRepo.trim());
+    tplSkills = [...tpl.skills];
+  }
+
+  /** Everything the run will inject (template skills + okf on OKF vaults). */
+  const runSkills = $derived([
+    ...tplSkills,
+    ...(vault.current?.okf && !tplSkills.includes('okf-authoring') ? ['okf-authoring'] : []),
+  ]);
+
+  // Skill viewer — chips are clickable so what gets injected is inspectable.
+  let skillView = $state<{ name: string; body: string } | null>(null);
+  async function viewSkill(name: string): Promise<void> {
+    try {
+      const s = await contextApi.getSkill(name);
+      skillView = { name, body: s.body };
+    } catch (e) {
+      toasts.error('Skill', e instanceof Error ? e.message : String(e));
+    }
+  }
 
   const providers = $derived(agentProviders());
   const run = $derived(vault.docsRun);
@@ -94,6 +132,7 @@
         target_dir: targetDir.trim(),
         agents: agents.map((a) => ({ provider: a.provider, model: a.model.trim() || undefined })),
         summarizer: agents.length > 1 ? { provider: sumProvider } : undefined,
+        skills: tplSkills.length ? tplSkills : undefined,
       });
       openTerminals = new Set();
       void vault.refreshDocsRuns();
@@ -102,6 +141,24 @@
       toasts.error('Docs agent', e instanceof Error ? e.message : String(e));
     } finally {
       starting = false;
+    }
+  }
+
+  // Per-slot retry (writers by index, 'sum' = summarizer) — kills the stuck
+  // session server-side; a fresh one re-spawns with the same prompt.
+  let retrying = $state<Record<string, boolean>>({});
+  async function retry(target: number | 'sum'): Promise<void> {
+    const r = vault.docsRun;
+    if (!r || retrying[String(target)]) return;
+    retrying = { ...retrying, [String(target)]: true };
+    try {
+      if (target === 'sum') await retryDocsSummarizer(r.id);
+      else await retryDocsAgent(r.id, target);
+      startPoll();
+    } catch (e) {
+      toasts.error('Retry', e instanceof Error ? e.message : String(e));
+    } finally {
+      retrying = { ...retrying, [String(target)]: false };
     }
   }
 
@@ -179,6 +236,29 @@
 
     {#if !run}
       <!-- ── form ─────────────────────────────────────────────────────────── -->
+      <div class="fld">
+        <span>Prepared prompt (optional)</span>
+        <div class="tpl-row">
+          <select bind:value={tplId}>
+            <option value="">— pick a template —</option>
+            {#each DOCS_TEMPLATES as t (t.id)}
+              <option value={t.id}>{t.label}</option>
+            {/each}
+          </select>
+          {#if tpl?.needsRepo}
+            <input class="tpl-repo" bind:value={tplRepo} placeholder="~/path/to/repo" />
+          {/if}
+          <button
+            class="tpl-use"
+            disabled={!tpl || (tpl.needsRepo && !tplRepo.trim())}
+            onclick={applyTemplate}>Insert</button
+          >
+        </div>
+        {#if tpl}
+          <div class="tpl-hint">{tpl.hint} You can edit the inserted prompt freely.</div>
+        {/if}
+      </div>
+
       <label class="fld">
         <span>What should be documented?</span>
         <textarea
@@ -228,6 +308,20 @@
         </label>
       {/if}
 
+      {#if runSkills.length > 0}
+        <div class="fld">
+          <span>Skills injected into this run — click to view</span>
+          <div class="skill-chips">
+            {#each runSkills as s (s)}
+              <button class="skill-chip" title="View {s}" onclick={() => void viewSkill(s)}>
+                <Icon name="function" size={11} />
+                {s}
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
       <div class="form-actions">
         <button class="primary" disabled={!prompt.trim() || starting} onclick={() => void start()}>
           {starting ? 'Starting…' : 'Run'}
@@ -259,9 +353,10 @@
           <button class="ghost" disabled={cancelling} onclick={() => void cancel()}>
             {cancelling ? 'Cancelling…' : 'Cancel'}
           </button>
-        {:else if !active}
-          <button class="ghost" onclick={newRun}>New run</button>
         {/if}
+        <!-- Always available — a stuck-RUNNING run must never trap the user
+             in the run view with no way to start a new run. -->
+        <button class="ghost" onclick={newRun}>New run</button>
       </div>
 
       {#if run.error}
@@ -278,6 +373,16 @@
               {#if agent.session_id}
                 <button class="ghost small" onclick={() => void toggleTerminal(agent.session_id)}>
                   {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
+                </button>
+              {/if}
+              {#if active && (agent.state === 'running' || agent.state === 'pending')}
+                <button
+                  class="ghost small"
+                  title="Kill this writer's session and restart its turn fresh"
+                  disabled={retrying[String(agent.index)]}
+                  onclick={() => void retry(agent.index)}
+                >
+                  {retrying[String(agent.index)] ? 'Retrying…' : 'Retry'}
                 </button>
               {/if}
               <span class="pill st-{agent.state}">
@@ -320,6 +425,16 @@
                 onclick={() => void toggleTerminal(run.summarizer.session_id)}
               >
                 {openTerminals.has(run.summarizer.session_id) ? 'Hide' : 'Open'}
+              </button>
+            {/if}
+            {#if run.state === 'summarizing' && (run.summarizer.state === 'running' || run.summarizer.state === 'pending')}
+              <button
+                class="ghost small"
+                title="Kill the summarizer's session and restart the consolidation fresh"
+                disabled={retrying['sum']}
+                onclick={() => void retry('sum')}
+              >
+                {retrying['sum'] ? 'Retrying…' : 'Retry'}
               </button>
             {/if}
             <span class="pill st-{run.summarizer.state}">
@@ -383,6 +498,27 @@
   </div>
 </div>
 
+{#if skillView}
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="skill-overlay" onclick={() => (skillView = null)}>
+    <div
+      class="skill-dialog"
+      role="dialog"
+      tabindex="-1"
+      aria-label="Skill {skillView.name}"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <div class="skill-dialog-head">
+        <h3><Icon name="function" size={14} /> {skillView.name}</h3>
+        <button class="icon-btn" title="Close" onclick={() => (skillView = null)}>
+          <Icon name="x" size={13} />
+        </button>
+      </div>
+      <pre class="skill-body">{skillView.body}</pre>
+    </div>
+  </div>
+{/if}
+
 <style>
   .docs-agents {
     overflow-y: auto;
@@ -407,6 +543,103 @@
   }
 
   /* ── form ─────────────────────────────────────────────────────────────── */
+  .tpl-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .tpl-row select {
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+  .tpl-repo {
+    flex: 1;
+    min-width: 0;
+  }
+  .tpl-use {
+    border: 1px solid var(--accent, #7a9cff);
+    background: var(--accent-dim, rgba(90, 120, 255, 0.14));
+    color: var(--accent, #9ab4ff);
+    border-radius: 7px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .tpl-use:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .tpl-hint {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    line-height: 1.4;
+  }
+  .skill-chips {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .skill-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11.5px;
+    color: var(--text);
+    background: var(--hover, rgba(127, 127, 127, 0.1));
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+  .skill-chip:hover {
+    border-color: var(--accent, #7a9cff);
+    color: var(--accent, #9ab4ff);
+  }
+  .skill-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 95;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 5vh 16px;
+  }
+  .skill-dialog {
+    width: min(760px, 94vw);
+    max-height: 88vh;
+    background: var(--panel, #1c1c1e);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .skill-dialog-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .skill-dialog-head h3 {
+    margin: 0;
+    font-size: 13.5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .skill-body {
+    margin: 0;
+    padding: 14px 16px;
+    overflow: auto;
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
   .fld {
     display: flex;
     flex-direction: column;

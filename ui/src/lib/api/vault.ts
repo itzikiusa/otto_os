@@ -131,6 +131,9 @@ export interface VaultDocsRunReq {
   target_dir?: string; // vault-relative folder ("" = root)
   agents: { provider: string; model?: string }[]; // 1..=4
   summarizer?: { provider?: string; model?: string };
+  /** Library skills injected into every writer + summarizer (≤4; prepared
+   *  prompts pass e.g. `vault-repo-docs`; okf-authoring auto-adds on OKF). */
+  skills?: string[];
 }
 
 export function runDocsAgents(ws: string, id: number, body: VaultDocsRunReq) {
@@ -150,6 +153,15 @@ export function listDocsRuns(ws: string, id: number, limit = 50) {
 
 export function cancelDocsRun(runId: string) {
   return api.post<void>(`/vault/docs-agents/runs/${enc(runId)}/cancel`, {});
+}
+
+/** LIVE-run retry of one stuck writer (kills its session; a fresh one spawns). */
+export function retryDocsAgent(runId: string, index: number) {
+  return api.post<void>(`/vault/docs-agents/runs/${enc(runId)}/agents/${index}/retry`, {});
+}
+
+export function retryDocsSummarizer(runId: string) {
+  return api.post<void>(`/vault/docs-agents/runs/${enc(runId)}/summarizer/retry`, {});
 }
 
 /** LONG request — resolves when the refine turn completes. */

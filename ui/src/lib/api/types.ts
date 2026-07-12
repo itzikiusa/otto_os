@@ -5180,7 +5180,7 @@ export interface VaultDocsAgent {
   name: string; // "writer-1 · claude" / "refine · claude"
   provider: string;
   model: string | null;
-  state: 'pending' | 'running' | 'done' | 'error' | 'interrupted';
+  state: 'pending' | 'running' | 'done' | 'error' | 'interrupted' | 'cancelled';
   session_id: string | null;
   error: string | null;
   drafts: string[]; // vault-relative draft note paths this agent produced
@@ -5189,7 +5189,7 @@ export interface VaultDocsSummarizer {
   provider: string;
   model: string | null;
   // skipped when 1 writer; interrupted when a daemon restart killed the run
-  state: 'pending' | 'running' | 'done' | 'error' | 'skipped' | 'interrupted';
+  state: 'pending' | 'running' | 'done' | 'error' | 'skipped' | 'interrupted' | 'cancelled';
   session_id: string | null;
   error: string | null;
 }
