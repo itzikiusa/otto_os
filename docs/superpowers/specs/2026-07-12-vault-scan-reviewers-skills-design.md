@@ -36,6 +36,8 @@ The two bundled authoring skills are also too shallow as packages:
    packages and add one generic plus four focused reviewer skills.
 6. Deliver each complete skill tree to every provider and verify the behavior
    with scripts, eval fixtures, Rust tests, and focused UI tests.
+7. Make non-Markdown documentation deliverables such as OpenAPI YAML writable
+   through the same guarded Vault API/MCP boundary as notes.
 
 ## Non-goals
 
@@ -230,6 +232,30 @@ transaction/consistency behavior, joins/relationships, field-level impact
 paths, examples, diagrams where useful, and citations. Unknown details are
 marked unknown instead of guessed.
 
+## Guarded text artifacts
+
+The current `otto_vault_write` path accepts only `.md`, while the shipped full
+scan template requires `api-openapi.yaml`. Direct filesystem writes would
+bypass Vault path checks, optimistic concurrency, rescanning, and the stated
+agent contract. Add a dedicated guarded text-artifact write instead of
+weakening note semantics:
+
+- `PUT /workspaces/{ws}/vault/vaults/{id}/file` and session MCP
+  `otto_vault_write_file` accept `{path, content, if_hash?}`.
+- Accepted extensions are documentation text assets: `.yaml`, `.yml`,
+  `.json`, `.d2`, `.mmd`, `.txt`, and `.csv`; Markdown remains on the note
+  endpoint so it always receives note parsing/index behavior.
+- The same traversal, hidden-segment, symlink-escape, optimistic concurrency,
+  and 4 MiB limits apply. Parent folders are created. The response is
+  `{path,size,hash}` and the Vault rescans before returning.
+- The tool is Editor-gated and classified as a Vault mutation. Reviewer
+  sessions do not receive it.
+- Binary assets remain read/import-only; this endpoint never accepts encoded
+  binary content.
+
+The full/API scan templates use this tool for `api-openapi.yaml`, and the
+OpenAPI viewer continues to read it through the existing asset endpoint.
+
 ## Complete skill delivery
 
 Replace the Claude-specific staging assumption with a provider-neutral
@@ -287,7 +313,7 @@ changed paths, Open, and Retry. The run header shows `reviewing · round N/M`,
 Update in lockstep:
 
 - `docs/contracts/api.md` request/response bodies, states, retry routes, and
-  durable semantics.
+  durable semantics, plus the guarded text-artifact write contract.
 - `ui/src/lib/api/types.ts` and `ui/src/lib/api/vault.ts`.
 - `docs/features/vault.md` form, lifecycle, skill roster, full-scan contract,
   iteration outcomes, and troubleshooting.
@@ -301,6 +327,9 @@ Update in lockstep:
   state transitions, early clean exit, exhaustion, malformed findings,
   interruption, retry/cancel, prompt construction, complete bundled-resource
   materialization, and provider-specific delivery.
+- Vault engine/API/MCP tests: allowed and rejected text extensions, traversal,
+  symlink escape, optimistic concurrency, size limit, rescan visibility, RBAC,
+  and reviewer-session tool filtering.
 - State tests: `reviewing`/`revising` count as unfinished.
 - Script tests: fixture repositories/bundles with missing API bodies, shallow
   DB coverage, missed workers, false citations, and clean controls.
