@@ -15,8 +15,10 @@
 //!   * **Codex** — `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`.
 //!     Usage on `type=="event_msg"` + `payload.type=="token_count"` lines, read
 //!     from `payload.info.last_token_usage` (per-turn; `total_token_usage` is
-//!     cumulative and would double-count). Model only in `session_meta` (first
-//!     line) if present, else falls back to the literal `"codex"`.
+//!     cumulative and would double-count). Codex's `input_tokens` is
+//!     cache-inclusive, so we subtract `cached_input_tokens` from it to keep
+//!     `input` disjoint from `cache_read` (see `parse_codex_line`). Model only
+//!     in `session_meta` (first line) if present, else falls back to `"codex"`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -119,6 +121,16 @@ pub fn parse_claude_line(line: &str) -> Option<ClaudeLine> {
 /// `output = output_tokens + reasoning_output_tokens`. Codex has no
 /// cache-creation concept, so `cache_write` is always 0. The model is supplied
 /// by the caller (from `session_meta`, or the literal `"codex"`).
+///
+/// Codex's `input_tokens` is **cache-inclusive** — it counts uncached *and*
+/// cached prompt tokens (`total_tokens == input_tokens + output_tokens`,
+/// `cached_input_tokens ⊆ input_tokens`). Claude's `input_tokens` instead
+/// *excludes* cache, so its buckets are disjoint. We normalize codex to Claude's
+/// convention by subtracting the cached portion, so `input` means uncached
+/// prompt tokens for both providers. Without this, the shared
+/// `input + output + cache_read + cache_write` total (and the per-token cost,
+/// which prices `input` at the base rate and `cache_read` at ~0.1×) counts the
+/// cached tokens twice — nearly doubling codex, which is overwhelmingly cache.
 pub fn parse_codex_line(line: &str, fallback_model: &str) -> Option<ParsedUsage> {
     let line = line.trim();
     if line.is_empty() {
@@ -137,11 +149,15 @@ pub fn parse_codex_line(line: &str, fallback_model: &str) -> Option<ParsedUsage>
         return None;
     }
     let output = u64_field(last, "output_tokens") + u64_field(last, "reasoning_output_tokens");
+    let cache_read = u64_field(last, "cached_input_tokens");
+    // `saturating_sub` guards against schema drift where cached briefly exceeds
+    // the reported input; codex's input is cache-inclusive (see doc above).
+    let input = u64_field(last, "input_tokens").saturating_sub(cache_read);
     Some(ParsedUsage {
         model: fallback_model.to_string(),
-        input: u64_field(last, "input_tokens"),
+        input,
         output,
-        cache_read: u64_field(last, "cached_input_tokens"),
+        cache_read,
         cache_write: 0,
     })
 }
@@ -483,12 +499,21 @@ mod tests {
             got,
             ParsedUsage {
                 model: "codex".to_string(),
-                input: 46563,
+                // Codex `input_tokens` (46563) is cache-inclusive; we subtract
+                // `cached_input_tokens` (8576) so `input` is the uncached prompt
+                // tokens (37987), disjoint from `cache_read`. This keeps the
+                // shared `input + output + cache_read + cache_write` total from
+                // counting the cached tokens twice.
+                input: 46563 - 8576,
                 output: 500 + 152, // reasoning bills as output
                 cache_read: 8576,
                 cache_write: 0,
             }
         );
+        // input + cache_read reconstructs codex's cache-inclusive input_tokens:
+        // no prompt tokens are lost by the split, they are just no longer
+        // double-counted (once in `input`, once in `cache_read`).
+        assert_eq!(got.input + got.cache_read, 46563);
     }
 
     #[test]
