@@ -263,6 +263,7 @@
           {sessionId}
           readOnly={isViewer}
           forceDark
+          preferDom
           shareToken={token}
           onstatus={onTermStatus}
         />

@@ -46,44 +46,57 @@ export function terminalTheme(theme: ThemeName, scheme: 'light' | 'dark' = 'dark
   // Light scheme: one light palette for all themes, accent-tinted cursor/selection.
   if (scheme === 'light') {
     const accent = theme === 'pro-dark' ? '#6c5ce7' : theme === 'warm' ? '#2bb673' : '#0a64c8';
+    const background = '#fbfbfd';
     return {
       ...lightBase,
-      background: '#fbfbfd',
+      background,
       foreground: '#1d1d22',
       cursor: accent,
+      // Text under the cursor (block fallback) must match the pane bg — a
+      // mismatched accent leaves opaque "ghost" cells when the cursor moves.
+      cursorAccent: background,
       selectionBackground: 'rgba(10, 100, 200, 0.2)',
       blue: accent,
     };
   }
   switch (theme) {
-    case 'pro-dark':
+    case 'pro-dark': {
+      const background = '#0f0f14';
       return {
         ...base,
-        background: '#0f0f14',
+        background,
         foreground: '#dcdce6',
         cursor: '#6c5ce7',
+        cursorAccent: background,
         selectionBackground: 'rgba(108, 92, 231, 0.35)',
         blue: '#7c6cf0',
         brightBlue: '#998cf5',
       };
-    case 'warm':
+    }
+    case 'warm': {
+      const background = '#1a1916';
       return {
         ...base,
-        background: '#1a1916',
+        background,
         foreground: '#e8e4da',
         cursor: '#2bb673',
+        cursorAccent: background,
         selectionBackground: 'rgba(43, 182, 115, 0.3)',
         green: '#2bb673',
         blue: '#4f9da6',
       };
+    }
     case 'native':
-    default:
+    default: {
+      const background = '#131318';
       return {
         ...base,
-        background: '#131318',
+        background,
         foreground: '#e8e8ee',
         cursor: '#0a84ff',
+        cursorAccent: background,
         selectionBackground: 'rgba(10, 132, 255, 0.35)',
       };
+    }
   }
 }

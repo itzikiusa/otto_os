@@ -110,7 +110,7 @@
   <div class="da-shell">
     {#if database.assistSessionId}
       {#key database.assistSessionId}
-        <Terminal sessionId={database.assistSessionId} readOnly={false} forceDark={true} />
+        <Terminal sessionId={database.assistSessionId} readOnly={false} forceDark preferDom />
       {/key}
     {:else}
       <div class="da-empty">

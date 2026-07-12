@@ -297,7 +297,7 @@
             {#if agent.session_id && openTerminals.has(agent.session_id)}
               <div class="term">
                 {#key agent.session_id}
-                  <Terminal sessionId={agent.session_id} />
+                  <Terminal sessionId={agent.session_id} preferDom />
                 {/key}
               </div>
             {/if}
@@ -333,7 +333,7 @@
             {#if run.summarizer.session_id && openTerminals.has(run.summarizer.session_id)}
               <div class="term">
                 {#key run.summarizer.session_id}
-                  <Terminal sessionId={run.summarizer.session_id} />
+                  <Terminal sessionId={run.summarizer.session_id} preferDom />
                 {/key}
               </div>
             {/if}

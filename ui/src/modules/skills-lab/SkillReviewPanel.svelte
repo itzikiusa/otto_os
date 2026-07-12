@@ -422,7 +422,7 @@
               {/if}
               {#if fx.session_id && fixTermOpen}
                 <div class="lr-fix-term">
-                  <Terminal sessionId={fx.session_id} />
+                  <Terminal sessionId={fx.session_id} preferDom />
                 </div>
               {/if}
             {/if}

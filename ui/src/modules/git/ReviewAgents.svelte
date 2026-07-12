@@ -179,7 +179,7 @@
                WS reconnect storm, leaving a running agent's terminal stuck on
                "reconnecting". The {#each} is keyed by agent.name, so the
                component instance is stable across refetches. -->
-          <Terminal sessionId={agent.session_id} />
+          <Terminal sessionId={agent.session_id} preferDom />
         </div>
       {/if}
       {#if agentExpanded[agent.name] && agent.findings}

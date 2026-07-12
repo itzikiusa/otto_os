@@ -100,7 +100,7 @@
       <div class="ma-shell">
         {#if mockupAssist.sessionId}
           {#key mockupAssist.sessionId}
-            <Terminal sessionId={mockupAssist.sessionId} readOnly={false} forceDark={true} />
+            <Terminal sessionId={mockupAssist.sessionId} readOnly={false} forceDark preferDom />
           {/key}
         {:else}
           <div class="ma-empty">

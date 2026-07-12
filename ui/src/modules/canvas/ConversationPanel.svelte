@@ -88,7 +88,7 @@
   <div class="shell">
     {#if canvas.sessionId}
       {#key canvas.sessionId}
-        <Terminal sessionId={canvas.sessionId} readOnly={false} forceDark={true} />
+        <Terminal sessionId={canvas.sessionId} readOnly={false} forceDark preferDom />
       {/key}
     {:else}
       <div class="empty">

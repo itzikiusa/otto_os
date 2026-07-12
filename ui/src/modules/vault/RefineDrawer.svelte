@@ -113,7 +113,7 @@
   {#if sessionId}
     <div class="term">
       {#key sessionId}
-        <Terminal sessionId={sessionId} />
+        <Terminal sessionId={sessionId} preferDom />
       {/key}
     </div>
   {:else}

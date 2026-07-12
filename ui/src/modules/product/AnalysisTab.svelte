@@ -472,7 +472,7 @@
           {#if summarizerAgent?.session_id && openTerminals.has(summarizerAgent.session_id)}
             <div class="rp-term">
               {#key summarizerAgent.session_id}
-                <Terminal sessionId={summarizerAgent.session_id} forceDark />
+                <Terminal sessionId={summarizerAgent.session_id} forceDark preferDom />
               {/key}
             </div>
           {/if}
@@ -544,7 +544,7 @@
               {#if agent.session_id && openTerminals.has(agent.session_id)}
                 <div class="rp-term">
                   {#key agent.session_id}
-                    <Terminal sessionId={agent.session_id} forceDark />
+                    <Terminal sessionId={agent.session_id} forceDark preferDom />
                   {/key}
                 </div>
               {/if}
@@ -588,7 +588,7 @@
               {#if agent.session_id && openTerminals.has(agent.session_id)}
                 <div class="rp-term">
                   {#key agent.session_id}
-                    <Terminal sessionId={agent.session_id} forceDark />
+                    <Terminal sessionId={agent.session_id} forceDark preferDom />
                   {/key}
                 </div>
               {/if}
@@ -761,7 +761,7 @@
             {#if agent.session_id && openTerminals.has(agent.session_id)}
               <div class="rp-term">
                 {#key agent.session_id}
-                  <Terminal sessionId={agent.session_id} forceDark />
+                  <Terminal sessionId={agent.session_id} forceDark preferDom />
                 {/key}
               </div>
             {/if}

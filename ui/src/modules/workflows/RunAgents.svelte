@@ -102,7 +102,7 @@
             {#if expanded[sid]}
               <div class="term">
                 {#key sid}
-                  <Terminal sessionId={sid} resumable />
+                  <Terminal sessionId={sid} resumable preferDom />
                 {/key}
               </div>
             {/if}
