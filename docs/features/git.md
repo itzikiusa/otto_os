@@ -217,6 +217,19 @@ graph** at each ref's tip. Right-clicking a commit, branch chip, or tag opens a
 context menu (see §[Context menus](#context-menus)). Removing a repo
 **unregisters** it only — `DELETE /repos/{id}` never touches the files on disk.
 
+**Linked git worktrees** are first-class in Graph:
+
+- Branches checked out in another worktree (not this tab's path) show a
+  **worktree** pip/chip and an **open worktree** hint — they are **not** regular
+  switchable branches.
+- Clicking such a branch (or a row under **WORKTREES**, or double-clicking a
+  worktree chip in the multi-ref popover) **opens that worktree as its own git
+  tab** (register via `POST /workspaces/{id}/repos/detect` when needed). It does
+  **not** run `checkout` — git refuses to check out a branch already held by
+  another worktree.
+- The **WORKTREES** section lists `git worktree list` entries; click opens,
+  right-click removes/prunes.
+
 ---
 
 ## 5. Stage / commit / discard / diff

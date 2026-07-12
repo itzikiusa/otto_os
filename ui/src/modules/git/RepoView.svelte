@@ -233,7 +233,14 @@
     {:else if tab === 'graph'}
       {#if status}
         {#key graphKey}
-          <GraphView repoId={repo.id} {status} onstatus={setStatus} onmergerequest={requestMerge} />
+          <GraphView
+            repoId={repo.id}
+            repoPath={repo.path}
+            workspaceId={repo.workspace_id}
+            {status}
+            onstatus={setStatus}
+            onmergerequest={requestMerge}
+          />
         {/key}
       {:else}
         <div style="padding: 16px"><Skeleton rows={5} height={36} /></div>

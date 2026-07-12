@@ -1,17 +1,42 @@
 <script lang="ts">
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { api } from '../../lib/api/client';
-  import type { CommitInfo, RefsResp, RefBranch, RefTag, StashInfo, SubmoduleInfo, WorktreeInfo, RepoStatusResp, DiffResp, FileDiff, DiffLine } from '../../lib/api/types';
+  import type {
+    CommitInfo,
+    RefsResp,
+    RefBranch,
+    RefTag,
+    Repo,
+    StashInfo,
+    SubmoduleInfo,
+    WorktreeInfo,
+    RepoStatusResp,
+    DiffResp,
+    FileDiff,
+    DiffLine,
+  } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { git } from '../../lib/stores/git.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
 
+  /** Strip trailing slashes so worktree paths match registered repo paths. */
+  function normPath(p: string): string {
+    return p.replace(/\/+$/, '');
+  }
+
   interface Props {
     repoId: string;
+    /** Absolute path of this repo tab (main or linked worktree). Used to tell
+     *  "branch lives in another worktree" vs "this checkout". */
+    repoPath?: string;
+    /** Workspace that owns this repo — used when registering a worktree path. */
+    workspaceId?: string;
     status: RepoStatusResp;
     onstatus: (s: RepoStatusResp) => void;
     /** Drag-to-merge: dropping branch `source` onto a different local branch
@@ -19,7 +44,7 @@
      *  here — the parent owns the modal + conflict-resolver routing. */
     onmergerequest?: (source: string, target: string) => void;
   }
-  let { repoId, status, onstatus, onmergerequest }: Props = $props();
+  let { repoId, repoPath = '', workspaceId = '', status, onstatus, onmergerequest }: Props = $props();
 
   // ── Drag-to-merge state ─────────────────────────────────────────────────────
   // The branch currently being dragged ({ name, remote }), and the local branch
@@ -156,6 +181,8 @@
   }
 
   let checkoutBusy = $state('');
+  /** Path of the worktree currently being opened as a git tab (busy guard). */
+  let openWtBusy = $state('');
 
   // ── Commits / graph ───────────────────────────────────────────────────────
   let commits: CommitInfo[] = $state([]);
@@ -488,12 +515,23 @@
       items.push({ label: 'Copy branch name', icon: 'note', action: () => void clip(localName, localName) });
     } else {
       const isCurrent = b.name === currentBranch;
-      items.push({
-        label: 'Checkout',
-        icon: 'branch',
-        disabled: isCurrent,
-        action: () => !isCurrent && checkout(b.name, false),
-      });
+      // Branch checked out in another worktree → open that tree, never checkout
+      // (git refuses "already checked out at …").
+      const wtElsewhere = worktreeByBranch.get(b.name);
+      if (wtElsewhere) {
+        items.push({
+          label: 'Open worktree',
+          icon: 'worktree',
+          action: () => void openWorktree(wtElsewhere),
+        });
+      } else {
+        items.push({
+          label: 'Checkout',
+          icon: 'branch',
+          disabled: isCurrent,
+          action: () => !isCurrent && void checkout(b.name, false),
+        });
+      }
       items.push({ separator: true });
       items.push({
         label: 'Create branch from here…',
@@ -686,10 +724,63 @@
     if (c) void selectCommit(c);
   }
 
-  // ── Worktree actions (sidebar WORKTREES section) ────────────────────────────
+  // ── Worktree actions (sidebar WORKTREES section + worktree branches) ────────
+  /** Absolute path of the repo tab we're viewing (main or linked worktree). */
+  const currentRepoPath = $derived(
+    normPath(repoPath || git.allRepos.find((r) => r.id === repoId)?.path || ''),
+  );
+
   /** Display name for a worktree: the last path segment. */
   function wtName(w: WorktreeInfo): string {
     return w.path.split('/').filter(Boolean).pop() ?? w.path;
+  }
+
+  /** True when this worktree is a different checkout than the open repo tab. */
+  function isForeignWorktree(w: WorktreeInfo): boolean {
+    if (w.prunable) return false;
+    if (!currentRepoPath) return !w.is_main;
+    return normPath(w.path) !== currentRepoPath;
+  }
+
+  /**
+   * Open a linked (or main) worktree as its own git tab — never checkout the
+   * branch into the current tree (git refuses: branch already checked out).
+   * Registers the path via detect if needed, then opens/activates the tab.
+   */
+  async function openWorktree(w: WorktreeInfo): Promise<void> {
+    if (w.prunable) {
+      toasts.error('Cannot open', 'Worktree directory is gone — prune the stale entry first');
+      return;
+    }
+    const path = normPath(w.path);
+    if (currentRepoPath && path === currentRepoPath) {
+      toasts.info('Already open', wtName(w));
+      return;
+    }
+    // Prefer an already-registered repo at this path (any workspace).
+    const existing = git.allRepos.find((r) => normPath(r.path) === path);
+    if (existing) {
+      git.openRepoTab(existing.id);
+      toasts.success('Opened worktree', existing.name);
+      return;
+    }
+    const parent = git.allRepos.find((r) => r.id === repoId);
+    const wsId = workspaceId || parent?.workspace_id || ws.currentId;
+    if (!wsId) {
+      toasts.error('Open worktree failed', 'No workspace available to register the worktree');
+      return;
+    }
+    openWtBusy = w.path;
+    try {
+      const repo = await api.post<Repo>(`/workspaces/${wsId}/repos/detect`, { path: w.path });
+      await git.loadAllRepos(true);
+      git.openRepoTab(repo.id);
+      toasts.success('Opened worktree', repo.name);
+    } catch (e) {
+      toasts.error('Open worktree failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      openWtBusy = '';
+    }
   }
 
   async function wtRemove(w: WorktreeInfo): Promise<void> {
@@ -727,6 +818,14 @@
 
   function wtMenu(e: MouseEvent | KeyboardEvent, w: WorktreeInfo): void {
     const items: MenuItem[] = [];
+    if (!w.prunable && isForeignWorktree(w)) {
+      items.push({
+        label: 'Open worktree',
+        icon: 'worktree',
+        action: () => void openWorktree(w),
+      });
+      items.push({ separator: true });
+    }
     if (!w.is_main) {
       if (w.prunable) {
         // Directory is already gone — the only cleanup is dropping the entry.
@@ -1118,12 +1217,29 @@
     worktree?: boolean; // branch checked out in a LINKED worktree (not this checkout)
   }
 
-  // Branches checked out in LINKED worktrees (main checkout excluded — that one
-  // already carries the check pip). Chips + ref rows mark them so a branch that
-  // "lives elsewhere" is self-explaining at a glance.
-  const worktreeBranches = $derived(
-    new Set(worktrees.filter((w) => !w.is_main && w.branch).map((w) => w.branch as string)),
-  );
+  // Branches checked out in a DIFFERENT worktree than the open repo tab (linked
+  // or main). Chips + ref rows mark them so a branch that "lives elsewhere" is
+  // self-explaining; click/open routes to that worktree instead of checkout.
+  const worktreeByBranch = $derived.by(() => {
+    const m = new Map<string, WorktreeInfo>();
+    for (const w of worktrees) {
+      if (w.branch && isForeignWorktree(w)) m.set(w.branch, w);
+    }
+    return m;
+  });
+  const worktreeBranches = $derived(new Set(worktreeByBranch.keys()));
+
+  /** Local branch click: open foreign worktree, else checkout. Never try to
+   *  checkout a branch already held by another worktree (git errors hard). */
+  function activateLocalBranch(b: RefBranch): void {
+    if (b.is_current) return;
+    const wt = worktreeByBranch.get(b.name);
+    if (wt) {
+      void openWorktree(wt);
+      return;
+    }
+    void checkout(b.name, false);
+  }
 
   // Set of remote-branch names (e.g. "origin/main") from the refs response, used
   // to classify a decoration token that isn't obviously a tag/HEAD.
@@ -1308,16 +1424,24 @@
     if (selectedSha !== commit.sha) void selectCommit(commit);
   }
 
-  // Double-click a popover row → check it out. Remote chips check out a local
-  // tracking branch (mirrors checkoutRemote); tags check out detached.
+  // Double-click a popover row → check it out (or open its worktree). Remote
+  // chips check out a local tracking branch (mirrors checkoutRemote); tags
+  // check out detached; worktree branches open the linked tree as a git tab.
   function refRowCheckout(chip: RefChip): void {
     closeRefMenu();
     if (chip.kind === 'remote') {
       void checkout(chip.label.replace(/^[^/]+\//, ''), true);
-    } else {
-      // local/head branch, or a tag (detached) — both check out by their label.
-      void checkout(chip.label, false);
+      return;
     }
+    if (chip.worktree) {
+      const wt = worktreeByBranch.get(chip.label);
+      if (wt) {
+        void openWorktree(wt);
+        return;
+      }
+    }
+    // local/head branch, or a tag (detached) — both check out by their label.
+    void checkout(chip.label, false);
   }
 
   // Right-click a popover row → the full existing branch/tag context menu (rename,
@@ -1395,16 +1519,17 @@
   <span
     class="ref-chip kind-{chip.kind}"
     class:current-chip={chip.current}
+    class:is-worktree={chip.worktree && !chip.current}
     title={chip.kind === 'stash'
       ? `Stash · ${label}`
       : chip.current
         ? `Checked out · ${chip.label}`
         : chip.worktree
-          ? `Checked out in a worktree · ${chip.label}`
+          ? `Worktree · ${chip.label} — open worktree (do not switch branch)`
           : chip.label}
   >
     {#if chip.current}<Icon name="check" size={8} />{/if}
-    {#if chip.worktree}<Icon name="worktree" size={8} />{/if}
+    {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
     {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
     {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
     {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
@@ -1443,33 +1568,40 @@
            is the short leaf name; `b.name` stays the full ref for every action. -->
       {#snippet localRow(leaf: BranchLeaf, nested: boolean)}
         {@const b = leaf.b}
+        {@const wtElsewhere = worktreeByBranch.get(b.name)}
         <button
           class="ref-row"
           class:nested
           class:current={b.is_current}
+          class:is-worktree={!!wtElsewhere}
           class:drag-target={dragOverTarget === b.name}
           class:dragging={dragSource?.name === b.name && !dragSource.remote}
-          draggable={checkoutBusy === ''}
+          draggable={checkoutBusy === '' && openWtBusy === ''}
           ondragstart={(e) => onRefDragStart(e, b.name, false)}
           ondragend={onRefDragEnd}
           ondragover={(e) => onTargetDragOver(e, b.name)}
           ondragleave={() => onTargetDragLeave(b.name)}
           ondrop={(e) => onTargetDrop(e, b.name)}
-          disabled={checkoutBusy !== ''}
-          onclick={() => !b.is_current && checkout(b.name, false)}
+          disabled={checkoutBusy !== '' || openWtBusy !== ''}
+          onclick={() => activateLocalBranch(b)}
           oncontextmenu={(e) => branchMenu(e, b)}
           title={dragSource && isValidDropTarget(b.name)
             ? `Merge ${dragSourceName()} → ${b.name}`
-            : b.name}
+            : wtElsewhere
+              ? `Open worktree · ${wtElsewhere.path}${wtElsewhere.branch ? ` · ${wtElsewhere.branch}` : ''}`
+              : b.name}
         >
           {#if b.is_current}
             <span class="cur-pip" title="Checked out"><Icon name="check" size={9} /></span>
-          {:else if worktreeBranches.has(b.name)}
-            <span class="cur-pip" title="Checked out in a worktree"><Icon name="worktree" size={9} /></span>
+          {:else if wtElsewhere}
+            <span class="cur-pip wt-pip" title="Worktree — click to open"><Icon name="worktree" size={9} /></span>
           {:else}
             <Icon name="dot" size={10} />
           {/if}
           <span class="mono ref-name">{leaf.label}</span>
+          {#if wtElsewhere}
+            <span class="wt-open-hint" title="Open worktree (do not switch branch)">open worktree</span>
+          {/if}
           {#if b.is_current && (status.ahead > 0 || status.behind > 0)}
             <span class="ref-ab" title="{status.ahead} ahead · {status.behind} behind">
               {#if status.ahead > 0}<span class="ab-ahead">↑{status.ahead}</span>{/if}
@@ -1487,7 +1619,7 @@
               <span class="ref-upstream mono dim" title={`upstream: ${b.upstream}`}>{b.upstream}</span>
             {/if}
           {/if}
-          {#if checkoutBusy === b.name}<span class="dim">…</span>{/if}
+          {#if checkoutBusy === b.name || openWtBusy === (wtElsewhere?.path ?? '')}<span class="dim">…</span>{/if}
         </button>
       {/snippet}
 
@@ -1642,41 +1774,58 @@
         {/if}
       </div>
 
-      <!-- WORKTREES — `git worktree list`; right-click to remove/prune. Shows
-           agent-created trees (swarm, Run-with-Otto, goal loops) too. -->
+      <!-- WORKTREES — `git worktree list`; click opens as a git tab (never
+           branch-switch). Right-click to remove/prune. Shows agent-created
+           trees (swarm, Run-with-Otto, goal loops) too. -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (worktreesOpen = !worktreesOpen)}>
           <Icon name={worktreesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
-          <Icon name="folder" size={12} />
+          <Icon name="worktree" size={12} />
           <span>WORKTREES</span>
           <span class="ref-count">{worktrees.length}</span>
         </button>
         {#if worktreesOpen}
           {#each worktrees as w (w.path)}
-            <div
-              class="ref-row stash-row"
-              role="button"
-              tabindex="0"
-              title={`${w.path}${w.branch ? ` · ${w.branch}` : ' · detached'}${w.dirty ? ' · uncommitted changes' : ''}${w.prunable ? ' · stale (directory gone)' : ''}`}
-              oncontextmenu={(e) => wtMenu(e, w)}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') wtMenu(e, w);
+            {@const isHere = currentRepoPath !== '' && normPath(w.path) === currentRepoPath}
+            <button
+              type="button"
+              class="ref-row stash-row is-worktree"
+              class:current={isHere}
+              disabled={w.prunable || openWtBusy !== ''}
+              title={w.prunable
+                ? `${w.path} · stale (directory gone)`
+                : isHere
+                  ? `Current worktree · ${w.path}`
+                  : `Open worktree · ${w.path}${w.branch ? ` · ${w.branch}` : ' · detached'}${w.dirty ? ' · uncommitted changes' : ''}`}
+              onclick={() => {
+                if (!w.prunable && !isHere) void openWorktree(w);
+              }}
+              oncontextmenu={(e) => {
+                e.preventDefault();
+                wtMenu(e, w);
               }}
             >
-              <Icon name="folder" size={10} />
+              <Icon name="worktree" size={10} />
               <span class="ref-name stash-msg" class:dim={w.prunable}>{wtName(w)}</span>
               {#if w.dirty}<span class="wt-dirty" title="Uncommitted changes">●</span>{/if}
               {#if w.locked}<Icon name="lock" size={9} />{/if}
               {#if w.prunable}
                 <span class="wt-flag mono dim">stale</span>
+              {:else if isHere}
+                <span class="wt-flag mono dim">current</span>
               {:else if w.is_main}
+                <span class="wt-open-hint">open worktree</span>
                 <span class="wt-flag mono dim">main</span>
-              {:else if w.branch}
-                <span class="stash-branch mono dim">{w.branch}</span>
               {:else}
-                <span class="wt-flag mono dim">detached</span>
+                <span class="wt-open-hint">open worktree</span>
+                {#if w.branch}
+                  <span class="stash-branch mono dim">{w.branch}</span>
+                {:else}
+                  <span class="wt-flag mono dim">detached</span>
+                {/if}
               {/if}
-            </div>
+              {#if openWtBusy === w.path}<span class="dim">…</span>{/if}
+            </button>
           {:else}
             <div class="dim ref-empty">No worktrees</div>
           {/each}
@@ -1927,8 +2076,18 @@
           <div class="detail-title-row">
             <span class="mono detail-sha">{selectedCommit.short_sha}</span>
             {#each chipsFor(selectedCommit) as chip}
-              <span class="ref-chip kind-{chip.kind}" class:current-chip={chip.current}>
+              <span
+                class="ref-chip kind-{chip.kind}"
+                class:current-chip={chip.current}
+                class:is-worktree={chip.worktree && !chip.current}
+                title={chip.worktree && !chip.current
+                  ? `Worktree · ${chip.label}`
+                  : chip.current
+                    ? `Checked out · ${chip.label}`
+                    : chip.label}
+              >
                 {#if chip.current}<Icon name="check" size={8} />{/if}
+                {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
                 {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
                 {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
                 {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
@@ -2036,14 +2195,31 @@
           type="button"
           class="ref-pop-row kind-{chip.kind}"
           class:is-current={chip.current}
-          title={chip.current ? `Checked out · ${chip.label} — double-click to re-checkout` : `Double-click to checkout · ${chip.label}`}
+          class:is-worktree={chip.worktree && !chip.current}
+          title={chip.current
+            ? `Checked out · ${chip.label} — double-click to re-checkout`
+            : chip.worktree
+              ? `Worktree · ${chip.label} — double-click to open worktree`
+              : `Double-click to checkout · ${chip.label}`}
           onclick={() => refRowSelect(refMenu!.commit)}
           ondblclick={() => refRowCheckout(chip)}
           oncontextmenu={(e) => refRowMenu(e, chip)}
         >
-          {#if chip.current}<Icon name="check" size={10} />{:else if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={10} />{:else}<Icon name="branch" size={10} />{/if}
+          {#if chip.current}
+            <Icon name="check" size={10} />
+          {:else if chip.worktree}
+            <Icon name="worktree" size={10} />
+          {:else if chip.kind === 'remote' || chip.onRemote}
+            <Icon name="globe" size={10} />
+          {:else}
+            <Icon name="branch" size={10} />
+          {/if}
           <span class="ref-pop-label">{chip.label}</span>
-          {#if chip.current}<span class="ref-pop-tag">current</span>{/if}
+          {#if chip.current}
+            <span class="ref-pop-tag">current</span>
+          {:else if chip.worktree}
+            <span class="ref-pop-tag">worktree</span>
+          {/if}
         </button>
       {/each}
     {/if}
@@ -2231,6 +2407,32 @@
     background: var(--accent);
     color: var(--accent-contrast);
   }
+  /* Worktree pip: violet folder so it never reads as "checked out here". */
+  .cur-pip.wt-pip {
+    background: color-mix(in srgb, #a78bfa 55%, transparent);
+    color: #c4b5fd;
+    border: 1px solid color-mix(in srgb, #a78bfa 50%, transparent);
+  }
+  /* Branch held by another worktree — distinct from a regular local branch. */
+  .ref-row.is-worktree {
+    color: #c4b5fd;
+  }
+  .ref-row.is-worktree:hover:not(:disabled) {
+    background: color-mix(in srgb, #a78bfa 12%, transparent);
+  }
+  /* Inline "open worktree" affordance next to the branch / worktree name. */
+  .wt-open-hint {
+    flex-shrink: 0;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: #a78bfa;
+    opacity: 0.85;
+    white-space: nowrap;
+  }
+  .ref-row:hover .wt-open-hint {
+    opacity: 1;
+  }
   .ref-ab {
     display: inline-flex;
     gap: 3px;
@@ -2403,6 +2605,12 @@
     color: var(--accent-contrast);
     border-color: color-mix(in srgb, var(--accent) 60%, #000);
   }
+  /* Branch checked out in another worktree — violet, not local-branch blue. */
+  .ref-chip.is-worktree {
+    background: color-mix(in srgb, #a78bfa 18%, transparent);
+    color: #c4b5fd;
+    border-color: color-mix(in srgb, #a78bfa 35%, transparent);
+  }
   .chip-ab {
     display: inline-flex;
     gap: 2px;
@@ -2562,6 +2770,13 @@
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
     color: var(--accent);
+  }
+  .ref-pop-row.is-worktree {
+    color: #c4b5fd;
+  }
+  .ref-pop-row.is-worktree .ref-pop-tag {
+    color: #a78bfa;
+    border-color: color-mix(in srgb, #a78bfa 40%, transparent);
   }
   .ref-pop-row:hover .ref-pop-tag,
   .ref-pop-row:focus-visible .ref-pop-tag {
