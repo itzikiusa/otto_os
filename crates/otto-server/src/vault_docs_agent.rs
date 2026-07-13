@@ -3512,6 +3512,19 @@ fn build_writer_prompt(
             ));
         }
     }
+    // Quality floor baked into the PROMPT (not only the staged skill): weaker
+    // CLIs skim skill packages — real runs came back with meta-placeholders in
+    // example position and ~1/7th of the flow inventory covered.
+    p.push_str(
+        "- EXAMPLES ARE REAL: every request/response/payload example must be a concrete \
+         body with the actual field names from the code (DTOs, handlers, tests, fixtures) \
+         and plausible values. NEVER a meta-description in example position — \
+         `{\"note\": \"DTO fields per handler\"}` is a FAILED example.\n\
+         - COMPLETENESS: when the request demands an inventory (flows, routes, tables, \
+         topics), enumerate the FULL inventory from the code FIRST, then cover EVERY \
+         item — no sampling, no representative subset. Before finishing, re-count: \
+         items documented must equal items enumerated; if they differ, keep writing.\n",
+    );
     p.push_str(DOCS_STEP_RULES);
     p.push_str(&okf_block(okf, okf_inline));
     if let Some(rp) = results_path {
@@ -3552,7 +3565,18 @@ fn build_summarizer_prompt(
          `otto_vault_write` (vault_id {vault_id}).\n\
          - Prefer the best content per topic; merge overlaps; fix contradictions. Do NOT \
          copy drafts in verbatim as duplicates.\n\
-         - Do NOT write anything under `_drafts/` — finals only.\n"
+         - Do NOT write anything under `_drafts/` — finals only.\n\
+         - A draft marked [truncated] or [not inlined] MUST be read in full via \
+         `otto_vault_read` before you write the final note it feeds — never consolidate \
+         from the truncation.\n\
+         - COVERAGE IS THE UNION: every distinct flow/route/table/topic ANY writer \
+         documented must survive into the finals as its own note/section. Do NOT collapse \
+         distinct flows into one generic \"route family\" note.\n\
+         - EXAMPLES ARE REAL: keep the most concrete request/response/payload examples \
+         from the drafts in every final note. NEVER replace them with meta-placeholders — \
+         `{{\"note\": \"DTO fields per handler\"}}` is a FAILED example. If no draft has a \
+         real example, lift one from the repository code; omit the example section \
+         entirely rather than writing a stub.\n"
     );
     if okf {
         p.push_str(&format!(
