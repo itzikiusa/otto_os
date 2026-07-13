@@ -27,6 +27,25 @@ pub struct NewConnection {
     pub created_by: Id,
 }
 
+/// Tolerant list mapping: a row with an unrecognized `kind`/`environment`
+/// (written by a newer build than the one running) is skipped with a warning
+/// instead of failing the whole list — one bad row must not blank the UI.
+fn rows_to_connections(rows: &[sqlx::sqlite::SqliteRow]) -> Vec<Connection> {
+    rows.iter()
+        .filter_map(|r| match row_to_connection(r) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(
+                    id = %r.get::<String, _>("id"),
+                    kind = %r.get::<String, _>("kind"),
+                    "skipping unparseable connection row: {e}"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
 fn row_to_connection(r: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
     // `last_opened_at` and `pinned` were added in migration 0050; they may
     // return a `ColumnNotFound` error on a DB that hasn't migrated yet (test-
@@ -113,7 +132,7 @@ impl ConnectionsRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("connections"))?;
-        rows.iter().map(row_to_connection).collect()
+        Ok(rows_to_connections(&rows))
     }
 
     /// Record that a connection was opened right now (best-effort; ignores
@@ -231,7 +250,7 @@ impl ConnectionsRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(dberr("connections for user"))?;
-        rows.iter().map(row_to_connection).collect()
+        Ok(rows_to_connections(&rows))
     }
 }
 
@@ -341,6 +360,54 @@ mod tests {
 
         let fetched = repo.get(&created.id).await.expect("re-fetch");
         assert_eq!(fetched.kind, ConnectionKind::Postgres);
+    }
+
+    #[tokio::test]
+    async fn list_skips_rows_with_unknown_kind() {
+        // Regression for the 2026-07-13 "bad connection kind" outage: a row
+        // written by a NEWER build (whose migration widened the kind CHECK and
+        // whose enum knows the value) must not brick the whole list on an older
+        // build — it is skipped with a warning instead.
+        let pool = mem_pool().await;
+        let user = seed_user(&pool).await;
+        let ws = seed_ws(&pool).await;
+        let repo = ConnectionsRepo::new(pool.clone());
+
+        repo.create(new_conn_ws(&user, Some(ws.clone()), Environment::Dev, false))
+            .await
+            .expect("create good connection");
+
+        // Simulate the newer-build row: bypass this build's CHECK the way a
+        // widened live-DB constraint would.
+        sqlx::query("PRAGMA ignore_check_constraints = ON")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO connections (id, workspace_id, name, kind, params_json, created_by, created_at)
+             VALUES (?, ?, 'future', 'kind_from_the_future', '{}', ?, ?)",
+        )
+        .bind(new_id())
+        .bind(&ws)
+        .bind(&user)
+        .bind(fmt(Utc::now()))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA ignore_check_constraints = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let listed = repo.list_visible(&ws).await.expect("list must not fail");
+        assert_eq!(listed.len(), 1, "good row survives, unknown row is skipped");
+        assert_eq!(listed[0].kind, ConnectionKind::Mysql);
+
+        let listed_for = repo
+            .list_visible_for(&ws, &user)
+            .await
+            .expect("scoped list must not fail");
+        assert_eq!(listed_for.len(), 1);
     }
 
     #[tokio::test]
