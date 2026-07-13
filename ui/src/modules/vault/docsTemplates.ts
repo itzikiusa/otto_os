@@ -51,12 +51,20 @@ FLOWS — partial by nature in a library:
 1. FIRST enumerate the flows that actually EXIST in the code: initialization/startup, connection & session management, background/scheduled loops, retry/circuit-breaker behavior, produced/consumed messages if any. List them in flows/index.md as a table (flow → trigger → one-line purpose).
 2. Then write ONE NOTE PER real flow under flows/ — all of them, but ONLY real ones; a library with three flows gets three notes, never padding. Same depth per note: trigger, step-by-step path (file citations), failure modes, ONE mermaid diagram.`;
 
+/** Cross-repo linking — the vault is a graph; app bundles must link into the
+ *  infra bundles that implement their calls, and infra links back to consumers. */
+const CROSS_REPO_RULES = `
+CROSS-REPO LINKS — the vault is a graph, connect this repo to the bundles already in it:
+1. BEFORE writing, list the vault's existing top-level bundles (otto_vault_list) — each is another repo already documented (e.g. go_utilities, go_casino_kit, other services).
+2. Whenever a flow step, data access, or client call is IMPLEMENTED by one of those documented repos (an imported library or a called service), link to that bundle at the exact mention — e.g. "opens the brand DB connection via [go_casino_kit multi-tenant SQL](../go_casino_kit/data.md)". Link the most specific existing note (package / flow / data note); fall back to that bundle's index.md. Never link bundles that don't exist yet.
+3. Write dependencies.md: one table of every external repo/library dependency the code ACTUALLY uses — import path → what this repo uses it for (with a file citation) → link to its vault bundle when documented, or "not in vault yet" when not. Link it from index.md.`;
+
 /** Scope pivot appended when the "infra repo" box is ticked. */
 const INFRA_SCOPE = `
 INFRA / LIBRARY REPO — scope pivot (this repository is a library or infrastructure component, NOT a deployed service):
 - It exposes NO HTTP API of its own. Document the EXPORTED surface instead: every public package/module with its exported types, functions, interfaces and their signatures (a table per package); skip internal helpers.
 - Where the deliverables below ask for api.md / api-openapi.yaml, produce the LIBRARY API reference instead (per-package exported-surface tables + usage examples) — do NOT fabricate an OpenAPI spec for routes that don't exist.
-- Add consumers.md: how downstream services are meant to use this library — the intended integration patterns, with realistic usage snippets lifted from tests and real consumers.
+- Add consumers.md: how downstream services are meant to use this library — the intended integration patterns, with realistic usage snippets lifted from tests and real consumers. When the vault already documents an app repo that imports this library, LINK to that app's bundle (its flow/data note when one names this library, else its index.md) so the app↔infra edge exists in both directions.
 - Config surface: every option / env var / parameter the library reads, its default and its effect.`;
 
 const COVERAGE_RULES = `
@@ -80,6 +88,7 @@ Ground rules: read the actual code FIRST; never invent endpoints, topics, tables
 ${infra ? INFRA_SCOPE : ''}
 ${COVERAGE_RULES}
 ${infra ? FLOW_RULES_INFRA : FLOW_RULES}
+${CROSS_REPO_RULES}
 
 Deliverables (all cross-linked; index.md links everything):
 1. overview.md — purpose, place in the platform, runtime topology, upstream/downstream dependencies, config surface. Mermaid context diagram (callers, callees, datastores, brokers).
@@ -89,6 +98,7 @@ Deliverables (all cross-linked; index.md links everything):
 5. workers.md — EVERY scheduled job and reconciliation: schedule, scan scope, what it fixes, idempotency, failure behavior, → flow links.
 6. data.md — EVERY datastore the code touches, grouped (brand MySQL, MS SQL, MongoDB, ClickHouse, Redis brand/MS). Per table/collection/key pattern: every column/field (name, type, purpose) AND the code paths that read or write it (file citations) — the goal is IMPACT ANALYSIS: from any column, a reader must see what a change to it would affect. d2 sql_table diagram per relational store.
 7. side-effects.md — one table: operation → everything it changes outside this service (calls to other services, events emitted, cache invalidations, balance mutations).
+8. dependencies.md — the cross-repo dependency table (see CROSS-REPO LINKS above).
 ${QUALITY_BAR}
 
 Scan marker (REQUIRED — incremental updates depend on it): record in overview.md's frontmatter the absolute repo path, the current git commit hash (\`git rev-parse HEAD\` in the repo), and the scan date, e.g. \`repo:\`, \`commit:\`, \`scanned_at:\`.
@@ -107,7 +117,8 @@ ${infra ? INFRA_SCOPE : ''}
 Method:
 1. Locate the repo's bundle in the vault (folder named after the repo); read its index.md and overview.md. The overview frontmatter records the last scanned commit (\`commit:\`).
 2. Verify the recorded commit exists and is an ancestor of HEAD. If it is missing, invalid, or diverged, FALL BACK TO A FULL CURRENT-TREE SCAN; never infer changes by comparing only existing docs. Otherwise list the commit range and diff.
-3. Map each change to the affected notes: flows added → NEW flow note (one per flow, all of them); flows removed → delete/mark the note; changed routes/payloads/schemas/workers → update ONLY the affected sections and examples; new tables/topics → extend data.md / messaging.md. Regenerate api-openapi.yaml only if the API surface changed.
+3. Map each change to the affected notes: flows added → NEW flow note (one per flow, all of them); flows removed → delete/mark the note; changed routes/payloads/schemas/workers → update ONLY the affected sections and examples; new tables/topics → extend data.md / messaging.md. Regenerate api-openapi.yaml only if the API surface changed. New/removed library or service dependencies → update dependencies.md and its cross-repo links (create it per the rules below if the bundle predates it).
+${CROSS_REPO_RULES}
 4. Run the staged inventory with \`--changed-since <commit>\` and repeat \`--include-file <path>\` for affected registration/contract dependencies. Require \`mode: incremental\`; if it reports \`full-fallback\`, perform the full scan. Update manifest.json and coverage.md for every added, changed, or removed candidate; preserve unaffected rows and reasons.
 5. Keep every touched note's citations and mermaid diagrams in sync with the new code. Use otto_vault_write_file when api-openapi.yaml changes.
 6. Run OKF validation and the staged repository-bundle audit with the updated manifest; source-check every changed claim.
@@ -126,8 +137,9 @@ Finish: one-line summary listing which notes you added / updated / removed and t
 ${infra ? INFRA_SCOPE : ''}
 ${COVERAGE_RULES}
 ${infra ? FLOW_RULES_INFRA : FLOW_RULES}
+${CROSS_REPO_RULES}
 
-No other deliverables — flows only, but ALL of them (${infra ? 'startup, connection management, background loops, messaging' : 'API, messaging, workers, reconciliation, startup'}). flows/index.md is the entry point.
+No other deliverables besides flows + dependencies.md — but ALL flows (${infra ? 'startup, connection management, background loops, messaging' : 'API, messaging, workers, reconciliation, startup'}). flows/index.md is the entry point.
 ${QUALITY_BAR}`,
   },
   {
@@ -141,6 +153,7 @@ ${QUALITY_BAR}`,
         ? `Document the COMPLETE EXPORTED API of the library repository at ${repo} into this vault under <repo-name>/.
 ${INFRA_SCOPE}
 ${COVERAGE_RULES}
+${CROSS_REPO_RULES}
 
 Deliverables:
 1. api.md — every public package/module as a section: a table of its exported types/functions/interfaces (name, signature, purpose), then realistic usage snippets lifted from tests and consumers. Cite defining file paths.
@@ -149,6 +162,7 @@ Deliverables:
 ${QUALITY_BAR}`
         : `Document the COMPLETE HTTP API of the repository at ${repo} into this vault under <repo-name>/.
 ${COVERAGE_RULES}
+${CROSS_REPO_RULES}
 
 Deliverables:
 1. api.md — every route as a table (method, path, auth, purpose), then one subsection per route: request/response shapes with a realistic JSON example each (from code/tests), validation rules, error responses, side effects (cite handler file paths).
@@ -165,6 +179,7 @@ ${QUALITY_BAR}`,
     build: (repo, infra = false) => `Audit EVERY datastore the repository at ${repo} touches and document them into this vault under <repo-name>/data/.
 ${infra ? INFRA_SCOPE : ''}
 ${COVERAGE_RULES}
+${CROSS_REPO_RULES}
 
 One note per store kind (brand MySQL, MS SQL, MongoDB, ClickHouse, Redis brand/MS — only those actually used): every table/collection/key pattern with purpose, a full column/field table (name, type, purpose), the actual queries/access patterns in the code, indexes, TTLs — and for EVERY column/field the code paths that read or write it (file citations). The goal is IMPACT ANALYSIS: from any column a reader must see what a change to it would affect. Add a d2 sql_table diagram per relational store and a data/index.md tying it together with a store → tables overview table.
 ${QUALITY_BAR}`,
@@ -178,6 +193,7 @@ ${QUALITY_BAR}`,
     build: (repo, infra = false) => `Map ALL messaging of the repository at ${repo} into this vault under <repo-name>/messaging/.
 ${infra ? INFRA_SCOPE : ''}
 ${COVERAGE_RULES}
+${CROSS_REPO_RULES}
 
 For EVERY consumer and producer: topic/queue name, trigger, FULL example payload (incoming and outgoing — realistic, from code/tests), schema of the payload, delivery guarantees, retry/backoff/poison handling, idempotency, and downstream effects (cite file paths). One mermaid sequenceDiagram per main message flow. messaging/index.md is the entry point with a topic → direction → handler table.
 ${QUALITY_BAR}`,
