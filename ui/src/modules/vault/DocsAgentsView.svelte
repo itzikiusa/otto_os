@@ -71,12 +71,15 @@
   // template's skills ride the run (RunReq.skills) and show as chips below.
   let tplId = $state('');
   let tplRepo = $state('');
+  // Infra/library repo: no HTTP API of its own, flows are partial — the
+  // template pivots its scope to packages + exported interfaces + consumers.
+  let tplInfra = $state(false);
   let tplSkills = $state<string[]>([]);
   const tpl = $derived(DOCS_TEMPLATES.find((t) => t.id === tplId) ?? null);
 
   function applyTemplate(): void {
     if (!tpl) return;
-    prompt = tpl.build(tplRepo.trim());
+    prompt = tpl.build(tplRepo.trim(), tplInfra);
     tplSkills = [...tpl.skills];
   }
 
@@ -358,6 +361,15 @@
             onclick={applyTemplate}>Insert</button
           >
         </div>
+        {#if tpl?.needsRepo}
+          <label
+            class="tpl-infra"
+            title="Library/infrastructure repo: no HTTP API of its own, flows are partial — documents packages, exported interfaces, consumers and config instead"
+          >
+            <input type="checkbox" bind:checked={tplInfra} />
+            Infra / library repo (no HTTP API — document exported packages instead)
+          </label>
+        {/if}
         {#if tpl}
           <div class="tpl-hint">{tpl.hint} You can edit the inserted prompt freely.</div>
         {/if}
@@ -938,6 +950,20 @@
     color: var(--text-dim);
     margin-top: 4px;
     line-height: 1.4;
+  }
+  .tpl-infra {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    margin-top: 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .tpl-infra input {
+    accent-color: var(--accent, #7a9cff);
+    margin: 0;
   }
   .skill-chips {
     display: flex;

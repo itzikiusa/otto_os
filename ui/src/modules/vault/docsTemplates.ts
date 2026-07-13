@@ -21,7 +21,9 @@ export interface DocsTemplate {
   skills: string[];
   /** Whether the template needs a repository path. */
   needsRepo: boolean;
-  build: (repo: string) => string;
+  /** `infra` pivots the scope for library/infrastructure repos (no HTTP API
+   *  of their own; flows are partial by nature). */
+  build: (repo: string, infra?: boolean) => string;
 }
 
 /** The shared quality bar — appended to every repo template. */
@@ -43,6 +45,20 @@ FLOWS — the core requirement:
 1. FIRST enumerate ALL flows by reading the code: every API operation, every consumed AND produced message, every scheduled worker / reconciliation cycle, every startup/shutdown routine. List them in flows/index.md as a table (flow → trigger → one-line purpose).
 2. Then write ONE NOTE PER FLOW under flows/ — ALL of them, no sampling. Each flow note: trigger, step-by-step path through the code (with file citations), data read/written per step, side effects outside the service, failure modes + retry/idempotency semantics, and ONE mermaid sequence or flowchart diagram.`;
 
+/** Flow rules variant for library/infra repos — flows exist but are partial. */
+const FLOW_RULES_INFRA = `
+FLOWS — partial by nature in a library:
+1. FIRST enumerate the flows that actually EXIST in the code: initialization/startup, connection & session management, background/scheduled loops, retry/circuit-breaker behavior, produced/consumed messages if any. List them in flows/index.md as a table (flow → trigger → one-line purpose).
+2. Then write ONE NOTE PER real flow under flows/ — all of them, but ONLY real ones; a library with three flows gets three notes, never padding. Same depth per note: trigger, step-by-step path (file citations), failure modes, ONE mermaid diagram.`;
+
+/** Scope pivot appended when the "infra repo" box is ticked. */
+const INFRA_SCOPE = `
+INFRA / LIBRARY REPO — scope pivot (this repository is a library or infrastructure component, NOT a deployed service):
+- It exposes NO HTTP API of its own. Document the EXPORTED surface instead: every public package/module with its exported types, functions, interfaces and their signatures (a table per package); skip internal helpers.
+- Where the deliverables below ask for api.md / api-openapi.yaml, produce the LIBRARY API reference instead (per-package exported-surface tables + usage examples) — do NOT fabricate an OpenAPI spec for routes that don't exist.
+- Add consumers.md: how downstream services are meant to use this library — the intended integration patterns, with realistic usage snippets lifted from tests and real consumers.
+- Config surface: every option / env var / parameter the library reads, its default and its effect.`;
+
 const COVERAGE_RULES = `
 FULL-SCAN ACCOUNTING — required even for a focused scan:
 1. Run the staged vault-repo-docs inventory script against the repository. Inspect scanned_files, exclusions, and per-kind counts; a non-empty source scan with zero candidates requires manual inspection, never automatic completion. Preserve its JSON as manifest.json with otto_vault_write_file.
@@ -58,11 +74,12 @@ export const DOCS_TEMPLATES: DocsTemplate[] = [
     hint: 'Complete linked bundle: overview, one note per flow, API+OpenAPI, messaging, workers, datastores, side effects.',
     skills: ['vault-repo-docs'],
     needsRepo: true,
-    build: (repo) => `Document the repository at ${repo} into this vault as a complete, linked bundle in a folder named after the repo.
+    build: (repo, infra = false) => `Document the repository at ${repo} into this vault as a complete, linked bundle in a folder named after the repo.
 
 Ground rules: read the actual code FIRST; never invent endpoints, topics, tables or workers — if it is not in the code, it is not in the docs.
+${infra ? INFRA_SCOPE : ''}
 ${COVERAGE_RULES}
-${FLOW_RULES}
+${infra ? FLOW_RULES_INFRA : FLOW_RULES}
 
 Deliverables (all cross-linked; index.md links everything):
 1. overview.md — purpose, place in the platform, runtime topology, upstream/downstream dependencies, config surface. Mermaid context diagram (callers, callees, datastores, brokers).
@@ -84,7 +101,8 @@ Finish: verify every link resolves and flows/index.md covers every flow you enum
     hint: 'Incremental: diff the repo against the commit recorded in the bundle and touch only affected notes.',
     skills: ['vault-repo-docs'],
     needsRepo: true,
-    build: (repo) => `UPDATE the existing documentation bundle for the repository at ${repo} in this vault — incrementally. Only changes since the last scan are relevant; do NOT rewrite what is still accurate.
+    build: (repo, infra = false) => `UPDATE the existing documentation bundle for the repository at ${repo} in this vault — incrementally. Only changes since the last scan are relevant; do NOT rewrite what is still accurate.
+${infra ? INFRA_SCOPE : ''}
 
 Method:
 1. Locate the repo's bundle in the vault (folder named after the repo); read its index.md and overview.md. The overview frontmatter records the last scanned commit (\`commit:\`).
@@ -104,11 +122,12 @@ Finish: one-line summary listing which notes you added / updated / removed and t
     hint: 'Just the flows — inventory table plus one detailed note per flow, all of them.',
     skills: ['vault-repo-docs'],
     needsRepo: true,
-    build: (repo) => `Catalog ALL flows of the repository at ${repo} into this vault, under <repo-name>/flows/.
+    build: (repo, infra = false) => `Catalog ALL flows of the repository at ${repo} into this vault, under <repo-name>/flows/.
+${infra ? INFRA_SCOPE : ''}
 ${COVERAGE_RULES}
-${FLOW_RULES}
+${infra ? FLOW_RULES_INFRA : FLOW_RULES}
 
-No other deliverables — flows only, but ALL of them (API, messaging, workers, reconciliation, startup). flows/index.md is the entry point.
+No other deliverables — flows only, but ALL of them (${infra ? 'startup, connection management, background loops, messaging' : 'API, messaging, workers, reconciliation, startup'}). flows/index.md is the entry point.
 ${QUALITY_BAR}`,
   },
   {
@@ -117,7 +136,18 @@ ${QUALITY_BAR}`,
     hint: 'Every route with examples, plus a real OpenAPI 3 YAML file.',
     skills: ['vault-repo-docs'],
     needsRepo: true,
-    build: (repo) => `Document the COMPLETE HTTP API of the repository at ${repo} into this vault under <repo-name>/.
+    build: (repo, infra = false) =>
+      infra
+        ? `Document the COMPLETE EXPORTED API of the library repository at ${repo} into this vault under <repo-name>/.
+${INFRA_SCOPE}
+${COVERAGE_RULES}
+
+Deliverables:
+1. api.md — every public package/module as a section: a table of its exported types/functions/interfaces (name, signature, purpose), then realistic usage snippets lifted from tests and consumers. Cite defining file paths.
+2. consumers.md — the intended integration patterns for downstream services, with working example code.
+3. index.md linking both. No OpenAPI file — this is a library, not an HTTP service.
+${QUALITY_BAR}`
+        : `Document the COMPLETE HTTP API of the repository at ${repo} into this vault under <repo-name>/.
 ${COVERAGE_RULES}
 
 Deliverables:
@@ -132,7 +162,8 @@ ${QUALITY_BAR}`,
     hint: 'Every table/collection/key across MySQL, MS SQL, Mongo, ClickHouse, Redis — schemas and access patterns.',
     skills: ['vault-repo-docs'],
     needsRepo: true,
-    build: (repo) => `Audit EVERY datastore the repository at ${repo} touches and document them into this vault under <repo-name>/data/.
+    build: (repo, infra = false) => `Audit EVERY datastore the repository at ${repo} touches and document them into this vault under <repo-name>/data/.
+${infra ? INFRA_SCOPE : ''}
 ${COVERAGE_RULES}
 
 One note per store kind (brand MySQL, MS SQL, MongoDB, ClickHouse, Redis brand/MS — only those actually used): every table/collection/key pattern with purpose, a full column/field table (name, type, purpose), the actual queries/access patterns in the code, indexes, TTLs — and for EVERY column/field the code paths that read or write it (file citations). The goal is IMPACT ANALYSIS: from any column a reader must see what a change to it would affect. Add a d2 sql_table diagram per relational store and a data/index.md tying it together with a store → tables overview table.
@@ -144,7 +175,8 @@ ${QUALITY_BAR}`,
     hint: 'Topics, payloads in/out with examples, retry semantics, sequence diagrams.',
     skills: ['vault-repo-docs'],
     needsRepo: true,
-    build: (repo) => `Map ALL messaging of the repository at ${repo} into this vault under <repo-name>/messaging/.
+    build: (repo, infra = false) => `Map ALL messaging of the repository at ${repo} into this vault under <repo-name>/messaging/.
+${infra ? INFRA_SCOPE : ''}
 ${COVERAGE_RULES}
 
 For EVERY consumer and producer: topic/queue name, trigger, FULL example payload (incoming and outgoing — realistic, from code/tests), schema of the payload, delivery guarantees, retry/backoff/poison handling, idempotency, and downstream effects (cite file paths). One mermaid sequenceDiagram per main message flow. messaging/index.md is the entry point with a topic → direction → handler table.
