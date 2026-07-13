@@ -275,6 +275,156 @@ paths:
 
             self.assertEqual([], audit_repo_bundle.audit(root, manifest))
 
+    def test_openapi_path_placeholders_need_resolvable_parameters(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = self.setup_bundle(
+                root,
+                [{"id": "api:a", "kind": "api", "evidence": "src/api.rs:1"}],
+            )
+            self.write_coverage(
+                root,
+                ["| `api:a` | api | `src/api.rs:1` | documented | [API](api.md) | Route verified |"],
+            )
+            (root / "api.md").write_text(
+                BASE.format(type="API Endpoint")
+                + """# GET /login/{brand_id}/player
+# Authentication
+`x-auth-token` header.
+# Request Body
+No request body.
+```json
+{}
+```
+# Success Response
+```json
+{"status":"ok"}
+```
+# Errors
+400 returns `{"error":"invalid"}`.
+# Flow
+[Login flow](api.md)
+# Citations
+`src/api.rs:1` `src/dto.rs:4` `src/handler.rs:8`
+"""
+            )
+            # {brand_id} has no declared path parameter; the version op points
+            # at a parameter component that does not exist.
+            (root / "api-openapi.yaml").write_text(
+                """openapi: 3.0.3
+paths:
+  /login/{brand_id}/player:
+    get:
+      operationId: login
+      parameters:
+      - $ref: '#/components/parameters/missingRef'
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                status: ok
+components:
+  parameters:
+    brandId:
+      name: brand_id
+      in: path
+      required: true
+      schema:
+        type: integer
+"""
+            )
+            rules = {item["rule"] for item in audit_repo_bundle.audit(root, manifest)}
+            self.assertIn("R_OPENAPI_PATH_PARAM", rules)
+            self.assertIn("R_OPENAPI_PARAM_REF", rules)
+
+            # Referencing the resolvable component clears both rules.
+            (root / "api-openapi.yaml").write_text(
+                (root / "api-openapi.yaml").read_text().replace("missingRef", "brandId")
+            )
+            rules = {item["rule"] for item in audit_repo_bundle.audit(root, manifest)}
+            self.assertNotIn("R_OPENAPI_PATH_PARAM", rules)
+            self.assertNotIn("R_OPENAPI_PARAM_REF", rules)
+
+    def test_shallow_flow_notes_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = self.setup_bundle(root, [])
+            self.write_coverage(root, [])
+            flows = root / "flows"
+            flows.mkdir()
+            # The real-world baseline miss: HTTP-triggered flow with no
+            # request/response examples and a diagram that hides the stores
+            # the prose says it touches.
+            (flows / "account-status.md").write_text(
+                """---
+type: flow
+description: Aggregate account status.
+timestamp: 2026-07-12
+---
+
+# Flow: account-status
+
+**Trigger**: GET `/admission/account/{brand_id}/{player_id}`
+
+Reads the player from MySQL and the session from Redis, then snapshots into
+ClickHouse.
+"""
+            )
+            rules = {item["rule"] for item in audit_repo_bundle.audit(root, manifest)}
+            self.assertIn("R_FLOW_DIAGRAM", rules)
+            self.assertIn("R_FLOW_STEPS", rules)
+            self.assertIn("R_FLOW_CITATIONS", rules)
+            self.assertIn("R_FLOW_HTTP_EXAMPLES", rules)
+
+            (flows / "account-status.md").write_text(
+                """---
+type: flow
+description: Aggregate account status.
+timestamp: 2026-07-12
+---
+
+# Flow: account-status
+
+**Trigger**: GET `/admission/account/{brand_id}/{player_id}` (`src/api.rs:1`)
+
+## Steps
+
+1. Load player from MySQL `pr_bo.MdlGm_tblPlayers` (`src/dao.rs:9`).
+2. Read session presence from Redis and snapshot to ClickHouse `players_tmx_data` (`src/dao.rs:21`).
+
+## Request example
+
+```json
+{}
+```
+
+## Response example
+
+```json
+{"status":"Active"}
+```
+
+```d2
+api: GET /admission/account
+players: "MySQL pr_bo.MdlGm_tblPlayers"
+session: "Redis session:{player}"
+api -> players
+api -> session
+```
+"""
+            )
+            findings = audit_repo_bundle.audit(root, manifest)
+            rules = {item["rule"] for item in findings}
+            # ClickHouse is in the prose steps but absent from the diagram.
+            self.assertIn("R_FLOW_STORE_NODES", rules)
+            self.assertNotIn("R_FLOW_DIAGRAM", rules)
+            self.assertNotIn("R_FLOW_STEPS", rules)
+            self.assertNotIn("R_FLOW_HTTP_EXAMPLES", rules)
+
     def test_shipped_api_example_is_a_complete_clean_bundle(self):
         package = Path(__file__).resolve().parent.parent
         example = package / "examples" / "api-flow-bundle"

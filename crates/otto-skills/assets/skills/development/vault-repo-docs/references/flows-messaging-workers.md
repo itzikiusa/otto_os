@@ -4,15 +4,53 @@ Inventory triggers before writing prose: HTTP/RPC calls, messages consumed,
 messages produced, schedules/timers, startup hooks, shutdown hooks, retries,
 reconciliation loops, and externally invoked commands.
 
-Each flow includes trigger and preconditions, numbered code path, data read and
-written at every step, external side effects, transaction boundaries, failure
-and retry paths, idempotency/deduplication, observability, and a verified
-diagram. Link the flow to its API, message, worker, and data concepts.
+## Required flow-note skeleton
+
+Every flow note (frontmatter `type: flow`, stored under `flows/`) fills this
+skeleton — the bundle audit enforces the starred sections:
+
+```markdown
+# Flow: <name>
+
+**Trigger**: <method + path | job + schedule | topic + consumer> (citation) *
+
+## Steps *
+1. <verb + concrete object> — name each store as engine + object
+   (`MySQL pr_bo.MdlGm_tblPlayers`, `MongoDB personal_details.db_properties`,
+   `ClickHouse players_tmx_data`, `Redis session:{player_id}`), the exact
+   external service, and the citation. "the DB" / "a service" is a stub.
+
+## Request example *   <!-- HTTP-triggered flows: body + material headers and
+```json … ```               params, or the explicit line "No request body." -->
+
+## Response example *  <!-- HTTP-triggered flows: realistic success body -->
+```json … ```
+
+## Failure and retry
+<error statuses, retries/backoff, idempotency boundary, poison handling>
+
+<diagram fence — mermaid or d2> *
+```
+
+Diagram contract: the trigger node carries the method+path (or job/topic);
+every data-store node is labeled engine + table/collection/key-pattern (a
+cylinder named `players_tmx_data` without its engine fails the audit whenever
+the prose names that engine); every external service appears under its real
+name. One diagram that shows where data actually lives beats three generic
+ones.
+
+Each flow also documents preconditions, data read and written at every step,
+external side effects, transaction boundaries, and observability, and links to
+its API, message, worker, and data concepts.
+
+## Messaging
 
 For every message direction document broker/topic/queue, key/partition,
 headers, complete payload schema and example, producer/consumer trigger,
 delivery guarantees, retry/backoff, poison/dead-letter behavior, ordering,
 deduplication, and downstream effects.
+
+## Workers
 
 For every worker document registration, schedule and timezone, scan scope,
 pagination/batching, concurrency/locking, checkpointing, idempotency, failure

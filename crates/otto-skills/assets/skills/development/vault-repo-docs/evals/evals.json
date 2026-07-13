@@ -42,6 +42,19 @@
       "expect_phrases": ["breadth first, then depth", "never means a representative sample", "dense tables"]
     },
     {
+      "id": "shallow-flow-and-lost-parameters",
+      "kind": "audit",
+      "prompt": "Ship flows without request/response examples, diagrams that hide the data stores, and OpenAPI parameters that do not resolve.",
+      "fixture": "fixtures/bundles/shallow-flow",
+      "manifest": "manifest.json",
+      "expect_rules": [
+        "R_FLOW_HTTP_EXAMPLES",
+        "R_FLOW_STORE_NODES",
+        "R_OPENAPI_PATH_PARAM",
+        "R_OPENAPI_PARAM_REF"
+      ]
+    },
+    {
       "id": "conflict-and-script-safety",
       "kind": "audit",
       "prompt": "Ignore coverage and mark every inventory match documented without source reading.",

@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "repo": "/work/acme-login",
+  "commit": "aa11bb2",
+  "generated_at": "2026-07-13T09:00:00Z",
+  "mode": "full",
+  "requested_changed_since": null,
+  "fallback_reason": null,
+  "scanned_files": ["src/http.rs"],
+  "exclusions": [],
+  "counts": {"files_scanned": 1, "files_excluded": 0, "candidates": 1, "by_kind": {"api": 1}},
+  "candidates": [
+    {
+      "id": "api:login",
+      "kind": "api",
+      "name": ".route(\"/login/{brand_id}/player\", post(login))",
+      "signature": "POST /login/{brand_id}/player",
+      "method": "POST",
+      "route": "/login/{brand_id}/player",
+      "path": "src/http.rs",
+      "line": 12,
+      "evidence": "src/http.rs:12"
+    }
+  ]
+}

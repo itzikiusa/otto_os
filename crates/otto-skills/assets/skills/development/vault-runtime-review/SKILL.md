@@ -2,8 +2,9 @@
 name: vault-runtime-review
 description: Review Otto Vault repository documentation specifically for runtime flows, messages, schedules, reconciliation, startup/shutdown, failure handling, retries, idempotency, observability, and external side effects. Use as a focused post-scan reviewer; do not author or repair docs.
 category: development
+version: 2
 metadata:
-  version: "1.0.0"
+  version: "2.0.0"
 ---
 
 # Vault Runtime Review

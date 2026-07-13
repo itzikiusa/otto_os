@@ -7,6 +7,12 @@
 - Data schema, reads, writes, indexes/TTL, consistency, and field impact are traced.
 - Producers, consumers, schedules, reconciliation, startup, shutdown, retries,
   idempotency, and side effects are covered.
+- Every OpenAPI `{placeholder}` and auth header resolves to a declared
+  parameter (follow `$ref`s into `components.parameters` yourself).
+- Flow notes fill the required skeleton: numbered steps naming each store as
+  engine + table/collection/key-pattern, request/response examples on
+  HTTP-triggered flows, and a diagram whose store nodes carry the engine name.
+  A flow whose diagram shows only generic service boxes is shallow.
 - Load-bearing claims have precise source citations and examples are not invented.
 - No remaining uncertainty is hidden behind a completion claim.
 

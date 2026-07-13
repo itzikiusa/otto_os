@@ -2,8 +2,9 @@
 name: vault-data-review
 description: Review Otto Vault repository documentation specifically for complete relational, document, analytical, and Redis schemas; real reads/writes; indexes/TTL; consistency; relationships; and field-level impact. Use as a focused post-scan reviewer; do not author or repair docs.
 category: development
+version: 2
 metadata:
-  version: "1.0.0"
+  version: "2.0.0"
 ---
 
 # Vault Data Review

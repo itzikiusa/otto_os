@@ -2,8 +2,9 @@
 name: vault-api-review
 description: Review Otto Vault repository documentation specifically for complete HTTP/RPC/WebSocket contracts, real request and response bodies, errors, auth, examples, OpenAPI parity, and runtime side effects. Use as a focused post-scan reviewer; do not author or repair docs.
 category: development
+version: 2
 metadata:
-  version: "1.0.0"
+  version: "2.0.0"
 ---
 
 # Vault API Review

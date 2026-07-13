@@ -1,0 +1,35 @@
+openapi: 3.0.3
+info:
+  title: acme-login
+  version: 1.0.0
+paths:
+  /login/{brand_id}/player:
+    post:
+      operationId: login
+      parameters:
+      - $ref: '#/components/parameters/missingBrand'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+            example:
+              user_name: player1
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                status: ok
+components:
+  parameters:
+    version:
+      name: version
+      in: path
+      required: true
+      schema:
+        type: string

@@ -2,8 +2,9 @@
 name: vault-docs-review
 description: Review an Otto Vault repository-documentation run for missed surfaces, shallow concepts, unsupported claims, broken coverage, and incomplete API/data/runtime detail. Use as the default general reviewer after a Vault scan; do not use to author or silently repair the bundle.
 category: development
+version: 2
 metadata:
-  version: "1.0.0"
+  version: "2.0.0"
 ---
 
 # Vault Documentation Review

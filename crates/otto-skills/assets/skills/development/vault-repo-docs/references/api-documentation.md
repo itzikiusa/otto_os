@@ -7,7 +7,12 @@ body from a type name alone.
 Every operation documents:
 
 - method, exact path, operation ID, purpose, authentication and authorization;
-- path, query, header, and cookie parameters including requiredness/defaults;
+- path, query, header, and cookie parameters including requiredness/defaults —
+  every `{placeholder}` in the path has a declared `in: path` parameter and
+  every auth/tenant header (`x-auth-token`, `jwt-auth`, `brand_id`, …) appears
+  as a header parameter or a referenced security scheme; a parameter `$ref`
+  must resolve to a `components.parameters` entry with `name` and `in` set
+  (the audit fails unresolved refs and uncovered placeholders);
 - content type, complete request body schema, validation and a realistic body
   example, or an explicit statement that no body exists;
 - every successful status with full response body and example;

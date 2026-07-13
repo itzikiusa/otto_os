@@ -20,6 +20,12 @@ CITATION_RE = re.compile(r"`?[A-Za-z0-9_.\-/]+:\d+`?")
 HTTP_OPERATION_RE = re.compile(
     r"(?im)(?:^#{1,6}\s*|`|^\|\s*)(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+(/[A-Za-z0-9_./{}:\-]+)"
 )
+DIAGRAM_FENCE_RE = re.compile(r"```(?:mermaid|d2)[^\n]*\n([\s\S]*?)```", re.I)
+PARAM_REF_RE = re.compile(r"\$ref:\s*['\"]?#/components/parameters/([A-Za-z0-9_.\-]+)['\"]?")
+FLOW_HTTP_TRIGGER_RE = re.compile(r"(?im)trigger[^\n]{0,200}\b(GET|POST|PUT|PATCH|DELETE)\b")
+# Engines a flow diagram must show by name when the prose claims the flow
+# touches them — a generic "service" box hides where the data actually lives.
+STORE_ENGINES = ("mysql", "mongo", "clickhouse", "redis", "kafka", "postgres", "sqlite", "elasticsearch")
 
 
 def finding(rule, path, message, severity="error"):
@@ -155,6 +161,177 @@ def _runtime_findings(kind: str, relative: str, text: str):
             "R_RUNTIME_CITATIONS": (citations >= 2, "lifecycle registration and implementation citations are missing"),
         }
     return [finding(rule, relative, message) for rule, (ok, message) in checks.items() if not ok]
+
+
+def _flow_findings(relative: str, text: str):
+    """Depth contract for flow notes (frontmatter `type: flow` or flows/*.md)."""
+    results = []
+    lower = text.lower()
+    diagrams = [match.group(1) for match in DIAGRAM_FENCE_RE.finditer(text)]
+    diagram_text = "\n".join(diagrams).lower()
+    prose = DIAGRAM_FENCE_RE.sub("", lower)
+    if not diagram_text.strip():
+        results.append(finding("R_FLOW_DIAGRAM", relative, "flow lacks a mermaid/d2 diagram"))
+    if not re.search(r"(?m)^\s*1[.)]\s+\S", text):
+        results.append(finding("R_FLOW_STEPS", relative, "flow lacks a numbered code path"))
+    if len(CITATION_RE.findall(text)) < 2:
+        results.append(finding("R_FLOW_CITATIONS", relative, "flow needs trigger and step citations"))
+    if FLOW_HTTP_TRIGGER_RE.search(text):
+        sections = _sections(text)
+        request = _section(sections, "request")
+        response = _section(sections, "response")
+        no_body = "no request body" in lower
+        request_ok = no_body or (bool(request) and _has_nonempty_fence(request))
+        response_ok = bool(response) and _has_nonempty_fence(response)
+        if not (request_ok and response_ok):
+            results.append(
+                finding(
+                    "R_FLOW_HTTP_EXAMPLES",
+                    relative,
+                    "HTTP-triggered flow lacks request/response example sections",
+                )
+            )
+    if diagram_text.strip():
+        for engine in STORE_ENGINES:
+            if re.search(rf"\b{engine}", prose) and engine not in diagram_text:
+                results.append(
+                    finding(
+                        "R_FLOW_STORE_NODES",
+                        relative,
+                        f"flow prose touches {engine} but the diagram does not name it",
+                    )
+                )
+    return results
+
+
+def _component_parameters(text: str):
+    """Conservative parse of components.parameters → key: (name, in)."""
+    lines = text.splitlines()
+    comp_index = next((i for i, line in enumerate(lines) if re.match(r"^components:\s*$", line)), None)
+    if comp_index is None:
+        return {}
+    params = {}
+    index = comp_index + 1
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if stripped and not stripped.startswith("#") and indent == 0:
+            break
+        if re.match(r"^\s*parameters:\s*$", line):
+            params_indent = indent
+            index += 1
+            current_key = None
+            key_indent = None
+            entry = {}
+            while index < len(lines):
+                line = lines[index]
+                stripped = line.strip()
+                indent = len(line) - len(line.lstrip())
+                if stripped and not stripped.startswith("#") and indent <= params_indent:
+                    break
+                key_match = re.match(r"^\s*([A-Za-z0-9_.\-]+):\s*$", line)
+                if key_match and indent > params_indent and (key_indent is None or indent == key_indent):
+                    if current_key:
+                        params[current_key] = (entry.get("name"), entry.get("in"))
+                    current_key, key_indent, entry = key_match.group(1), indent, {}
+                elif current_key:
+                    for field in ("name", "in"):
+                        value = re.match(rf"^\s*{field}:\s*(\S+)", line)
+                        if value:
+                            entry[field] = value.group(1).strip("'\"")
+                index += 1
+            if current_key:
+                params[current_key] = (entry.get("name"), entry.get("in"))
+            break
+        index += 1
+    return params
+
+
+def _block_params(block: str):
+    """Parameter list items in a YAML block → {'name','in'} or {'ref': key}."""
+    items = []
+    lines = block.splitlines()
+    for index, line in enumerate(lines):
+        ref = PARAM_REF_RE.search(line)
+        if re.match(r"^\s*-\s*\$ref:", line) and ref:
+            items.append({"ref": ref.group(1)})
+            continue
+        name_match = re.match(r"^\s*-\s*name:\s*(\S+)", line)
+        if not name_match:
+            continue
+        entry = {"name": name_match.group(1).strip("'\""), "in": None}
+        item_indent = len(line) - len(line.lstrip())
+        for probe in lines[index + 1 :]:
+            probe_indent = len(probe) - len(probe.lstrip())
+            if probe.strip() and probe_indent <= item_indent:
+                break
+            in_match = re.match(r"^\s*in:\s*(\S+)", probe)
+            if in_match:
+                entry["in"] = in_match.group(1).strip("'\"")
+                break
+        items.append(entry)
+    return items
+
+
+def _openapi_path_blocks(text: str):
+    """Each `paths:` entry's full block (path-level + all operations)."""
+    lines = text.splitlines()
+    paths_index = next((i for i, line in enumerate(lines) if re.match(r"^\s*paths:\s*$", line)), None)
+    if paths_index is None:
+        return {}
+    paths_indent = len(lines[paths_index]) - len(lines[paths_index].lstrip())
+    blocks = {}
+    current = start = path_indent = None
+    for index in range(paths_index + 1, len(lines) + 1):
+        line = lines[index] if index < len(lines) else ""
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip()) if line else 0
+        section_end = index == len(lines) or (stripped and not stripped.startswith("#") and indent <= paths_indent)
+        path_match = None if section_end else re.match(r"^\s*(/[^:]+):\s*$", line)
+        if section_end or (path_match and (path_indent is None or indent == path_indent)):
+            if current is not None:
+                blocks[current] = "\n".join(lines[start:index])
+            if section_end:
+                break
+            current, start, path_indent = path_match.group(1), index + 1, indent
+    return blocks
+
+
+def _openapi_param_findings(text: str, operations):
+    """Every parameter $ref must resolve; every {placeholder} needs a declared
+    path parameter — the two ways an operation silently loses its brand_id."""
+    findings = []
+    components = _component_parameters(text)
+    for (method, path), block in sorted(operations.items()):
+        for item in _block_params(block):
+            if "ref" in item and item["ref"] not in components:
+                findings.append(
+                    finding(
+                        "R_OPENAPI_PARAM_REF",
+                        "api-openapi.yaml",
+                        f"{method} {path} references unresolved parameter component {item['ref']}",
+                    )
+                )
+    for path, block in sorted(_openapi_path_blocks(text).items()):
+        placeholders = re.findall(r"\{([^{}/]+)\}", path)
+        if not placeholders:
+            continue
+        declared = set()
+        for item in _block_params(block):
+            name, location = components.get(item["ref"], (None, None)) if "ref" in item else (item.get("name"), item.get("in"))
+            if name and location == "path":
+                declared.add(name)
+        for placeholder in placeholders:
+            if placeholder not in declared:
+                findings.append(
+                    finding(
+                        "R_OPENAPI_PATH_PARAM",
+                        "api-openapi.yaml",
+                        f"{path} placeholder {{{placeholder}}} has no resolvable path parameter",
+                    )
+                )
+    return findings
 
 
 def _openapi_operations(text: str):
@@ -321,13 +498,25 @@ def audit(root: Path, manifest_path: Path):
         elif kind in {"messaging", "worker", "runtime"}:
             findings.extend(_runtime_findings(kind, relative, text))
 
+    # Flow notes escape the coverage-target loop (they're linked, not ledger
+    # targets) — audit every one directly.
+    for flow_path in sorted(root.rglob("*.md")):
+        if flow_path.name.lower() == "index.md":
+            continue
+        text = _read(flow_path)
+        is_flow = bool(re.search(r"(?m)^type:\s*[\"']?flow\b", text[:400], re.I)) or flow_path.parent.name == "flows"
+        if is_flow:
+            findings.extend(_flow_findings(flow_path.relative_to(root).as_posix(), text))
+
     if any(kind == "api" for kind, _ in targets):
         openapi = next((path for name in ("api-openapi.yaml", "api-openapi.yml") if (path := root / name).is_file()), None)
         if openapi is None:
             findings.append(finding("R_OPENAPI", "api-openapi.yaml", "API docs exist but OpenAPI artifact is missing"))
         else:
-            operations, openapi_findings = _openapi_operations(_read(openapi))
+            openapi_text = _read(openapi)
+            operations, openapi_findings = _openapi_operations(openapi_text)
             findings.extend(openapi_findings)
+            findings.extend(_openapi_param_findings(openapi_text, operations))
             spec_ops = set(operations)
             for method, path in sorted(documented_api_ops - spec_ops):
                 findings.append(finding("R_OPENAPI_MISMATCH", openapi.name, f"documented {method} {path} is absent from OpenAPI"))

@@ -2,9 +2,9 @@
 name: vault-repo-docs
 description: Use when indexing, scanning, or documenting a repository into the Otto Vault as a durable OKF bundle, including full, focused, and incremental scans or feature dependency maps; not for code review or one-off repository questions.
 category: development
-version: 3
+version: 4
 metadata:
-  version: "3.0.0"
+  version: "4.0.0"
 ---
 
 # Vault Repository Documentation
@@ -62,6 +62,11 @@ A full scan is complete only when:
 - data assets contain schema, grain, indexes/TTL, actual read and write paths,
   consistency boundaries, field-level impact, examples, and citations;
 - messaging, workers, startup/shutdown, and reconciliation flows are inventoried;
+- every flow note fills the required skeleton in
+  [flows-messaging-workers.md](references/flows-messaging-workers.md): numbered
+  steps naming each store as engine + table/collection, request/response
+  examples for HTTP-triggered flows, and a diagram whose store nodes carry the
+  engine name (the audit enforces all of these);
 - every load-bearing claim cites `relative/path:line` and has been rechecked;
 - validators and audits are clean. If evidence is unavailable, say what remains
   uncertain and finish as partial rather than fabricating completeness.
