@@ -137,6 +137,16 @@ impl VaultDocsRunsRepo {
         Ok(row.as_ref().map(row_to_run))
     }
 
+    /// Delete one run row (history cleanup). Returns whether a row existed.
+    pub async fn delete(&self, id: &str) -> Result<bool> {
+        let res = sqlx::query("DELETE FROM vault_docs_runs WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete vault docs run"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// Every non-terminal row — the startup interrupted-sweep input.
     pub async fn list_unfinished(&self) -> Result<Vec<VaultDocsRunRow>> {
         let rows = sqlx::query(

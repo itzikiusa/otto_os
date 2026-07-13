@@ -120,6 +120,13 @@ class VaultStore {
   docsRuns = $state<VaultDocsRun[]>([]);
   /** Target-folder prefill for the docs-agent form ("Docs agent here"). */
   docsAgentsDir = $state('');
+  /** One-shot prompt/skills prefill for the docs-agent form ("Review + fix
+   *  docs" on a folder, "Send to agent to fix" on a findings run). The view
+   *  consumes it on open. */
+  docsAgentsPrefill = $state<{ prompt: string; skills: string[] } | null>(null);
+  /** One-shot "Review + fix" request for a note: NoteView auto-opens the
+   *  refine drawer and the drawer auto-sends this prompt for the given path. */
+  pendingRefine = $state<{ path: string; prompt: string } | null>(null);
 
   /** Runs still moving — drives the topbar "agents running" chip. */
   get activeDocsRuns(): VaultDocsRun[] {
@@ -693,6 +700,84 @@ class VaultStore {
     this.docsAgentsDir = dir;
     this.centerMode = 'docs-agents';
     this.persistView();
+  }
+
+  /** "Review + fix docs" on a bundle folder → docs-agent form prefilled with a
+   *  review-and-repair prompt scoped to that folder. */
+  reviewFixBundle(dir: string): void {
+    this.docsAgentsPrefill = {
+      prompt:
+        `REVIEW AND FIX the existing documentation bundle \`${dir}/\` in this vault — ` +
+        `repair in place, do NOT rewrite it from scratch.\n\n` +
+        `1. Read the bundle's index.md, coverage.md and overview.md; locate the source ` +
+        `repository from overview.md's frontmatter (repo:/commit:).\n` +
+        `2. Verify the docs against the CURRENT code: every claim, citation (file:line), ` +
+        `example, link, table, diagram and OpenAPI operation.\n` +
+        `3. FIX in place: wrong or stale claims; placeholder/meta examples (replace with ` +
+        `REAL bodies from the code — actual field names, plausible values); missing ` +
+        `flow-note sections (trigger, numbered steps naming each store as engine + ` +
+        `table/collection, request/response examples, failure/retry, one diagram); broken ` +
+        `mermaid/d2 fences; dangling links (forward links into not-yet-scanned dependency ` +
+        `bundles are FINE — leave those); coverage rows that no longer match reality.\n` +
+        `4. Run the OKF validator and the staged audit script; resolve every finding.\n\n` +
+        `Finish with a one-line summary of what was fixed.`,
+      skills: ['vault-repo-docs'],
+    };
+    this.openDocsAgents(dir);
+  }
+
+  /** "Send to agent…" on a folder — free-form instruction scoped to the dir
+   *  (e.g. "split the flows into groups with proper indexing"). */
+  sendDirToAgent(dir: string, instruction: string): void {
+    this.docsAgentsPrefill = {
+      prompt:
+        `Work on the folder \`${dir}/\` of this vault. Read its index and notes first; ` +
+        `keep every note's content source-backed (never drop citations, examples or ` +
+        `diagrams while reorganizing), and keep all links — inbound and outbound — ` +
+        `resolving when you move or rename notes (update index.md files accordingly).\n\n` +
+        `Instruction:\n${instruction}\n\n` +
+        `Finish with a one-line summary of what changed.`,
+      skills: [],
+    };
+    this.openDocsAgents(dir);
+  }
+
+  /** Multi-select → one agent request over the group (canned review+fix or a
+   *  free-form instruction). */
+  sendGroupToAgent(paths: string[], instruction: string | null): void {
+    const list = paths.map((p) => `- \`${p}\``).join('\n');
+    const task = instruction
+      ? `Instruction:\n${instruction}`
+      : `REVIEW AND FIX each of these notes in place, treating them as ONE coherent set: ` +
+        `verify every claim, citation (file:line), example and link against the CURRENT ` +
+        `source code; replace placeholder/meta examples with REAL bodies from the code; ` +
+        `fill missing required sections; fix broken mermaid/d2 fences; align terminology ` +
+        `and cross-links BETWEEN these notes.`;
+    this.docsAgentsPrefill = {
+      prompt:
+        `Work on this specific GROUP of notes in the vault — these and ONLY these:\n` +
+        `${list}\n\n${task}\n\n` +
+        `Finish with a one-line summary per note changed.`,
+      skills: ['vault-repo-docs'],
+    };
+    this.openDocsAgents();
+  }
+
+  /** "Review + fix" on a single note → open it and auto-send a refine turn. */
+  reviewFixNote(path: string): void {
+    this.pendingRefine = {
+      path,
+      prompt:
+        `Review this note against the source repository it documents, then FIX it in place: ` +
+        `verify every claim, citation (file:line), example and link against the CURRENT code ` +
+        `and correct anything wrong or stale; replace placeholder/meta examples with REAL ` +
+        `bodies lifted from the code (actual field names, plausible values); fill missing ` +
+        `required sections (flow notes: trigger, numbered steps naming each store as engine + ` +
+        `table/collection, request/response examples, failure/retry, one diagram); verify ` +
+        `every mermaid/d2 fence parses and fix or simplify broken ones; keep it dense. ` +
+        `Reply with a one-line summary of what you fixed.`,
+    };
+    void this.open(path);
   }
 
   // -- search / tags / switcher ---------------------------------------------------------

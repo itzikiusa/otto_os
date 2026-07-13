@@ -81,6 +81,13 @@
   onMount(() => {
     // Reattach an existing refine session for this note (survives drawer close).
     void checkSession();
+    // "Review + fix" from the tree: consume the queued prompt and fire it.
+    const pending = vault.pendingRefine;
+    if (pending && pending.path === path) {
+      vault.pendingRefine = null;
+      prompt = pending.prompt;
+      void send();
+    }
     return () => stopPolling();
   });
 </script>

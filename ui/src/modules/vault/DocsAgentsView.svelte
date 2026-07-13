@@ -21,6 +21,8 @@
   import {
     cancelDocsRun,
     docsRun as getDocsRun,
+    deleteDocsRun,
+    resolveDocsRun,
     retryDocsAgent,
     retryDocsReviewer,
     retryDocsRevision,
@@ -114,6 +116,18 @@
   // Prefill (and re-prefill on "Docs agent here" from a folder's context menu).
   $effect(() => {
     targetDir = vault.docsAgentsDir;
+  });
+
+  // One-shot prompt/skills prefill ("Review + fix docs", "Send to agent…",
+  // group actions, "Send to agent to fix" on a findings run). Consuming it
+  // also deselects any run so the form is what the user lands on.
+  $effect(() => {
+    const p = vault.docsAgentsPrefill;
+    if (!p) return;
+    vault.docsAgentsPrefill = null;
+    prompt = p.prompt;
+    tplSkills = p.skills;
+    vault.docsRun = null;
   });
 
   function addAgent(): void {
@@ -288,6 +302,87 @@
   function newRun(): void {
     vault.docsRun = null;
     openTerminals = new Set();
+  }
+
+  // -- done_with_findings dispositions ------------------------------------------
+  // "Send to agent to fix" turns the run's outstanding findings into a
+  // prefilled fix prompt; "Mark OK"/"Mark fixed" resolve the run durably.
+  let resolving = $state(false);
+
+  async function resolveRun(outcome: 'ok' | 'fixed'): Promise<void> {
+    const r = vault.docsRun;
+    if (!r || resolving) return;
+    resolving = true;
+    try {
+      vault.docsRun = await resolveDocsRun(r.id, outcome);
+      void vault.refreshDocsRuns();
+      toasts.success(
+        'Review resolved',
+        outcome === 'ok' ? 'Findings accepted as-is' : 'Findings marked as fixed',
+      );
+    } catch (e) {
+      toasts.error('Resolve', e instanceof Error ? e.message : String(e));
+    } finally {
+      resolving = false;
+    }
+  }
+
+  // History cleanup — terminal runs only (the server 409s on active ones).
+  let deleting = $state<string | null>(null);
+
+  async function deleteRun(r: VaultDocsRun): Promise<void> {
+    if (deleting) return;
+    deleting = r.id;
+    try {
+      await deleteDocsRun(r.id);
+      if (vault.docsRun?.id === r.id) vault.docsRun = null;
+      vault.docsRuns = vault.docsRuns.filter((x) => x.id !== r.id);
+    } catch (e) {
+      toasts.error('Delete run', e instanceof Error ? e.message : String(e));
+    } finally {
+      deleting = null;
+    }
+  }
+
+  function fixWithAgent(): void {
+    const r = vault.docsRun;
+    if (!r) return;
+    const round = r.review.rounds.at(-1);
+    const findings = (round?.reviewers ?? []).flatMap((rv) => rv.findings);
+    if (findings.length === 0) {
+      toasts.error('Fix findings', 'This run has no recorded findings');
+      return;
+    }
+    const lines = findings.map((f, i) => {
+      const ev = f.evidence
+        .map((e) =>
+          [
+            e.repo_path ? `${e.repo_path}${e.line != null ? ':' + e.line : ''}` : null,
+            e.doc_path ? `${e.doc_path}${e.section ? ' §' + e.section : ''}` : null,
+          ]
+            .filter(Boolean)
+            .join(' → '),
+        )
+        .filter(Boolean)
+        .join('; ');
+      return (
+        `${i + 1}. [${f.severity}/${f.category}] ${f.summary}\n` +
+        `   missed: ${f.missed_item}\n` +
+        `   fix required: ${f.required_fix}` +
+        (ev ? `\n   evidence: ${ev}` : '')
+      );
+    });
+    const scope = r.target_dir ? ` (bundle \`${r.target_dir}/\`)` : '';
+    vault.docsAgentsPrefill = {
+      prompt:
+        `FIX the documentation in this vault: a review pass finished with UNRESOLVED ` +
+        `findings${scope}. Address EVERY finding below by editing the affected notes in ` +
+        `place — verify each fix against the CURRENT source code, use REAL examples ` +
+        `(actual field names from the code), and do not rewrite unaffected content.\n\n` +
+        `FINDINGS:\n${lines.join('\n')}\n\n` +
+        `Finish with a one-line summary listing the notes you changed.`,
+      skills: ['vault-repo-docs'],
+    };
   }
 
   /** Show one run (live or history) — the poll follows the selection. */
@@ -546,6 +641,25 @@
           <button class="ghost" disabled={cancelling} onclick={() => void cancel()}>
             {cancelling ? 'Cancelling…' : 'Cancel'}
           </button>
+        {/if}
+        {#if run.state === 'done_with_findings'}
+          <button
+            class="ghost"
+            title="Prefill a fix run from this run's outstanding findings"
+            onclick={fixWithAgent}>Send to agent to fix</button
+          >
+          <button
+            class="ghost"
+            disabled={resolving}
+            title="The findings were addressed — resolve this run as done"
+            onclick={() => void resolveRun('fixed')}>Mark fixed</button
+          >
+          <button
+            class="ghost"
+            disabled={resolving}
+            title="Accept the findings as-is — resolve this run as done"
+            onclick={() => void resolveRun('ok')}>Mark OK</button
+          >
         {/if}
         <!-- Always available — a stuck-RUNNING run must never trap the user
              in the run view with no way to start a new run. -->
@@ -848,25 +962,37 @@
       <div class="runs-section">
         <span class="runs-title">Runs</span>
         {#each vault.docsRuns as r (r.id)}
-          <button
-            class="run-row"
-            class:selected={run?.id === r.id}
-            onclick={() => selectRun(r)}
-            title={r.prompt}
-          >
-            <span
-              class="pill st-{r.state}"
-              title={r.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
+          <div class="run-row-wrap">
+            <button
+              class="run-row"
+              class:selected={run?.id === r.id}
+              onclick={() => selectRun(r)}
+              title={r.prompt}
             >
-              {#if isActive(r)}<span class="spinner-xs"></span>{/if}
-              {displayState(r.state)}
-            </span>
-            <span class="kind-chip">{r.kind}</span>
-            <span class="run-row-text">
-              {r.kind === 'refine' ? `${r.note_path} — ${r.prompt}` : r.prompt}
-            </span>
-            <span class="run-row-when">{new Date(r.started_at).toLocaleString()}</span>
-          </button>
+              <span
+                class="pill st-{r.state}"
+                title={r.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
+              >
+                {#if isActive(r)}<span class="spinner-xs"></span>{/if}
+                {displayState(r.state)}
+              </span>
+              <span class="kind-chip">{r.kind}</span>
+              <span class="run-row-text">
+                {r.kind === 'refine' ? `${r.note_path} — ${r.prompt}` : r.prompt}
+              </span>
+              <span class="run-row-when">{new Date(r.started_at).toLocaleString()}</span>
+            </button>
+            {#if !isActive(r)}
+              <button
+                class="run-del"
+                title="Delete this run from history"
+                disabled={deleting === r.id}
+                onclick={() => void deleteRun(r)}
+              >
+                <Icon name="trash" size={12} />
+              </button>
+            {/if}
+          </div>
         {/each}
       </div>
     {/if}
@@ -1675,6 +1801,35 @@
     letter-spacing: 0.04em;
     margin-bottom: 2px;
   }
+  .run-row-wrap {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+  }
+  .run-row-wrap .run-del {
+    display: inline-flex;
+    align-items: center;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    border-radius: 6px;
+    padding: 5px;
+    cursor: pointer;
+    visibility: hidden;
+    flex-shrink: 0;
+  }
+  .run-row-wrap:hover .run-del {
+    visibility: visible;
+  }
+  .run-del:hover {
+    color: var(--danger, #ff6b6b);
+    background: color-mix(in srgb, var(--danger, #ff6b6b) 12%, transparent);
+  }
+  .run-del:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
   .run-row {
     display: flex;
     align-items: center;
@@ -1688,6 +1843,7 @@
     min-width: 0;
     color: var(--text);
     font-size: 12px;
+    flex: 1;
   }
   .run-row:hover {
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);

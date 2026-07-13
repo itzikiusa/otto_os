@@ -543,8 +543,15 @@ pub fn routes() -> Router<ServerCtx> {
         )
         // NOT ws-scoped: the run id carries its ws, and the handlers re-check
         // the caller's role against it (policy row: /vault/docs-agents/*).
-        .route("/vault/docs-agents/runs/{run_id}", get(get_run))
+        .route(
+            "/vault/docs-agents/runs/{run_id}",
+            get(get_run).delete(delete_run),
+        )
         .route("/vault/docs-agents/runs/{run_id}/cancel", post(cancel_run))
+        .route(
+            "/vault/docs-agents/runs/{run_id}/resolve",
+            post(resolve_run),
+        )
         .route(
             "/vault/docs-agents/runs/{run_id}/agents/{index}/retry",
             post(retry_agent),
@@ -789,6 +796,106 @@ async fn get_run(
     )
     .await?;
     Ok(Json(run))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveReq {
+    /// `ok` — the findings were reviewed and accepted as-is;
+    /// `fixed` — the findings were addressed (by hand or a follow-up agent).
+    outcome: String,
+}
+
+/// `POST /vault/docs-agents/runs/{run_id}/resolve` — user disposition for a
+/// `done_with_findings` run: flip it to `done` and stamp `review.outcome` with
+/// `resolved_ok` / `resolved_fixed`. Terminal runs live only in the durable
+/// row (the registry evicts on finalize), so this mutates the row directly;
+/// 409 for any other state — an active run resolves through its own lifecycle.
+async fn resolve_run(
+    Path(run_id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<ResolveReq>,
+) -> ApiResult<Json<VaultDocsRun>> {
+    let outcome = match req.outcome.as_str() {
+        "ok" => "resolved_ok",
+        "fixed" => "resolved_fixed",
+        other => {
+            return Err(ApiError(Error::Invalid(format!(
+                "outcome must be `ok` or `fixed`, got `{other}`"
+            ))));
+        }
+    };
+    let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
+    let row = repo
+        .get(&run_id)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
+    let mut run = row_to_run_dto(&row)
+        .ok_or_else(|| ApiError(Error::Internal(format!("unparseable run {run_id}"))))?;
+    crate::auth::require_ws_role(
+        &ctx,
+        &user,
+        &Id::from(run.ws_id.clone()),
+        WorkspaceRole::Editor,
+    )
+    .await?;
+    if run.state != "done_with_findings" {
+        return Err(ApiError(Error::Conflict(format!(
+            "only a done_with_findings run can be resolved (state: {})",
+            run.state
+        ))));
+    }
+    run.state = "done".into();
+    run.review.outcome = Some(outcome.into());
+    repo.upsert(&run_row(&run)).await.map_err(ApiError)?;
+    // A just-finished run can still sit in the registry until finalize evicts
+    // it — keep that snapshot consistent so a racing poll doesn't resurrect
+    // the old state.
+    with_run(&ctx.vault_docs_runs, &run_id, |r| {
+        r.state = "done".into();
+        r.review.outcome = Some(outcome.into());
+    });
+    Ok(Json(run))
+}
+
+/// `DELETE /vault/docs-agents/runs/{run_id}` — history cleanup: drop one
+/// TERMINAL run's durable row (and any lingering registry snapshot). An
+/// active run must be cancelled first — 409 otherwise.
+async fn delete_run(
+    Path(run_id): Path<String>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<axum::http::StatusCode> {
+    let repo = otto_state::VaultDocsRunsRepo::new(ctx.pool.clone());
+    let row = repo
+        .get(&run_id)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound(format!("docs run {run_id}"))))?;
+    crate::auth::require_ws_role(
+        &ctx,
+        &user,
+        &Id::from(row.ws_id.clone()),
+        WorkspaceRole::Editor,
+    )
+    .await?;
+    // The registry snapshot is fresher than the row while a run is live.
+    let live_state = ctx
+        .vault_docs_runs
+        .lock()
+        .unwrap()
+        .get(&run_id)
+        .map(|e| e.run.state.clone());
+    let state = live_state.unwrap_or_else(|| row.state.clone());
+    if !is_terminal(&state) {
+        return Err(ApiError(Error::Conflict(
+            "run is still active — cancel it before deleting".into(),
+        )));
+    }
+    repo.delete(&run_id).await.map_err(ApiError)?;
+    ctx.vault_docs_runs.lock().unwrap().remove(&run_id);
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// Parse a durable row back into the DTO. The row's flat `state` wins over the

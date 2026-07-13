@@ -25,6 +25,36 @@
   let renameValue = $state('');
   let dragOver = $state<string | null>(null);
 
+  // Multi-select (notes/files, not dirs): hover checkboxes; any selection
+  // keeps every checkbox visible and shows the group action bar.
+  let selected = $state<Set<string>>(new Set());
+
+  function toggleSelect(path: string): void {
+    const next = new Set(selected);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    selected = next;
+  }
+
+  function clearSelection(): void {
+    selected = new Set();
+  }
+
+  function groupReviewFix(): void {
+    vault.sendGroupToAgent([...selected], null);
+    clearSelection();
+  }
+
+  function groupSend(): void {
+    const inst = prompt(
+      'Instruction for the agent (applies to the selected notes as one group)',
+      'e.g. merge overlapping content and align terminology across these notes',
+    );
+    if (!inst?.trim()) return;
+    vault.sendGroupToAgent([...selected], inst.trim());
+    clearSelection();
+  }
+
   /** Mode-aware selection — only the pane actually shown highlights its row. */
   function isActive(n: TreeNode): boolean {
     return vault.centerMode === 'note'
@@ -37,10 +67,14 @@
       void vault.toggleDir(n);
       return;
     }
-    // ⌘/Ctrl-click (or middle-click via onauxclick) → open in a NEW tab.
-    const newTab = !!e && (e.metaKey || e.ctrlKey);
-    if (n.entry.kind === 'note') void vault.open(n.entry.path, { newTab });
-    else void vault.openFile(n.entry.path, { newTab });
+    // ⌘/Ctrl-click → toggle multi-select (OS file-manager convention). Open
+    // in a new tab moved to middle-click (onauxclick) / the context menu.
+    if (e && (e.metaKey || e.ctrlKey)) {
+      toggleSelect(n.entry.path);
+      return;
+    }
+    if (n.entry.kind === 'note') void vault.open(n.entry.path);
+    else void vault.openFile(n.entry.path);
   }
 
   function rowAuxClick(n: TreeNode, e: MouseEvent): void {
@@ -79,6 +113,15 @@
                   ? void vault.open(n.entry.path, { newTab: true })
                   : void vault.openFile(n.entry.path, { newTab: true }),
             },
+            ...(n.entry.kind === 'note'
+              ? [
+                  {
+                    label: 'Review + fix (agent)',
+                    icon: 'zap',
+                    action: () => vault.reviewFixNote(n.entry.path),
+                  },
+                ]
+              : []),
             { separator: true },
           ]),
       ...(isDir
@@ -88,6 +131,22 @@
               label: 'Docs agent here',
               icon: 'zap',
               action: () => vault.openDocsAgents(n.entry.path),
+            },
+            {
+              label: 'Review + fix docs (agent)',
+              icon: 'zap',
+              action: () => vault.reviewFixBundle(n.entry.path),
+            },
+            {
+              label: 'Send to agent…',
+              icon: 'zap',
+              action: () => {
+                const inst = prompt(
+                  'Instruction for the agent (scoped to this folder)',
+                  'e.g. split these flows into grouped subfolders with a proper index',
+                );
+                if (inst?.trim()) vault.sendDirToAgent(n.entry.path, inst.trim());
+              },
             },
             {
               label: 'New folder here',
@@ -149,6 +208,7 @@
           class:drag-over={dragOver === n.entry.path}
           style="padding-inline-start: {8 + n.depth * 14}px"
           role="treeitem"
+          class:checked={selected.has(n.entry.path)}
           aria-selected={isActive(n)}
           tabindex="0"
           draggable={n.entry.kind !== 'dir'}
@@ -169,12 +229,19 @@
           {#if n.entry.kind === 'dir'}
             <span class="chev" class:open={n.open}>▸</span>
             <Icon name="folder" size={14} />
-          {:else if n.entry.kind === 'note'}
-            <span class="pad"></span>
-            <Icon name="note" size={14} />
           {:else}
-            <span class="pad"></span>
-            <Icon name="file" size={14} />
+            <input
+              type="checkbox"
+              class="sel"
+              class:vis={selected.size > 0}
+              checked={selected.has(n.entry.path)}
+              aria-label="Select for group agent actions"
+              onclick={(e) => {
+                e.stopPropagation();
+                toggleSelect(n.entry.path);
+              }}
+            />
+            <Icon name={n.entry.kind === 'note' ? 'note' : 'file'} size={14} />
           {/if}
           <span class="name" title={n.entry.path}>
             {n.entry.kind === 'note' ? n.entry.name.replace(/\.md$/i, '') : n.entry.name}
@@ -206,6 +273,19 @@
         </div>
       {/snippet}
     </VirtualList>
+  {/if}
+
+  {#if selected.size > 0}
+    <div class="sel-bar">
+      <span class="sel-count">{selected.size} selected</span>
+      <button class="ghost" title="Review + fix the selected notes as one coherent set" onclick={groupReviewFix}>
+        Review + fix
+      </button>
+      <button class="ghost" title="Send the selected notes to an agent with a custom instruction" onclick={groupSend}>
+        Send to agent…
+      </button>
+      <button class="ghost dim" onclick={clearSelection}>Clear</button>
+    </div>
   {/if}
 </div>
 
@@ -264,6 +344,55 @@
   }
   .pad {
     width: 12px;
+  }
+  /* Selection checkbox lives in the .pad slot: invisible until hover or an
+     active selection, so rows never shift. */
+  .sel {
+    width: 12px;
+    height: 12px;
+    margin: 0;
+    flex-shrink: 0;
+    visibility: hidden;
+    accent-color: var(--accent, #7a9cff);
+    cursor: pointer;
+  }
+  .row:hover .sel,
+  .sel.vis,
+  .sel:checked {
+    visibility: visible;
+  }
+  .row.checked {
+    background: var(--accent-dim, rgba(90, 120, 255, 0.12));
+  }
+  .sel-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-top: 1px solid var(--border);
+    background: var(--panel, #1c1c1e);
+    flex-wrap: wrap;
+  }
+  .sel-count {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-inline-end: auto;
+  }
+  .sel-bar .ghost {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 3px 9px;
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .sel-bar .ghost:hover {
+    border-color: var(--accent, #7a9cff);
+    color: var(--accent, #9ab4ff);
+  }
+  .sel-bar .ghost.dim {
+    color: var(--text-dim);
   }
   .name {
     overflow: hidden;

@@ -27,6 +27,15 @@
     refineOpen = { ...refineOpen, [p]: !refineOpen[p] };
   }
 
+  // "Review + fix" (tree context menu) queues a pending refine — force the
+  // drawer open for that note; the drawer itself consumes + auto-sends it.
+  $effect(() => {
+    const pending = vault.pendingRefine;
+    if (pending && vault.notePath === pending.path && !refineOpen[pending.path]) {
+      refineOpen = { ...refineOpen, [pending.path]: true };
+    }
+  });
+
   // -- attachments: authed blob URLs, cached per path -------------------------
   let assetUrls = $state<Record<string, string>>({});
   const pendingAssets = new Set<string>();

@@ -165,6 +165,17 @@ export function cancelDocsRun(runId: string) {
   return api.post<void>(`/vault/docs-agents/runs/${enc(runId)}/cancel`, {});
 }
 
+/** User disposition for a done_with_findings run: `ok` (accepted as-is) or
+ *  `fixed` (findings addressed) — flips the run to `done` durably. */
+export function resolveDocsRun(runId: string, outcome: 'ok' | 'fixed') {
+  return api.post<VaultDocsRun>(`/vault/docs-agents/runs/${enc(runId)}/resolve`, { outcome });
+}
+
+/** History cleanup — deletes one TERMINAL run's durable row (409 while active). */
+export function deleteDocsRun(runId: string) {
+  return api.del<void>(`/vault/docs-agents/runs/${enc(runId)}`);
+}
+
 /** LIVE-run retry of one stuck writer (kills its session; a fresh one spawns). */
 export function retryDocsAgent(runId: string, index: number) {
   return api.post<void>(`/vault/docs-agents/runs/${enc(runId)}/agents/${index}/retry`, {});
