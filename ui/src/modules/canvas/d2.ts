@@ -41,6 +41,19 @@ async function load(): Promise<D2Api> {
   return _loading;
 }
 
+/** The D2 worker bridge holds a SINGLE currentResolve/currentReject slot, so
+ *  concurrent compile/render calls clobber each other: caller A receives
+ *  caller B's compile result (an object — rendered as "[object Object]") and
+ *  caller B's promise never settles (its diagram stays stuck as raw source).
+ *  Notes with 2+ d2 fences hit this every time. Serialize every worker
+ *  round-trip pair through one queue; failures must not wedge the chain. */
+let _queue: Promise<unknown> = Promise.resolve();
+function enqueue<T>(job: () => Promise<T>): Promise<T> {
+  const next = _queue.then(job, job);
+  _queue = next.catch(() => undefined);
+  return next;
+}
+
 /** A compile error's `.message` is a JSON array of `{errmsg}` — flatten it into
  *  one readable line; fall back to the raw message for anything else. */
 function friendlyError(raw: string): string {
@@ -67,11 +80,17 @@ export async function renderD2(
   if (!text) return { error: 'Empty diagram' };
   try {
     const api = await load();
-    const compiled = await api.compile(text, {
-      sketch: opts.sketch ?? false,
-      themeID: opts.dark ? 200 : 0,
+    const svg = await enqueue(async () => {
+      const compiled = await api.compile(text, {
+        sketch: opts.sketch ?? false,
+        themeID: opts.dark ? 200 : 0,
+      });
+      return api.render(compiled.diagram, compiled.renderOptions);
     });
-    const svg = await api.render(compiled.diagram, compiled.renderOptions);
+    // Belt-and-braces: never hand a non-SVG payload to innerHTML.
+    if (typeof svg !== 'string' || !svg.includes('<svg')) {
+      return { error: 'D2 returned an unexpected render payload' };
+    }
     return { svg };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -85,7 +104,7 @@ export async function parseD2(src: string): Promise<boolean> {
   if (!text) return false;
   try {
     const api = await load();
-    await api.compile(text, {});
+    await enqueue(() => api.compile(text, {}));
     return true;
   } catch {
     return false;
