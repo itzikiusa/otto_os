@@ -16,6 +16,8 @@
     summary: string;
     deprecated: boolean;
     op: any;
+    /** Owning path item — carries shared (path-level) parameters. */
+    item: any;
   }
 
   const info = $derived((spec.info ?? {}) as Record<string, any>);
@@ -42,6 +44,7 @@
           summary: String(op.summary ?? op.operationId ?? ''),
           deprecated: !!op.deprecated,
           op,
+          item,
         });
       }
     }
@@ -82,7 +85,8 @@
       }
     }
     // swagger 2: body parameter
-    for (const p of op.parameters ?? []) {
+    for (const raw of op.parameters ?? []) {
+      const p = derefParam(raw);
       if (p?.in === 'body' && p.schema) out.push({ mime: 'body', schema: p.schema });
     }
     return out;
@@ -102,8 +106,25 @@
     return out;
   }
 
-  function params(op: any): any[] {
-    return (op.parameters ?? []).filter((p: any) => p && p.in !== 'body');
+  /** Resolve a parameter-level $ref (components.parameters / swagger-2 root
+   *  `parameters`) — schema deref alone left ref'd params as blank rows with
+   *  the ref tail leaking into the type column. */
+  function derefParam(p: any): any {
+    if (p && typeof p === 'object' && typeof p.$ref === 'string') {
+      const name = p.$ref.split('/').pop() ?? '';
+      return spec.components?.parameters?.[name] ?? spec.parameters?.[name] ?? p;
+    }
+    return p;
+  }
+
+  /** Operation + path-item level parameters, $ref-resolved; op-level wins on
+   *  (name, in) collisions per the OpenAPI merge rule. */
+  function params(op: any, pathItem: any): any[] {
+    const own = ((op.parameters ?? []) as any[]).map(derefParam);
+    const shared = ((pathItem?.parameters ?? []) as any[])
+      .map(derefParam)
+      .filter((s: any) => s && !own.some((o: any) => o?.name === s.name && o?.in === s.in));
+    return [...own, ...shared].filter((p: any) => p && p.in !== 'body');
   }
 
   function example(op: any): string | null {
@@ -181,18 +202,22 @@
           <div class="op-body">
             {#if o.op.description}<p class="desc">{o.op.description}</p>{/if}
 
-            {#if params(o.op).length}
+            {#if params(o.op, o.item).length}
               <h4>Parameters</h4>
               <table>
                 <thead><tr><th>name</th><th>in</th><th>type</th><th>req</th><th>description</th></tr></thead>
                 <tbody>
-                  {#each params(o.op) as p, i (i)}
+                  {#each params(o.op, o.item) as p, i (i)}
                     <tr>
                       <td><code>{p.name}</code></td>
                       <td>{p.in}</td>
                       <td>{typeLabel(p.schema ?? p)}</td>
                       <td>{p.required ? '✓' : ''}</td>
-                      <td>{p.description ?? ''}</td>
+                      <td
+                        >{p.description ?? ''}{p.example !== undefined
+                          ? `${p.description ? ' — ' : ''}e.g. ${p.example}`
+                          : ''}</td
+                      >
                     </tr>
                   {/each}
                 </tbody>
