@@ -211,6 +211,35 @@ test('ui: search panel, tags panel, quick switcher', async ({ page }) => {
   await expect(page.locator('.crumbs')).toContainText('auth-api');
 });
 
+test('ui: OpenAPI viewer resolves $ref parameters; multi-d2 notes render every diagram', async ({
+  page,
+}) => {
+  await openPage(page, 'vault');
+  const tree = page.locator('.tree');
+
+  // Structured OpenAPI view: the $ref'd brand_id parameter resolves into a
+  // real row (name/in/req) instead of blank cells with the ref tail as type.
+  await tree.getByText('services', { exact: true }).click();
+  await tree.getByText('api-openapi.yaml', { exact: true }).click();
+  const op = page.locator('.oas details.op', { hasText: '/login/{brand_id}/player' });
+  await op.locator('summary').click();
+  const row = op.locator('tbody tr', { hasText: 'brand_id' });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('path');
+  await expect(row).toContainText('✓');
+
+  // Both d2 fences in one note render to SVG — concurrent renders used to
+  // cross-wire the worker bridge ("[object Object]" / stuck raw source).
+  await tree.getByText('runbooks', { exact: true }).click();
+  await tree.getByText('data-model', { exact: true }).click();
+  const blocks = page.locator('.read div.diagram-block');
+  await expect(blocks).toHaveCount(2);
+  // d2 output nests an inner <svg> — assert on the outermost one.
+  await expect(blocks.nth(0).locator('svg').first()).toBeVisible({ timeout: 30_000 });
+  await expect(blocks.nth(1).locator('svg').first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('.read')).not.toContainText('[object Object]');
+});
+
 test('ui: OKF panel validates and reports', async ({ page }) => {
   await openPage(page, 'vault');
   const tree = page.locator('.tree');

@@ -82,6 +82,43 @@ export async function seedVaultDir(
     join(dir, 'runbooks', 'deploy.md'),
     '---\ntype: Runbook\ntitle: Deploy Runbook\ndescription: How we ship.\ntimestamp: 2026-07-10T10:00:00Z\n---\n\nShip [[auth-api]] carefully. #oncall\n',
   );
+  // OpenAPI artifact with $ref'd parameters — the structured viewer must
+  // resolve them into name/in/req cells, not render blank rows.
+  writeFileSync(
+    join(dir, 'services', 'api-openapi.yaml'),
+    [
+      'openapi: 3.0.3',
+      'info:',
+      '  title: auth',
+      '  version: 1.0.0',
+      'paths:',
+      '  /login/{brand_id}/player:',
+      '    post:',
+      '      operationId: login',
+      '      summary: Player login',
+      '      parameters:',
+      "      - $ref: '#/components/parameters/brandId'",
+      '      responses:',
+      "        '200':",
+      '          description: ok',
+      'components:',
+      '  parameters:',
+      '    brandId:',
+      '      name: brand_id',
+      '      in: path',
+      '      required: true',
+      '      schema:',
+      '        type: integer',
+      '',
+    ].join('\n'),
+  );
+  // Two d2 fences in ONE note — regression for the worker-bridge race that
+  // rendered "[object Object]" / left diagrams stuck as raw source when
+  // fences rendered concurrently.
+  writeFileSync(
+    join(dir, 'runbooks', 'data-model.md'),
+    '---\ntype: Reference\ntitle: Data Model\ndescription: Two d2 diagrams in one note.\ntimestamp: 2026-07-10T10:00:00Z\n---\n\n# Stores\n\n```d2\nplayers: {\n  shape: sql_table\n  id: "bigint PK"\n  login: varchar\n}\n```\n\n# Sessions\n\n```d2\napi: "POST /login"\nredis: "Redis session" { shape: cylinder }\napi -> redis\n```\n',
+  );
   // Optional synthetic bulk for graph-scale specs: chained + hub-linked notes.
   const extra = opts.notes ?? 0;
   if (extra > 0) {
