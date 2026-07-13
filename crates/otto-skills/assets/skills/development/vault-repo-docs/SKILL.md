@@ -2,9 +2,9 @@
 name: vault-repo-docs
 description: Use when indexing, scanning, or documenting a repository into the Otto Vault as a durable OKF bundle, including full, focused, and incremental scans or feature dependency maps; not for code review or one-off repository questions.
 category: development
-version: 4
+version: 5
 metadata:
-  version: "4.0.0"
+  version: "5.0.0"
 ---
 
 # Vault Repository Documentation
@@ -36,16 +36,26 @@ sample.
    - [datastore-documentation.md](references/datastore-documentation.md)
    - [flows-messaging-workers.md](references/flows-messaging-workers.md)
    - [evidence-and-citations.md](references/evidence-and-citations.md)
+   - [cross-repo-dependencies.md](references/cross-repo-dependencies.md)
    Keep output consumable with linked concepts, dense tables, diagrams, and
    examples; do not restate the repository line by line.
-5. Use `otto_vault_write` for Markdown. Use `otto_vault_write_file` for
+5. Resolve internal/platform dependencies to local checkouts and DEEP-DIVE
+   into them where a flow crosses the boundary: document what the called code
+   actually does for this flow (cited as `<dep-repo>:path:line`), link the
+   dependency's vault bundle at the mention — forward-linking
+   `../<dep-repo>/index.md` even when that repo is not scanned yet — and write
+   `dependencies.md`. See
+   [cross-repo-dependencies.md](references/cross-repo-dependencies.md).
+6. Use `otto_vault_write` for Markdown. Use `otto_vault_write_file` for
    approved text artifacts such as `api-openapi.yaml`; never hide YAML in a
    Markdown note merely because the writer lacks the correct tool.
-6. Run the OKF validator and `scripts/audit_repo_bundle.py BUNDLE --manifest
+7. Run the OKF validator and `scripts/audit_repo_bundle.py BUNDLE --manifest
    BUNDLE/manifest.json`. The audit resolves document links, checks kind-specific
    depth, and reconciles API operations with OpenAPI. Resolve every finding; an
    uncertain row deliberately fails the completion gate and means partial.
-7. Perform a second source pass: re-check at least the route registration plus
+   Forward links into not-yet-scanned dependency bundles are the one accepted
+   class of unresolved link.
+8. Perform a second source pass: re-check at least the route registration plus
    DTO for each API, every DB access path cited, and every trigger/side effect
    for runtime flows. Update the ledger and scan marker only after this pass.
 
@@ -67,6 +77,10 @@ A full scan is complete only when:
   steps naming each store as engine + table/collection, request/response
   examples for HTTP-triggered flows, and a diagram whose store nodes carry the
   engine name (the audit enforces all of these);
+- `dependencies.md` maps every internal dependency to its vault bundle (live
+  or forward link), flow steps that cross into a resolved dependency document
+  what happens inside it (cited `<dep-repo>:path:line`), and a library scan's
+  `consumers.md` links back to documented importers;
 - every load-bearing claim cites `relative/path:line` and has been rechecked;
 - validators and audits are clean. If evidence is unavailable, say what remains
   uncertain and finish as partial rather than fabricating completeness.

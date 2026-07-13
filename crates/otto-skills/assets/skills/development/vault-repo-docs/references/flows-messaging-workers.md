@@ -43,6 +43,13 @@ Each flow also documents preconditions, data read and written at every step,
 external side effects, transaction boundaries, and observability, and links to
 its API, message, worker, and data concepts.
 
+Steps that call into an internal/platform library (a resolved local
+dependency) must say what happens INSIDE the call as it matters to this flow —
+discovery lookup, pooling, retries, transactionality — cited as
+`<dep-repo>:path:line`, with the mention linked to that repo's vault bundle
+(forward link if not yet scanned). See
+[cross-repo-dependencies.md](cross-repo-dependencies.md).
+
 ## Messaging
 
 For every message direction document broker/topic/queue, key/partition,

@@ -54,10 +54,11 @@ FLOWS — partial by nature in a library:
 /** Cross-repo linking — the vault is a graph; app bundles must link into the
  *  infra bundles that implement their calls, and infra links back to consumers. */
 const CROSS_REPO_RULES = `
-CROSS-REPO LINKS — the vault is a graph, connect this repo to the bundles already in it:
-1. BEFORE writing, list the vault's existing top-level bundles (otto_vault_list) — each is another repo already documented (e.g. go_utilities, go_casino_kit, other services).
-2. Whenever a flow step, data access, or client call is IMPLEMENTED by one of those documented repos (an imported library or a called service), link to that bundle at the exact mention — e.g. "opens the brand DB connection via [go_casino_kit multi-tenant SQL](../go_casino_kit/data.md)". Link the most specific existing note (package / flow / data note); fall back to that bundle's index.md. Never link bundles that don't exist yet.
-3. Write dependencies.md: one table of every external repo/library dependency the code ACTUALLY uses — import path → what this repo uses it for (with a file citation) → link to its vault bundle when documented, or "not in vault yet" when not. Link it from index.md.`;
+CROSS-REPO LINKS + DEPENDENCY DEEP-DIVE — the vault is a graph, connect this repo to its dependencies:
+1. BEFORE writing, list the vault's existing top-level bundles (otto_vault_list) — each is another repo already documented. ALWAYS resolve internal/platform dependencies to LOCAL source checkouts — they are usually on this machine: take the repo name from the module path's last segment (<host>/<org>/<repo> → <repo>) and look for a sibling of the scanned repo or ~/<repo>; also honor go.mod replace directives / vendor / workspace deps.
+2. Whenever a flow step, data access, or client call is IMPLEMENTED by an internal dependency, link to that repo's bundle at the exact mention — e.g. "opens the tenant DB connection via [<dep-repo> multi-tenant SQL](../<dep-repo>/data.md)". Link the most specific existing note; fall back to index.md. Bundles are folders named after the repo, so when the dependency is NOT scanned yet, still write the FORWARD link (../<dep-repo>/index.md) — it resolves the moment that repo gets scanned. Never omit the link.
+3. DEEP-DIVE: for each such call, open the dependency's local source and document what actually happens inside as it matters to THIS flow (discovery lookup, connection pooling, retries, caching, transactionality), citing <dep-repo>:path:line. The reader must not need to reverse-engineer the library to understand the flow.
+4. Write dependencies.md: one table of every internal repo/library dependency the code ACTUALLY uses — import path → local source path → what this repo uses it for (with a file citation) → vault bundle link (live, or forward-marked "not scanned yet"). Link it from index.md.`;
 
 /** Scope pivot appended when the "infra repo" box is ticked. */
 const INFRA_SCOPE = `
