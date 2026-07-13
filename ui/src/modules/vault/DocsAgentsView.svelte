@@ -556,10 +556,15 @@
                   {openTerminals.has(agent.session_id) ? 'Hide' : 'Open'}
                 </button>
               {/if}
-              {#if active && (agent.state === 'running' || agent.state === 'pending')}
+              <!-- An errored writer stays retryable while the writers stage is
+                   still open (run.state === 'running') — its slot keeps
+                   listening for the retry flag as long as any peer is moving. -->
+              {#if active && (agent.state === 'running' || agent.state === 'pending' || (agent.state === 'error' && run.state === 'running'))}
                 <button
                   class="ghost small"
-                  title="Kill this writer's session and restart its turn fresh"
+                  title={agent.state === 'error'
+                    ? "Re-spawn this writer's turn in a fresh session"
+                    : "Kill this writer's session and restart its turn fresh"}
                   disabled={retrying[String(agent.index)]}
                   onclick={() => void retry(agent.index)}
                 >

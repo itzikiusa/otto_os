@@ -1136,6 +1136,18 @@ async fn terminate_session(manager: Arc<otto_sessions::SessionManager>, sid: Id)
     let _ = manager.kill_session(&sid).await;
 }
 
+/// True while some OTHER writer slot is still moving — the window in which an
+/// errored slot keeps listening for a user retry. Once every peer is terminal
+/// the writers barrier must not hang on a slot nobody can un-stick.
+fn writers_stage_open(reg: &RunRegistry, run_id: &str, index: usize) -> bool {
+    reg.lock().unwrap().get(run_id).is_some_and(|e| {
+        e.run
+            .agents
+            .iter()
+            .any(|a| a.index != index && matches!(a.state.as_str(), "running" | "pending"))
+    })
+}
+
 async fn wait_for_retry_flag(
     retries: &Arc<Mutex<HashSet<usize>>>,
     cancel: &Arc<AtomicBool>,
@@ -1158,7 +1170,7 @@ async fn retry_target(
     run_id: String,
     index: usize,
 ) -> ApiResult<axum::http::StatusCode> {
-    let (ws_id, sid, retries) = {
+    let (ws_id, sid, needs_kill, retries) = {
         let reg = ctx.vault_docs_runs.lock().unwrap();
         let e = reg
             .get(&run_id)
@@ -1168,7 +1180,7 @@ async fn retry_target(
                 "run already finished — start a new run instead".into(),
             )));
         }
-        let sid = if index == SUM_RETRY_IDX {
+        let (sid, needs_kill) = if index == SUM_RETRY_IDX {
             if e.run.state != "summarizing"
                 || !matches!(e.run.summarizer.state.as_str(), "running" | "pending")
             {
@@ -1176,21 +1188,27 @@ async fn retry_target(
                     "summarizer is not running".into(),
                 )));
             }
-            e.run.summarizer.session_id.clone()
+            (e.run.summarizer.session_id.clone(), true)
         } else {
             let a = e
                 .run
                 .agents
                 .get(index)
                 .ok_or_else(|| ApiError(Error::NotFound(format!("writer {index}"))))?;
-            if !matches!(a.state.as_str(), "running" | "pending") {
-                return Err(ApiError(Error::Conflict(
-                    "writer is not running — cancel and start a new run".into(),
-                )));
+            // An ERRORED writer stays retryable while the writers stage is
+            // still open (its turn loop keeps listening for the flag as long
+            // as any peer is moving). Its session is already dead — no kill.
+            match a.state.as_str() {
+                "running" | "pending" => (a.session_id.clone(), true),
+                "error" if e.run.state == "running" => (None, false),
+                _ => {
+                    return Err(ApiError(Error::Conflict(
+                        "writer is not retryable — cancel and start a new run".into(),
+                    )));
+                }
             }
-            a.session_id.clone()
         };
-        (e.run.ws_id.clone(), sid, Arc::clone(&e.retries))
+        (e.run.ws_id.clone(), sid, needs_kill, Arc::clone(&e.retries))
     };
     crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id), WorkspaceRole::Editor).await?;
     retries.lock().unwrap().insert(index);
@@ -1208,7 +1226,8 @@ async fn retry_target(
     persist(&ctx.vault_docs_runs, &run_id);
     // Kill the current session so the in-flight turn errors and the loop
     // consumes the retry flag. Same interrupt-then-kill dance as cancel.
-    if let Some(sid) = sid {
+    // (Skipped for an errored slot — its session already died.)
+    if let Some(sid) = sid.filter(|_| needs_kill) {
         let manager = ctx.manager.clone();
         let sid = Id::from(sid);
         tokio::spawn(async move {
@@ -1843,6 +1862,7 @@ async fn run_docs(
             // loop re-spawns a FRESH session with the same prompt (new done-
             // marker each attempt; the old one is embedded in the old prompt).
             let mut user_retries: u32 = 0;
+            let mut auto_retries: u32 = 0;
             let ok = loop {
                 let (done_path, done_line) = done_marker();
                 let attempt_prompt = format!("{prompt}{done_line}");
@@ -1911,13 +1931,70 @@ async fn run_docs(
                             persist(&reg, &run_id);
                             continue;
                         }
+                        // Spawn-death flake: the CLI process exited/vanished
+                        // underneath the turn without a cancel or retry (codex
+                        // has died seconds after its trust prompt). One
+                        // automatic respawn before surfacing the error.
+                        let msg = e.0.to_string();
+                        if auto_retries < MAX_AUTO_RETRIES
+                            && (msg.contains("vanished") || msg.contains("exited"))
+                        {
+                            auto_retries += 1;
+                            warn!(
+                                "vault_docs: writer {} session died ({}); auto-respawning",
+                                i + 1,
+                                msg
+                            );
+                            with_run(&reg, &run_id, |r| {
+                                if let Some(a) = r.agents.get_mut(i) {
+                                    a.state = "pending".into();
+                                    a.error = None;
+                                }
+                            });
+                            persist(&reg, &run_id);
+                            continue;
+                        }
                         warn!("vault_docs: writer {} failed: {}", i + 1, e.0);
                         with_run(&reg, &run_id, |r| {
                             if let Some(a) = r.agents.get_mut(i) {
                                 a.state = "error".into();
-                                a.error = Some(e.0.to_string());
+                                a.error = Some(msg.clone());
                             }
                         });
+                        persist(&reg, &run_id);
+                        // The slot failed but the stage is still open while any
+                        // PEER is moving — keep listening for a user retry so an
+                        // early-crashed writer can be re-spawned without a new
+                        // run. Gives up when every peer is terminal (the writers
+                        // barrier must never hang on an un-stickable slot).
+                        let mut retried = false;
+                        loop {
+                            if cancel.load(Ordering::Relaxed)
+                                || user_retries >= MAX_USER_RETRIES
+                            {
+                                break;
+                            }
+                            let stage_open = writers_stage_open(&reg, &run_id, i);
+                            if retries.lock().unwrap().remove(&i) {
+                                user_retries += 1;
+                                with_run(&reg, &run_id, |r| {
+                                    if let Some(a) = r.agents.get_mut(i) {
+                                        a.state = "pending".into();
+                                        a.error = None;
+                                    }
+                                });
+                                persist(&reg, &run_id);
+                                retried = true;
+                                break;
+                            }
+                            if !stage_open {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        }
+                        if retried {
+                            continue;
+                        }
                         break false;
                     }
                 }
@@ -1932,6 +2009,18 @@ async fn run_docs(
             any_ok = any_ok || ok;
         }
     }
+    // A retry that lands in the instant between an errored waiter giving up
+    // and the barrier closing flips its slot "pending" with nobody left to
+    // serve it — surface that honestly instead of a forever-pending writer.
+    with_run(&reg, &run_id, |r| {
+        for a in r.agents.iter_mut() {
+            if a.state == "pending" {
+                a.state = "error".into();
+                a.error =
+                    Some("retry arrived after the writers stage closed — start a new run".into());
+            }
+        }
+    });
 
     if cancel.load(Ordering::Relaxed) {
         finish_run(&reg, &run_id, "cancelled", None);
@@ -3090,6 +3179,11 @@ const QUIET_DONE: std::time::Duration = std::time::Duration::from_secs(150);
 /// a sanity bound, not a policy (each retry is an explicit click).
 const MAX_USER_RETRIES: u32 = 5;
 
+/// One automatic respawn per writer slot when its CLI process dies underneath
+/// the turn (codex has been seen exiting seconds after its trust prompt). A
+/// single attempt heals the flake without looping on a persistent failure.
+const MAX_AUTO_RETRIES: u32 = 1;
+
 /// Bundled, read-only review methods accepted by the public run request.
 pub const VAULT_REVIEWER_SKILLS: [&str; 5] = [
     "vault-docs-review",
@@ -4187,6 +4281,36 @@ mod tests {
         assert!(retry_needs_termination("running"));
         assert!(retry_needs_termination("pending"));
         assert!(!retry_needs_termination("error"));
+    }
+
+    #[test]
+    fn errored_writer_waits_only_while_a_peer_is_still_moving() {
+        let reg = new_run_registry();
+        let mut run = sample_run("running");
+        // agents: 0=done, 1=running, 2=pending (from sample_run). Slot 0 errored
+        // → the stage is open for it while 1/2 move.
+        run.agents[0].state = "error".into();
+        reg.lock().unwrap().insert(
+            run.id.clone(),
+            RunEntry {
+                run,
+                cancel: Arc::new(AtomicBool::new(false)),
+                retries: Arc::new(Mutex::new(HashSet::new())),
+                persist_tx: None,
+            },
+        );
+        assert!(writers_stage_open(&reg, "run-12345678", 0));
+        // A slot never counts ITSELF as an open peer.
+        assert!(writers_stage_open(&reg, "run-12345678", 1)); // peer 2 pending
+        with_run(&reg, "run-12345678", |r| {
+            r.agents[1].state = "done".into();
+            r.agents[2].state = "error".into();
+        });
+        // Every peer terminal → the waiter must give up (barrier can't hang).
+        assert!(!writers_stage_open(&reg, "run-12345678", 0));
+        assert!(!writers_stage_open(&reg, "run-12345678", 2));
+        // Unknown run → closed.
+        assert!(!writers_stage_open(&reg, "nope", 0));
     }
 
     #[test]
