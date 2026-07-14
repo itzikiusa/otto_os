@@ -123,7 +123,9 @@ class VaultStore {
   /** One-shot prompt/skills prefill for the docs-agent form ("Review + fix
    *  docs" on a folder, "Send to agent to fix" on a findings run). The view
    *  consumes it on open. */
-  docsAgentsPrefill = $state<{ prompt: string; skills: string[] } | null>(null);
+  docsAgentsPrefill = $state<{ prompt: string; skills: string[]; autorun?: boolean } | null>(
+    null,
+  );
   /** One-shot "Review + fix" request for a note: NoteView auto-opens the
    *  refine drawer and the drawer auto-sends this prompt for the given path. */
   pendingRefine = $state<{ path: string; prompt: string } | null>(null);
@@ -727,15 +729,21 @@ class VaultStore {
   }
 
   /** "Send to agent…" on a folder — free-form instruction scoped to the dir
-   *  (e.g. "split the flows into groups with proper indexing"). */
+   *  (e.g. "split the flows into groups with proper indexing"). An empty
+   *  instruction leaves the scaffold open-ended: the docs-agent form's prompt
+   *  box is where the user writes it (window.prompt doesn't exist in the
+   *  desktop webview, so the form IS the input). */
   sendDirToAgent(dir: string, instruction: string): void {
+    const inst = instruction.trim()
+      ? `Instruction:\n${instruction.trim()}`
+      : `Instruction:\n(write what to do with this folder here, then press Run)`;
     this.docsAgentsPrefill = {
       prompt:
         `Work on the folder \`${dir}/\` of this vault. Read its index and notes first; ` +
         `keep every note's content source-backed (never drop citations, examples or ` +
         `diagrams while reorganizing), and keep all links — inbound and outbound — ` +
         `resolving when you move or rename notes (update index.md files accordingly).\n\n` +
-        `Instruction:\n${instruction}\n\n` +
+        `${inst}\n\n` +
         `Finish with a one-line summary of what changed.`,
       skills: [],
     };
@@ -743,7 +751,7 @@ class VaultStore {
   }
 
   /** Multi-select → one agent request over the group (canned review+fix or a
-   *  free-form instruction). */
+   *  free-form instruction). Auto-runs: the group bar's button IS the send. */
   sendGroupToAgent(paths: string[], instruction: string | null): void {
     const list = paths.map((p) => `- \`${p}\``).join('\n');
     const task = instruction
@@ -759,6 +767,7 @@ class VaultStore {
         `${list}\n\n${task}\n\n` +
         `Finish with a one-line summary per note changed.`,
       skills: ['vault-repo-docs'],
+      autorun: true,
     };
     this.openDocsAgents();
   }

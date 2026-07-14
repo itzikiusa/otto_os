@@ -45,13 +45,19 @@
     clearSelection();
   }
 
+  // Free-form group instruction, typed INLINE in the selection bar —
+  // window.prompt() does not exist in the desktop webview (silent no-op).
+  let groupPrompt = $state('');
+  let groupInputEl = $state<HTMLInputElement | null>(null);
+
   function groupSend(): void {
-    const inst = prompt(
-      'Instruction for the agent (applies to the selected notes as one group)',
-      'e.g. merge overlapping content and align terminology across these notes',
-    );
-    if (!inst?.trim()) return;
-    vault.sendGroupToAgent([...selected], inst.trim());
+    const inst = groupPrompt.trim();
+    if (!inst) {
+      groupInputEl?.focus();
+      return;
+    }
+    vault.sendGroupToAgent([...selected], inst);
+    groupPrompt = '';
     clearSelection();
   }
 
@@ -113,13 +119,23 @@
                   ? void vault.open(n.entry.path, { newTab: true })
                   : void vault.openFile(n.entry.path, { newTab: true }),
             },
+            // With a multi-selection containing this note, Review + fix acts
+            // on the WHOLE selection (same as the selection bar) — a single
+            // right-clicked note out of N selected being fixed alone is never
+            // what the user meant.
             ...(n.entry.kind === 'note'
               ? [
-                  {
-                    label: 'Review + fix (agent)',
-                    icon: 'zap',
-                    action: () => vault.reviewFixNote(n.entry.path),
-                  },
+                  selected.size > 1 && selected.has(n.entry.path)
+                    ? {
+                        label: `Review + fix ${selected.size} selected (agent)`,
+                        icon: 'zap',
+                        action: () => groupReviewFix(),
+                      }
+                    : {
+                        label: 'Review + fix (agent)',
+                        icon: 'zap',
+                        action: () => vault.reviewFixNote(n.entry.path),
+                      },
                 ]
               : []),
             { separator: true },
@@ -138,15 +154,12 @@
               action: () => vault.reviewFixBundle(n.entry.path),
             },
             {
+              // Opens the docs-agent form scoped to the folder — the form's
+              // prompt box is where the instruction is written (window.prompt
+              // does not exist in the desktop webview).
               label: 'Send to agent…',
               icon: 'zap',
-              action: () => {
-                const inst = prompt(
-                  'Instruction for the agent (scoped to this folder)',
-                  'e.g. split these flows into grouped subfolders with a proper index',
-                );
-                if (inst?.trim()) vault.sendDirToAgent(n.entry.path, inst.trim());
-              },
+              action: () => vault.sendDirToAgent(n.entry.path, ''),
             },
             {
               label: 'New folder here',
@@ -277,14 +290,36 @@
 
   {#if selected.size > 0}
     <div class="sel-bar">
-      <span class="sel-count">{selected.size} selected</span>
-      <button class="ghost" title="Review + fix the selected notes as one coherent set" onclick={groupReviewFix}>
-        Review + fix
-      </button>
-      <button class="ghost" title="Send the selected notes to an agent with a custom instruction" onclick={groupSend}>
-        Send to agent…
-      </button>
-      <button class="ghost dim" onclick={clearSelection}>Clear</button>
+      <div class="sel-row">
+        <span class="sel-count">{selected.size} selected</span>
+        <button
+          class="ghost"
+          title="Review + fix ALL {selected.size} selected notes as one coherent set (starts the agent immediately)"
+          onclick={groupReviewFix}
+        >
+          Review + fix
+        </button>
+        <button class="ghost dim" onclick={clearSelection}>Clear</button>
+      </div>
+      <div class="sel-row">
+        <input
+          class="sel-input"
+          bind:this={groupInputEl}
+          bind:value={groupPrompt}
+          placeholder="Instruction for the {selected.size} notes… (Enter to send)"
+          onkeydown={(e) => {
+            if (e.key === 'Enter') groupSend();
+          }}
+        />
+        <button
+          class="ghost"
+          title="Send ALL {selected.size} selected notes to an agent with this instruction"
+          disabled={!groupPrompt.trim()}
+          onclick={groupSend}
+        >
+          Send
+        </button>
+      </div>
     </div>
   {/if}
 </div>
@@ -366,17 +401,35 @@
   }
   .sel-bar {
     display: flex;
-    align-items: center;
+    flex-direction: column;
     gap: 6px;
     padding: 6px 8px;
     border-top: 1px solid var(--border);
     background: var(--panel, #1c1c1e);
-    flex-wrap: wrap;
+  }
+  .sel-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
   .sel-count {
     font-size: 11px;
     color: var(--text-dim);
     margin-inline-end: auto;
+  }
+  .sel-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--panel-2, #222);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 11.5px;
+    padding: 4px 8px;
+  }
+  .sel-bar .ghost:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .sel-bar .ghost {
     background: none;

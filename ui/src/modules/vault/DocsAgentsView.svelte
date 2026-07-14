@@ -120,14 +120,17 @@
 
   // One-shot prompt/skills prefill ("Review + fix docs", "Send to agent…",
   // group actions, "Send to agent to fix" on a findings run). Consuming it
-  // also deselects any run so the form is what the user lands on.
+  // also deselects any run so the form is what the user lands on. `autorun`
+  // (group-bar actions) launches immediately — the bar's button IS the send.
   $effect(() => {
     const p = vault.docsAgentsPrefill;
     if (!p) return;
     vault.docsAgentsPrefill = null;
     prompt = p.prompt;
     tplSkills = p.skills;
+    targetDir = vault.docsAgentsDir;
     vault.docsRun = null;
+    if (p.autorun) void start();
   });
 
   function addAgent(): void {
