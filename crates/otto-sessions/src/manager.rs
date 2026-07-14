@@ -1757,6 +1757,72 @@ impl SessionManager {
         after > before.saturating_add(30)
     }
 
+    /// Best-effort path of the provider's on-disk ACTIVITY ARTIFACT for a
+    /// session — the file that grows while the agent works: claude's transcript
+    /// JSONL, codex's rollout JSONL, agy's conversation db. Callers use its
+    /// mtime as a truthful progress clock (PTY output lies for agent TUIs: an
+    /// idle spinner repaints forever). `None` when the provider has no artifact
+    /// (shell/custom/grok), the provider session id isn't captured yet
+    /// (codex/agy mint it a few seconds post-spawn), or the file doesn't exist
+    /// yet — callers keep their PTY-clock fallback and re-ask later, and must
+    /// never read a missing artifact as "no progress".
+    pub async fn activity_artifact(&self, id: &Id) -> Option<std::path::PathBuf> {
+        let session = self.repo.get(id).await.ok()?;
+        let psid = session.provider_session_id.clone()?;
+        let path = match session.provider.as_str() {
+            // `~/.claude/projects/<enc(cwd)>/<psid>.jsonl`. claude symlink-
+            // resolves the spawn cwd for its transcript dir, so canonicalize
+            // before encoding (same rule as otto-server's transcript polling;
+            // encoding mirrors otto_orchestrator::claude_pty::project_dir).
+            "claude" => {
+                let cwd = std::fs::canonicalize(&session.cwd)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| session.cwd.clone());
+                let enc: String = cwd
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                    .collect();
+                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join(".claude")
+                    .join("projects")
+                    .join(enc)
+                    .join(format!("{psid}.jsonl"))
+            }
+            // `<sessions root>/YYYY/MM/DD/rollout-<ts>-<psid>.jsonl`, found by
+            // filename suffix. The rollout's mtime only moves forward, so the
+            // session-creation floor keeps the walk cheap even with history.
+            "codex" => {
+                let floor = std::time::SystemTime::from(session.created_at)
+                    .checked_sub(Duration::from_secs(2))
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                let suffix = format!("-{psid}.jsonl");
+                recent_codex_rollouts(&codex_sessions_root(), floor)
+                    .into_iter()
+                    .find(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.ends_with(&suffix))
+                    })?
+            }
+            // `conversations/<psid>.db|.pb` — the most recently touched of the
+            // two (agy writes whichever format it's on; either grows per turn).
+            "agy" => {
+                let dir = agy_cli_root().join("conversations");
+                ["db", "pb"]
+                    .iter()
+                    .filter_map(|ext| {
+                        let p = dir.join(format!("{psid}.{ext}"));
+                        let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok()?;
+                        Some((mtime, p))
+                    })
+                    .max_by_key(|(m, _)| *m)
+                    .map(|(_, p)| p)?
+            }
+            _ => return None,
+        };
+        std::fs::metadata(&path).is_ok().then_some(path)
+    }
+
     /// One sweep of the idle-suspend policy: suspend every LIVE session that is
     /// resumable, idle (no output for ≥ [`SUSPEND_GRACE`]) and has no attached
     /// WS viewer. Working sessions, attached sessions and non-resumable
