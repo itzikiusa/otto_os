@@ -153,9 +153,41 @@ fn trust_grok(cwd: &str) -> Result<(), String> {
     let path = dir.join("trusted_folders.toml");
     let current = std::fs::read_to_string(&path).unwrap_or_default();
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut next = current;
+    // Grok's own store writes `decided_at` as an INTEGER unix timestamp (see a
+    // manually-approved entry). We used to write an ISO-8601 STRING, which grok
+    // does not accept — the "pre-trusted" folder still stalled on the trust
+    // prompt. Write the integer form, and repair any string entries an earlier
+    // Otto left behind (they poison grok's parse of the file).
+    let now = chrono::Utc::now().timestamp();
     let mut changed = false;
+    let mut next = if current.contains("decided_at = \"") {
+        changed = true;
+        let repaired: Vec<String> = current
+            .lines()
+            .map(|l| {
+                let t = l.trim();
+                match t
+                    .strip_prefix("decided_at = \"")
+                    .and_then(|r| r.strip_suffix('"'))
+                {
+                    Some(v) => {
+                        let ts = chrono::DateTime::parse_from_rfc3339(v)
+                            .map(|d| d.timestamp())
+                            .unwrap_or(now);
+                        format!("decided_at = {ts}")
+                    }
+                    None => l.to_string(),
+                }
+            })
+            .collect();
+        let mut s = repaired.join("\n");
+        if !s.is_empty() && !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s
+    } else {
+        current
+    };
     for variant in path_variants(cwd) {
         if variant.is_empty() || variant == "/" || variant == home_str {
             continue;
@@ -167,9 +199,7 @@ fn trust_grok(cwd: &str) -> Result<(), String> {
         if !next.is_empty() && !next.ends_with('\n') {
             next.push('\n');
         }
-        next.push_str(&format!(
-            "\n{header}\ntrusted = true\ndecided_at = \"{now}\"\n"
-        ));
+        next.push_str(&format!("\n{header}\ntrusted = true\ndecided_at = {now}\n"));
         changed = true;
     }
     if !changed {
