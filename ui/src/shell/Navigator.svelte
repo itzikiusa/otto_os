@@ -106,6 +106,15 @@
     ws.navigateToSession(id);
   }
 
+  /** Respawn a stuck in-progress agent's PTY (the terminal reconnects itself). */
+  async function restartAgent(id: string): Promise<void> {
+    try {
+      await ws.restartSession(id);
+    } catch (e) {
+      toasts.error('Restart failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   // ── Workspace management (context menu on the Workspaces rows) ──────────────
   async function renameWorkspace(w: WorkspaceWithRole): Promise<void> {
     const name = await confirmer.promptText('New workspace name', {
@@ -680,6 +689,11 @@
           { label: 'Rename', icon: 'edit', action: () => startRename(s.id, s.title) },
           { separator: true },
           ...(ws.myRole !== 'viewer' ? [
+            // In-progress agent only: respawn a stuck PTY (provider resume when
+            // possible). Idle/exited/reconnectable sessions have their own paths.
+            ...(s.kind === 'agent' && (status === 'running' || status === 'working')
+              ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restartAgent(s.id) }]
+              : []),
             { label: 'Archive', icon: 'archive', action: () => ws.archiveSession(s.id) },
             { label: 'Delete', icon: 'trash', danger: true as const, action: () => ws.killSession(s.id) },
           ] : []),

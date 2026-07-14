@@ -292,6 +292,11 @@
             },
           ]
         : []),
+      // In-progress agent only: respawn a stuck PTY (provider resume when
+      // possible). Idle/exited/reconnectable sessions have their own paths.
+      ...(isAgent && (status === 'running' || status === 'working')
+        ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restart() } as MenuItem]
+        : []),
       { separator: true },
       { label: 'Archive', icon: 'archive', action: () => void archive() },
       { label: 'Delete', icon: 'trash', danger: true, action: () => void del() },
