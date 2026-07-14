@@ -2119,8 +2119,9 @@ The response/persisted DTOs are mirrored in `ui/src/lib/api/types.ts`:
 | POST /vault/docs-agents/runs/{run_id}/cancel | ws editor (the run's ws, re-checked) | — | 204 — marks the run/review/current round and active nested slots `cancelled`, stops orchestration, and terminates active sessions; finished slots keep their results. 404 once terminal. |
 | POST /vault/docs-agents/runs/{run_id}/resolve | ws editor (the run's ws, re-checked) | `{outcome: "ok"\|"fixed"}` | `VaultDocsRun` — user disposition for a `done_with_findings` run: flips it to `done` durably and stamps `review.outcome` `resolved_ok`/`resolved_fixed`. `409` for any other state; `400` for an unknown outcome. |
 | DELETE /vault/docs-agents/runs/{run_id} | ws editor (the run's ws, re-checked) | — | `204` — history cleanup: drops one TERMINAL run's durable row (and any lingering registry snapshot). `409` while the run is active (cancel first). |
-| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — long request; one resumed session per (vault, note), rehydrated after restart; `provider` is honored on the first turn only. |
+| POST /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine | ws editor | `{path, prompt, provider?, model?}` | `{session_id, reply}` — long request; one resumed session per (vault, note), rehydrated after restart. An explicit `provider` DIFFERENT from the bound session's starts a FRESH session (rebinds the note); same/omitted resumes. |
 | GET /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws viewer | `?path=` | `{session_id: string\|null, running: boolean}` — poll after posting refine to attach the live shell. |
+| DELETE /workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session | ws editor | `?path=` | `{session_id: null, running: false}` — detach the note's refine session (the old session stays in the sessions list). Writes a tombstone so rehydration doesn't resurrect the binding; the next refine POST starts a fresh agent with any provider. |
 
 ## Message Brokers (Kafka viewer)
 

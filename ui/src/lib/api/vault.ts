@@ -217,3 +217,10 @@ export function refineSession(ws: string, id: number, path: string) {
     `${base(ws)}/${id}/docs-agents/refine-session?path=${enc(path)}`,
   );
 }
+
+/** Detach the note's refine session — the next Send starts a fresh agent. */
+export function resetRefineSession(ws: string, id: number, path: string) {
+  return api.del<{ session_id: string | null; running: boolean }>(
+    `${base(ws)}/${id}/docs-agents/refine-session?path=${enc(path)}`,
+  );
+}

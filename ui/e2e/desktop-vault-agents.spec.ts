@@ -91,6 +91,24 @@ test('api: single-agent run skips the summarizer; refine registers a session', a
     await ctx.get(`${v1}/docs-agents/refine-session?path=runbooks%2Fdeploy.md`)
   ).json();
   expect(reg.session_id).toBe(refine.session_id);
+
+  // Reset detaches the binding (tombstone: no rehydration resurrects it) —
+  // the next refine starts a FRESH session instead of resuming the old one.
+  const reset = await (
+    await ctx.delete(`${v1}/docs-agents/refine-session?path=runbooks%2Fdeploy.md`)
+  ).json();
+  expect(reset.session_id).toBeNull();
+  const afterReset = await (
+    await ctx.get(`${v1}/docs-agents/refine-session?path=runbooks%2Fdeploy.md`)
+  ).json();
+  expect(afterReset.session_id).toBeNull();
+  const fresh = await (
+    await ctx.post(`${v1}/docs-agents/refine`, {
+      data: { path: 'runbooks/deploy.md', prompt: 'Tighten the intro' },
+    })
+  ).json();
+  expect(fresh.session_id).toBeTruthy();
+  expect(fresh.session_id).not.toBe(refine.session_id);
   await ctx.dispose();
 });
 

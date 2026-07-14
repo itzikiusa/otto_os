@@ -905,6 +905,11 @@ mod tests {
             pol(Method::GET, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session"),
             Require(Product, View),
         );
+        // Reset (detach the note's refine session) is a mutation → Edit.
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session"),
+            Require(Product, Edit),
+        );
         assert_eq!(
             pol(Method::GET, "/api/v1/workspaces/{ws}/vault/vaults/{id}/docs-agents/runs"),
             Require(Product, View),

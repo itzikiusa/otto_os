@@ -10,7 +10,7 @@
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
-  import { refineNote, refineSession } from '../../lib/api/vault';
+  import { refineNote, refineSession, resetRefineSession } from '../../lib/api/vault';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { toasts } from '../../lib/toast.svelte';
   import { vault } from './vault.svelte';
@@ -21,6 +21,9 @@
   let prompt = $state('');
   let sending = $state(false);
   let sessionId = $state<string | null>(null);
+  /** Bumped on reset — a long-running send from a previous epoch must not
+   *  re-apply its (stale) session/state when it finally resolves. */
+  let epoch = 0;
 
   const providers = $derived(agentProviders());
 
@@ -44,8 +47,10 @@
 
   async function checkSession(): Promise<void> {
     if (!vault.current) return;
+    const myEpoch = epoch;
     try {
       const s = await refineSession(vault.wsId, vault.current.id, path);
+      if (myEpoch !== epoch) return; // reset raced this poll
       if (s.session_id) {
         sessionId = s.session_id;
         stopPolling();
@@ -59,9 +64,11 @@
     const p = prompt.trim();
     if (!p || sending || !vault.current) return;
     sending = true;
+    const myEpoch = epoch;
     startSessionPoll();
     try {
       const r = await refineNote(vault.wsId, vault.current.id, { path, prompt: p, provider });
+      if (myEpoch !== epoch) return; // reset happened mid-turn — stale result
       sessionId = r.session_id;
       stopPolling();
       prompt = '';
@@ -71,11 +78,28 @@
         void vault.open(path);
       }
     } catch (e) {
+      if (myEpoch !== epoch) return;
       stopPolling();
       toasts.error('Refine failed', e instanceof Error ? e.message : String(e));
     } finally {
-      sending = false;
+      if (myEpoch === epoch) sending = false;
     }
+  }
+
+  /** Detach the note's session: unblocks a stuck/exited agent — the next Send
+   *  starts a FRESH session with whatever provider is selected. */
+  async function reset(): Promise<void> {
+    if (!vault.current) return;
+    epoch += 1;
+    stopPolling();
+    try {
+      await resetRefineSession(vault.wsId, vault.current.id, path);
+    } catch (e) {
+      toasts.error('Reset failed', e instanceof Error ? e.message : String(e));
+      return;
+    }
+    sessionId = null;
+    sending = false;
   }
 
   onMount(() => {
@@ -97,8 +121,10 @@
     <span class="spark"><Icon name="zap" size={13} /></span>
     <select
       bind:value={provider}
-      disabled={!!sessionId || sending}
-      title={sessionId ? 'Provider is locked to this note’s refine session' : 'Agent provider'}
+      disabled={sending}
+      title={sessionId
+        ? 'Picking a different provider starts a fresh agent session on the next Send'
+        : 'Agent provider'}
     >
       {#each providers as p (p)}
         <option value={p}>{p}</option>
@@ -115,6 +141,15 @@
     <button class="send" disabled={sending || !prompt.trim()} onclick={() => void send()}>
       {#if sending}<span class="spinner-xs"></span> Working…{:else}Send{/if}
     </button>
+    {#if sessionId || sending}
+      <button
+        class="reset"
+        title="Detach this note’s agent session — unblocks a stuck or exited agent; the next Send starts a fresh one"
+        onclick={() => void reset()}
+      >
+        <Icon name="refresh" size={12} /> New agent
+      </button>
+    {/if}
   </div>
 
   {#if sessionId}
@@ -194,6 +229,23 @@
   .send:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  .reset {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 7px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .reset:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
   }
   .term {
     flex: 1;

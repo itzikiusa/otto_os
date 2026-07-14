@@ -535,7 +535,7 @@ pub fn routes() -> Router<ServerCtx> {
         )
         .route(
             "/workspaces/{ws}/vault/vaults/{id}/docs-agents/refine-session",
-            get(refine_session),
+            get(refine_session).delete(reset_refine_session),
         )
         .route(
             "/workspaces/{ws}/vault/vaults/{id}/docs-agents/runs",
@@ -1391,26 +1391,25 @@ async fn refine(
         .map_err(ApiError)?;
     let key = (vault_id, req.path.clone());
 
-    // Resume the note's session when one exists; the request's provider is
-    // honored on the FIRST turn only. A resumed turn must poll the transcript
-    // of the session's REAL provider, so read it back from the session record.
-    // The registry is memory-only — on a miss (fresh daemon), rehydrate the
-    // note's session from its newest persisted refine turn so "one session per
-    // note" survives restarts.
-    let mut existing = ctx
-        .vault_docs_refine
-        .lock()
-        .unwrap()
-        .get(&key)
-        .and_then(|e| e.session_id.clone());
-    if existing.is_none() {
+    // Resume the note's session when one exists AND the requested provider
+    // matches it. The registry is memory-only — on a true miss (fresh daemon,
+    // note never bound), rehydrate from the newest persisted refine turn so
+    // "one session per note" survives restarts; an explicit reset writes a
+    // tombstone entry (present, no session) that must NOT rehydrate.
+    let (mut existing, bound) = {
+        let reg = ctx.vault_docs_refine.lock().unwrap();
+        match reg.get(&key) {
+            Some(e) => (e.session_id.clone(), true),
+            None => (None, false),
+        }
+    };
+    if existing.is_none() && !bound {
         existing = rehydrate_refine_session(&ctx, vault_id, &req.path).await;
         if let Some(sid) = &existing {
             let mut reg = ctx.vault_docs_refine.lock().unwrap();
             reg.entry(key.clone()).or_default().session_id = Some(sid.clone());
         }
     }
-    let first_turn = existing.is_none();
     let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
         .get("default_provider")
         .await
@@ -1421,11 +1420,30 @@ async fn refine(
         otto_core::provider::workspace_default(&ws.settings),
         otto_core::provider::global_default(global_default.as_ref()),
     ]);
-    if let Some(sid) = &existing {
-        if let Ok(s) = ctx.manager.get(sid).await {
-            provider = s.provider;
+    if let Some(sid) = existing.clone() {
+        match ctx.manager.get(&sid).await {
+            // An explicitly different provider means "give me a fresh agent on
+            // this note" (the drawer's picker is live, not locked) — drop the
+            // old binding and spawn new below. Same/unspecified resumes, and
+            // the session's REAL provider drives transcript polling.
+            Ok(s) => {
+                let switched = req
+                    .provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .is_some_and(|p| p != s.provider);
+                if switched {
+                    existing = None;
+                } else {
+                    provider = s.provider;
+                }
+            }
+            // Session record gone (deleted) — the binding is stale; start over.
+            Err(_) => existing = None,
         }
     }
+    let first_turn = existing.is_none();
     otto_sessions::trust::ensure_trusted(&provider, &vault.root_path);
 
     let refine_skill_names = if vault.okf {
@@ -1535,11 +1553,18 @@ async fn refine(
         spawn_persister(repo.clone(), move || Some(snap.lock().unwrap().clone()))
     };
 
+    // This turn's session id, for the finalizer: a reset / provider switch can
+    // rebind the note to a DIFFERENT session while this turn still runs — the
+    // finalizer must only touch the registry entry if it still points at us.
+    let turn_sid: Arc<Mutex<Option<Id>>> = Arc::new(Mutex::new(existing.clone()));
+
     let ready_reg = ctx.vault_docs_refine.clone();
     let ready_key = key.clone();
     let ready_tx = persist_tx.clone();
     let ready_turn = Arc::clone(&turn_run);
+    let ready_sid = Arc::clone(&turn_sid);
     let on_ready = move |sid: &Id| {
+        *ready_sid.lock().unwrap() = Some(sid.clone());
         {
             let mut reg = ready_reg.lock().unwrap();
             let e = reg.entry(ready_key).or_default();
@@ -1587,8 +1612,13 @@ async fn refine(
             // The turn is over either way — clear `running` + finish the
             // recorded turn (this task survives a client disconnect, so the
             // row can never be stranded `running` until the next restart).
+            // Guarded: a reset / provider switch may have rebound this note to
+            // a different session mid-turn — leave that newer binding alone.
+            let ours = turn_sid.lock().unwrap().clone();
             if let Some(e) = refine_reg.lock().unwrap().get_mut(&key) {
-                e.running = false;
+                if e.session_id.is_none() || e.session_id == ours {
+                    e.running = false;
+                }
             }
             let final_row = {
                 let mut run = turn_run.lock().unwrap();
@@ -1615,7 +1645,9 @@ async fn refine(
             };
             if let Ok((_reply, sid)) = &turn {
                 if let Some(e) = refine_reg.lock().unwrap().get_mut(&key) {
-                    e.session_id = Some(sid.clone());
+                    if e.session_id.is_none() || e.session_id == ours {
+                        e.session_id = Some(sid.clone());
+                    }
                 }
             }
             // Flush any queued on_ready write, then land the terminal row
@@ -1653,16 +1685,17 @@ async fn refine_session(
         .get_scoped(&ws_id, vault_id)
         .await
         .map_err(ApiError)?;
-    let mut entry = ctx
-        .vault_docs_refine
-        .lock()
-        .unwrap()
-        .get(&(vault_id, q.path.clone()))
-        .cloned()
-        .unwrap_or_default();
-    // Registry miss (fresh daemon): rehydrate the note's persisted session so
-    // the drawer re-attaches the SAME conversation after a restart.
-    if entry.session_id.is_none() && !entry.running {
+    let (mut entry, bound) = {
+        let reg = ctx.vault_docs_refine.lock().unwrap();
+        match reg.get(&(vault_id, q.path.clone())) {
+            Some(e) => (e.clone(), true),
+            None => (RefineEntry::default(), false),
+        }
+    };
+    // TRUE registry miss (fresh daemon): rehydrate the note's persisted session
+    // so the drawer re-attaches the SAME conversation after a restart. A bound
+    // entry with no session is a reset tombstone — never resurrect those.
+    if !bound && entry.session_id.is_none() && !entry.running {
         if let Some(sid) = rehydrate_refine_session(&ctx, vault_id, &q.path).await {
             let mut reg = ctx.vault_docs_refine.lock().unwrap();
             reg.entry((vault_id, q.path.clone()))
@@ -1674,6 +1707,33 @@ async fn refine_session(
     Ok(Json(RefineSessionResp {
         session_id: entry.session_id.map(|s| s.to_string()),
         running: entry.running,
+    }))
+}
+
+/// `DELETE …/docs-agents/refine-session?path=` — detach the note's refine
+/// session so the next Send starts a FRESH agent (any provider). The old
+/// session itself is left alone (still inspectable in the sessions list). The
+/// tombstone entry (present, no session) blocks rehydration from persisted
+/// turns — without it the very next GET/POST would resurrect the old binding.
+async fn reset_refine_session(
+    Path((ws_id, vault_id)): Path<(String, i64)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<RefineSessionQ>,
+) -> ApiResult<Json<RefineSessionResp>> {
+    crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id.clone()), WorkspaceRole::Editor)
+        .await?;
+    ctx.vault
+        .get_scoped(&ws_id, vault_id)
+        .await
+        .map_err(ApiError)?;
+    ctx.vault_docs_refine
+        .lock()
+        .unwrap()
+        .insert((vault_id, q.path), RefineEntry::default());
+    Ok(Json(RefineSessionResp {
+        session_id: None,
+        running: false,
     }))
 }
 
