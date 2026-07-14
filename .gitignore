@@ -42,6 +42,8 @@ docs/superpowers/
 
 # --- Local tooling state ---
 .superpowers/
+# Agent-CLI local state (machine-specific paths; written by the CLIs themselves)
+.grok/
 
 # Prebuilt daemon binary bundled by the packaging step (built artifact)
 apps/desktop/src-tauri/binaries/
