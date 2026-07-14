@@ -469,7 +469,7 @@ impl WorkflowChatTriggerImpl {
         let wf2 = wf.clone();
         let input2 = input.clone();
         tokio::spawn(async move {
-            crate::workflow_engine::run_workflow(ctx2, ws, wf2, run_id, input2, None, false).await;
+            crate::workflow_engine::run_workflow(ctx2, ws, wf2, run_id, input2, None, false, None).await;
         });
 
         let tail = detail.unwrap_or_else(|| "Working through the steps now.".to_string());

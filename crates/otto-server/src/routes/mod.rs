@@ -456,6 +456,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/workflow-runs/{id}", get(workflows::get_run))
         .route("/workflow-runs/{id}/cancel", post(workflows::cancel_run))
+        .route("/workflow-runs/{id}/retry-node", post(workflows::retry_run_node))
         // Human-approval resume: requires bearer auth, Editor in the run's workspace.
         .route("/workflow-runs/{id}/approve", post(workflows::approve_run))
         // --- Snips (screenshot → annotate → clipboard) -------------------

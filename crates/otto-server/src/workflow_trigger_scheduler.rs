@@ -144,7 +144,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             crate::workflow_engine::run_workflow(
                 ctx2, ws, wf, run_id,
                 input,
-                None, false,
+                None, false, None,
             )
             .await;
         });
@@ -385,7 +385,7 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
                     crate::workflow_engine::run_workflow(
                         ctx2, ws, wf, run_id,
                         input,
-                        None, false,
+                        None, false, None,
                     )
                     .await;
                 });

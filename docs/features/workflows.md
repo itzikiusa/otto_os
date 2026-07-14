@@ -164,6 +164,36 @@ supplied as a `params.retry` object. `human_approval` and `manual_trigger` are
 never retried. `NodeRunState.attempts` records how many attempts ran (`0` = a cache
 hit).
 
+### Stall watchdog (agent-backed steps)
+Every agent-backed step carries a **no-real-progress trip**: if the agent makes
+no progress for `wf_step_stall_secs` (setting; default **300s**, `0` disables)
+the step fails with a retryable "stuck" error and the per-node retry policy
+re-runs it in a fresh session. "Progress" is measured on signals a stuck agent
+can't fake: the provider's activity artifact growing (claude's transcript
+JSONL, codex's rollout JSONL, agy's conversation DB) or the session's child
+processes burning CPU (a long quiet build/test). PTY output deliberately does
+**not** count — a hung TUI keeps repainting its spinner forever, which is
+exactly how stuck codex steps used to sit undetected for hours.
+
+### Retrying steps of a finished run (`POST /workflow-runs/{id}/retry-node`)
+A **finished** run can be re-entered in place without re-running the earlier
+(possibly hours-long) steps: the run reopens, out-of-scope nodes keep their
+prior state/output/sessions, in-scope nodes re-execute — against the same run
+context dir and the same provisioned `otto-wf/<run_id>` worktree/branch — and
+the run's final status is recomputed. Retry re-entries bypass node-cache
+*reads*, so in-scope nodes genuinely re-execute instead of replaying a cached
+output. Two scopes, both on the run-view step cards once the run has finished:
+- **Retry step** (errored steps only) — re-run just that step.
+- **Re-run from here** (any settled step) — re-run the step and everything
+  downstream of it.
+
+⚠ This is different from the **canvas** "Run from here" (`RunWorkflowReq.
+start_node`): that mints a **fresh run** — new context dir, new worktree cut
+from base — so files produced by the original run's steps are NOT there (the
+node cache replays *outputs*, not file state). To redo part of a run that
+produced files (implementations, test changes), use the run view's retry
+actions, which keep the original worktree.
+
 ### How node inputs flow (`assemble_input`)
 Each node's input is assembled from its **predecessors' outputs**:
 - **0 predecessors that produced output** → the node receives the **run input**

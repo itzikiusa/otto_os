@@ -9,8 +9,8 @@ use otto_core::domain::WorkspaceRole;
 use otto_core::event::Event;
 use otto_core::workflows::{
     ActiveWorkflowRun, CreateWorkflowReq, FromTemplateReq, NodeTypeSpec, RestoreVersionReq,
-    RunStatus, RunWorkflowReq, UpdateWorkflowReq, Workflow, WorkflowEdge, WorkflowGraph,
-    WorkflowNode, WorkflowRun, WorkflowTemplate, WorkflowVersion,
+    RetryRunNodeReq, RunStatus, RunWorkflowReq, UpdateWorkflowReq, Workflow, WorkflowEdge,
+    WorkflowGraph, WorkflowNode, WorkflowRun, WorkflowTemplate, WorkflowVersion,
 };
 use otto_core::{Error, Id};
 use otto_state::{NewWorkflowTrigger, TriggersRepo, WorkflowTrigger, WorkflowsRepo};
@@ -407,9 +407,72 @@ pub async fn run_workflow(
     let start_node = req.start_node.clone();
     let only_node = req.only_node;
     tokio::spawn(async move {
-        workflow_engine::run_workflow(ctx2, ws, wf, run_id, input, start_node, only_node).await;
+        workflow_engine::run_workflow(ctx2, ws, wf, run_id, input, start_node, only_node, None).await;
     });
 
+    Ok(Json(run))
+}
+
+/// `POST /workflow-runs/{id}/retry-node` — re-run ONE errored step of a
+/// FINISHED run, in place, without repeating the (possibly hours-long) earlier
+/// steps. The run row is reopened and re-entered with `start_node=node,
+/// only_node=true`; every other node ADOPTS its prior state (status/output/
+/// sessions), the retried node starts fresh, and the run's final status is
+/// recomputed over all of them. The run's context dir + provisioned
+/// `otto-wf/<run_id>` worktrees are keyed by run id, so the retried step sees
+/// the same branch/worktree the original attempt worked on
+/// (`worktree_add_if_absent` re-attaches a surviving branch). Only `error`
+/// steps of non-active runs are retryable — retrying a successful/skipped
+/// step would replay side effects that already happened.
+pub async fn retry_run_node(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<RetryRunNodeReq>,
+) -> ApiResult<Json<WorkflowRun>> {
+    let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
+    if matches!(run.status, RunStatus::Pending | RunStatus::Running) {
+        return Err(ApiError(Error::Conflict(
+            "run is still active — cancel it first or wait for it to finish".into(),
+        )));
+    }
+    let node_id = req.node_id.trim();
+    let target = run
+        .nodes
+        .iter()
+        .find(|n| n.node_id == node_id)
+        .ok_or_else(|| ApiError(Error::NotFound(format!("run has no node '{node_id}'"))))?;
+    // Single-step retry is for ERRORED steps only (re-executing a successful
+    // step alone would replay side effects out of context). "Re-run from
+    // here" re-executes the whole downstream flow, so any settled entry step
+    // is a valid starting point.
+    use otto_core::workflows::NodeStatus;
+    let ok_entry = if req.include_downstream {
+        !matches!(target.status, NodeStatus::Pending | NodeStatus::Running)
+    } else {
+        target.status == NodeStatus::Error
+    };
+    if !ok_entry {
+        return Err(ApiError(Error::Invalid(format!(
+            "step '{node_id}' ({:?}) can't be retried — only an errored step, or any settled step with include_downstream",
+            target.status
+        ))));
+    }
+    let wf = repo(&ctx).get(&run.workflow_id).await.map_err(ApiError)?;
+    let ws = ctx.workspaces.get(&wf.workspace_id).await.map_err(ApiError)?;
+    repo(&ctx).reopen_run(&id).await.map_err(ApiError)?;
+
+    let ctx2 = ctx.clone();
+    let run_id = run.id.clone();
+    let input = run.input.clone();
+    let start = Some(node_id.to_string());
+    let only = !req.include_downstream;
+    let prior = run.nodes.clone();
+    tokio::spawn(async move {
+        workflow_engine::run_workflow(ctx2, ws, wf, run_id, input, start, only, Some(prior)).await;
+    });
+    let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     Ok(Json(run))
 }
 
@@ -1216,7 +1279,7 @@ pub async fn webhook_trigger(
     let ctx2 = ctx.clone();
     let run_id = run.id.clone();
     tokio::spawn(async move {
-        workflow_engine::run_workflow(ctx2, ws, wf, run_id, input, None, false).await;
+        workflow_engine::run_workflow(ctx2, ws, wf, run_id, input, None, false, None).await;
     });
 
     Ok(Json(run))

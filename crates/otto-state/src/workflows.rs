@@ -546,6 +546,28 @@ impl WorkflowsRepo {
         Ok(rev)
     }
 
+    /// Re-open a FINISHED run for a retry-a-step re-entry: back to `pending`
+    /// with `finished_at`/`error` cleared, so the engine's normal
+    /// Pending→Running transition + finalize stamp a fresh lifecycle. Guarded
+    /// against live runs — the engine loop owning a running run must never be
+    /// raced by a second one.
+    pub async fn reopen_run(&self, id: &Id) -> Result<()> {
+        let n = sqlx::query(
+            "UPDATE workflow_runs SET status = 'pending', finished_at = NULL, error = NULL,
+             rev = rev + 1
+             WHERE id = ? AND status IN ('success','error','canceled')",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("reopen run"))?
+        .rows_affected();
+        if n == 0 {
+            return Err(Error::Conflict("run is still active".into()));
+        }
+        Ok(())
+    }
+
     /// Persist per-node progress WITHOUT touching the run's lifecycle `status`
     /// or `finished_at`. The engine calls this for its routine in-loop progress
     /// writes so a concurrent Cancel (the API flips `status` to Canceled) is
@@ -626,6 +648,30 @@ mod tests {
         let got = repo.get_version(&wf.id, 2).await.unwrap().unwrap();
         assert_eq!(got.graph.nodes.len(), 1);
         assert!(repo.get_version(&wf.id, 99).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn reopen_run_only_reopens_finished_runs() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let g = WorkflowGraph::default();
+        let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
+        let run = repo
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null)
+            .await
+            .unwrap();
+
+        // Live run → Conflict (the engine loop owns it).
+        repo.update_run(&run.id, RunStatus::Running, &[], None, false).await.unwrap();
+        assert!(repo.reopen_run(&run.id).await.is_err());
+
+        // Finished (error) run → reopens to pending with error/finished_at cleared.
+        repo.update_run(&run.id, RunStatus::Error, &[], Some("boom"), true).await.unwrap();
+        repo.reopen_run(&run.id).await.unwrap();
+        let r = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(r.status, RunStatus::Pending);
+        assert!(r.error.is_none());
+        assert!(r.finished_at.is_none());
     }
 
     #[tokio::test]

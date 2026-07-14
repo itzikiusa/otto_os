@@ -636,6 +636,7 @@ fn validate_node_output(kind: &str, output: &Value) -> Vec<String> {
 /// replaces its 700ms poll loop with a WS-driven refresh (a capped poll is kept
 /// as a fallback). Cache-eligible nodes are skipped if a matching
 /// `workflow_node_cache` entry exists; their state is logged as "Success (cached)".
+#[allow(clippy::too_many_arguments)]
 pub async fn run_workflow(
     ctx: ServerCtx,
     ws: Workspace,
@@ -644,6 +645,13 @@ pub async fn run_workflow(
     input: Value,
     start_node: Option<String>,
     only_node: bool,
+    // Retry-a-step re-entry (`POST /workflow-runs/{id}/retry-node`): the
+    // finished run's node states. Out-of-scope nodes ADOPT them — status,
+    // output, sessions — so the run keeps its history (siblings stay
+    // Success/Skipped instead of flipping to "outside run scope") and the
+    // final status still accounts for other nodes' failures. `None` for every
+    // normal run.
+    prior_nodes: Option<Vec<NodeRunState>>,
 ) {
     let repo = WorkflowsRepo::new(ctx.pool.clone());
     let order = match topo_order(&workflow.graph) {
@@ -924,6 +932,27 @@ pub async fn run_workflow(
     let mut canceled = false;
     let mut timed_out = false;
 
+    // Retry re-entry: adopt the prior run's states/outputs for everything the
+    // run scope excludes. In-scope nodes start fresh (Pending). Adopted Error
+    // states seed `errored` so downstream decisions still see the poison.
+    if let Some(prior) = &prior_nodes {
+        for ps in prior {
+            let out_of_scope = run_set.as_ref().is_some_and(|s| !s.contains(&ps.node_id));
+            if !out_of_scope {
+                continue;
+            }
+            if let Some(idx) = states.iter().position(|s| s.node_id == ps.node_id) {
+                if let Some(o) = &ps.output {
+                    outputs.insert(ps.node_id.clone(), o.clone());
+                }
+                if ps.status == NodeStatus::Error {
+                    errored.insert(ps.node_id.clone());
+                }
+                states[idx] = ps.clone();
+            }
+        }
+    }
+
     // Record which workflow version this run executed (best-effort).
     let _ = repo.set_run_version(&run_id, workflow.version).await;
 
@@ -989,8 +1018,12 @@ pub async fn run_workflow(
         };
         let idx = states.iter().position(|s| s.node_id == node_id).unwrap();
 
-        // Outside the run scope (start-from-here) → skip without running.
+        // Outside the run scope (start-from-here) → skip without running. A
+        // retry re-entry already adopted the node's prior state — keep it.
         if run_set.as_ref().is_some_and(|set| !set.contains(&node_id)) {
+            if states[idx].status != NodeStatus::Pending {
+                continue;
+            }
             states[idx].status = NodeStatus::Skipped;
             states[idx].logs = vec!["outside run scope".into()];
             let rev = repo
@@ -1059,7 +1092,12 @@ pub async fn run_workflow(
                 .params
                 .get("no_cache")
                 .and_then(Value::as_bool)
-                .unwrap_or(false);
+                .unwrap_or(false)
+            // Retry re-entry: the user asked for a FRESH execution of the
+            // in-scope nodes — a cache hit (possibly from an older run with
+            // the same input) would silently replay the very output being
+            // retried. Successful re-runs still WRITE the cache below.
+            || prior_nodes.is_some();
         let cached_out = if !no_cache {
             repo.get_cached_output(&workflow.id, &node_id, &params_hash, &input_hash)
                 .await
@@ -1912,8 +1950,9 @@ async fn execute_node(
                 &format!("{preamble}{prompt}\n\n[input data]\n{}", truncate(&input.to_string(), 4000)),
             );
             let acwd = node_cwd(node, &input, run_cwd);
+            let done = env.files.step_md_path(&crate::workflow_context::step_base_name(scope.step_no, node_display_name(node), scope.iter, scope.inner_idx));
             let (reply, sid) =
-                run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, session_tx).await?;
+                run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, done, session_tx).await?;
             // Publish WHERE the implementer worked (+ thread the ambient repo/base)
             // so a downstream review/PR is aware of exactly this directory — even
             // when the agent ran in its own per-node cwd. This is what carries the
@@ -1992,7 +2031,8 @@ async fn execute_node(
                 let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
                 let model = p.get("model").and_then(Value::as_str);
                 let acwd = node_cwd(node, &input, run_cwd);
-                let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, session_tx).await?;
+                let done = env.files.step_md_path(&crate::workflow_context::step_base_name(scope.step_no, node_display_name(node), scope.iter, scope.inner_idx));
+                let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, done, session_tx).await?;
                 out.insert("reply".into(), json!(reply));
                 out.insert("session_id".into(), json!(sid));
                 out.insert("working_directory".into(), json!(acwd));
@@ -3257,7 +3297,7 @@ async fn execute_node(
                          where each score and the overall score are 0–100.\n\nGoals:\n- {}",
                         goals.join("\n- ")
                     );
-                    match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, &goals_provider, None, &gprompt, worktree, session_tx).await {
+                    match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, &goals_provider, None, &gprompt, worktree, None, session_tx).await {
                         Ok((reply, _sid)) => match extract_json(&reply) {
                             Some(v) => {
                                 let gs = v.get("score").and_then(Value::as_i64).unwrap_or(review_score).clamp(0, 100);
@@ -3449,7 +3489,8 @@ async fn execute_node(
             let acwd = node_cwd(node, &input, run_cwd);
             let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
             let model = p.get("model").and_then(Value::as_str);
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &prompt, &acwd, session_tx).await?;
+            let done = env.files.step_md_path(&crate::workflow_context::step_base_name(scope.step_no, node_display_name(node), scope.iter, scope.inner_idx));
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &prompt, &acwd, done, session_tx).await?;
             let mut out = serde_json::Map::new();
             out.insert("story_id".into(), json!(story_id));
             out.insert("session_id".into(), json!(sid));
@@ -3555,7 +3596,7 @@ async fn execute_node(
             let acwd = node_cwd(node, &input, run_cwd);
             let provider = p.get("provider").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(env.default_provider.as_str());
             let model = p.get("model").and_then(Value::as_str);
-            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, session_tx).await?;
+            let (reply, sid) = run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &full, &acwd, None, session_tx).await?;
             let diagram = extract_code_block(&reply, mode).unwrap_or_else(|| reply.clone());
             // Write under the data dir (never the user's repo working tree).
             let ext = canvas_node_ext(mode);
@@ -3700,6 +3741,31 @@ async fn execute_node(
                     }
                 };
                 let wt = if worktree.trim().is_empty() { repo.path.clone() } else { worktree.clone() };
+                // FIRST check before any PR: agents are told to commit, but a
+                // stalled/stuck one leaves its work uncommitted — the branch then
+                // has no commits ahead of base and the provider rejects the PR
+                // ("no changes to be pulled"). Sweep leftovers into a commit, but
+                // ONLY in a dedicated worktree — never a user's main checkout.
+                if wt != repo.path {
+                    match otto_git::LocalGit::new(&wt)
+                        .commit_all_if_dirty(&format!(
+                            "chore: commit workflow changes ({})",
+                            env.wf_name
+                        ))
+                        .await
+                    {
+                        Ok(Some(sha)) => logs.push(format!(
+                            "git_pr: committed leftover worktree changes on {} ({})",
+                            repo.name,
+                            &sha[..sha.len().min(9)]
+                        )),
+                        Ok(None) => {}
+                        Err(e) => notes.push(format!(
+                            "{}: leftover-changes commit failed: {e}",
+                            repo.name
+                        )),
+                    }
+                }
                 // Draft the PR message with the NODE's chosen provider/model (the
                 // "Open PR" node crafts title+description with an agent). Build the
                 // same prompt the HTTP draft uses, then run it through the node's
@@ -3712,7 +3778,7 @@ async fn execute_node(
                             .filter(|s| !s.trim().is_empty())
                             .unwrap_or(env.default_provider.as_str());
                         let model = p.get("model").and_then(Value::as_str);
-                        match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &draft_prompt, &wt, session_tx).await {
+                        match run_node_agent(ctx, ws, user, node, &env.wf_name, &env.run_id, provider, model, &draft_prompt, &wt, None, session_tx).await {
                             Ok((reply, _sid)) => {
                                 let (mut title, description) = crate::modules::parse_pr_draft(&reply, &source);
                                 if let Some(key) = crate::modules::jira_key_from_branch(&source) {
@@ -4040,10 +4106,19 @@ const WF_STEP_RULES: &str = "\n\n[workflow step — execution rules]\n\
     - Do NOT spawn, launch, or delegate to sub-agents, background agents, parallel workers, or the Task tool. No run_in_background, no fan-out — you are the only agent for this step.\n\
     - Do NOT end your turn until the task is fully complete. Never stop early to \"wait for\" something you started; finish everything yourself, then write your handoff summary.\n";
 
-/// A workflow `agent_prompt` step that produces no output for this long is treated
-/// as stuck and retried. Separate from — and never longer than — the 10h max
-/// session lifespan backstop. See design R5.
-const WF_STEP_STUCK: Duration = Duration::from_secs(3 * 60);
+/// Default no-REAL-progress trip for agent-backed workflow steps (overridable
+/// via the `wf_step_stall_secs` setting; 0 disables). Progress means the
+/// provider's transcript/rollout growing or child processes burning CPU — not
+/// PTY repaints, which a stuck TUI spinner keeps emitting forever. A tripped
+/// step is retried per `resolve_retry`. Separate from — and never longer
+/// than — the 10h max session lifespan backstop. See design R5.
+const WF_STEP_STALL_DEFAULT: Duration = Duration::from_secs(5 * 60);
+
+/// PTY-silence window that counts as turn-complete for step agents on
+/// providers WITHOUT a pollable transcript (codex/agy). A working TUI keeps
+/// repainting; this much silence means it's idle at its input box. Mirrors
+/// the vault docs agent's value.
+const WF_QUIET_DONE: Duration = Duration::from_secs(150);
 
 fn resolve_retry(node: &WorkflowNode) -> otto_core::workflows::RetryPolicy {
     if let Some(p) = &node.retry {
@@ -4116,6 +4191,12 @@ async fn run_node_agent(
     model: Option<&str>,
     prompt: &str,
     cwd: &str,
+    // The step's handoff `.md` (named by the preamble) as a completion MARKER:
+    // for providers without a pollable transcript (codex/agy) it is the ONLY
+    // positive "the step finished" signal — without it they sit at their input
+    // box until the stall trip errors the step. `None` for steps whose reply
+    // must come from the transcript (canvas/goals/PR-draft agents).
+    done_file: Option<std::path::PathBuf>,
     session_tx: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(String, Id)> {
     // Title carries the workflow name, the step, and a short run id so two
@@ -4143,16 +4224,29 @@ async fn run_node_agent(
     // R2/R3: every agent-backed step runs as a single agent that does all the work
     // itself — no sub-agents / background tasks — and doesn't yield its turn early.
     let guarded = format!("{prompt}{WF_STEP_RULES}");
-    // R5: an `agent_prompt` step gets an early 3-min no-progress trip (retryable via
-    // resolve_retry); heavier agent kinds (review/product/canvas) keep the 10h backstop.
-    // `prepare_context` only ever reaches this call with an agent phase (a non-empty
-    // `params.prompt`) — treat it the same as `agent_prompt`.
-    let stuck_after = if node.kind == "agent_prompt" || node.kind == "prepare_context" {
-        WF_STEP_STUCK
-    } else {
+    // R5: EVERY agent-backed step gets the no-real-progress trip (retryable via
+    // resolve_retry). Heavy kinds are safe under a short threshold because the
+    // clock only counts genuine stalls — transcript/rollout growth and child
+    // CPU reset it (see agent_session), so a long review or quiet test run
+    // never false-trips while a codex spinner can no longer mask a hang.
+    let stall = otto_state::SettingsRepo::new(ctx.pool.clone())
+        .get("wf_step_stall_secs")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_u64())
+        .map_or(WF_STEP_STALL_DEFAULT, Duration::from_secs);
+    let stuck_after = if stall.is_zero() {
         crate::agent_session::STUCK_IDLE
+    } else {
+        stall
     };
-    crate::agent_session::run_session_turn(
+    // A leftover handoff from a PRIOR attempt/run of this step would complete
+    // the new turn instantly with stale content — clear it before submitting.
+    if let Some(df) = &done_file {
+        let _ = std::fs::remove_file(df);
+    }
+    crate::agent_session::run_session_turn_with(
         ctx,
         ws,
         user,
@@ -4163,6 +4257,16 @@ async fn run_node_agent(
         meta,
         &guarded,
         stuck_after,
+        crate::agent_session::TurnOpts {
+            done_file,
+            // Non-transcript providers (codex/agy) additionally complete on
+            // sustained PTY silence — a finished TUI sits repaint-free at its
+            // input box. Ignored for claude (transcript-based detection).
+            quiet_done: Some(WF_QUIET_DONE),
+            // The retry spawns a fresh session; don't leave the stuck one
+            // alive (its spinner defeats the idle-suspend sweep).
+            kill_on_stall: true,
+        },
         move |id| {
             let _ = tx.send(id.to_string());
         },
@@ -4515,6 +4619,12 @@ async fn provision_wf_worktrees(
 /// commits are reachable elsewhere (merged into HEAD) or pushed to origin;
 /// otherwise the branch stays (cheap) and only the worktree directory goes
 /// (`worktree_add_if_absent` re-attaches a surviving branch on a later run).
+///
+/// Work policy — never discard UNCOMMITTED work either: leftovers in a dirty
+/// worktree are swept into a commit on the run branch BEFORE removal (2026-07-14:
+/// a failed run's reap destroyed an implement step's uncommitted test suite —
+/// the branch policy alone protects only what was committed). If that sweep
+/// fails, the worktree directory is kept rather than destroyed.
 async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
     let dir = ctx.data_dir.join("workflow-runs").join(run_id);
     let entries = match std::fs::read_dir(&dir) {
@@ -4522,6 +4632,7 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         Err(_) => return, // nothing provisioned
     };
     let branch = format!("otto-wf/{run_id}");
+    let mut kept_any = false;
     for entry in entries.flatten() {
         let wt = entry.path();
         if !wt.is_dir() {
@@ -4537,6 +4648,21 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
         let Some(root) = std::path::Path::new(common).parent() else {
             continue;
         };
+        match wt_git
+            .commit_all_if_dirty(&format!("chore: preserve workflow leftovers (run {run_id})"))
+            .await
+        {
+            Ok(Some(sha)) => tracing::info!(
+                "wf reap: committed leftover changes in {wt_str} onto {branch} ({})",
+                &sha[..sha.len().min(9)]
+            ),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("wf reap: could not commit leftovers in {wt_str}: {e} — keeping the worktree");
+                kept_any = true;
+                continue;
+            }
+        }
         let repo_git = otto_git::LocalGit::new(root);
         let _ = repo_git.worktree_remove(&wt_str).await;
         // Safe-delete the run branch: merged into HEAD OR pushed to origin.
@@ -4558,7 +4684,11 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
             );
         }
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    // Only when every worktree was safely handled — a kept (unsweepable)
+    // worktree must not be bulldozed by the directory cleanup.
+    if !kept_any {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Startup sweep: reap worktree leftovers of every run directory whose run is

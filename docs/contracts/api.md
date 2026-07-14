@@ -1346,6 +1346,7 @@ workspace from the workflow/run row.
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
 | POST /workflow-runs/{id}/cancel | ws editor | — | cancel a run |
+| POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). Retry re-entries bypass node-cache READS so in-scope nodes genuinely re-execute. `409` while the run is still active; `400` on a bad target |
 | GET /workflows/{id}/versions | ws viewer | — | `WorkflowVersion[]` — graph snapshot history, newest first |
 | GET /workflows/{id}/versions/{v} | ws viewer | — | `WorkflowVersion` — one snapshot (404 if `v` unknown) |
 | POST /workflows/{id}/versions/{v}/restore | ws editor | `RestoreVersionReq {note?}` | Workflow — copies `v`'s graph back in as a **new** version (append-only history) |

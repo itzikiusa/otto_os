@@ -325,6 +325,27 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
 
     // Push the branch first so the PR has a head to point at.
     if let Some(wt) = run.worktree_path.as_deref() {
+        let git = otto_git::LocalGit::new(wt);
+        // FIRST check before the PR: a stalled agent can leave its work
+        // uncommitted — the push is then a no-op and the provider rejects the
+        // PR ("no changes to be pulled"). Run worktrees only (this path is
+        // always a dedicated worktree, never the user's main checkout).
+        if let Ok(Some(_)) = git
+            .commit_all_if_dirty("chore: commit run changes left before PR")
+            .await
+        {
+            let _ = ctx
+                .runs
+                .add_event(NewRunEvent {
+                    run_id: run.id.clone(),
+                    workspace_id: run.workspace_id.clone(),
+                    kind: "note".to_string(),
+                    status: Some(run.status.as_str().to_string()),
+                    message: "committed leftover worktree changes before PR".to_string(),
+                    detail: None,
+                })
+                .await;
+        }
         let token = match repo.git_account_id.as_ref() {
             Some(aid) => match ctx.git_store.get_account(aid).await {
                 Ok(acc) => ctx.secrets.get(&acc.token_ref).ok().flatten(),
@@ -332,7 +353,7 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
             },
             None => None,
         };
-        let _ = otto_git::LocalGit::new(wt).push(token).await;
+        let _ = git.push(token).await;
     }
 
     let create = CreatePrReq {

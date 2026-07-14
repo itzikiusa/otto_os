@@ -588,7 +588,7 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
         let rid = run_id.clone();
         let input2 = input.clone();
         tokio::spawn(async move {
-            crate::workflow_engine::run_workflow(ctx2, ws2, wf2, rid, input2, None, false).await;
+            crate::workflow_engine::run_workflow(ctx2, ws2, wf2, rid, input2, None, false, None).await;
         });
     }
 

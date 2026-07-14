@@ -328,6 +328,17 @@ pub struct UpdateWorkflowReq {
     pub graph: Option<WorkflowGraph>,
 }
 
+/// `POST /workflow-runs/{id}/retry-node` — re-enter a finished run in place
+/// (see the route for semantics). Default: retry ONE errored step. With
+/// `include_downstream`, re-run the step AND everything after it — the
+/// "run from here, keeping this run's files/worktree" flow.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetryRunNodeReq {
+    pub node_id: String,
+    #[serde(default)]
+    pub include_downstream: bool,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RunWorkflowReq {
     #[serde(default)]

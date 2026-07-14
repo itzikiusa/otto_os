@@ -1603,6 +1603,7 @@ async fn refine(
                 crate::agent_session::TurnOpts {
                     done_file: Some(done_path.clone()),
                     quiet_done: Some(QUIET_DONE),
+                    kill_on_stall: false,
                 },
                 on_ready,
             )
@@ -2060,6 +2061,7 @@ async fn run_docs(
                     crate::agent_session::TurnOpts {
                         done_file: Some(done_path.clone()),
                         quiet_done: Some(QUIET_DONE),
+                        kill_on_stall: false,
                     },
                     on_ready,
                 )
@@ -2347,6 +2349,7 @@ async fn run_docs(
             crate::agent_session::TurnOpts {
                 done_file: Some(sum_done_path.clone()),
                 quiet_done: Some(QUIET_DONE),
+                kill_on_stall: false,
             },
             on_ready,
         )
@@ -2629,6 +2632,7 @@ impl ReviewTurnRunner for LiveReviewTurnRunner {
             crate::agent_session::TurnOpts {
                 done_file: Some(request.done_path),
                 quiet_done: Some(QUIET_DONE),
+                kill_on_stall: false,
             },
             move |sid| on_ready(sid.clone()),
         )

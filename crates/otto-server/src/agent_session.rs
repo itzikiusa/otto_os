@@ -78,6 +78,12 @@ pub struct TurnOpts {
     /// text). Working TUIs repaint (spinners/tool output), so silence this
     /// long means the agent is sitting at its input box. Ignored for claude.
     pub quiet_done: Option<Duration>,
+    /// Kill the session when the stall trip fires. Workflow steps set this:
+    /// their retry spawns a FRESH session, and the stuck one would otherwise
+    /// linger alive forever (its spinner defeats the idle-suspend sweep too).
+    /// Interactive callers keep the default (false) — their session belongs
+    /// to the user.
+    pub kill_on_stall: bool,
 }
 
 /// Run one turn. Returns `(reply_text, session_id)`. Persist the returned
@@ -252,6 +258,17 @@ pub async fn run_session_turn_with(
     //    the session OPEN.
     let deadline = Instant::now() + TURN_TIMEOUT;
     let mut reminder_nudges: u32 = 0;
+    // Progress clock for the stall trip. PTY-output recency alone is a LIAR
+    // for agent TUIs: a stuck agent's spinner keeps repainting, so
+    // `last_output_at` stays fresh forever (the live "codex stuck for 30min
+    // in a workflow" bug). Real progress = the provider's activity artifact
+    // (transcript/rollout) growing, or — checked lazily, right before
+    // tripping — descendant processes burning CPU (a long quiet build/test
+    // run writes neither). Providers without an artifact keep the PTY clock.
+    let mut artifact: Option<std::path::PathBuf> = None;
+    let mut artifact_lookup_at = Instant::now();
+    let mut artifact_mtime: Option<std::time::SystemTime> = None;
+    let mut last_progress = Instant::now();
     loop {
         // Marker channel (provider-agnostic): the agent wrote its done-file —
         // the turn is complete regardless of transcript availability.
@@ -308,11 +325,43 @@ pub async fn run_session_turn_with(
                         }
                     }
                 }
-                if h.last_output_at().elapsed() >= stuck_after {
-                    return Err(ApiError(Error::Upstream(format!(
-                        "step made no progress for {}m",
-                        stuck_after.as_secs() / 60
-                    ))));
+                // Refresh the progress clock. Codex/agy mint their session id
+                // a few seconds post-spawn, so keep looking for the artifact
+                // (cheap, every ~5s) until found.
+                if artifact.is_none() && Instant::now() >= artifact_lookup_at {
+                    artifact = ctx.manager.activity_artifact(&sid).await;
+                    artifact_lookup_at = Instant::now() + Duration::from_secs(5);
+                }
+                let progressed = match &artifact {
+                    Some(p) => match tokio::fs::metadata(p).await.ok().and_then(|m| m.modified().ok()) {
+                        Some(m) if artifact_mtime != Some(m) => {
+                            artifact_mtime = Some(m);
+                            true
+                        }
+                        _ => false,
+                    },
+                    // No artifact (shell/custom, or id not captured yet):
+                    // PTY output is the only signal we have.
+                    None => h.last_output_at().elapsed() < POLL * 2,
+                };
+                if progressed {
+                    last_progress = Instant::now();
+                }
+                if last_progress.elapsed() >= stuck_after {
+                    // Final guard before tripping: a child tree burning CPU
+                    // (build, test suite) is progress even when nothing is
+                    // written. Probed lazily — it costs a 750ms sample.
+                    if ctx.manager.tree_active(&sid).await {
+                        last_progress = Instant::now();
+                    } else {
+                        if opts.kill_on_stall {
+                            let _ = ctx.manager.kill_session(&sid).await;
+                        }
+                        return Err(ApiError(Error::Upstream(format!(
+                            "step made no progress for {}m (agent looks stuck)",
+                            stuck_after.as_secs() / 60
+                        ))));
+                    }
                 }
             }
             None => {
