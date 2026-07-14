@@ -137,6 +137,17 @@ impl ClickHouse {
         Err(Error::Internal(format!("clickhouse server failed to start: {last_err}")))
     }
 
+    /// Whether the spawned `clickhouse server` child is still running. `false`
+    /// once it exited (crashed, or killed — e.g. by another process reclaiming
+    /// the data dir). This is the engine's self-heal signal: a dead child with
+    /// failing inserts means "restart the server", not "keep warning forever".
+    pub fn server_alive(&self) -> bool {
+        match self.child.lock().unwrap().as_mut() {
+            Some(c) => matches!(c.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+
     async fn wait_ping(&self, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let url = format!("{}/ping", self.base_url);

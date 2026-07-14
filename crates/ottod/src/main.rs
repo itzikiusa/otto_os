@@ -135,6 +135,17 @@ async fn run(cfg: Config) -> Result<(), String> {
         cfg.data_dir.display()
     );
 
+    // Single-instance lock FIRST: holding the loopback port is what proves no
+    // other ottod owns this data dir. Everything below mutates shared state —
+    // the usage engine's reclaim_dir kills whatever ClickHouse server holds the
+    // data dir, plugin supervisors spawn sidecars, schedulers fire. A second
+    // instance (launchd respawn racing a still-running daemon) used to get all
+    // the way through those side effects — murdering the live daemon's
+    // ClickHouse — before dying on this very bind. Losers must exit HERE, first.
+    let loopback = tokio::net::TcpListener::bind(("127.0.0.1", cfg.port))
+        .await
+        .map_err(|e| format!("bind 127.0.0.1:{}: {e}", cfg.port))?;
+
     let pool = otto_state::open(&cfg.db_path())
         .await
         .map_err(|e| format!("open database: {e}"))?;
@@ -914,9 +925,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         let _ = shutdown_tx.send(true);
     });
 
-    let loopback = tokio::net::TcpListener::bind(("127.0.0.1", cfg.port))
-        .await
-        .map_err(|e| format!("bind 127.0.0.1:{}: {e}", cfg.port))?;
+    // (Bound at the very top of `run` — the single-instance lock.)
     tracing::info!("listening on http://127.0.0.1:{}", cfg.port);
 
     // Optional network listener from the settings table. Unlike loopback, the

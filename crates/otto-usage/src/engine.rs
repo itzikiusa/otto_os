@@ -7,7 +7,8 @@
 //! installs or updates the `clickhouse` binary — without a daemon restart.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use otto_core::Result;
@@ -28,6 +29,13 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 const FLUSH_BATCH: usize = 200;
 /// Default cap on the session leaderboard.
 const SESSION_LIMIT: u32 = 50;
+/// How often the self-heal watcher checks whether an insert path flagged the
+/// server as dead (see [`Inner::heal`]).
+const HEAL_POLL: Duration = Duration::from_secs(5);
+/// Cap on events retained across failed flushes while the server is down —
+/// beyond this the OLDEST buffered events are dropped (bounded memory beats a
+/// perfect record during an outage; the tailer re-derives transcript rows).
+const RETAIN_MAX: usize = 20_000;
 
 /// Swappable runtime state: the live ClickHouse handle, the writer channel, and
 /// the resolved binary path (kept even when disabled, for status reporting).
@@ -45,6 +53,11 @@ pub struct UsageEngine {
     /// Serializes (re)initialization so two `reinit` calls can't both try to
     /// start a server on the same (dir-locked) data dir.
     reinit_lock: tokio::sync::Mutex<()>,
+    /// Set by an insert path that failed against a DEAD server child (killed /
+    /// crashed out from under us). The self-heal watcher (spawned in
+    /// [`Self::start`]) drains it and restarts the server via [`Self::reinit`],
+    /// so usage tracking recovers without a daemon restart.
+    heal: Arc<AtomicBool>,
 }
 
 impl UsageEngine {
@@ -60,10 +73,28 @@ impl UsageEngine {
             config: RwLock::new(config.clone()),
             data_dir,
             reinit_lock: tokio::sync::Mutex::new(()),
+            heal: Arc::new(AtomicBool::new(false)),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
             bg.reinit(config).await;
+        });
+        // Self-heal watcher: when an insert path flags the server child as dead
+        // (see `heal`), restart it. Weak so the watcher never keeps a dropped
+        // engine alive; exits with it.
+        let weak: Weak<Self> = Arc::downgrade(&engine);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(HEAL_POLL).await;
+                let Some(engine) = weak.upgrade() else { break };
+                if engine.heal.swap(false, Ordering::SeqCst) {
+                    tracing::warn!(
+                        "usage: clickhouse server died under the engine — restarting it"
+                    );
+                    let cfg = engine.config();
+                    engine.reinit(cfg).await;
+                }
+            }
         });
         engine
     }
@@ -108,7 +139,7 @@ impl UsageEngine {
                                     tracing::warn!("usage: modify ttl failed (non-fatal): {e}");
                                 }
                                 let (tx, rx) = mpsc::unbounded_channel();
-                                spawn_writer(Arc::clone(&ch), rx);
+                                spawn_writer(Arc::clone(&ch), rx, Arc::clone(&self.heal));
                                 tracing::info!(
                                     "usage: clickhouse server ready at {} (binary {})",
                                     ch.data_dir().display(),
@@ -263,7 +294,11 @@ impl UsageEngine {
             "process_cpu_pct": m.process_cpu_pct,
             "active_sessions": m.active_sessions,
         });
-        ch.insert_ndjson("system_metrics", &format!("{row}\n")).await
+        let res = ch.insert_ndjson("system_metrics", &format!("{row}\n")).await;
+        if res.is_err() && !ch.server_alive() {
+            self.heal.store(true, Ordering::SeqCst);
+        }
+        res
     }
 
     // ── Config ───────────────────────────────────────────────────────────────
@@ -880,7 +915,15 @@ impl UsageEngine {
 
 /// Background task: drains the event channel, batching inserts on a timer or
 /// when the buffer fills. Exits when the channel closes (engine reinit/drop).
-fn spawn_writer(ch: Arc<ClickHouse>, mut rx: mpsc::UnboundedReceiver<UsageEvent>) {
+/// `heal` is raised when a flush fails against a dead server child, so the
+/// engine's watcher restarts it. Failed flushes RETAIN their events (bounded)
+/// for the next tick; what's still unflushed when the reinit ends this writer
+/// is lost — a bounded, logged loss instead of the old drop-every-batch.
+fn spawn_writer(
+    ch: Arc<ClickHouse>,
+    mut rx: mpsc::UnboundedReceiver<UsageEvent>,
+    heal: Arc<AtomicBool>,
+) {
     tokio::spawn(async move {
         let mut buf: Vec<UsageEvent> = Vec::new();
         let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
@@ -890,29 +933,40 @@ fn spawn_writer(ch: Arc<ClickHouse>, mut rx: mpsc::UnboundedReceiver<UsageEvent>
                     Some(ev) => {
                         buf.push(ev);
                         if buf.len() >= FLUSH_BATCH {
-                            flush(&ch, &mut buf).await;
+                            flush(&ch, &mut buf, &heal).await;
                         }
                     }
                     None => {
-                        flush(&ch, &mut buf).await;
+                        flush(&ch, &mut buf, &heal).await;
                         break;
                     }
                 },
-                _ = ticker.tick() => flush(&ch, &mut buf).await,
+                _ = ticker.tick() => flush(&ch, &mut buf, &heal).await,
             }
         }
     });
 }
 
-async fn flush(ch: &ClickHouse, buf: &mut Vec<UsageEvent>) {
+async fn flush(ch: &ClickHouse, buf: &mut Vec<UsageEvent>, heal: &AtomicBool) {
     if buf.is_empty() {
         return;
     }
     let payload = ndjson(buf);
-    buf.clear();
     if let Err(e) = ch.insert_ndjson("usage_events", &payload).await {
         tracing::warn!("usage: flush failed: {e}");
+        // Keep the events for the next attempt (bounded) instead of dropping
+        // them — a transient failure or a self-heal restart then loses nothing.
+        if buf.len() > RETAIN_MAX {
+            let drop_n = buf.len() - RETAIN_MAX;
+            buf.drain(..drop_n);
+            tracing::warn!("usage: retained buffer full — dropped {drop_n} oldest events");
+        }
+        if !ch.server_alive() {
+            heal.store(true, Ordering::SeqCst);
+        }
+        return;
     }
+    buf.clear();
 }
 
 /// Serialize events to newline-delimited JSON for `JSONEachRow` insertion.
