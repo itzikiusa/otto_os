@@ -36,8 +36,8 @@
   // ── Mobile (phone + tablet) ───────────────────────────────────────────────
   // The desktop two-pane (files rail | detail) doesn't fit a narrow viewport,
   // so ≤1024 stacks the conflicted-files list as a collapsible strip above the
-  // detail pane (mirrors ChangesView). Picking a file collapses the list so the
-  // resolver gets the screen.
+  // detail pane. Picking a file collapses the list so the resolver gets the
+  // screen.
   let isMobile = $state(false);
   $effect(() => {
     const mq = window.matchMedia('(max-width: 1024px)');
@@ -83,6 +83,11 @@
   });
 
   const sourceLabel = $derived(status?.source ?? initialSource);
+  // A/B side labels for the hunk pickers: A = the checked-out branch (ours),
+  // B = the branch being merged in (theirs). Best-effort — plain OURS/THEIRS
+  // when the repo status / merge source isn't known.
+  const oursLabel = $derived(git.statusById[repoId]?.branch ?? 'OURS');
+  const theirsLabel = $derived(sourceLabel ?? 'THEIRS');
   const allFiles = $derived([...pending]);
   const allResolved = $derived(allFiles.length > 0 && allFiles.every((f) => resolved.has(f)));
 
@@ -223,6 +228,8 @@
             <ConflictFilePane
               {repoId}
               path={selected}
+              {oursLabel}
+              {theirsLabel}
               onresolved={() => handleResolved(selected!)}
             />
           {/key}

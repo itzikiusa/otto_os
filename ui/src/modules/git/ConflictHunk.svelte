@@ -1,12 +1,13 @@
 <script lang="ts">
-  // One conflict segment: ours/theirs shown side-by-side (reusing the diff
-  // split-row look), with an action bar to pick the resolution — Use ours /
-  // Use theirs / Both / Edit. The chosen resolution is reported back up as the
-  // array of resolved lines (or null while undecided) via `onresolve`.
+  // One conflict segment, GitKraken-style: side A (ours) and side B (theirs)
+  // shown side-by-side, each with a HEADER CHECKBOX (take the whole side) and
+  // PER-LINE CHECKBOXES — so a resolution can mix parts of both sides. The
+  // output order is A's picked lines then B's picked lines; "Edit" opens a
+  // hand-edit buffer for anything fancier (reorder, rewrite). The resolution is
+  // reported up as the array of resolved lines via `onresolve` (null while the
+  // user hasn't touched the conflict yet).
   import Icon from '../../lib/components/Icon.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
-
-  type Choice = 'ours' | 'theirs' | 'both' | 'edit' | null;
 
   interface Props {
     ours: string[];
@@ -18,20 +19,45 @@
     path?: string;
     /** Work-tree root for the CodeEditor (LSP/context); optional. */
     root?: string;
+    /** Side labels — the checked-out branch vs the merge source. */
+    oursLabel?: string;
+    theirsLabel?: string;
     /** Fired whenever the resolution changes. `lines` is null while undecided. */
     onresolve: (lines: string[] | null) => void;
   }
-  let { ours, theirs, base, index, path = '', root = '', onresolve }: Props = $props();
+  let {
+    ours,
+    theirs,
+    base,
+    index,
+    path = '',
+    root = '',
+    oursLabel = 'OURS',
+    theirsLabel = 'THEIRS',
+    onresolve,
+  }: Props = $props();
 
-  let choice = $state<Choice>(null);
+  // Per-line picks. Undecided until the user touches ANY control — from then on
+  // the resolution is exactly the checked lines (possibly none = delete block).
+  let oursSel = $state<boolean[]>([]);
+  let theirsSel = $state<boolean[]>([]);
+  let touched = $state(false);
+  let editing = $state(false);
+  // (Re)seed the pick arrays whenever the conflict content itself changes —
+  // a new file load replaces the segment arrays wholesale.
+  $effect(() => {
+    oursSel = ours.map(() => false);
+    theirsSel = theirs.map(() => false);
+    touched = false;
+    editing = false;
+  });
   // Edit-mode buffer (joined text the user can hand-edit).
   let editText = $state('');
   // Whether the diff3 merge base is currently expanded.
   let showBase = $state(false);
 
-  // ≤1024 (phone + tablet): the ours/theirs side-by-side columns are too narrow
-  // to read, so the table stacks vertically (ours block over theirs block) with
-  // its own per-side label. matchMedia drives a class toggle on the table.
+  // ≤1024 (phone + tablet): the A/B side-by-side columns are too narrow to
+  // read, so the table stacks vertically (A block over B block).
   let isMobile = $state(false);
   $effect(() => {
     const mq = window.matchMedia('(max-width: 1024px)');
@@ -43,21 +69,22 @@
   // True when the parser populated a merge base (diff3 conflict style).
   const hasBase = $derived(base.length > 0);
 
-  // The resolved lines for the current choice.
+  const oursPicked = $derived(oursSel.filter(Boolean).length);
+  const theirsPicked = $derived(theirsSel.filter(Boolean).length);
+  const oursAll = $derived(ours.length > 0 && oursPicked === ours.length);
+  const theirsAll = $derived(theirs.length > 0 && theirsPicked === theirs.length);
+
+  // The resolved lines: A's picks in order, then B's picks in order.
   const resolved = $derived.by((): string[] | null => {
-    switch (choice) {
-      case 'ours':
-        return ours;
-      case 'theirs':
-        return theirs;
-      case 'both':
-        return [...ours, ...theirs];
-      case 'edit':
-        // An empty editor still counts as a (deliberate) empty resolution.
-        return editText.length === 0 ? [] : editText.split('\n');
-      default:
-        return null;
+    if (editing) {
+      // An empty editor still counts as a (deliberate) empty resolution.
+      return editText.length === 0 ? [] : editText.split('\n');
     }
+    if (!touched) return null;
+    return [
+      ...ours.filter((_, i) => oursSel[i]),
+      ...theirs.filter((_, i) => theirsSel[i]),
+    ];
   });
 
   // Propagate every resolution change to the parent.
@@ -65,63 +92,69 @@
     onresolve(resolved);
   });
 
-  function pick(c: Exclude<Choice, 'edit' | null>): void {
-    choice = c;
+  function toggleLine(side: 'ours' | 'theirs', i: number): void {
+    touched = true;
+    if (side === 'ours') {
+      const next = [...oursSel];
+      next[i] = !next[i];
+      oursSel = next;
+    } else {
+      const next = [...theirsSel];
+      next[i] = !next[i];
+      theirsSel = next;
+    }
+  }
+
+  /** Header checkbox: take (or drop) a whole side. Works on an EMPTY side too —
+   *  taking an empty side is a deliberate "delete this block". */
+  function toggleSide(side: 'ours' | 'theirs'): void {
+    touched = true;
+    if (side === 'ours') oursSel = ours.map(() => !oursAll);
+    else theirsSel = theirs.map(() => !theirsAll);
   }
 
   function startEdit(): void {
-    // Seed the editor with the "Both" merge so users start from something
-    // sensible (ours then theirs), unless they had a prior choice.
-    if (choice !== 'edit') {
-      const seed =
-        choice === 'ours'
-          ? ours
-          : choice === 'theirs'
-            ? theirs
-            : [...ours, ...theirs];
+    if (!editing) {
+      // Seed the editor with the current picks (or the "both" merge when the
+      // conflict is still untouched) so users start from something sensible.
+      const seed = touched
+        ? [...ours.filter((_, i) => oursSel[i]), ...theirs.filter((_, i) => theirsSel[i])]
+        : [...ours, ...theirs];
       editText = seed.join('\n');
     }
-    choice = 'edit';
+    editing = true;
   }
 
-  // Pad the two sides to equal height so the side-by-side rows line up.
-  const splitRows = $derived.by(() => {
-    const n = Math.max(ours.length, theirs.length);
-    const rows: { left: string | null; right: string | null }[] = [];
-    for (let i = 0; i < n; i++) {
-      rows.push({ left: ours[i] ?? null, right: theirs[i] ?? null });
-    }
-    return rows;
-  });
+  function stopEdit(): void {
+    editing = false;
+    // Leaving edit keeps whatever picks were there before; if none, the hunk
+    // returns to undecided (resolved → null) which is the honest state.
+  }
+
 </script>
 
-<div class="hunk" class:resolved={choice !== null}>
+<div class="hunk" class:resolved={resolved !== null}>
   <div class="hunk-bar">
     <span class="hunk-label">
       <Icon name="merge" size={12} />
       Conflict {index}
     </span>
-    {#if choice !== null}
+    {#if resolved !== null}
       <span class="resolved-badge"><Icon name="check" size={11} /> resolved</span>
     {/if}
     <span class="grow"></span>
-    <div class="seg">
-      <button class:active={choice === 'ours'} onclick={() => pick('ours')} title="Keep our version">
-        Use ours
+    {#if editing}
+      <button class="edit-done" onclick={stopEdit} title="Back to side-by-side picking">
+        <Icon name="check" size={11} /> Done editing
       </button>
-      <button class:active={choice === 'theirs'} onclick={() => pick('theirs')} title="Keep their version">
-        Use theirs
-      </button>
-      <button class:active={choice === 'both'} onclick={() => pick('both')} title="Keep both (ours then theirs)">
-        Both
-      </button>
-      <button class:active={choice === 'edit'} onclick={startEdit} title="Edit the resolution by hand">
+    {:else}
+      <button class="edit-btn" onclick={startEdit} title="Edit the resolution by hand">
         Edit
       </button>
-    </div>
+    {/if}
   </div>
 
-  {#if choice === 'edit'}
+  {#if editing}
     <div class="edit-wrap">
       <div
         class="edit-editor"
@@ -154,55 +187,101 @@
         {/if}
       </div>
     {/if}
+
+    <!-- Side headers: A / B with take-the-whole-side checkboxes. -->
+    <div class="side-heads" class:stacked={isMobile}>
+      <label class="side-head ours" title="Take all of {oursLabel}">
+        <input
+          type="checkbox"
+          checked={oursAll}
+          onchange={() => toggleSide('ours')}
+          aria-label="Take all of {oursLabel} for conflict {index}"
+        />
+        <span class="side-tag tag-a">A</span>
+        <span class="side-name">{oursLabel}</span>
+        {#if oursPicked > 0 && !oursAll}<span class="side-partial">{oursPicked}/{ours.length}</span>{/if}
+      </label>
+      {#if !isMobile}
+        <label class="side-head theirs" title="Take all of {theirsLabel}">
+          <input
+            type="checkbox"
+            checked={theirsAll}
+            onchange={() => toggleSide('theirs')}
+            aria-label="Take all of {theirsLabel} for conflict {index}"
+          />
+          <span class="side-tag tag-b">B</span>
+          <span class="side-name">{theirsLabel}</span>
+          {#if theirsPicked > 0 && !theirsAll}<span class="side-partial">{theirsPicked}/{theirs.length}</span>{/if}
+        </label>
+      {/if}
+    </div>
+
     {#if isMobile}
-      <!-- Stacked ours/theirs blocks: the side-by-side columns are too narrow on
-           a phone, so each side is its own full-width, labelled, scrolling block. -->
+      <!-- Stacked A block over B block (each with its own header + line picks). -->
       <div class="stack-sides">
-        <div class="stack-side ours" class:dim-side={choice === 'theirs'}>
-          <div class="stack-label ours-label">OURS</div>
+        <div class="stack-side ours">
           {#if ours.length === 0}
-            <pre class="stack-code mono empty-side">(empty)</pre>
+            <div class="empty-side dim mono">(empty — taking A deletes the block)</div>
           {:else}
-            <pre class="stack-code mono">{ours.join('\n')}</pre>
+            {#each ours as line, i (i)}
+              <button class="pick-line ours" class:picked={oursSel[i]} onclick={() => toggleLine('ours', i)}>
+                <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={10} />{/if}</span>
+                <span class="mono pick-code">{line}</span>
+              </button>
+            {/each}
           {/if}
         </div>
-        <div class="stack-side theirs" class:dim-side={choice === 'ours'}>
-          <div class="stack-label theirs-label">THEIRS</div>
+        <label class="side-head theirs stacked-b" title="Take all of {theirsLabel}">
+          <input
+            type="checkbox"
+            checked={theirsAll}
+            onchange={() => toggleSide('theirs')}
+            aria-label="Take all of {theirsLabel} for conflict {index}"
+          />
+          <span class="side-tag tag-b">B</span>
+          <span class="side-name">{theirsLabel}</span>
+          {#if theirsPicked > 0 && !theirsAll}<span class="side-partial">{theirsPicked}/{theirs.length}</span>{/if}
+        </label>
+        <div class="stack-side theirs">
           {#if theirs.length === 0}
-            <pre class="stack-code mono empty-side">(empty)</pre>
+            <div class="empty-side dim mono">(empty — taking B deletes the block)</div>
           {:else}
-            <pre class="stack-code mono">{theirs.join('\n')}</pre>
+            {#each theirs as line, i (i)}
+              <button class="pick-line theirs" class:picked={theirsSel[i]} onclick={() => toggleLine('theirs', i)}>
+                <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={10} />{/if}</span>
+                <span class="mono pick-code">{line}</span>
+              </button>
+            {/each}
           {/if}
         </div>
       </div>
     {:else}
-      <table class="split-table">
-        <thead>
-          <tr>
-            <th class="side-head ours">OURS</th>
-            <th class="side-head theirs">THEIRS</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each splitRows as row, ri (ri)}
-            <tr>
-              <td
-                class="code mono half ours"
-                class:void={row.left === null}
-                class:dim-side={choice === 'theirs'}
-              >{row.left ?? ''}</td>
-              <td
-                class="code mono half theirs"
-                class:void={row.right === null}
-                class:dim-side={choice === 'ours'}
-              >{row.right ?? ''}</td>
-            </tr>
-          {/each}
-          {#if splitRows.length === 0}
-            <tr><td class="code dim" colspan="2">(empty on both sides)</td></tr>
+      <div class="split-grid">
+        <div class="split-col ours">
+          {#if ours.length === 0}
+            <div class="empty-side dim mono">(empty — taking A deletes the block)</div>
+          {:else}
+            {#each ours as line, i (i)}
+              <button class="pick-line ours" class:picked={oursSel[i]} onclick={() => toggleLine('ours', i)}>
+                <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={10} />{/if}</span>
+                <span class="mono pick-code">{line}</span>
+              </button>
+            {/each}
           {/if}
-        </tbody>
-      </table>
+        </div>
+        <div class="split-col theirs">
+          {#if theirs.length === 0}
+            <div class="empty-side dim mono">(empty — taking B deletes the block)</div>
+          {:else}
+            {#each theirs as line, i (i)}
+              <button class="pick-line theirs" class:picked={theirsSel[i]} onclick={() => toggleLine('theirs', i)}>
+                <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={10} />{/if}</span>
+                <span class="mono pick-code">{line}</span>
+              </button>
+            {/each}
+          {/if}
+        </div>
+      </div>
     {/if}
   {/if}
 </div>
@@ -244,78 +323,165 @@
   .grow {
     flex: 1;
   }
-  .seg {
+  .edit-btn,
+  .edit-done {
     display: inline-flex;
+    align-items: center;
+    gap: 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    overflow: hidden;
-    flex-shrink: 0;
-  }
-  .seg button {
-    border: none;
     background: transparent;
     color: var(--text-dim);
     font-size: 11px;
     padding: 3px 9px;
     cursor: pointer;
-    border-inline-end: 1px solid var(--border);
     transition: background 100ms, color 100ms;
   }
-  .seg button:last-child {
-    border-inline-end: none;
-  }
-  .seg button:hover {
+  .edit-btn:hover,
+  .edit-done:hover {
     background: var(--surface);
     color: var(--text);
   }
-  .seg button.active {
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 600;
+  .edit-done {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
 
-  .split-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 11.5px;
-    line-height: 1.55;
-    table-layout: fixed;
+  /* ── Side headers (A / B) ── */
+  .side-heads {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border-bottom: 1px solid var(--border);
+  }
+  .side-heads.stacked {
+    grid-template-columns: 1fr;
   }
   .side-head {
-    text-align: start;
-    font-size: 9.5px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.06em;
-    padding: 2px 10px;
+    letter-spacing: 0.05em;
     color: var(--text-dim);
-    width: 50%;
-    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+  }
+  .side-head input[type='checkbox'] {
+    margin: 0;
   }
   .side-head.ours {
     border-inline-end: 1px solid var(--border);
+    background: color-mix(in srgb, var(--status-working) 7%, transparent);
   }
-  .code {
-    padding: 0 10px;
+  .side-heads.stacked .side-head.ours {
+    border-inline-end: none;
+  }
+  .side-head.theirs {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .side-tag {
+    display: inline-grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 800;
+  }
+  .tag-a {
+    background: color-mix(in srgb, var(--status-working) 28%, transparent);
+    color: var(--status-working);
+  }
+  .tag-b {
+    background: color-mix(in srgb, var(--accent) 26%, transparent);
+    color: var(--accent);
+  }
+  .side-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .side-partial {
+    font-weight: 600;
+    letter-spacing: 0;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-radius: 999px;
+    padding: 0 6px;
+    flex-shrink: 0;
+  }
+  .stacked-b {
+    border-top: 1px solid var(--border);
+  }
+
+  /* ── Pickable lines ── */
+  .split-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .split-col {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .split-col.ours {
+    border-inline-end: 1px solid var(--border);
+    background: color-mix(in srgb, var(--status-working) 5%, transparent);
+  }
+  .split-col.theirs {
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+  .pick-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    width: 100%;
+    padding: 1px 8px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    text-align: start;
+    color: var(--text);
+  }
+  .pick-line:hover {
+    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  }
+  .pick-line.picked.ours {
+    background: color-mix(in srgb, var(--status-working) 18%, transparent);
+  }
+  .pick-line.picked.theirs {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .pick-box {
+    display: inline-grid;
+    place-items: center;
+    width: 13px;
+    height: 13px;
+    margin-top: 2px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--surface);
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+  .pick-line.picked .pick-box {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  }
+  .pick-code {
+    font-size: 11.5px;
+    line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-all;
-    user-select: text;
-    vertical-align: top;
+    min-width: 0;
   }
-  .half {
-    width: 50%;
-  }
-  .half.ours {
-    border-inline-end: 1px solid var(--border);
-    background: color-mix(in srgb, var(--status-working) 9%, transparent);
-  }
-  .half.theirs {
-    background: color-mix(in srgb, var(--accent) 11%, transparent);
-  }
-  .half.void {
-    background: color-mix(in srgb, var(--text-dim) 6%, transparent);
-  }
-  .half.dim-side {
-    opacity: 0.4;
+  .empty-side {
+    padding: 4px 10px;
+    font-size: 11px;
+    font-style: italic;
   }
   .dim {
     color: var(--text-dim);
@@ -369,8 +535,6 @@
   .base-code {
     margin: 0;
     padding: 4px 10px 6px;
-    /* Logical indent so the base block stays indented from the reading edge
-       under the BASE toggle in RTL too. */
     padding-inline-start: 24px;
     font-size: 11.5px;
     line-height: 1.55;
@@ -380,52 +544,19 @@
     overflow-x: auto;
   }
 
-  /* ── Stacked ours/theirs sides (≤1024px) ── */
+  /* ── Stacked sides (≤1024px) ── */
   .stack-sides {
     display: flex;
     flex-direction: column;
   }
   .stack-side.ours {
-    background: color-mix(in srgb, var(--status-working) 9%, transparent);
+    background: color-mix(in srgb, var(--status-working) 5%, transparent);
   }
   .stack-side.theirs {
-    background: color-mix(in srgb, var(--accent) 11%, transparent);
-    border-top: 1px solid var(--border);
-  }
-  .stack-side.dim-side {
-    opacity: 0.4;
-  }
-  .stack-label {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    padding: 4px 10px 2px;
-    color: var(--text-dim);
-  }
-  .stack-label.ours-label {
-    color: color-mix(in srgb, var(--status-working) 75%, var(--text));
-  }
-  .stack-label.theirs-label {
-    color: color-mix(in srgb, var(--accent) 80%, var(--text));
-  }
-  .stack-code {
-    margin: 0;
-    padding: 0 10px 6px;
-    font-size: 12.5px;
-    line-height: 1.55;
-    white-space: pre-wrap;
-    word-break: break-word;
-    overflow-wrap: anywhere;
-    user-select: text;
-  }
-  .empty-side {
-    color: var(--text-dim);
-    font-style: italic;
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
   }
 
-  /* ── Mobile + tablet (≤1024px): the action bar wraps so all four resolution
-     buttons stay reachable with real touch targets, and the bar/label don't
-     clip off-screen on a narrow phone. ── */
+  /* ── Mobile + tablet (≤1024px): real touch targets. ── */
   @media (max-width: 1024px) {
     .hunk-bar {
       flex-wrap: wrap;
@@ -435,33 +566,36 @@
     .hunk-label {
       font-size: 12px;
     }
-    /* Let the segmented control take a full row of its own and grow each button
-       so they're tappable; they distribute evenly across the width. */
-    .seg {
-      flex-basis: 100%;
-      flex-shrink: 1;
+    .side-head {
+      min-height: 38px;
+      font-size: 11px;
     }
-    .seg button {
-      flex: 1;
-      font-size: 12px;
-      padding: 8px 6px;
-      min-height: 40px;
-      white-space: nowrap;
+    .side-head input[type='checkbox'] {
+      width: 17px;
+      height: 17px;
     }
-    /* Merge-base toggle: real touch target on a phone. */
+    .pick-line {
+      padding: 6px 10px;
+    }
+    .pick-box {
+      width: 17px;
+      height: 17px;
+      margin-top: 1px;
+    }
+    .pick-code {
+      font-size: 12.5px;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
     .base-toggle {
       min-height: 36px;
       font-size: 11px;
     }
-  }
-
-  /* Smallest phones (≤360px): let the segmented labels wrap rather than clip so
-     "Use ours/Use theirs" stay readable when four buttons share the row. */
-  @media (max-width: 360px) {
-    .seg button {
-      white-space: normal;
-      line-height: 1.15;
-      padding: 6px 4px;
+    .edit-btn,
+    .edit-done {
+      min-height: 36px;
+      padding: 6px 12px;
+      font-size: 12px;
     }
   }
 </style>

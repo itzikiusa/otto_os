@@ -1,8 +1,10 @@
 <script lang="ts">
   // One conflicted file: loads its segmented view, renders context verbatim
-  // (dim) and each conflict as a ConflictHunk. When every conflict has a choice
-  // the file can be "marked resolved" — we recompose the full file text (context
-  // lines + each conflict's chosen lines, in segment order) and POST it.
+  // (dim) and each conflict as a ConflictHunk (A/B side + per-line picking).
+  // Below the hunks sits a GitKraken-style OUTPUT pane: a live preview of the
+  // recomposed file (context + chosen lines), with "conflict k of m" navigation
+  // that scrolls the hunk list. When every conflict has a choice the file can
+  // be "marked resolved" — we recompose the full file text and POST it.
   import type { ConflictFile, ConflictSegment } from '../../lib/api/types';
   import { git } from '../../lib/stores/git.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -13,10 +15,13 @@
   interface Props {
     repoId: string;
     path: string;
+    /** Side labels for the A/B pickers (checked-out branch vs merge source). */
+    oursLabel?: string;
+    theirsLabel?: string;
     /** Called once the file has been marked resolved on the daemon. */
     onresolved: () => void;
   }
-  let { repoId, path, onresolved }: Props = $props();
+  let { repoId, path, oursLabel = 'OURS', theirsLabel = 'THEIRS', onresolved }: Props = $props();
 
   let file = $state<ConflictFile | null>(null);
   let loading = $state(true);
@@ -25,7 +30,14 @@
 
   // Per-conflict chosen lines. Indexed by the conflict's ordinal position
   // among `conflict` segments (0-based). null = undecided.
-  let choices = $state<(string[] | null)[]>([]);
+  //
+  // $state.raw, NOT $state: the values come from ConflictHunk as plain arrays
+  // and setChoice's no-change guard compares them by IDENTITY. A deep proxy
+  // would re-wrap the stored array, the guard would never match, and the
+  // hunk's onresolve effect → setChoice → re-render cycle would spin until
+  // Svelte aborts it (effect_update_depth_exceeded). The array is only ever
+  // replaced wholesale, so raw loses nothing.
+  let choices = $state.raw<(string[] | null)[]>([]);
 
   $effect(() => {
     // Re-load whenever the selected file changes.
@@ -41,6 +53,7 @@
         file = f;
         const conflictCount = f.segments.filter((s) => s.kind === 'conflict').length;
         choices = new Array(conflictCount).fill(null);
+        current = 0;
       })
       .catch((e) => {
         loadError = e instanceof Error ? e.message : String(e);
@@ -71,6 +84,54 @@
     next[ordinal] = lines;
     choices = next;
   }
+
+  // ── Conflict navigation (Output pane header) ────────────────────────────────
+  // 0-based index of the "current" conflict; prev/next scroll its hunk into
+  // view in the hunk list so long files stay navigable.
+  let current = $state(0);
+  let hunkEls: (HTMLElement | null)[] = $state([]);
+
+  function goTo(ord: number): void {
+    if (conflictCount === 0) return;
+    const next = ((ord % conflictCount) + conflictCount) % conflictCount;
+    current = next;
+    hunkEls[next]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  // ── Output preview ──────────────────────────────────────────────────────────
+  let outputOpen = $state(true);
+
+  type OutSeg =
+    | { kind: 'context'; text: string }
+    | { kind: 'resolved'; ord: number; text: string; deleted: boolean }
+    | { kind: 'unresolved'; ord: number };
+
+  /** The live recomposition shown in the Output pane: context verbatim, each
+   *  conflict either its chosen lines or an explicit "unresolved" marker. */
+  const outputSegs = $derived.by((): OutSeg[] => {
+    if (!file) return [];
+    const out: OutSeg[] = [];
+    let ord = -1;
+    for (const seg of file.segments) {
+      if (seg.kind === 'context') {
+        if (seg.lines.length > 0) out.push({ kind: 'context', text: seg.lines.join('\n') });
+      } else {
+        ord++;
+        const choice = choices[ord];
+        if (choice === null || choice === undefined) {
+          out.push({ kind: 'unresolved', ord });
+        } else {
+          out.push({
+            kind: 'resolved',
+            ord,
+            text: choice.join('\n'),
+            deleted: choice.length === 0,
+          });
+        }
+      }
+    }
+    return out;
+  });
 
   /**
    * Recompose the full file text from the segments + the user's choices:
@@ -149,14 +210,18 @@
             {/if}
           {:else}
             {@const ord = conflictOrdinal(file.segments, si)}
-            <ConflictHunk
-              ours={seg.ours}
-              theirs={seg.theirs}
-              base={seg.base}
-              index={ord + 1}
-              {path}
-              onresolve={(lines) => setChoice(ord, lines)}
-            />
+            <div class="hunk-anchor" bind:this={hunkEls[ord]}>
+              <ConflictHunk
+                ours={seg.ours}
+                theirs={seg.theirs}
+                base={seg.base}
+                index={ord + 1}
+                {path}
+                {oursLabel}
+                {theirsLabel}
+                onresolve={(lines) => setChoice(ord, lines)}
+              />
+            </div>
           {/if}
         {/each}
         {#if conflictCount === 0}
@@ -167,6 +232,62 @@
       {/if}
     {/if}
   </div>
+
+  <!-- ── Output: live preview of the resolved file ── -->
+  {#if file && !file.is_binary && conflictCount > 0}
+    <div class="output" class:open={outputOpen}>
+      <div class="output-bar">
+        <button
+          class="output-toggle"
+          onclick={() => (outputOpen = !outputOpen)}
+          aria-expanded={outputOpen}
+        >
+          <Icon name={outputOpen ? 'chevronDown' : 'chevronRight'} size={12} />
+          <span class="output-title">Output</span>
+        </button>
+        <span class="grow"></span>
+        <span class="output-nav">
+          <span class="output-count">conflict {Math.min(current + 1, conflictCount)} of {conflictCount}</span>
+          <button
+            class="nav-btn"
+            onclick={() => goTo(current - 1)}
+            title="Previous conflict"
+            aria-label="Previous conflict"
+          >
+            <Icon name="chevronUp" size={12} />
+          </button>
+          <button
+            class="nav-btn"
+            onclick={() => goTo(current + 1)}
+            title="Next conflict"
+            aria-label="Next conflict"
+          >
+            <Icon name="chevronDown" size={12} />
+          </button>
+        </span>
+      </div>
+      {#if outputOpen}
+        <div class="output-body">
+          {#each outputSegs as seg, i (i)}
+            {#if seg.kind === 'context'}
+              <pre class="out-context mono">{seg.text}</pre>
+            {:else if seg.kind === 'resolved'}
+              {#if seg.deleted}
+                <div class="out-deleted dim mono">‹conflict {seg.ord + 1}: block removed›</div>
+              {:else}
+                <pre class="out-resolved mono">{seg.text}</pre>
+              {/if}
+            {:else}
+              <button class="out-unresolved" onclick={() => goTo(seg.ord)} title="Jump to conflict {seg.ord + 1}">
+                <Icon name="merge" size={11} />
+                conflict {seg.ord + 1} — unresolved
+              </button>
+            {/if}
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -220,6 +341,9 @@
     flex-direction: column;
     gap: 10px;
   }
+  .hunk-anchor {
+    scroll-margin: 12px;
+  }
   .context {
     margin: 0;
     padding: 4px 10px;
@@ -251,10 +375,116 @@
     font-family: var(--font-mono);
   }
 
-  /* ── Mobile + tablet (≤1024px): let the head wrap so the long file path, the
-     progress chip and the "Mark file resolved" button all stay reachable; bump
-     the button to a real touch target. The body already wraps + owns its
-     scroll, so it just gets a touch of legibility. ── */
+  /* ── Output preview pane ── */
+  .output {
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .output.open {
+    flex-basis: 34%;
+    max-height: 42%;
+  }
+  .output-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .output-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    padding: 2px 0;
+  }
+  .output-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .output-count {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .nav-btn {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .nav-btn:hover {
+    color: var(--text);
+    background: var(--surface-2);
+  }
+  .output-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 6px 10px;
+  }
+  .out-context {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .out-resolved {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text);
+    background: color-mix(in srgb, var(--status-working) 10%, transparent);
+    border-inline-start: 2px solid color-mix(in srgb, var(--status-working) 60%, transparent);
+    padding: 1px 8px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .out-deleted {
+    font-size: 10.5px;
+    font-style: italic;
+    padding: 1px 8px;
+    border-inline-start: 2px solid var(--border);
+  }
+  .out-unresolved {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    border: 1px dashed color-mix(in srgb, var(--status-warn) 55%, transparent);
+    border-radius: var(--radius-s);
+    background: var(--status-warn-soft);
+    color: var(--status-warn);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    margin: 3px 0;
+    cursor: pointer;
+    text-align: start;
+  }
+
+  /* ── Mobile + tablet (≤1024px) ── */
   @media (max-width: 1024px) {
     .pane-head {
       flex-wrap: wrap;
@@ -275,6 +505,17 @@
       font-size: 12.5px;
       word-break: break-word;
       overflow-wrap: anywhere;
+    }
+    .output.open {
+      flex-basis: 40%;
+      max-height: 45%;
+    }
+    .nav-btn {
+      width: 32px;
+      height: 32px;
+    }
+    .output-toggle {
+      min-height: 32px;
     }
   }
 </style>
