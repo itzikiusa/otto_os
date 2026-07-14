@@ -123,9 +123,14 @@ class VaultStore {
   /** One-shot prompt/skills prefill for the docs-agent form ("Review + fix
    *  docs" on a folder, "Send to agent to fix" on a findings run). The view
    *  consumes it on open. */
-  docsAgentsPrefill = $state<{ prompt: string; skills: string[]; autorun?: boolean } | null>(
-    null,
-  );
+  docsAgentsPrefill = $state<{
+    prompt: string;
+    skills: string[];
+    autorun?: boolean;
+    /** Writer rows to run with (group bar's provider/model picker); the form's
+     *  defaults apply when absent. */
+    agents?: { provider: string; model?: string }[];
+  } | null>(null);
   /** One-shot "Review + fix" request for a note: NoteView auto-opens the
    *  refine drawer and the drawer auto-sends this prompt for the given path. */
   pendingRefine = $state<{ path: string; prompt: string } | null>(null);
@@ -751,8 +756,13 @@ class VaultStore {
   }
 
   /** Multi-select → one agent request over the group (canned review+fix or a
-   *  free-form instruction). Auto-runs: the group bar's button IS the send. */
-  sendGroupToAgent(paths: string[], instruction: string | null): void {
+   *  free-form instruction). Auto-runs: the group bar's button IS the send.
+   *  `agent` (the bar's provider/model picker) selects who runs it. */
+  sendGroupToAgent(
+    paths: string[],
+    instruction: string | null,
+    agent?: { provider: string; model?: string },
+  ): void {
     const list = paths.map((p) => `- \`${p}\``).join('\n');
     const task = instruction
       ? `Instruction:\n${instruction}`
@@ -768,6 +778,7 @@ class VaultStore {
         `Finish with a one-line summary per note changed.`,
       skills: ['vault-repo-docs'],
       autorun: true,
+      agents: agent ? [agent] : undefined,
     };
     this.openDocsAgents();
   }

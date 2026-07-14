@@ -5,6 +5,7 @@
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { vault, type TreeNode } from './vault.svelte';
 
   let {
@@ -40,15 +41,22 @@
     selected = new Set();
   }
 
-  function groupReviewFix(): void {
-    vault.sendGroupToAgent([...selected], null);
-    clearSelection();
+  // Free-form group instruction + the agent that runs it, all INLINE in the
+  // selection bar — window.prompt() does not exist in the desktop webview
+  // (silent no-op).
+  let groupPrompt = $state('');
+  let groupProvider = $state(defaultAgentProvider());
+  let groupModel = $state('');
+  let groupInputEl = $state<HTMLInputElement | null>(null);
+
+  function groupAgent(): { provider: string; model?: string } {
+    return { provider: groupProvider, model: groupModel.trim() || undefined };
   }
 
-  // Free-form group instruction, typed INLINE in the selection bar —
-  // window.prompt() does not exist in the desktop webview (silent no-op).
-  let groupPrompt = $state('');
-  let groupInputEl = $state<HTMLInputElement | null>(null);
+  function groupReviewFix(): void {
+    vault.sendGroupToAgent([...selected], null, groupAgent());
+    clearSelection();
+  }
 
   function groupSend(): void {
     const inst = groupPrompt.trim();
@@ -56,7 +64,7 @@
       groupInputEl?.focus();
       return;
     }
-    vault.sendGroupToAgent([...selected], inst);
+    vault.sendGroupToAgent([...selected], inst, groupAgent());
     groupPrompt = '';
     clearSelection();
   }
@@ -302,6 +310,23 @@
         <button class="ghost dim" onclick={clearSelection}>Clear</button>
       </div>
       <div class="sel-row">
+        <select
+          class="sel-select"
+          bind:value={groupProvider}
+          title="Agent provider that runs the group action"
+        >
+          {#each agentProviders() as p (p)}
+            <option value={p}>{p}</option>
+          {/each}
+        </select>
+        <input
+          class="sel-input"
+          bind:value={groupModel}
+          placeholder="model (optional)"
+          title="Model override for the agent (leave empty for the provider default)"
+        />
+      </div>
+      <div class="sel-row">
         <input
           class="sel-input"
           bind:this={groupInputEl}
@@ -426,6 +451,16 @@
     color: var(--text);
     font-size: 11.5px;
     padding: 4px 8px;
+  }
+  .sel-select {
+    flex: 0 0 auto;
+    max-width: 45%;
+    background: var(--panel-2, #222);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 11.5px;
+    padding: 4px 6px;
   }
   .sel-bar .ghost:disabled {
     opacity: 0.5;

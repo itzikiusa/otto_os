@@ -129,6 +129,9 @@
     prompt = p.prompt;
     tplSkills = p.skills;
     targetDir = vault.docsAgentsDir;
+    if (p.agents?.length) {
+      agents = p.agents.map((a) => ({ provider: a.provider, model: a.model ?? '' }));
+    }
     vault.docsRun = null;
     if (p.autorun) void start();
   });
