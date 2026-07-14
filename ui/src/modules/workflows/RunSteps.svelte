@@ -7,6 +7,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { proof } from '../../lib/stores/proof.svelte';
   import { router } from '../../lib/router.svelte';
+  import { retryRunNode } from '../../lib/api/workflows';
   import type { WorkflowRun, NodeRunState } from '../../lib/api/types';
 
   interface Props {
@@ -16,8 +17,11 @@
     /** Open a session INLINE (WF page's Agents tab) instead of navigating to the
      *  global Agents panel. When omitted, falls back to router navigation. */
     onOpenSession?: (id: string) => void;
+    /** Merge a fresh run snapshot into the viewed run (e.g. after a step retry
+     *  flips it back to running). When omitted, the WS/poll sync catches up. */
+    onRunUpdated?: (run: WorkflowRun) => void;
   }
-  let { run, nodeName = (id) => id, onOpenSession }: Props = $props();
+  let { run, nodeName = (id) => id, onOpenSession, onRunUpdated }: Props = $props();
 
   // Expansion is USER-owned, id-keyed state: a step that errors auto-opens once
   // (error visibility), but a manual toggle always wins afterward — live run
@@ -121,6 +125,38 @@
     return typeof out === 'string' ? out : JSON.stringify(out, null, 2);
   }
 
+  // "Retry step": re-run a single ERRORED step of a FINISHED run. Never offered
+  // while the run is still pending/running (the server 409s), nor on steps that
+  // ended any other way (done/skipped — the server 400s those).
+  const runFinished = $derived(
+    run.status === 'success' || run.status === 'error' || run.status === 'canceled',
+  );
+  function canRetry(ns: NodeRunState): boolean {
+    return ns.status === 'error' && runFinished;
+  }
+  // "Re-run from here": re-enter THIS run at a settled step and re-execute it
+  // plus everything downstream — same run id, so the run's context dir and
+  // otto-wf worktree (the files earlier steps produced) are reused. This is
+  // the stateful counterpart of the canvas "Run from here" (which mints a
+  // fresh run with a clean worktree).
+  function canRerunFrom(ns: NodeRunState): boolean {
+    return runFinished && ns.status !== 'pending' && ns.status !== 'running';
+  }
+  let retryingId = $state<string | null>(null);
+  async function retryStep(ns: NodeRunState, includeDownstream = false): Promise<void> {
+    if (retryingId) return; // one retry in flight at a time
+    retryingId = ns.node_id;
+    try {
+      const nr = await retryRunNode(run.id, ns.node_id, includeDownstream);
+      onRunUpdated?.(nr); // flips the run back to running; WS keeps it live
+      toasts.info(includeDownstream ? 'Re-running from step…' : 'Step retrying…', nodeName(ns.node_id));
+    } catch (e) {
+      toasts.error('Retry failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      retryingId = null;
+    }
+  }
+
   // "Zoom in on a specific step" (R6): open the step's full logs + work product
   // in a large modal, so a big JSON config/output is actually readable.
   let zoomed = $state<NodeRunState | null>(null);
@@ -180,8 +216,28 @@
           <div class="err">{ns.error}</div>
         {/if}
 
-        {#if ns.sessions?.length || reviewIdOf(ns.output)}
+        {#if ns.sessions?.length || reviewIdOf(ns.output) || canRetry(ns) || canRerunFrom(ns)}
           <div class="links">
+            {#if canRetry(ns)}
+              <button
+                class="link-btn"
+                title="Re-run ONLY this errored step, keeping this run's files/worktree"
+                disabled={retryingId === ns.node_id}
+                onclick={() => void retryStep(ns)}
+              >
+                <Icon name="refresh" size={11} /> {retryingId === ns.node_id ? 'Retrying…' : 'Retry step'}
+              </button>
+            {/if}
+            {#if canRerunFrom(ns)}
+              <button
+                class="link-btn"
+                title="Re-run this step AND everything after it, keeping this run's files/worktree (unlike the canvas Run-from-here, which starts a fresh run with a clean worktree)"
+                disabled={retryingId === ns.node_id}
+                onclick={() => void retryStep(ns, true)}
+              >
+                <Icon name="play" size={11} /> Re-run from here
+              </button>
+            {/if}
             {#each ns.sessions ?? [] as sid (sid)}
               <button class="link-btn" title={`Open session ${sid}`} onclick={() => openSession(sid)}>
                 <Icon name="terminal" size={11} /> Open session
@@ -303,6 +359,10 @@
   .link-btn:hover {
     color: var(--text);
     border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  }
+  .link-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
   .step {
     border: 1px solid var(--border);

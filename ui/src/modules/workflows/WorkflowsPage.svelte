@@ -1668,7 +1668,7 @@
                 </button>
               {/each}
             </div>
-            <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} onOpenSession={openSessionInline} /></div>
+            <div class="run-detail"><RunSteps {run} nodeName={(id) => nodeName(id)} onOpenSession={openSessionInline} onRunUpdated={applyRunSnapshot} /></div>
             {#if run.status === 'success' && run.context_dir && finalOutputAvailable && finalOutputRunId === run.id && !viewport.isDesktop}
               <!-- Mobile/tablet: the run's deliverable, above the context-file tree
                    below. On desktop this moves into the Context-files sidebar. -->
