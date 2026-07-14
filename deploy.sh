@@ -106,7 +106,11 @@ if [[ -z "${OTTO_DEPLOY_DETACHED:-}" ]] && under_ottod; then
     echo "  Re-launching detached so the deploy survives the daemon restart."
     echo "  ${DIM}log:${RST}    $LOG"
     echo "  ${DIM}follow:${RST} tail -f \"$LOG\""
-    OTTO_DEPLOY_DETACHED=1 nohup "$0" "$@" >"$LOG" 2>&1 </dev/null & disown
+    # Re-exec by ABSOLUTE path: `bash deploy.sh` leaves $0 slash-less, and nohup
+    # PATH-looks-up bare names — the detached copy would die with "No such file
+    # or directory" before doing anything (and the parent exits 0, silently).
+    SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    OTTO_DEPLOY_DETACHED=1 nohup bash "$SELF" "$@" >"$LOG" 2>&1 </dev/null & disown
     exit 0
 fi
 
