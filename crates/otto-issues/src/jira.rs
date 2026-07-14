@@ -8,7 +8,7 @@ use futures_util::future::join_all;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use otto_core::domain::{IssueDetail, IssueProject, IssueSummary};
+use otto_core::domain::{IssueDetail, IssueProject, IssueSummary, MyWorkIssue};
 use otto_core::{Error, Result};
 
 use crate::adf::{adf_to_markdown, text_to_adf};
@@ -435,6 +435,97 @@ impl JiraClient {
         let from = (start_at as usize).min(collected.len());
         let to = (start_at.saturating_add(PAGE) as usize).min(collected.len());
         Ok(collected[from..to].to_vec())
+    }
+
+    /// The caller's open assigned issues (the Focus view's "my work"): every
+    /// `assignee = currentUser()` issue not in a Done status category, newest
+    /// activity first, with parent + project fields so the client can rebuild
+    /// the epic → story → subtask hierarchy. One page of 100 — a personal
+    /// backlog deeper than that isn't a focus view any more.
+    pub async fn my_work(&self) -> Result<Vec<MyWorkIssue>> {
+        let jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
+        let fields = "summary,status,issuetype,parent,project,priority,updated";
+        let new_url = format!("{}/rest/api/3/search/jql", self.base_url);
+        let resp = self
+            .http
+            .get(&new_url)
+            .header("Authorization", &self.auth_header)
+            .header("Accept", "application/json")
+            .query(&[("jql", jql), ("maxResults", "100"), ("fields", fields)])
+            .send()
+            .await
+            .map_err(|e| Error::Upstream(format!("jira my-work request: {e}")))?;
+
+        let body: serde_json::Value = if resp.status().is_success() {
+            resp.json()
+                .await
+                .map_err(|e| Error::Upstream(format!("jira my-work parse: {e}")))?
+        } else {
+            // Classic `/rest/api/3/search` fallback (same rule as search_jql).
+            let resp = self
+                .http
+                .get(format!("{}/rest/api/3/search", self.base_url))
+                .header("Authorization", &self.auth_header)
+                .header("Accept", "application/json")
+                .query(&[
+                    ("jql", jql),
+                    ("maxResults", "100"),
+                    ("startAt", "0"),
+                    ("fields", fields),
+                ])
+                .send()
+                .await
+                .map_err(|e| Error::Upstream(format!("jira my-work fallback request: {e}")))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(Error::Upstream(format!(
+                    "jira my-work search failed ({status}): {body}"
+                )));
+            }
+            resp.json()
+                .await
+                .map_err(|e| Error::Upstream(format!("jira my-work parse: {e}")))?
+        };
+        Ok(self.parse_my_work(&body))
+    }
+
+    /// Shape a search response's `issues` array into [`MyWorkIssue`]s.
+    fn parse_my_work(&self, body: &serde_json::Value) -> Vec<MyWorkIssue> {
+        fn s(v: &serde_json::Value, path: &[&str]) -> Option<String> {
+            let mut cur = v;
+            for p in path {
+                cur = cur.get(p)?;
+            }
+            cur.as_str().map(str::to_string)
+        }
+        let issues = body
+            .get("issues")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+        let mut results = Vec::with_capacity(issues.len());
+        for issue in issues {
+            let Some(key) = issue.get("key").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let f = issue.get("fields").cloned().unwrap_or_default();
+            results.push(MyWorkIssue {
+                key: key.to_string(),
+                summary: s(&f, &["summary"]).unwrap_or_default(),
+                status: s(&f, &["status", "name"]).unwrap_or_default(),
+                issue_type: s(&f, &["issuetype", "name"]).unwrap_or_default(),
+                url: format!("{}/browse/{}", self.base_url, key),
+                project_key: s(&f, &["project", "key"]).unwrap_or_default(),
+                project_name: s(&f, &["project", "name"]).unwrap_or_default(),
+                parent_key: s(&f, &["parent", "key"]),
+                parent_summary: s(&f, &["parent", "fields", "summary"]),
+                parent_type: s(&f, &["parent", "fields", "issuetype", "name"]),
+                priority: s(&f, &["priority", "name"]),
+                updated_at: s(&f, &["updated"]),
+            });
+        }
+        results
     }
 
     /// Classic `/rest/api/3/search` offset-paginated fallback.

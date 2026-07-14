@@ -1033,6 +1033,7 @@ configured Jira/Confluence account.
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
 | GET /issue/projects | member | — | available projects |
 | GET /issue/search | member | — | issue search results (JQL) |
+| GET /issue/my-work?account_id= | member | — | `MyWorkIssue[]` — the caller's open assigned issues (`assignee = currentUser()`, statusCategory != Done, newest first, one page of 100) with parent/project context for the Focus view hierarchy |
 | GET /issue/confluence/spaces | member | — | Confluence spaces |
 | GET /issue/confluence/search | member | — | Confluence page search |
 | GET /issue/{account_id}/{key} | member | — | issue summary |

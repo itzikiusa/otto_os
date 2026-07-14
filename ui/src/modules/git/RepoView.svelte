@@ -8,6 +8,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import GitToolbar from './GitToolbar.svelte';
   import GraphView from './GraphView.svelte';
+  import FocusView from './FocusView.svelte';
   import PrList from './PrList.svelte';
   import LocalReviewPanel from './LocalReviewPanel.svelte';
   import MergeApprovalModal from './MergeApprovalModal.svelte';
@@ -134,6 +135,9 @@
     { id: 'graph', label: 'Graph' },
     { id: 'prs', label: 'Pull Requests' },
     { id: 'review', label: 'Review' },
+    // Cross-repo: "my PRs" + "my Jira work" — not scoped to this repo, but it
+    // lives here because the git page is where you think about this.
+    { id: 'focus', label: 'Focus' },
   ];
 
   // Repo switcher: jump between repositories without going back to the list.
@@ -248,6 +252,8 @@
       <div class="rv-tab-scroll">
         <LocalReviewPanel repoId={repo.id} />
       </div>
+    {:else if effTab === 'focus'}
+      <FocusView />
     {:else if status}
       <!-- Graph is the default for 'graph' AND any legacy tab id (changes /
            history) still living in persisted state or old deep links. -->

@@ -745,6 +745,27 @@ pub struct IssueSummary {
     pub url: String,
 }
 
+/// One of the caller's assigned issues (the Focus view's "my work" list),
+/// carrying parent + project context so the client can rebuild the
+/// epic → story → subtask hierarchy without extra round-trips.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyWorkIssue {
+    pub key: String,
+    pub summary: String,
+    pub status: String,
+    pub issue_type: String,
+    pub url: String,
+    pub project_key: String,
+    pub project_name: String,
+    /// Direct parent (epic for stories, story for subtasks); None at the top.
+    pub parent_key: Option<String>,
+    pub parent_summary: Option<String>,
+    pub parent_type: Option<String>,
+    pub priority: Option<String>,
+    /// Raw Jira `updated` timestamp (ISO-8601); None when absent.
+    pub updated_at: Option<String>,
+}
+
 /// Full issue detail returned by the single-issue fetch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueDetail {

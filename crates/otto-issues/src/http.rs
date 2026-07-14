@@ -12,7 +12,7 @@ use axum::routing::{get, patch, post, put};
 use axum::{Extension, Json, Router};
 use otto_core::api::{CreateIssueAccountReq, Problem, UpdateIssueAccountReq};
 use otto_core::auth::{authorize_owner, AuthUser};
-use otto_core::domain::{IssueAccount, IssueDetail, IssueProject, IssueSummary};
+use otto_core::domain::{IssueAccount, IssueDetail, IssueProject, IssueSummary, MyWorkIssue};
 use otto_core::secrets::SecretStore;
 use otto_core::{new_id, Error, Id};
 use otto_state::{IssuesRepo, NewIssueAccount};
@@ -112,6 +112,7 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
         )
         .route("/issue/projects", get(list_projects::<S>))
         .route("/issue/search", get(search_issues::<S>))
+        .route("/issue/my-work", get(my_work::<S>))
         .route("/issue/confluence/spaces", get(list_spaces_cf::<S>))
         .route("/issue/confluence/search", get(search_pages_cf::<S>))
         .route("/issue/{account_id}/{key}", get(get_issue::<S>))
@@ -291,6 +292,27 @@ async fn search_issues<S: IssuesCtx>(
         .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
     let client = JiraClient::new(&account.base_url, &account.email, &token);
     let results = client.search(&q, project.as_deref(), start_at).await?;
+    Ok(Json(results))
+}
+
+/// The caller's open assigned issues for the Focus view. `account_id` picks
+/// which Jira identity to ask; "mine" is Jira's `currentUser()` for it.
+async fn my_work<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Vec<MyWorkIssue>>> {
+    let account_id: Id = params
+        .get("account_id")
+        .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
+        .clone();
+    let account = load_authorized_account(&s, &account_id, &user).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    let client = JiraClient::new(&account.base_url, &account.email, &token);
+    let results = client.my_work().await?;
     Ok(Json(results))
 }
 

@@ -15,6 +15,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import GitTabs from './GitTabs.svelte';
   import RepoView from './RepoView.svelte';
+  import FocusView from './FocusView.svelte';
   import PrDetail from './PrDetail.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
@@ -30,6 +31,10 @@
   // The active repo is driven by the tab store, not the route.
   const activeRepo = $derived(git.allRepos.find((r) => r.id === git.activeRepoId) ?? null);
   const prRepo = $derived(git.allRepos.find((r) => r.id === routeRepoId) ?? null);
+
+  // Focus view (my PRs + my Jira work) shown from the landing when no repo tab
+  // is open — the same view also lives as a sub-tab inside every open repo.
+  let landingFocus = $state(false);
 
   // add repo sheet
   let addOpen = $state(false);
@@ -236,6 +241,14 @@
           />
         </div>
       {/key}
+    {:else if landingFocus}
+      <div class="landing-focus">
+        <div class="landing-focus-head">
+          <button class="btn ghost small" onclick={() => (landingFocus = false)}>← Repos</button>
+          <span class="landing-focus-title">Focus</span>
+        </div>
+        <FocusView />
+      </div>
     {:else}
       <!-- ── Compact, centered hub (no tab open). Adding/opening also live in
            the + tab, so this is just a tidy launcher, not a separate screen. ── -->
@@ -260,9 +273,14 @@
                   new repository there.
                 </div>
               </div>
-              <button class="btn primary" onclick={() => (addOpen = true)}>
-                <Icon name="plus" size={12} /> Add Repository
-              </button>
+              <div class="landing-actions">
+                <button class="btn ghost" onclick={() => (landingFocus = true)} title="My pull requests + my Jira work">
+                  <Icon name="zap" size={12} /> Focus
+                </button>
+                <button class="btn primary" onclick={() => (addOpen = true)}>
+                  <Icon name="plus" size={12} /> Add Repository
+                </button>
+              </div>
             </div>
             <div class="repo-search">
               <Icon name="search" size={13} />
@@ -486,6 +504,31 @@
     min-height: 0;
     overflow-y: auto;
     padding: 28px 24px 40px;
+  }
+  /* Focus view opened from the landing (no repo tab): slim header + the view. */
+  .landing-focus {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .landing-focus-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .landing-focus-title {
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .landing-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
   /* Centered, constrained hub so the no-tab state isn't a sprawling near-empty
      page — the + tab is the primary add/open entry point. */

@@ -1629,6 +1629,10 @@ mod tests {
             Require(Issues, View)
         );
         assert_eq!(
+            pol(Method::GET, "/api/v1/issue/my-work"),
+            Require(Issues, View)
+        );
+        assert_eq!(
             pol(Method::POST, "/api/v1/issue/{account_id}/{key}/comment"),
             Require(Issues, Edit)
         );

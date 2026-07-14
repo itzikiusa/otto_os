@@ -2934,6 +2934,23 @@ export interface IssueSummary {
   url: string;
 }
 
+/** `GET /issue/my-work?account_id=` — one of the caller's assigned issues
+ *  (Focus view), with parent + project context for hierarchy rebuilding. */
+export interface MyWorkIssue {
+  key: string;
+  summary: string;
+  status: string;
+  issue_type: string;
+  url: string;
+  project_key: string;
+  project_name: string;
+  parent_key: string | null;
+  parent_summary: string | null;
+  parent_type: string | null;
+  priority: string | null;
+  updated_at: string | null;
+}
+
 export interface IssueDetail {
   key: string;
   summary: string;
