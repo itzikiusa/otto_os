@@ -849,6 +849,35 @@ impl LocalGit {
         Ok(sha.trim().to_string())
     }
 
+    /// Safety net before opening a PR from a run/workflow worktree: stage and
+    /// commit everything an agent left uncommitted (agents are TOLD to commit,
+    /// but a stalled/stuck one leaves its work in the tree — the branch then
+    /// has no commits ahead of base and the provider rejects the PR with
+    /// "no changes to be pulled"). Otto's own runtime artifacts are excluded:
+    /// `.mcp.json` is rendered into the cwd at session spawn and `.env*` /
+    /// `.DS_Store` must never ride into a PR. Returns `Some(sha)` when a
+    /// commit was made, `None` when there was nothing (real) to commit.
+    /// Callers point this ONLY at dedicated run worktrees, never at a user's
+    /// main checkout.
+    pub async fn commit_all_if_dirty(&self, message: &str) -> Result<Option<String>> {
+        self.run(&[
+            "add",
+            "-A",
+            "--",
+            ".",
+            ":(exclude).mcp.json",
+            ":(exclude).env",
+            ":(exclude).env.*",
+            ":(exclude,glob)**/.DS_Store",
+        ])
+        .await?;
+        let staged = self.run(&["diff", "--cached", "--name-only"]).await?;
+        if staged.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.commit(message, false).await?))
+    }
+
     /// `git push`; for https remotes pass the account token so the askpass
     /// helper can answer credential prompts. Returns combined output.
     ///
@@ -1637,8 +1666,9 @@ fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
 /// Temp executable script handed to git via GIT_ASKPASS. Echoes a placeholder
 /// username for "Username" prompts and the token (provided via env var
 /// OTTO_GIT_TOKEN, never written to disk) for everything else. Works for
-/// GitHub (any username + PAT), Bitbucket (x-token-auth or app-password user)
-/// and GitLab (any username + PAT).
+/// GitHub (any username + PAT), Bitbucket (see [`AskPass::envs`] — API tokens
+/// need the magic `x-bitbucket-api-token-auth` username; access tokens use
+/// `x-token-auth`) and GitLab (any username + PAT).
 struct AskPass {
     // Held to keep the temp file alive for the duration of the command.
     _file: tempfile::TempPath,
@@ -1674,13 +1704,35 @@ impl AskPass {
     }
 
     fn envs(&self) -> Vec<(String, String)> {
-        vec![
+        let mut envs = vec![
             (
                 "GIT_ASKPASS".to_string(),
                 self.path.to_string_lossy().into_owned(),
             ),
             ("OTTO_GIT_TOKEN".to_string(), self.token.clone()),
-        ]
+            // System credential helpers (osxkeychain) run BEFORE askpass, and
+            // a stale credential they serve (e.g. a dying Bitbucket app
+            // password) draws a 410 — a HARD error git never retries with the
+            // next credential source, so the account token below is never
+            // consulted. When Otto supplies the credential it must be
+            // authoritative: reset the helper list via config-env (the
+            // equivalent of `git -c credential.helper=`).
+            ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            ("GIT_CONFIG_KEY_0".to_string(), "credential.helper".to_string()),
+            ("GIT_CONFIG_VALUE_0".to_string(), String::new()),
+        ];
+        // Atlassian API tokens (the app-password replacement, prefix ATATT)
+        // authenticate git-over-HTTPS only under this exact magic username —
+        // `x-token-auth` (the default) gets 410 Gone from bitbucket.org. The
+        // prefix is Atlassian-specific, so this never misfires for GitHub
+        // (ghp_/github_pat_) or GitLab (glpat-) tokens.
+        if self.token.starts_with("ATATT") {
+            envs.push((
+                "OTTO_GIT_USERNAME".to_string(),
+                "x-bitbucket-api-token-auth".to_string(),
+            ));
+        }
+        envs
     }
 }
 
@@ -1966,6 +2018,50 @@ mod tests {
         match git.checkout("no-such-branch", false).await {
             Err(Error::Upstream(msg)) => assert!(msg.contains("git exited")),
             other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_all_if_dirty_sweeps_leftovers_but_not_artifacts() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        // The fixture starts dirty (staged rename/new, unstaged, untracked) —
+        // the sweep commits all of it.
+        assert!(git.commit_all_if_dirty("sweep fixture").await.unwrap().is_some());
+        // Now-clean tree → no commit.
+        assert!(git.commit_all_if_dirty("noop").await.unwrap().is_none());
+        // Leftover agent work + runtime artifacts that must stay out.
+        write(&dir, "work.txt", "agent forgot to commit me\n");
+        write(&dir, ".mcp.json", "{}\n");
+        write(&dir, ".env", "SECRET=1\n");
+        let sha = git.commit_all_if_dirty("sweep").await.unwrap();
+        assert!(sha.is_some());
+        let st = git.status().await.unwrap();
+        assert!(!st.changes.iter().any(|c| c.path == "work.txt"));
+        assert!(st.changes.iter().any(|c| c.path == ".mcp.json"));
+        assert!(st.changes.iter().any(|c| c.path == ".env"));
+        // Nothing real left → None again.
+        assert!(git.commit_all_if_dirty("noop").await.unwrap().is_none());
+    }
+
+    #[test]
+    fn askpass_username_follows_token_kind() {
+        // Atlassian API tokens must authenticate under the magic username;
+        // everything else keeps the x-token-auth script default (no env).
+        let api = AskPass::new("ATATT3xFfGF0abc").unwrap();
+        assert!(api.envs().iter().any(|(k, v)| {
+            k == "OTTO_GIT_USERNAME" && v == "x-bitbucket-api-token-auth"
+        }));
+        let pat = AskPass::new("ghp_abc123").unwrap();
+        assert!(!pat.envs().iter().any(|(k, _)| k == "OTTO_GIT_USERNAME"));
+        // Otto's credential must be authoritative: helpers reset for every
+        // token kind (a stale osxkeychain app password otherwise wins and
+        // draws a hard 410 before askpass is ever consulted).
+        for a in [&api, &pat] {
+            assert!(a
+                .envs()
+                .iter()
+                .any(|(k, v)| k == "GIT_CONFIG_KEY_0" && v == "credential.helper"));
         }
     }
 

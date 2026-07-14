@@ -606,11 +606,25 @@ async fn remote_repos<S: GitCtx>(
 /// workspaces they are a member of (any role ≥ Viewer — membership grants at
 /// least Viewer). Per-repo operations still authorize against the repo's own
 /// workspace, so this only widens *discovery*, not access.
+/// Drop repos whose path no longer exists on disk (failed/aborted clones,
+/// deleted checkouts) so they don't linger in pickers. Rows are kept — a repo
+/// on an unmounted volume reappears when the path does.
+async fn retain_on_disk(repos: &mut Vec<Repo>) {
+    let mut keep = Vec::with_capacity(repos.len());
+    for r in repos.drain(..) {
+        if tokio::fs::metadata(&r.path).await.is_ok() {
+            keep.push(r);
+        }
+    }
+    *repos = keep;
+}
+
 async fn list_all_repos<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<Repo>>> {
     let mut all = s.store().list_all_repos().await?;
+    retain_on_disk(&mut all).await;
     all.iter_mut().for_each(fill_forge);
     if user.0.is_root {
         return Ok(Json(all));
@@ -639,6 +653,7 @@ async fn list_repos<S: GitCtx>(
         .check(&user.0, &ws_id, WorkspaceRole::Viewer)
         .await?;
     let mut repos = s.store().list_repos(&ws_id).await?;
+    retain_on_disk(&mut repos).await;
     repos.iter_mut().for_each(fill_forge);
     Ok(Json(repos))
 }
@@ -785,18 +800,31 @@ async fn clone_into_workspace<S: GitCtx>(
     let provider = detected.as_ref().map(|(k, _)| *k);
     let account_id = resolve_account(s, user, req.git_account_id.as_ref(), provider).await?;
 
+    let dest_str = dest.to_string_lossy().into_owned();
     // Row first — the UI sees the repo immediately; Notice events track progress.
-    let repo = s
+    // Reuse a leftover row for the same path (a prior failed clone) instead of
+    // minting a duplicate — same rule as `register_repo` for local adds.
+    let existing = s
         .store()
-        .create_repo(NewRepo {
-            workspace_id: ws_id.clone(),
-            name: name.clone(),
-            path: dest.to_string_lossy().into_owned(),
-            remote_url: Some(url.to_string()),
-            provider,
-            git_account_id: account_id.clone(),
-        })
-        .await?;
+        .list_repos(ws_id)
+        .await?
+        .into_iter()
+        .find(|r| r.path == dest_str);
+    let repo = match existing {
+        Some(r) => r,
+        None => {
+            s.store()
+                .create_repo(NewRepo {
+                    workspace_id: ws_id.clone(),
+                    name: name.clone(),
+                    path: dest_str,
+                    remote_url: Some(url.to_string()),
+                    provider,
+                    git_account_id: account_id.clone(),
+                })
+                .await?
+        }
+    };
 
     let token = match &account_id {
         Some(aid) => {
@@ -809,6 +837,7 @@ async fn clone_into_workspace<S: GitCtx>(
     let task_state = s.clone();
     let task_url = url.to_string();
     let task_name = name.clone();
+    let task_repo_id = repo.id.clone();
     tokio::spawn(async move {
         // Display URL only — strip any user:pass@ a caller may have embedded so
         // it isn't echoed into the notice/log (the real URL still drives clone).
@@ -830,12 +859,21 @@ async fn clone_into_workspace<S: GitCtx>(
                 "Clone finished",
                 &format!("{task_name} is ready"),
             ),
-            Err(e) => notice(
-                &task_state,
-                "error",
-                "Clone failed",
-                &format!("{task_name}: {e}"),
-            ),
+            Err(e) => {
+                notice(
+                    &task_state,
+                    "error",
+                    "Clone failed",
+                    &format!("{task_name}: {e}"),
+                );
+                // The eager row now points at nothing (git removes the dest it
+                // created on failure) — unregister it so failed attempts don't
+                // pile up as dead entries in the repo list. Files untouched;
+                // if the dest somehow exists, keep the row.
+                if tokio::fs::metadata(&dest).await.is_err() {
+                    let _ = task_state.store().delete_repo(&task_repo_id).await;
+                }
+            }
         }
     });
 
