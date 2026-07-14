@@ -1,13 +1,13 @@
 <script lang="ts">
-  // One repo: toolbar header + tabs (Graph / Changes / History / Pull Requests).
+  // One repo: toolbar header + tabs (Graph / Pull Requests / Review). Staging
+  // and history both live on the graph now (WIP row + detail panel), so there
+  // are no separate Changes/History tabs.
   import type { MergeResult, Repo, RepoStatusResp } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import GitToolbar from './GitToolbar.svelte';
-  import ChangesView from './ChangesView.svelte';
   import GraphView from './GraphView.svelte';
-  import HistoryView from './HistoryView.svelte';
   import PrList from './PrList.svelte';
   import LocalReviewPanel from './LocalReviewPanel.svelte';
   import MergeApprovalModal from './MergeApprovalModal.svelte';
@@ -18,13 +18,17 @@
 
   interface Props {
     repo: Repo;
-    tab: string; // graph | changes | history | prs | review
+    tab: string; // graph | prs | review (legacy changes/history render the graph)
     /** Embedded in the agent-mode right panel: switch tabs via `onTab` (local
      *  state) instead of routing, and hide the "← Repos" back button. */
     embedded?: boolean;
     onTab?: (tab: string) => void;
   }
   let { repo, tab, embedded = false, onTab }: Props = $props();
+
+  // Legacy deep links / persisted state may still say 'changes' or 'history';
+  // both render the graph now, and the Graph tab must read as active for them.
+  const effTab = $derived(tab === 'changes' || tab === 'history' ? 'graph' : tab);
 
   // Status is owned by the git store (single source of truth) so the auto-fetch
   // loop, the tab strip and this toolbar all stay in sync from one fetch.
@@ -128,8 +132,6 @@
 
   const tabs = [
     { id: 'graph', label: 'Graph' },
-    { id: 'changes', label: 'Changes' },
-    { id: 'history', label: 'History' },
     { id: 'prs', label: 'Pull Requests' },
     { id: 'review', label: 'Review' },
   ];
@@ -182,7 +184,7 @@
     {#each tabs as t (t.id)}
       <button
         class="rv-tab"
-        class:active={tab === t.id && !resolving}
+        class:active={effTab === t.id && !resolving}
         onclick={() => {
           resolving = false;
           if (embedded) onTab?.(t.id);
@@ -190,8 +192,8 @@
         }}
       >
         {t.label}
-        {#if t.id === 'changes' && status && status.changes.length > 0}
-          <span class="count">{status.changes.length}</span>
+        {#if t.id === 'graph' && status && status.changes.length > 0}
+          <span class="count" title="{status.changes.length} uncommitted change{status.changes.length === 1 ? '' : 's'} (WIP)">{status.changes.length}</span>
         {/if}
       </button>
     {/each}
@@ -230,24 +232,7 @@
         initialSource={conflictSeed.source}
         onleave={leaveResolver}
       />
-    {:else if tab === 'graph'}
-      {#if status}
-        {#key graphKey}
-          <GraphView
-            repoId={repo.id}
-            repoPath={repo.path}
-            workspaceId={repo.workspace_id}
-            {status}
-            onstatus={setStatus}
-            onmergerequest={requestMerge}
-          />
-        {/key}
-      {:else}
-        <div style="padding: 16px"><Skeleton rows={5} height={36} /></div>
-      {/if}
-    {:else if tab === 'history'}
-      <HistoryView repoId={repo.id} />
-    {:else if tab === 'prs'}
+    {:else if effTab === 'prs'}
       {#if repo.forge === 'unrecognized'}
         <!-- Honest dead-end instead of a silent one: the remote host isn't a
              forge Otto can open PRs on (e.g. Bitbucket Server / Data Center). -->
@@ -259,12 +244,23 @@
       {:else}
         <PrList repoId={repo.id} />
       {/if}
-    {:else if tab === 'review'}
+    {:else if effTab === 'review'}
       <div class="rv-tab-scroll">
         <LocalReviewPanel repoId={repo.id} />
       </div>
     {:else if status}
-      <ChangesView repoId={repo.id} {status} onstatus={setStatus} />
+      <!-- Graph is the default for 'graph' AND any legacy tab id (changes /
+           history) still living in persisted state or old deep links. -->
+      {#key graphKey}
+        <GraphView
+          repoId={repo.id}
+          repoPath={repo.path}
+          workspaceId={repo.workspace_id}
+          {status}
+          onstatus={setStatus}
+          onmergerequest={requestMerge}
+        />
+      {/key}
     {:else}
       <div style="padding: 16px"><Skeleton rows={5} height={36} /></div>
     {/if}

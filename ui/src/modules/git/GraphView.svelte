@@ -24,6 +24,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
+  import WipPanel from './WipPanel.svelte';
 
   /** Strip trailing slashes so worktree paths match registered repo paths. */
   function normPath(p: string): string {
@@ -202,6 +203,37 @@
   let diffLoading = $state(false);
   // Track which files are collapsed (path → true = collapsed)
   let fileCollapsed = $state<Record<string, boolean>>({});
+
+  // ── WIP (working tree) row selection ──────────────────────────────────────
+  // GitKraken-style: a dirty working tree renders as a dashed row pinned above
+  // the graph; selecting it opens the staging/commit panel in the detail pane
+  // (this replaced the separate "Changes" tab).
+  let wipSelected = $state(false);
+  /** The detail pane is open for EITHER a commit or the WIP row. */
+  const detailOpen = $derived(selectedSha !== null || wipSelected);
+
+  function selectWip(): void {
+    if (wipSelected) {
+      clearSelection();
+      return;
+    }
+    wipSelected = true;
+    selectedSha = null;
+    selectedCommit = null;
+    diffResp = null;
+    diffLoading = false;
+    fileCollapsed = {};
+    if (isMobile) secCommitsOpen = false;
+  }
+
+  // A commit (or an outside `git commit`) can leave the tree clean while the
+  // WIP panel is open — close it so the pane doesn't show a stale empty WIP.
+  $effect(() => {
+    if (wipSelected && status.changes.length === 0) {
+      wipSelected = false;
+      if (isMobile) secCommitsOpen = true;
+    }
+  });
 
   $effect(() => {
     const id = repoId;
@@ -926,6 +958,7 @@
       clearSelection();
       return;
     }
+    wipSelected = false;
     selectedSha = commit.sha;
     selectedCommit = commit;
     diffResp = null;
@@ -954,6 +987,7 @@
   }
 
   function clearSelection(): void {
+    wipSelected = false;
     selectedSha = null;
     selectedCommit = null;
     diffResp = null;
@@ -1104,6 +1138,11 @@
   });
 
   const laneRows = $derived(graph.rows);
+
+  // WIP row: sits on the HEAD commit's lane so the dashed stub visually hangs
+  // off the checked-out branch (falls back to lane 0 while the log loads).
+  const wipCol = $derived(laneRows.find((r) => isHeadCommit(r.commit))?.col ?? 0);
+  const wipStagedCount = $derived(status.changes.filter((c) => c.staged).length);
 
   // Gutter width shared by every row so lane dots line up vertically. Sized to
   // the widest lane count actually reached (plus a half-lane for the node
@@ -1909,10 +1948,10 @@
   {/if}
   <div
     class="graph-panel"
-    class:panel-shrunk={selectedSha !== null && !isMobile}
+    class:panel-shrunk={detailOpen && !isMobile}
     class:mob-collapsed={isMobile && !secCommitsOpen}
     class:resizing={listResizing}
-    style:flex-basis={selectedSha !== null && !isMobile ? `${ui.gitGraphListWidth}px` : null}
+    style:flex-basis={detailOpen && !isMobile ? `${ui.gitGraphListWidth}px` : null}
   >
     {#if commitsLoading}
       <div style="padding: 10px"><Skeleton rows={12} height={28} /></div>
@@ -1920,6 +1959,64 @@
       <div class="dim" style="padding: 18px; font-size: 12px">No commits found.</div>
     {:else}
       <div class="graph-list">
+        <!-- WIP row (GitKraken-style): uncommitted changes pinned above the
+             graph; selecting it opens the staging/commit panel on the right. -->
+        {#if status.changes.length > 0}
+          {@const cx = wipCol * LANE_W + LANE_W / 2}
+          <button
+            class="graph-row wip-row"
+            class:graph-row-selected={wipSelected}
+            onclick={selectWip}
+            title="Uncommitted changes — click to stage & commit"
+            aria-pressed={wipSelected}
+          >
+            <div class="branch-cell">
+              <span class="wip-chip mono">WIP</span>
+            </div>
+            <svg
+              class="gutter"
+              width={gutterWidth}
+              height={28}
+              style="flex-shrink: 0; width: {gutterWidth}px;"
+            >
+              <!-- dashed stub hanging toward the HEAD commit's lane -->
+              <line
+                x1={cx}
+                y1={14 + NODE_R}
+                x2={cx}
+                y2={28}
+                stroke="var(--accent)"
+                stroke-width="1.5"
+                stroke-dasharray="2 2"
+                opacity="0.7"
+              />
+              {#if wipSelected}
+                <circle cx={cx} cy={14} r={NODE_R + 3} fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" />
+              {/if}
+              <circle
+                cx={cx}
+                cy={14}
+                r={NODE_R}
+                fill="var(--surface)"
+                stroke="var(--accent)"
+                stroke-width="1.5"
+                stroke-dasharray="2.5 1.8"
+              />
+            </svg>
+            <div class="commit-info">
+              <div class="ci-top">
+                <span class="ci-subject wip-subject mono">// WIP</span>
+              </div>
+              <div class="ci-meta">
+                <span class="dim">
+                  {status.changes.length} file{status.changes.length === 1 ? '' : 's'} changed{wipStagedCount > 0
+                    ? ` · ${wipStagedCount} staged`
+                    : ''}
+                </span>
+              </div>
+            </div>
+          </button>
+        {/if}
         {#each laneRows as row (row.commit.sha)}
           {@const svgW = gutterWidth}
           {@const cx = row.col * LANE_W + LANE_W / 2}
@@ -2055,8 +2152,8 @@
     />
   {/if}
 
-  <!-- ── RIGHT: commit detail + diff ─────────────────────────────────────── -->
-  {#if selectedSha !== null && !isMobile}
+  <!-- ── RIGHT: commit detail + diff / WIP staging panel ─────────────────── -->
+  {#if detailOpen && !isMobile}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="graph-resizer"
@@ -2066,25 +2163,37 @@
     ></div>
   {/if}
 
-  {#if isMobile && selectedSha !== null}
-    <!-- Mobile: a sticky section header for the open commit's diff, with a tap
-         target to close it (re-opening the commit list). -->
+  {#if isMobile && detailOpen}
+    <!-- Mobile: a sticky section header for the open commit's diff (or the WIP
+         panel), with a tap target to close it (re-opening the commit list). -->
     <button class="mob-sec-head mob-diff-head" onclick={clearSelection} aria-expanded="true">
       <Icon name="chevronDown" size={13} />
       <Icon name="file" size={13} />
-      <span class="mob-diff-title mono">{selectedCommit?.short_sha ?? 'Diff'}</span>
+      <span class="mob-diff-title mono">{wipSelected ? '// WIP' : (selectedCommit?.short_sha ?? 'Diff')}</span>
       <span class="grow"></span>
-      {#if diffResp}<span class="mob-sec-count">{diffResp.files.length} file{diffResp.files.length === 1 ? '' : 's'}</span>{/if}
+      {#if wipSelected}
+        <span class="mob-sec-count">{status.changes.length} file{status.changes.length === 1 ? '' : 's'}</span>
+      {:else if diffResp}
+        <span class="mob-sec-count">{diffResp.files.length} file{diffResp.files.length === 1 ? '' : 's'}</span>
+      {/if}
       <span class="mob-close">✕</span>
     </button>
   {/if}
   <div
     class="detail-panel"
-    class:detail-visible={selectedSha !== null && !isMobile}
-    class:mob-visible={isMobile && selectedSha !== null}
-    class:mob-hidden={isMobile && selectedSha === null}
+    class:detail-visible={detailOpen && !isMobile}
+    class:mob-visible={isMobile && detailOpen}
+    class:mob-hidden={isMobile && !detailOpen}
   >
-    {#if selectedSha === null}
+    {#if wipSelected}
+      <WipPanel
+        {repoId}
+        {status}
+        {onstatus}
+        oncommitted={() => void refreshAfter()}
+        onclose={clearSelection}
+      />
+    {:else if selectedSha === null}
       <div class="detail-empty">
         <span class="detail-empty-label">COMMIT</span>
         <span class="dim detail-empty-hint">select a commit</span>
@@ -2542,6 +2651,28 @@
     color: var(--accent);
     font-weight: 600;
   }
+  /* ── WIP row (uncommitted changes, GitKraken-style) ── */
+  .wip-row:not(.graph-row-selected) {
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+  }
+  .wip-row .wip-subject {
+    color: var(--accent);
+    font-weight: 600;
+    font-style: italic;
+  }
+  .wip-chip {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+
   /* The HEAD commit ("you are here") — a leading accent rail + faint wash so the
      checked-out tip is obvious at a glance, even when not selected. */
   .graph-row-head:not(.graph-row-selected) {
