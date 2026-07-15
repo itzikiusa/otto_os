@@ -396,11 +396,13 @@
     );
   }
 
-  /** Open agent session ids whose answer-tokens include `tok` (lowercased). */
+  /** Open agent session ids whose answer-tokens include `tok` (lowercased).
+   *  Only VISIBLE foreground sessions answer to a name — hidden background
+   *  ones (workflow steps, review agents, …) share common title words like
+   *  "open"/"tests" and would hijack ordinary commands if they counted. */
   function matchSessionsByToken(tok: string): string[] {
     const ids: string[] = [];
-    for (const s of ws.sessions) {
-      if (s.archived || s.kind !== 'agent') continue;
+    for (const s of ws.plainAgentSessions) {
       if (sessionAnswerTokens(s).has(tok)) ids.push(s.id);
     }
     return ids;
@@ -534,6 +536,14 @@
       return { ids: id ? [id] : [], broadcast: false, message };
     }
 
+    // Bare (unverbed, un-colon'd) addressing must never shadow a command the
+    // deterministic parser understands: "open claude session" is a spawn even
+    // when some session's title happens to contain the word "open". Explicit
+    // forms — a send verb ("tell messi …") or a colon ("messi: …") — still win.
+    if (!hadVerb && !(tokens[0] ?? '').endsWith(':') && parseCommand(s, allProviders()) !== null) {
+      return null;
+    }
+
     // By name, greedily from the start ("ronaldo …", "ronaldo, messi: …").
     const matched: string[] = [];
     let consumedN = 0;
@@ -551,7 +561,6 @@
       if (tokens[i].endsWith(':')) break;
     }
     if (matched.length === 0) return null; // not addressed → fall through
-    void hadVerb;
     const message = stripLeadingWords(s, consumedN).replace(/^[:,]\s*/, '').replace(/^to\s+/i, '').trim();
     return { ids: matched, broadcast: false, message };
   }
@@ -577,12 +586,18 @@
         session_ids: r.broadcast ? [] : r.ids,
       });
       const n = resp.session_ids.length;
-      toasts.success(
-        r.broadcast
-          ? `Broadcast to ${n} session${n === 1 ? '' : 's'}`
-          : `Sent to ${n} session${n === 1 ? '' : 's'}`,
-        message,
-      );
+      // The daemon only delivers to RUNNING sessions — targets can all be
+      // suspended/exited, in which case "sent" would be a lie.
+      if (n === 0) {
+        toasts.warn('Not delivered', 'No running session accepted the message.');
+      } else {
+        toasts.success(
+          r.broadcast
+            ? `Broadcast to ${n} session${n === 1 ? '' : 's'}`
+            : `Sent to ${n} session${n === 1 ? '' : 's'}`,
+          message,
+        );
+      }
       close();
       englishText = '';
     } catch (e) {

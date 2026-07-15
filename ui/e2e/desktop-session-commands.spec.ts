@@ -106,6 +106,31 @@ test('⌘I: "send to <name/session N> <msg>" delivers to the right session', asy
   await expect.poll(() => existsSync(nameFile), { timeout: 15_000 }).toBe(true);
 });
 
+test('⌘I: "open shell session" spawns even when a title contains "open" (regression)', async ({
+  page,
+}) => {
+  // A session whose TITLE contains the word "open" used to hijack the command
+  // via bare-name addressing: "open" matched the title word, so "shell session"
+  // was sent as a message ("Sent to 0 sessions") instead of spawning. The
+  // deterministic parser must win over bare (unverbed) addressing.
+  const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+    data: { kind: 'agent', provider: 'shell', title: 'Open Zone', cwd: '/tmp', meta: { origin: 'e2e' } },
+  });
+  expect(r.ok()).toBe(true);
+  // Wait for the store to see it, so the palette's matcher has the bait title.
+  await expect(page.getByText('Open Zone').first()).toBeVisible({ timeout: 20_000 });
+
+  const countSessions = async (): Promise<number> => {
+    const list = (await (await ctx.get(`${base}/api/v1/workspaces/${wsId}/sessions`)).json()) as {
+      archived: boolean;
+    }[];
+    return list.filter((s) => !s.archived).length;
+  };
+  const before = await countSessions();
+  await runOttoCommand(page, 'open shell session');
+  await expect.poll(countSessions, { timeout: 15_000 }).toBe(before + 1);
+});
+
 test('⌘T: arrow keys switch provider, Tab moves to the next field', async ({ page }) => {
   await page.keyboard.press('Meta+t');
   const group = page.locator('[role="radiogroup"]');
