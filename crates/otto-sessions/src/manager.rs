@@ -245,7 +245,12 @@ async fn capture_codex_session_id(
     let floor = spawn_time
         .checked_sub(Duration::from_secs(2))
         .unwrap_or(std::time::UNIX_EPOCH);
-    for _ in 0..24 {
+    // 60s window: codex-tui can take 20s+ to mint its rollout when it boots
+    // with heavy context/MCP config, and a concurrent same-cwd capture holding
+    // `codex_capture_lock` delays this one's first scan further. A miss here
+    // leaves the session permanently non-resumable (it opens DEAD after the
+    // next daemon restart), so err long — the loop exits on first match.
+    for _ in 0..120 {
         if let Some(sid) = scan_codex_rollout(sessions_root, cwd, floor, &claimed) {
             return Some(sid);
         }
@@ -1603,7 +1608,33 @@ impl SessionManager {
         if self.is_live(id) {
             return Ok(());
         }
-        let session = self.repo.get(id).await?;
+        let mut session = self.repo.get(id).await?;
+        // Second-chance provider-id capture. A codex/agy session whose
+        // spawn-time capture timed out (slow first rollout write) carries no
+        // provider_session_id and would dead-end below: reconnectable in the
+        // UI but impossible to reopen — a live-looking session nobody can
+        // reach. Its rollout usually exists on disk by now, so rescan with
+        // this session's creation as the floor and claim it late; resume then
+        // works as if the spawn-time capture had succeeded.
+        if session.kind == SessionKind::Agent
+            && session.provider_session_id.is_none()
+            && self.providers.captures_session_id(&session.provider)
+        {
+            if let Some(psid) = self.late_capture_provider_id(&session).await {
+                match self.repo.set_provider_session(id, &psid).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            session = %id, provider = %session.provider, provider_session = %psid,
+                            "late provider id capture — session is now resumable"
+                        );
+                        session.provider_session_id = Some(psid);
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %id, "late provider id capture: persist failed: {e}")
+                    }
+                }
+            }
+        }
         let resumable = session.kind == SessionKind::Agent
             && session.provider_session_id.is_some()
             && self.providers.supports_resume(&session.provider);
@@ -1611,6 +1642,31 @@ impl SessionManager {
             self.restart(id, None).await.map(|_| ())?;
         }
         Ok(())
+    }
+
+    /// One synchronous scan for a non-resumable codex/agy session's on-disk
+    /// id, run at reopen time instead of spawn time. Same matching rules as
+    /// [`Self::spawn_session_id_capture`] (canonical cwd, oldest UNCLAIMED
+    /// match at/after the floor, serialized by `codex_capture_lock`) — only
+    /// the floor differs: the session's `created_at`, since the spawn moment
+    /// is long gone. No polling: by reopen time the file either exists or
+    /// never will.
+    async fn late_capture_provider_id(&self, session: &Session) -> Option<String> {
+        let _guard = self.codex_capture_lock.lock().await;
+        let claimed_rows = self.repo.provider_session_ids().await.unwrap_or_default();
+        let claimed: std::collections::HashSet<&str> =
+            claimed_rows.iter().map(String::as_str).collect();
+        let cwd = std::fs::canonicalize(&session.cwd)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| session.cwd.clone());
+        let floor = std::time::SystemTime::from(session.created_at)
+            .checked_sub(Duration::from_secs(2))
+            .unwrap_or(std::time::UNIX_EPOCH);
+        match session.provider.as_str() {
+            "codex" => scan_codex_rollout(&codex_sessions_root(), &cwd, floor, &claimed),
+            "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed),
+            _ => None,
+        }
     }
 
     /// The live PTY handle, when the session has one in this daemon.
@@ -2776,6 +2832,62 @@ mod tests {
         assert_eq!(s.provider_session_id.as_deref(), Some("sid-keep"));
         // Suspend flag is cleared after the operation.
         assert!(!mgr.suspending.contains_key(&id));
+    }
+
+    /// Root-cause regression for the dead-on-reopen codex session
+    /// (2026-07-16): a session whose spawn-time id capture timed out (codex
+    /// wrote its rollout ~20s after launch, past the old 12s window) stayed
+    /// non-resumable forever, and `ensure_live` silently no-opped — the
+    /// session showed in the UI but could never be reopened. The late capture
+    /// must claim the on-disk rollout born after the session's creation, and
+    /// must NOT steal an id another session already claimed.
+    #[tokio::test]
+    async fn late_capture_claims_rollout_written_after_spawn_window() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let cwd_dir = tempfile::tempdir().unwrap();
+        // Canonical form up front: the capture compares cwd by exact string.
+        let cwd = cwd_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let new_codex = |title: &str| NewSession {
+            workspace_id: ws.id.clone(),
+            kind: SessionKind::Agent,
+            provider: "codex".into(),
+            title: title.into(),
+            cwd: cwd.clone(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: user.clone(),
+            meta: serde_json::json!({}),
+        };
+        let s = repo.create(new_codex("t")).await.unwrap();
+
+        // The rollout lands only now — after `created_at`, i.e. after the
+        // spawn-time window would have expired. CODEX_HOME points the scan at
+        // it (safe here: every other test passes its scan root explicitly).
+        let codex_home = tempfile::tempdir().unwrap();
+        let day = codex_home.path().join("sessions").join("2026/07/16");
+        write_rollout(&day, "r.jsonl", "LATE-1", &cwd, "codex-tui", "user");
+        std::env::set_var("CODEX_HOME", codex_home.path());
+
+        assert_eq!(
+            mgr.late_capture_provider_id(&s).await.as_deref(),
+            Some("LATE-1"),
+            "late capture must find the rollout the spawn-time window missed"
+        );
+
+        // Claim it for `s`; a second non-resumable session in the same cwd
+        // must not capture the same conversation.
+        repo.set_provider_session(&s.id, "LATE-1").await.unwrap();
+        let s2 = repo.create(new_codex("t2")).await.unwrap();
+        assert_eq!(
+            mgr.late_capture_provider_id(&s2).await,
+            None,
+            "a claimed rollout id must never be re-claimed by another session"
+        );
     }
 
     #[tokio::test]
