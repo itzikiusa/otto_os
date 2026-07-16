@@ -33,8 +33,11 @@ def _scalar(raw: str) -> Optional[str]:
         return None
     if value.startswith('"'):
         try:
-            parsed = json.loads(value)
+            parsed, end = json.JSONDecoder().raw_decode(value)
         except (TypeError, ValueError):
+            return value
+        remainder = value[end:].strip()
+        if remainder and not remainder.startswith("#"):
             return value
         return parsed if isinstance(parsed, str) else value
     if value.startswith("'") and value.endswith("'") and len(value) >= 2:
@@ -89,6 +92,13 @@ def parse_frontmatter(text: str) -> Tuple[bool, bool, Dict[str, Optional[str]], 
         if key in values:
             parse_error = True
             continue
+        plain_value = raw_value.strip()
+        if (
+            plain_value
+            and not plain_value.startswith(('"', "'", "[", "{"))
+            and re.search(r":\s", plain_value.split(" #", 1)[0])
+        ):
+            parse_error = True
         values[key] = _scalar(raw_value)
         last_key = key
 
@@ -98,6 +108,13 @@ def parse_frontmatter(text: str) -> Tuple[bool, bool, Dict[str, Optional[str]], 
 def _markdown_files(root: Path) -> List[Path]:
     return sorted(
         (path for path in root.rglob("*.md") if path.is_file()),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+
+
+def _all_files(root: Path) -> List[Path]:
+    return sorted(
+        (path for path in root.rglob("*") if path.is_file()),
         key=lambda path: path.relative_to(root).as_posix(),
     )
 
@@ -123,7 +140,7 @@ def _strip_fenced_code(text: str) -> str:
     return "\n".join(output)
 
 
-def _internal_targets(source: str, body: str) -> Iterable[str]:
+def _internal_targets(source: str, body: str) -> Iterable[Tuple[str, str]]:
     for match in LINK_RE.finditer(_strip_fenced_code(body)):
         raw = match.group(1).strip()
         if raw.startswith("<") and raw.endswith(">"):
@@ -133,15 +150,30 @@ def _internal_targets(source: str, body: str) -> Iterable[str]:
         target = unquote(raw.split("#", 1)[0].split("?", 1)[0])
         if not target or target.startswith("#") or target.startswith("//"):
             continue
-        if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
+        scheme = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):", target)
+        if scheme and scheme.group(1).lower() == "file":
+            yield "L1", raw
+            continue
+        if scheme:
+            continue
+        if target.endswith("/"):
+            yield "W2_DIRECTORY", raw
             continue
         if target.startswith("/"):
             normalized = posixpath.normpath(target.lstrip("/"))
         else:
             normalized = posixpath.normpath(posixpath.join(posixpath.dirname(source), target))
-        if target.endswith("/"):
-            normalized = posixpath.join(normalized, "index.md")
-        yield normalized
+        yield "W2", normalized
+
+
+def _file_uri_duplicates_vault_note(raw: str, existing: set) -> bool:
+    path = unquote(raw.split("#", 1)[0].split("?", 1)[0])
+    path = path[len("file://") :] if path.lower().startswith("file://") else path
+    parts = [part for part in path.split("/") if part]
+    for start in range(max(0, len(parts) - 1)):
+        if "/".join(parts[start:]) in existing:
+            return True
+    return False
 
 
 def validate_bundle(root: Path) -> Dict[str, object]:
@@ -150,7 +182,7 @@ def validate_bundle(root: Path) -> Dict[str, object]:
         raise ValueError("ROOT must be an existing directory")
 
     files = _markdown_files(root)
-    existing = {path.relative_to(root).as_posix() for path in files}
+    existing = {path.relative_to(root).as_posix() for path in _all_files(root)}
     errors: List[Dict[str, str]] = []
     warnings: List[Dict[str, str]] = []
     dirs_with_concepts = set()
@@ -234,8 +266,26 @@ def validate_bundle(root: Path) -> Dict[str, object]:
         bodies.append((relative, body))
 
     for source, body in bodies:
-        for target in _internal_targets(source, body):
-            if target == ".." or target.startswith("../") or target not in existing:
+        for rule, target in _internal_targets(source, body):
+            if rule == "L1" and _file_uri_duplicates_vault_note(target, existing):
+                warnings.append(
+                    _finding(
+                        "L1",
+                        source,
+                        "machine-local file URI duplicates a Vault note -> `{}`".format(
+                            target
+                        ),
+                    )
+                )
+            elif rule == "W2_DIRECTORY":
+                warnings.append(
+                    _finding(
+                        "W2",
+                        source,
+                        "directory link must name index.md -> `{}`".format(target),
+                    )
+                )
+            elif target == ".." or target.startswith("../") or target not in existing:
                 warnings.append(
                     _finding("W2", source, "broken internal link -> `{}`".format(target))
                 )
@@ -281,6 +331,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
     parser.add_argument("--format", choices=("json", "text"), default="text")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit non-zero when deterministic warnings are present",
+    )
     args = parser.parse_args(argv)
     try:
         report = validate_bundle(args.root)
@@ -290,7 +345,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(_render_text(report))
-    return 0 if report["conformant"] else 1
+    return 0 if report["conformant"] and (not args.strict or not report["warnings"]) else 1
 
 
 if __name__ == "__main__":

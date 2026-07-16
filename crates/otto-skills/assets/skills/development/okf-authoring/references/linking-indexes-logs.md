@@ -5,10 +5,12 @@ Use these rules whenever the concept neighborhood changes.
 ## Link discipline
 
 - Use `[label](/datasets/orders.md)` for bundle-absolute links in tools or `[label](../datasets/orders.md)` for portable relative links.
+- Never link to a directory such as `endpoints/`; name its concrete `endpoints/index.md` target.
+- Never use `file://` for a Vault relationship; use a Vault-relative file target so Otto can index the graph edge.
 - Link a concept once per section at its first useful mention.
 - Do not link from headings, fenced code, schema field cells, or to the current concept itself.
 - Express relationship kind in prose; links carry no hidden semantics.
-- Preserve unresolved links as visible warnings when the target is planned knowledge.
+- Preserve an unresolved planned link only while work is explicitly incomplete. The hard static gate must be clean before a produce/maintain completion claim.
 
 ## Index contract
 

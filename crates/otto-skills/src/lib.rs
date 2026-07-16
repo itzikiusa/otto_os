@@ -68,6 +68,17 @@ fn frontmatter_value(body: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Read the skill's content version from either Otto's legacy integer field or
+/// the Agent Skills `metadata.version` semver string. Otto's drift model tracks
+/// major content revisions, so `3` and `3.0.0` both map to version 3.
+fn frontmatter_version(body: &str) -> Option<u32> {
+    frontmatter_value(body, "version")?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Locate the embedded directory for skill `name` (searched across all categories).
 fn bundled_dir(name: &str) -> Option<(&'static Dir<'static>, String)> {
     for cat in BUNDLED.dirs() {
@@ -103,9 +114,7 @@ fn meta(skill_dir: &Dir<'_>, category_dir: &str) -> Option<BundledSkill> {
     Some(BundledSkill {
         name,
         category: frontmatter_value(body, "category").unwrap_or_else(|| category_dir.to_string()),
-        version: frontmatter_value(body, "version")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1),
+        version: frontmatter_version(body).unwrap_or(1),
         description: frontmatter_value(body, "description").unwrap_or_default(),
     })
 }
@@ -136,9 +145,7 @@ pub fn bundled_version(name: &str) -> Option<u32> {
 pub fn installed_version(library: &Library, name: &str) -> Option<u32> {
     let path = library.root.join("skills").join(name).join("SKILL.md");
     let body = std::fs::read_to_string(path).ok()?;
-    frontmatter_value(&body, "version")
-        .and_then(|v| v.parse().ok())
-        .or(Some(1))
+    frontmatter_version(&body).or(Some(1))
 }
 
 /// The bundled `SKILL.md` body for `name`, if it exists. Lets callers (the skill
@@ -286,6 +293,49 @@ mod tests {
         assert_eq!(frontmatter_value(body, "description").as_deref(), Some("Hunt bugs"));
         assert_eq!(frontmatter_value(body, "missing"), None);
         assert_eq!(frontmatter_value("no frontmatter", "version"), None);
+    }
+
+    #[test]
+    fn skill_spec_metadata_semver_drives_bundled_version() {
+        let body = concat!(
+            "---\n",
+            "name: okf-authoring\n",
+            "description: Use when authoring OKF bundles.\n",
+            "metadata:\n",
+            "  version: \"3.0.0\"\n",
+            "---\n",
+            "# OKF authoring\n",
+        );
+
+        assert_eq!(frontmatter_version(body), Some(3));
+    }
+
+    #[test]
+    fn okf_authoring_bundles_hard_static_enforcement() {
+        let skill = list_bundled()
+            .into_iter()
+            .find(|skill| skill.name == "okf-authoring")
+            .expect("okf-authoring bundled");
+        assert_eq!(skill.version, 3);
+
+        let body = bundled_body("okf-authoring").expect("okf-authoring body");
+        assert!(body.contains("## Hard static enforcement"));
+        assert!(body.contains("scripts/check_vault.py"));
+        assert!(body.contains("validate_okf.py ROOT --strict"));
+
+        let files = bundled_files("okf-authoring");
+        for expected in [
+            "scripts/test_skill_contract.py",
+            "evals/fixtures/static-link-violations/index.md",
+            "evals/fixtures/static-link-violations/broken.md",
+            "evals/fixtures/static-link-violations/targets/index.md",
+        ] {
+            assert!(files.iter().any(|path| path == expected), "missing {expected}");
+        }
+
+        let evals = bundled_file("okf-authoring", "evals/evals.json").expect("evals");
+        assert!(evals.contains("static-link-enforcement"));
+        assert!(evals.contains("strict-completion-gate"));
     }
 
     #[test]

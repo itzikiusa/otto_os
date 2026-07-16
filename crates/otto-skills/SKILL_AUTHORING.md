@@ -41,6 +41,21 @@ isn't done.
 
 ## Frontmatter (required)
 
+For skills that must work in provider-native global registries, use the Agent
+Skills-compatible form. Otto derives the category from the parent directory and
+uses the major part of `metadata.version` for Library drift detection:
+
+```yaml
+---
+name: skill-name
+description: <specific selector signal describing when the skill applies>
+metadata:
+  version: "2.0.0"
+---
+```
+
+Otto also accepts the legacy bundled form while existing skills migrate:
+
 ```yaml
 ---
 description: <one or two sentences — what it does + when to use it. This is the selector signal; make it specific.>
@@ -49,7 +64,9 @@ version: 1                  # integer; bump when content changes (drives Setting
 ---
 ```
 
-The dir name is the skill's name (no `name:` field — matches Otto's existing product skills).
+The directory name remains the canonical Library key in both forms. Bump the
+major content version whenever bundled behavior changes so Settings exposes the
+update and provider-global copies can be refreshed.
 
 ## Quality bar (match the existing product skills + grill)
 

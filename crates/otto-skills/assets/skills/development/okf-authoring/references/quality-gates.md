@@ -34,14 +34,14 @@ Augment rather than rewrite:
 
 ## Deterministic gate
 
-Run both tools from the skill directory:
+Prefer a repository-owned static gate when present, then run the quality audit:
 
 ```bash
-python3 scripts/validate_okf.py ROOT --format text
+python3 ROOT/scripts/check_vault.py ROOT
 python3 scripts/audit_bundle.py ROOT --format text
 ```
 
-`validate_okf.py` fails only for E1–E3 conformance errors. `audit_bundle.py` emits findings shaped as `{rule,path,message,severity}`; conformance findings use `error`, depth and warning findings use `warning`. A warning is not permission to invent a fix.
+When `ROOT/scripts/check_vault.py` is absent, run `python3 scripts/validate_okf.py ROOT --strict --format text`. Strict validation fails for deterministic warnings as well as E1–E3 errors. `audit_bundle.py` emits findings shaped as `{rule,path,message,severity}`; conformance findings use `error`, depth and warning findings use `warning`. A warning is not permission to invent a fix or to claim completion.
 
 The audit requires substantive prose, populated schemas, and realistic structured examples. A heading, a keyword, a table header without rows, or an arbitrary fenced sentence does not satisfy a gate. When source evidence is incomplete, use the evidence-backed `Unknown`/`N/A` form above instead of filler.
 
@@ -51,6 +51,6 @@ Finish with:
 
 - Mode and changed concept/index/log paths.
 - Sources consulted and material unknowns.
-- Conformance result and checked-note count.
+- Static-gate result and checked-note/link count; zero deterministic findings are required.
 - Quality findings resolved or explicitly blocked by unavailable evidence.
 - Confirmation that no existing headings/frontmatter were lost during maintenance.

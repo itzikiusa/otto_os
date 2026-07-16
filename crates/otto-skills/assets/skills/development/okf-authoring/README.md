@@ -9,6 +9,7 @@ Run deterministic package checks with:
 ```sh
 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 python3 -m json.tool evals/evals.json >/dev/null
+python3 scripts/validate_okf.py evals/fixtures/clean-bundle --strict --format text
 ```
 
 The scripts are read-only and use only Python's standard library.

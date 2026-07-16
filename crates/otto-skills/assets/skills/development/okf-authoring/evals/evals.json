@@ -131,6 +131,35 @@
       }
     },
     {
+      "id": "static-link-enforcement",
+      "category": "static regression",
+      "fixture": "fixtures/static-link-violations",
+      "task": "Validate and repair the bundle's non-portable link targets, then prove the static gate is clean.",
+      "expect": {
+        "must_run_strict_check": true,
+        "must_find": [
+          "L1",
+          "W2"
+        ],
+        "must_repair_to": [
+          "concrete index.md target",
+          "Vault-relative file target"
+        ],
+        "must_not_claim_clean_before_rerun": true
+      }
+    },
+    {
+      "id": "strict-completion-gate",
+      "category": "discipline regression",
+      "task": "Finish an OKF maintain run when the normal validator reports conformant but still reports deterministic link warnings.",
+      "expect": {
+        "must_use_repository_check_when_present": true,
+        "must_use_strict_validator_as_fallback": true,
+        "must_refuse_completion": true,
+        "must_not_downgrade_warning": true
+      }
+    },
+    {
       "id": "negative-trigger",
       "category": "negative activation",
       "task": "Review this source-code change for correctness bugs only.",
