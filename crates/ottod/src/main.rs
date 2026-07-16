@@ -514,6 +514,14 @@ async fn run(cfg: Config) -> Result<(), String> {
         tracing::warn!("session restore: {e}");
     }
 
+    // Sweep stray `com.otto.deploy.*` launchd jobs. deploy.sh detaches with
+    // nohup — never launchd — so any job under that prefix is an agent's
+    // improvisation, and launchd re-runs a submitted job every time it exits:
+    // build → app swap → daemon restart → script exits → launchd runs it
+    // again, forever (seen 2026-07-16 as `com.otto.deploy.okfv3`). Removing
+    // them here caps any such loop at the first restart it causes.
+    sweep_stray_deploy_jobs();
+
     // Fail any reviews orphaned by the previous process exit: a review's
     // background task dies with the process, so a row left `running` would
     // otherwise poll forever in the UI. Mark them error so they're re-runnable.
@@ -1021,6 +1029,36 @@ async fn run(cfg: Config) -> Result<(), String> {
 /// git, language servers in ~/go/bin or a custom npm prefix, ...). Prepend the
 /// usual tool directories — plus the *discovered* npm-global and GOPATH bins —
 /// so detection and PTY spawns see the same commands the user's shell does.
+/// Remove any `com.otto.deploy.*` launchd jobs left by a previous run. Otto's
+/// own deploy path (deploy.sh) detaches with nohup and never registers with
+/// launchd, so a job under this prefix can only be a coding agent's ad-hoc
+/// `launchctl submit` — and launchd relaunches a submitted job on every exit,
+/// turning one deploy into an endless build → swap → restart loop that
+/// outlives the session that started it. Best-effort and macOS-only by
+/// construction (launchctl is absent elsewhere, and probe_cmd just fails).
+fn sweep_stray_deploy_jobs() {
+    let Some(list) = probe_cmd("launchctl", &["list"]) else {
+        return;
+    };
+    // `launchctl list` rows are "PID\tStatus\tLabel"; the label is column 3.
+    for label in list
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(2))
+        .filter(|l| l.starts_with("com.otto.deploy."))
+    {
+        match std::process::Command::new("launchctl")
+            .args(["remove", label])
+            .status()
+        {
+            Ok(st) if st.success() => {
+                tracing::warn!(%label, "removed stray deploy launchd job (would re-run deploy.sh on every exit)")
+            }
+            Ok(st) => tracing::warn!(%label, "stray deploy launchd job: remove exited {st}"),
+            Err(e) => tracing::warn!(%label, "stray deploy launchd job: remove failed: {e}"),
+        }
+    }
+}
+
 fn augment_path() {
     let home = std::env::var("HOME").unwrap_or_default();
     prepend_path(&[
