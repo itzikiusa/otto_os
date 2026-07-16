@@ -398,15 +398,22 @@
       {/if}
     </div>
 
-    <!-- Per-file diff -->
-    {#if selectedPath !== null}
-      <div class="wp-diff">
-        <div class="wp-diff-head">
-          <Icon name="file" size={12} />
-          <span class="mono wp-diff-path" title={selectedPath}>{selectedPath}</span>
-          <span class="grow"></span>
-          <button class="wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff">✕</button>
-        </div>
+  </div>
+
+  <!-- Per-file diff: a SIBLING of the tree scroller, not its tail — appended
+       inside wp-scroll it sat below every tree row, so on a large changeset
+       (hundreds of files) selecting a file loaded the diff far off-screen and
+       looked like nothing happened. As its own flex region it is visible the
+       instant a file is clicked, with its own scrollbar. -->
+  {#if selectedPath !== null}
+    <div class="wp-diff">
+      <div class="wp-diff-head">
+        <Icon name="file" size={12} />
+        <span class="mono wp-diff-path" title={selectedPath}>{selectedPath}</span>
+        <span class="grow"></span>
+        <button class="wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff">✕</button>
+      </div>
+      <div class="wp-diff-body">
         {#if diffLoading && !diff}
           <div style="padding: 10px"><Skeleton rows={5} height={20} /></div>
         {:else if diff && diff.files.length > 0}
@@ -415,8 +422,8 @@
           <div class="dim wp-empty">No textual diff for this file.</div>
         {/if}
       </div>
-    {/if}
-  </div>
+    </div>
+  {/if}
 
   <!-- Commit composer -->
   <div class="wp-composer">
@@ -513,6 +520,12 @@
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
+  }
+  /* With a diff open the trees yield the pane: capped (but still scrollable)
+     so the diff region below is always on-screen. */
+  .wp-scroll.has-diff {
+    flex: 0 1 auto;
+    max-height: 45%;
   }
   .wp-section {
     border-bottom: 1px solid var(--border);
@@ -694,7 +707,11 @@
   }
 
   .wp-diff {
-    border-bottom: 1px solid var(--border);
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--border);
   }
   .wp-diff-head {
     display: flex;
@@ -703,9 +720,13 @@
     padding: 6px 10px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border);
-    position: sticky;
-    top: 0;
-    z-index: 1;
+    flex-shrink: 0;
+  }
+  .wp-diff-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
   .wp-diff-path {
     font-size: 11px;
