@@ -54,7 +54,7 @@ SERVE_URL="http://127.0.0.1:7700/"
 TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/host: //p')"; TRIPLE="${TRIPLE:-aarch64-apple-darwin}"
 SIDECAR_SRC="$ROOT/apps/desktop/src-tauri/binaries/ottod-${TRIPLE}"
 BUILT_APP="$ROOT/apps/desktop/src-tauri/target/release/bundle/macos/Otto.app"
-KEEP_BACKUPS=5
+KEEP_BACKUPS=3
 
 WANT_DMG=0
 FORCE_CI=0
@@ -313,6 +313,25 @@ BUILT_SHA="$(shasum -a 256 "$BUILT_APP/Contents/MacOS/otto-desktop" | awk '{prin
 # every post-deploy verification passed — drop the previous app we kept aside
 # for rollback safety (only exists if an old app was swapped out)
 [[ -d "$OLD" ]] && rm -rf "$OLD" && ok "removed rollback copy of previous app"
+
+# sweep stale build artifacts: cargo never deletes superseded per-hash outputs
+# (each dep bump leaves another ~600MB libotto_server rlib in target/…/deps
+# forever — target has hit 79GB+). Anything the build we JUST completed didn't
+# touch within the window is dead weight; cargo transparently rebuilds if a
+# swept file is ever needed again. Runs only after a fully verified deploy.
+# 2 days ≈ several deploys back at the current cadence (a 7-day window was
+# measured to keep ~60GB of dead rlibs alive).
+SWEEP_DAYS=2
+swept_kb=0
+for tdir in "$ROOT/target" "$ROOT/apps/desktop/src-tauri/target"; do
+    [[ -d "$tdir" ]] || continue
+    before_kb=$(du -sk "$tdir" 2>/dev/null | awk '{print $1}')
+    find "$tdir" -type f -mtime +"$SWEEP_DAYS" -delete 2>/dev/null
+    find "$tdir" -type d -empty -delete 2>/dev/null
+    after_kb=$(du -sk "$tdir" 2>/dev/null | awk '{print $1}')
+    swept_kb=$(( swept_kb + before_kb - after_kb ))
+done
+[[ $swept_kb -gt 0 ]] && ok "swept $(( swept_kb / 1024 ))MB of stale build artifacts (>${SWEEP_DAYS}d old)"
 
 ELAPSED=$(( $(date +%s) - START_TS ))
 echo
