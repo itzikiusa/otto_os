@@ -22,7 +22,7 @@
 
   // Max number of tiles allowed to hold a live terminal/WS at once. Visible,
   // recently-focused tiles win the budget; everything else stays a placeholder.
-  const MAX_LIVE_TILES = 6;
+  const MAX_LIVE_TILES = 15;
 
   // Column count scales with tile count: 1→1, 2-4→2, 5-9→3, 10+→4.
   const cols = $derived.by(() => {
