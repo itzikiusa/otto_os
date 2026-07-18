@@ -228,7 +228,7 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Database** | ✅ list_connections / *query_db_readonly*¹ | — |
 | **Issues** | ✅ search_issues / get_issue / search_confluence | ⚠ comment_issue, transition_issue |
 | **Swarm** | ✅ list / get / list_runs / get_board / create_work_item² | ⚠ post_swarm_board |
-| **Vault (docs home)** | ✅ vault_list / vault_dir / vault_read / vault_search / vault_backlinks / vault_tags / vault_graph / vault_okf_validate | ⚠ vault_write, vault_rename, vault_delete (delete = soft move to `.trash/`) |
+| **Vault (docs home)** | ✅ vault_list / vault_dir / vault_read / vault_search / vault_backlinks / vault_tags / vault_graph / vault_okf_validate | ⚠ vault_write, vault_rename, vault_delete (delete = soft move to `.trash/`) — `workspace_id` optional on all vault tools (vaults are global; omitted → token pin, else first accessible workspace) |
 | **Sessions** | ✅ list / get | ⚠ broadcast_message |
 | **Code Review** | ✅ list_findings / get_finding | ⚠ start_pr_review |
 | **Product** | ✅ list_stories / get_story | — |

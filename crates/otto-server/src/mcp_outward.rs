@@ -15,6 +15,7 @@ use axum::extract::{Query, State};
 use axum::Json;
 use otto_core::api::CreateMcpTokenReq;
 use otto_core::auth::{AuthContext, McpScope};
+use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id};
 use otto_mcp::{canonical_hash, InvokeCtx};
 use otto_rbac::AuthRepo;
@@ -306,49 +307,49 @@ pub fn otto_tool_specs() -> Vec<Value> {
 
         // ================= Vault (docs home) =================
         json!({"name":"otto.vault_list","mutating":false,"category":"Vault",
-            "description":"List a workspace's markdown doc vaults (id, name, root, OKF flag, note/link counts). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+            "description":"List markdown doc vaults (id, name, root, OKF flag, note/link counts). Vaults are a global library — every workspace sees them all. Read-only.",
+            "inputSchema":{"type":"object","required":[],"properties":{"workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."}}}}),
         json!({"name":"otto.vault_dir","mutating":false,"category":"Vault",
             "description":"One level of a vault's folder tree (folders, notes, attachments). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["vault_id"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
         json!({"name":"otto.vault_read","mutating":false,"category":"Vault",
             "description":"A note's raw markdown + metadata + outgoing links. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id","path"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
         json!({"name":"otto.vault_search","mutating":false,"category":"Vault",
             "description":"Full-text (FTS5) search over a vault's notes with snippets; tag:/path:/type: operators. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id","query"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"},"query":{"type":"string"},"limit":{"type":"integer"}}}}),
+            "inputSchema":{"type":"object","required":["vault_id","query"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"query":{"type":"string"},"limit":{"type":"integer"}}}}),
         json!({"name":"otto.vault_backlinks","mutating":false,"category":"Vault",
             "description":"Notes linking TO a given note, with context snippets. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id","path"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
         json!({"name":"otto.vault_tags","mutating":false,"category":"Vault",
             "description":"Every tag in a vault with note counts. Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"}}}}),
+            "inputSchema":{"type":"object","required":["vault_id"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"}}}}),
         json!({"name":"otto.vault_graph","mutating":false,"category":"Vault",
             "description":"The vault link graph (compact arrays; local neighborhood when `path` given). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"},"mode":{"type":"string"},"path":{"type":"string"},"depth":{"type":"integer"}}}}),
+            "inputSchema":{"type":"object","required":["vault_id"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"mode":{"type":"string"},"path":{"type":"string"},"depth":{"type":"integer"}}}}),
         json!({"name":"otto.vault_okf_validate","mutating":false,"category":"Vault",
             "description":"Deterministic OKF v0.1 conformance report (E1-E3 errors, W1-W5 warnings). Read-only.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"}}}}),
+            "inputSchema":{"type":"object","required":["vault_id"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"}}}}),
         json!({"name":"otto.vault_write","mutating":true,"category":"Vault",
             "description":"Create/update a markdown note in a doc vault (OKF preferred). DANGEROUS: writes files — approval-gated.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id","path","content"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"},"path":{"type":"string"},
+            "inputSchema":{"type":"object","required":["vault_id","path","content"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"},
                 "content":{"type":"string"},"if_hash":{"type":"string"}}}}),
         json!({"name":"otto.vault_rename","mutating":true,"category":"Vault",
             "description":"Rename/move a note or folder; rewrites every referencing link across the vault. DANGEROUS — approval-gated.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id","from","to"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"},"from":{"type":"string"},"to":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["vault_id","from","to"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"from":{"type":"string"},"to":{"type":"string"}}}}),
         json!({"name":"otto.vault_delete","mutating":true,"category":"Vault",
             "description":"Soft-delete a note into the vault's .trash/ (never destroys files). DANGEROUS — approval-gated.",
-            "inputSchema":{"type":"object","required":["workspace_id","vault_id","path"],"properties":{
-                "workspace_id":{"type":"string"},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
+            "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
+                "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
 
 
         // ================= Sessions =================
@@ -678,6 +679,14 @@ pub(crate) async fn governed_invoke(
 ) -> ApiResult<Value> {
     let user = &auth.effective_user;
     let short = tool.strip_prefix("otto.").unwrap_or(tool).to_string();
+    // Vault calls may omit `workspace_id` (vaults are a global library) —
+    // resolve the effective workspace up front so the token's workspace pin,
+    // the audit record, and the approval args-hash all see the same scoped
+    // arguments.
+    let filled = fill_vault_workspace(ctx, auth, &short, arguments)
+        .await
+        .map_err(ApiError)?;
+    let arguments = filled.as_ref().unwrap_or(arguments);
     let mut audit = NewCallLog {
         tool: tool.to_string(),
         direction: "inbound".into(),
@@ -851,6 +860,72 @@ fn is_read_only_sql(stmt: &str) -> bool {
         || up.starts_with("DESC ")
         || up.starts_with("EXPLAIN")
         || up.starts_with("WITH")
+}
+
+/// Vaults are a GLOBAL library (`otto_vault::VaultEngine::list`): the `{ws}`
+/// segment on the vault REST routes only picks the workspace the caller's role
+/// is checked in — it never narrows which vault a `vault_id` addresses. Outward
+/// callers therefore don't have to know a workspace at all: when a `vault_*`
+/// call omits `workspace_id`, scope it to the token's workspace pin when one is
+/// set, else the caller's first accessible workspace (preferring one they can
+/// write in when the tool mutates). Returns `None` when the args need no
+/// filling. Runs BEFORE the scope check so a pinned token's filled call still
+/// faces `McpScope::deny_reason` with the pin satisfied — never bypassed.
+async fn fill_vault_workspace(
+    ctx: &ServerCtx,
+    auth: &AuthContext,
+    tool: &str,
+    args: &Value,
+) -> Result<Option<Value>, Error> {
+    let has_ws = args
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if !tool.starts_with("vault_") || has_ws {
+        return Ok(None);
+    }
+    let user = &auth.effective_user;
+    if let Some(pin) = auth
+        .mcp_scope
+        .as_ref()
+        .and_then(|s| s.workspace_id.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        let mut filled = args.clone();
+        filled["workspace_id"] = json!(pin);
+        return Ok(Some(filled));
+    }
+    let repo = otto_state::WorkspacesRepo::new(ctx.pool.clone());
+    let rows: Vec<(otto_core::domain::Workspace, WorkspaceRole)> = if user.is_root {
+        repo.list_all()
+            .await?
+            .into_iter()
+            .map(|w| (w, WorkspaceRole::Admin))
+            .collect()
+    } else {
+        repo.list_for_user(&user.id).await?
+    };
+    let ws = pick_vault_workspace(&rows, tool_is_mutating(tool)).ok_or_else(|| {
+        Error::Invalid("no accessible workspace to scope this vault call — pass 'workspace_id'".into())
+    })?;
+    let mut filled = args.clone();
+    filled["workspace_id"] = json!(ws);
+    Ok(Some(filled))
+}
+
+/// Pick the workspace an omitted-`workspace_id` vault call is scoped to: the
+/// first one whose role satisfies the tool (Editor for mutating, Viewer for
+/// reads), falling back to the first membership so the self-call's native RBAC
+/// produces the honest 403 rather than an "unknown workspace" here.
+fn pick_vault_workspace(
+    rows: &[(otto_core::domain::Workspace, WorkspaceRole)],
+    mutating: bool,
+) -> Option<Id> {
+    let need = if mutating { WorkspaceRole::Editor } else { WorkspaceRole::Viewer };
+    rows.iter()
+        .find(|(_, role)| *role >= need)
+        .or_else(|| rows.first())
+        .map(|(w, _)| w.id.clone())
 }
 
 async fn execute_otto_tool(
@@ -2125,5 +2200,59 @@ mod tests {
         let d = dangerous_detail("otto.create_pr", &json!({"repo_id":"r1","title":"Fix","source_branch":"f","target_branch":"main"}));
         assert!(d.contains("Fix") && d.contains("main"));
         assert!(dangerous_detail("otto.broadcast_message", &json!({"text":"hello team"})).contains("hello team"));
+    }
+
+    // ----- Vault: optional workspace_id ------------------------------------
+
+    #[test]
+    fn vault_tools_do_not_require_workspace_id() {
+        // Vaults are a global library: `workspace_id` is an optional hint on
+        // every vault tool (`fill_vault_workspace` scopes omitted calls
+        // server-side), while vault addressing stays strict via `vault_id`.
+        for t in otto_tool_specs() {
+            if t["category"] != json!("Vault") {
+                continue;
+            }
+            let name = t["name"].as_str().unwrap();
+            let reqd = t["inputSchema"]["required"].as_array().unwrap();
+            assert!(
+                !reqd.iter().any(|r| r == "workspace_id"),
+                "{name} must not require workspace_id"
+            );
+            assert!(
+                t["inputSchema"]["properties"].get("workspace_id").is_some(),
+                "{name} lost the workspace_id property"
+            );
+            if name != "otto.vault_list" {
+                assert!(reqd.iter().any(|r| r == "vault_id"), "{name} must require vault_id");
+            }
+        }
+    }
+
+    #[test]
+    fn pick_vault_workspace_prefers_writable_for_mutating_tools() {
+        fn ws(id: &str) -> otto_core::domain::Workspace {
+            otto_core::domain::Workspace {
+                id: id.into(),
+                name: id.into(),
+                root_path: format!("/tmp/{id}"),
+                settings: json!({}),
+                archived: false,
+                created_at: chrono::Utc::now(),
+            }
+        }
+        let rows = vec![
+            (ws("view-only"), WorkspaceRole::Viewer),
+            (ws("editable"), WorkspaceRole::Editor),
+        ];
+        // Reads take the first accessible workspace; writes skip ahead to the
+        // first Editor+ membership.
+        assert_eq!(pick_vault_workspace(&rows, false).as_deref(), Some("view-only"));
+        assert_eq!(pick_vault_workspace(&rows, true).as_deref(), Some("editable"));
+        // Viewer-only memberships still resolve for a mutating tool — the
+        // self-call's native RBAC owns the denial.
+        let viewer_only = vec![(ws("view-only"), WorkspaceRole::Viewer)];
+        assert_eq!(pick_vault_workspace(&viewer_only, true).as_deref(), Some("view-only"));
+        assert_eq!(pick_vault_workspace(&[], false), None);
     }
 }

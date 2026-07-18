@@ -399,7 +399,11 @@ check first, so agents always see fresh indexes.
 clients): the eight reads are in the **default-enabled** set once the server is
 on; `otto.vault_write` / `otto.vault_rename` / `otto.vault_delete` are
 classified **DANGEROUS** — off by default and approval-gated by the control
-plane like every other write. See
+plane like every other write. `workspace_id` is **optional** on every vault
+tool (vaults are global): an omitted value resolves to the token's workspace
+pin when one is set, else the caller's first accessible workspace
+(`fill_vault_workspace` in `mcp_outward.rs`, applied before the scope check so
+a pin is never bypassed). See
 [`./mcp-control-plane.md`](./mcp-control-plane.md).
 
 ## 6b. Docs agents — write, review, revise
