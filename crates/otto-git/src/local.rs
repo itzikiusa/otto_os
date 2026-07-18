@@ -129,7 +129,16 @@ impl LocalGit {
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         if !out.status.success() {
-            return Err(upstream_err(&stderr, &stdout, out.status.code()));
+            let err = upstream_err(&stderr, &stdout, out.status.code());
+            // The HTTP layer collapses this to a bare 502 in the access log;
+            // record WHAT failed here so the daemon log is diagnosable.
+            tracing::warn!(
+                repo = %self.repo_path.display(),
+                args = ?args,
+                code = out.status.code(),
+                "git failed: {err}"
+            );
+            return Err(err);
         }
         Ok((stdout, stderr))
     }
@@ -749,7 +758,18 @@ impl LocalGit {
 
     pub async fn checkout(&self, branch: &str, create: bool) -> Result<()> {
         if create {
-            self.run(&["checkout", "-b", branch]).await?;
+            // Creating a branch whose name already exists on origin is almost
+            // never meant as "shadow it from my (possibly stale) HEAD" — a bare
+            // `checkout -b` would do exactly that AND leave the branch without
+            // an upstream, so the first `pull` dies with "no tracking
+            // information". Start it at the remote tip and track it instead.
+            let remote = format!("origin/{branch}");
+            if self.verify_commit_ref(&format!("refs/remotes/{remote}")).await {
+                self.run(&["checkout", "-b", branch, "--track", &remote])
+                    .await?;
+            } else {
+                self.run(&["checkout", "-b", branch]).await?;
+            }
         } else {
             self.run(&["checkout", branch]).await?;
         }
@@ -1013,12 +1033,28 @@ impl LocalGit {
         start_point: Option<&str>,
         checkout: bool,
     ) -> Result<()> {
+        let sp = start_point.filter(|s| !s.is_empty());
+        // No explicit start point + the name exists on origin ⇒ the caller
+        // means THAT branch: base it at the remote tip with tracking, not at a
+        // possibly-stale HEAD with no upstream (see `checkout`).
+        let remote = format!("origin/{name}");
+        if sp.is_none()
+            && self.verify_commit_ref(&format!("refs/remotes/{remote}")).await
+        {
+            let args: &[&str] = if checkout {
+                &["checkout", "-b", name, "--track", &remote]
+            } else {
+                &["branch", "--track", name, &remote]
+            };
+            self.run(args).await?;
+            return Ok(());
+        }
         let mut args: Vec<&str> = if checkout {
             vec!["checkout", "-b", name]
         } else {
             vec!["branch", name]
         };
-        if let Some(sp) = start_point.filter(|s| !s.is_empty()) {
+        if let Some(sp) = sp {
             args.push(sp);
         }
         self.run(&args).await?;
@@ -2364,6 +2400,63 @@ mod tests {
             !after.iter().any(|b| b.name == "origin/tmp"),
             "origin/tmp pruned from local tracking refs after delete"
         );
+    }
+
+    /// Creating a branch whose name exists on origin must start AT the remote
+    /// tip and track it — a bare `checkout -b` from a stale HEAD makes an
+    /// upstream-less branch whose first `pull` dies with "no tracking
+    /// information" (the koala-bigdaddy `develop` incident).
+    #[tokio::test]
+    async fn create_named_like_remote_branch_tracks_remote_tip() {
+        let (_tmp, dir) = fixture();
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "tidy"]);
+        let parent = dir.parent().unwrap();
+        sh_git(parent, &["init", "--bare", "origin.git"]);
+        let bare = parent.join("origin.git");
+        sh_git(&dir, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        sh_git(&dir, &["push", "origin", "main"]);
+        // `dev` exists on origin one commit AHEAD of local main (the "stale
+        // HEAD" scenario), and only as a remote-tracking ref locally.
+        sh_git(&dir, &["checkout", "-b", "dev"]);
+        write(&dir, "remote-only.txt", "ahead\n");
+        sh_git(&dir, &["add", "remote-only.txt"]);
+        sh_git(&dir, &["commit", "-m", "remote ahead"]);
+        sh_git(&dir, &["push", "origin", "dev"]);
+        sh_git(&dir, &["checkout", "main"]);
+        sh_git(&dir, &["branch", "-D", "dev"]);
+        sh_git(&dir, &["fetch", "origin"]);
+
+        let git = LocalGit::new(&dir);
+        git.checkout("dev", true).await.unwrap();
+        assert_eq!(git.current_branch().await.unwrap(), "dev");
+        let head = git.run(&["rev-parse", "HEAD"]).await.unwrap();
+        let remote_tip = git.run(&["rev-parse", "origin/dev"]).await.unwrap();
+        assert_eq!(head, remote_tip, "branch starts at the remote tip, not stale HEAD");
+        let upstream = git
+            .run(&["rev-parse", "--abbrev-ref", "dev@{upstream}"])
+            .await
+            .unwrap();
+        assert_eq!(upstream.trim(), "origin/dev", "upstream configured");
+
+        // Same guarantee for the create-in-place path.
+        sh_git(&dir, &["checkout", "main"]);
+        sh_git(&dir, &["branch", "-D", "dev"]);
+        git.create_branch("dev", None, false).await.unwrap();
+        let upstream = git
+            .run(&["rev-parse", "--abbrev-ref", "dev@{upstream}"])
+            .await
+            .unwrap();
+        assert_eq!(upstream.trim(), "origin/dev", "create_branch tracks too");
+
+        // A genuinely new name still branches from HEAD (no upstream to wire).
+        git.checkout("feature/fresh", true).await.unwrap();
+        assert_eq!(git.current_branch().await.unwrap(), "feature/fresh");
+        // An explicit start_point is respected verbatim (no remote override).
+        let base = git.run(&["rev-parse", "main~1"]).await.unwrap();
+        git.create_branch("dev2", Some(base.trim()), false).await.unwrap();
+        let dev2 = git.run(&["rev-parse", "dev2"]).await.unwrap();
+        assert_eq!(dev2, base, "explicit start point wins");
     }
 
     /// A stale local remote-tracking ref — the branch was deleted on origin
