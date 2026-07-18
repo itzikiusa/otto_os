@@ -52,6 +52,21 @@ fn row_to_account(r: &sqlx::sqlite::SqliteRow) -> Result<GitAccount> {
     })
 }
 
+/// Canonical form of a repo path — the key the `repos.path` UNIQUE index
+/// deduplicates on. Expands `~`, resolves symlinks when the directory exists
+/// (`/var` vs `/private/var` register as one repo), and drops a trailing
+/// slash so cosmetic variants of the same checkout can't mint extra rows.
+fn normalize_repo_path(p: &str) -> String {
+    let expanded = otto_core::paths::expand_tilde(p.trim());
+    let resolved = std::fs::canonicalize(&expanded)
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or(expanded);
+    match resolved.trim_end_matches('/') {
+        "" => "/".to_string(),
+        s => s.to_string(),
+    }
+}
+
 fn row_to_repo(r: &sqlx::sqlite::SqliteRow) -> Result<Repo> {
     let provider: Option<String> = r.get("provider");
     Ok(Repo {
@@ -188,24 +203,51 @@ impl GitStore {
     // -- repos ------------------------------------------------------------
 
     pub async fn create_repo(&self, n: NewRepo) -> Result<Repo> {
+        // One row per checkout: normalize the path (tilde, symlinks, trailing
+        // slash) and return the already-registered repo instead of minting a
+        // duplicate — bulk imports and agent runs re-register known repos from
+        // other workspaces, which used to fork state per row (0107 made
+        // repos.path UNIQUE).
+        let path = normalize_repo_path(&n.path);
+        if let Some(existing) = self.get_repo_by_path(&path).await? {
+            return Ok(existing);
+        }
         let id = new_id();
         let now = fmt(Utc::now());
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO repos (id, workspace_id, name, path, remote_url, provider, git_account_id, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&n.workspace_id)
         .bind(&n.name)
-        .bind(&n.path)
+        .bind(&path)
         .bind(&n.remote_url)
         .bind(n.provider.map(|p| p.as_str()))
         .bind(&n.git_account_id)
         .bind(&now)
         .execute(&self.pool)
-        .await
-        .map_err(dberr("create repo"))?;
-        self.get_repo(&id).await
+        .await;
+        match inserted {
+            Ok(_) => self.get_repo(&id).await,
+            // Lost a concurrent-create race against the unique index — the
+            // other row is the repo; return it.
+            Err(e) if e.to_string().contains("UNIQUE constraint failed: repos.path") => self
+                .get_repo_by_path(&path)
+                .await?
+                .ok_or_else(|| Error::Internal("repo vanished after unique-path race".into())),
+            Err(e) => Err(dberr("create repo")(e)),
+        }
+    }
+
+    /// The repo registered at `path` (already normalized), if any.
+    pub async fn get_repo_by_path(&self, path: &str) -> Result<Option<Repo>> {
+        let row = sqlx::query("SELECT * FROM repos WHERE path = ?")
+            .bind(path)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("repo by path"))?;
+        row.as_ref().map(row_to_repo).transpose()
     }
 
     pub async fn get_repo(&self, id: &Id) -> Result<Repo> {
@@ -471,5 +513,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(a.token_expires_at, None);
+    }
+
+    /// The same checkout registered twice — even from another workspace or via
+    /// a cosmetic path variant (`~`, trailing slash) — must resolve to ONE row,
+    /// not mint a duplicate (the multi-row repos that forked git state per tab).
+    #[tokio::test]
+    async fn create_repo_same_path_returns_existing_row() {
+        let pool = mem_pool().await;
+        let store = GitStore::new(pool.clone());
+        let now = fmt(Utc::now());
+        for ws in ["ws1", "ws2"] {
+            sqlx::query(
+                "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, '/', ?)",
+            )
+            .bind(ws)
+            .bind(ws)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mk = |ws: &str, path: &str| NewRepo {
+            workspace_id: ws.into(),
+            name: "repo".into(),
+            path: path.into(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        };
+        // A real dir so canonicalize resolves symlinked temp roots consistently.
+        let dir = tempfile::tempdir().unwrap();
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+        let canon_str = canon.to_string_lossy().into_owned();
+
+        let a = store.create_repo(mk("ws1", &canon_str)).await.unwrap();
+        // Same path from ANOTHER workspace → the existing row, unchanged home.
+        let b = store
+            .create_repo(mk("ws2", &format!("{canon_str}/")))
+            .await
+            .unwrap();
+        assert_eq!(a.id, b.id, "duplicate registration returns the original");
+        assert_eq!(b.workspace_id, "ws1", "row keeps its original workspace");
+        // Symlink variant (/var vs /private/var style) also dedupes.
+        let c = store.create_repo(mk("ws2", dir.path().to_str().unwrap())).await.unwrap();
+        assert_eq!(a.id, c.id);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repos")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "exactly one row for the checkout");
     }
 }
