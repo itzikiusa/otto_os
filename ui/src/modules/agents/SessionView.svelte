@@ -77,6 +77,15 @@
     ((session?.meta?.name_full as string | undefined) ?? '').trim(),
   );
 
+  // Live pane-header width, so the header can shed controls in the same order
+  // the CSS container queries hide them (below) — driving the JS-only fallback of
+  // folding the terminal font/copy toolbar into the ⋯ menu once it's too narrow
+  // to fit inline. Kept in lockstep with the `@container` breakpoints in the CSS.
+  let headW = $state(0);
+  // Matches the `@container (max-width: 300px)` rule that hides `.term-ctl`:
+  // below this the zoom/copy controls live in the ⋯ menu instead.
+  const termCtlFolded = $derived(!viewport.isPhone && ui.termToolbar && headW > 0 && headW <= 300);
+
   let renaming = $state(false);
   // Bumped after a successful restart so the embedded <Terminal> drops its
   // exited overlay and reconnects to the freshly respawned/resumed PTY.
@@ -297,6 +306,21 @@
       ...(isAgent && (status === 'running' || status === 'working')
         ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restart() } as MenuItem]
         : []),
+      // In a narrow pane the inline terminal font/copy toolbar is hidden (see the
+      // `@container` rule on `.term-ctl`); surface its actions here so nothing is
+      // lost when tiling many sessions.
+      ...(termCtlFolded
+        ? [
+            { separator: true } as MenuItem,
+            { label: `Terminal font smaller (${ui.termFontSize}px)`, action: () => ui.termZoomOut() },
+            { label: 'Terminal font larger', icon: 'plus', action: () => ui.termZoomIn() },
+            {
+              label: ui.termCopyOnSelect ? 'Copy-on-select: on' : 'Copy-on-select: off',
+              icon: 'copy',
+              action: () => ui.setTermCopyOnSelect(!ui.termCopyOnSelect),
+            },
+          ]
+        : []),
       { separator: true },
       { label: 'Archive', icon: 'archive', action: () => void archive() },
       { label: 'Delete', icon: 'trash', danger: true, action: () => void del() },
@@ -314,7 +338,7 @@
     onfocus();
   }}
 >
-  <header class="pane-head">
+  <header class="pane-head" bind:clientWidth={headW}>
     <StatusDot {status} {needsYou} />
     {#if renaming}
       <!-- svelte-ignore a11y_autofocus -->
@@ -342,11 +366,14 @@
     {#if nameFull && nameFull !== session?.title}
       <span class="pane-fullname" title="Themed name — address this session by “{session?.meta?.name_handle ?? session?.title}”">({nameFull})</span>
     {/if}
-    <span class="chip provider-chip" title={session?.provider}>
+    <!-- `has-icon` lets the container query collapse the chip to icon-only in a
+         narrow pane; icon-less providers keep their text label (nothing else to
+         show). -->
+    <span class="chip provider-chip" class:has-icon={hasProviderIcon(session?.provider)} title={session?.provider}>
       {#if hasProviderIcon(session?.provider)}
         <ProviderIcon provider={session?.provider ?? ''} size={13} />
       {/if}
-      {session?.provider ?? '?'}
+      <span class="provider-name">{session?.provider ?? '?'}</span>
     </span>
     {#if needsYou}
       <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
@@ -512,6 +539,15 @@
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
+    /* Establish a query container on the header's inline size so the controls
+       below degrade with PANE width, not window width — the tiled view packs
+       10+ of these side by side and each shrinks independently. Breakpoints are
+       mirrored in the `@container` blocks at the bottom of this stylesheet. */
+    container-type: inline-size;
+  }
+  /* Provider label beside its brand icon — hidden (icon-only) in a narrow pane. */
+  .provider-name {
+    display: inline-block;
   }
   .pane-fullname {
     font-size: 11px;
@@ -720,5 +756,57 @@
   .dir-add .input {
     flex: 1;
     min-width: 0;
+  }
+
+  /* ── Responsive pane header ──────────────────────────────────────────────
+     Queried against the header's own inline size (see `.pane-head`), so a pane
+     sheds chrome by its OWN width in a tiled/split grid. Degradation order,
+     widest→narrowest: cwd → provider text → themed full-name → font/copy
+     toolbar. The status dot, the (ellipsized) title, and the ⋯ menu never drop.
+     The toolbar removed at 300px re-appears as ⋯-menu entries (see script). */
+
+  /* 1. The cwd path is the first to go — longest, least critical inline. */
+  @container (max-width: 440px) {
+    .pane-cwd {
+      display: none;
+    }
+  }
+
+  /* 2. Provider chip collapses to its brand icon (text-labelled providers with
+        no icon keep their text — the chip would otherwise render empty). */
+  @container (max-width: 380px) {
+    .provider-chip.has-icon .provider-name {
+      display: none;
+    }
+    .provider-chip.has-icon {
+      padding: 0 4px;
+    }
+  }
+
+  /* 3. Drop the themed full-name in parens; the short handle title carries it. */
+  @container (max-width: 340px) {
+    .pane-fullname {
+      display: none;
+    }
+    /* Tidy the header up: shorter, slightly smaller, tighter gaps. */
+    .pane-head {
+      height: 26px;
+      gap: 6px;
+    }
+    .pane-title {
+      font-size: 11px;
+      max-width: 130px;
+    }
+  }
+
+  /* 4. Fold the inline terminal font/copy toolbar away — its actions move into
+        the ⋯ menu (script adds them when `termCtlFolded`). */
+  @container (max-width: 300px) {
+    .term-ctl {
+      display: none;
+    }
+    .pane-title {
+      max-width: 96px;
+    }
   }
 </style>

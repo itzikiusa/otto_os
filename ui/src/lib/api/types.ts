@@ -870,6 +870,7 @@ export type OttoEvent =
       workspace_id: Id;
       meta: Record<string, unknown>;
     }
+  | { type: 'session_renamed'; session_id: Id; workspace_id: Id; title: string }
   | { type: 'session_removed'; session_id: Id; workspace_id: Id }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; title: string; body: string }
   | { type: 'notification'; notice: Notice; user_id?: string | null }
@@ -2011,6 +2012,10 @@ export interface RefBranch {
   is_current: boolean;
   upstream: string | null;
   remote: boolean;
+  /** True when this branch's tip is already contained in the repo's cleanup base
+   *  branch — a hint that it's safe to delete. The base branch itself is never
+   *  flagged. Absent on responses that predate the field → treat as false. */
+  merged_into_base?: boolean;
 }
 
 export interface RefTag {
@@ -2021,6 +2026,24 @@ export interface RefsResp {
   local: RefBranch[];
   remote: RefBranch[];
   tags: RefTag[];
+  /** Base branch `merged_into_base` was computed against (per-repo
+   *  `cleanup_base_branch` override, else the detected default). `null` when the
+   *  repo has no resolvable base — then nothing is flagged merged. */
+  base_branch?: string | null;
+}
+
+/** GET/PUT /repos/{id}/cleanup-base — the per-repo base branch driving the
+ *  "safe to delete (merged)" indicators. `base_branch` is the stored override
+ *  (`null` = follow the detected default); `resolved` is what it currently
+ *  resolves to. */
+export interface CleanupBaseResp {
+  base_branch: string | null;
+  resolved: string | null;
+}
+
+/** PUT /repos/{id}/cleanup-base body. Empty/null clears the override. */
+export interface SetCleanupBaseReq {
+  base_branch?: string | null;
 }
 
 /** One `git stash list` entry. `ref` is the `stash@{N}` selector; `parents` are

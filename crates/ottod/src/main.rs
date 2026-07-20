@@ -633,6 +633,25 @@ async fn run(cfg: Config) -> Result<(), String> {
         });
     }
 
+    // Provider-title auto-namer: every ~20s, rename any LIVE foreground agent
+    // session the user hasn't named to the provider's own session title (the
+    // first user prompt in claude's transcript / codex's rollout). Skips
+    // user-named and already-adopted sessions with no disk work, so it stays
+    // cheap; each rename broadcasts `SessionRenamed` for a live UI refresh.
+    {
+        let manager = Arc::clone(&manager);
+        let interval = std::time::Duration::from_secs(20);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let n = manager.refresh_provider_titles().await;
+                if n > 0 {
+                    tracing::info!("auto-named {n} session(s) from provider title");
+                }
+            }
+        });
+    }
+
     // Existence-check pruner: once at startup, then every ~6h. For non-live
     // resumable agent sessions, delete the row only when the provider's local
     // transcript is positively gone (un-resumable). Sessions whose transcript

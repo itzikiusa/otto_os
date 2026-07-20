@@ -24,6 +24,15 @@ pub enum Event {
         workspace_id: Id,
         meta: serde_json::Value,
     },
+    /// A session's `title` changed — a user rename, or the background
+    /// auto-namer adopting the provider's own session title. Carries the new
+    /// title so clients can update their cached session in place (the
+    /// `meta_updated` event does not carry the title).
+    SessionRenamed {
+        session_id: Id,
+        workspace_id: Id,
+        title: String,
+    },
     /// A session was removed.
     SessionRemoved { session_id: Id, workspace_id: Id },
     /// Free-form notice surfaced as a toast/notification.

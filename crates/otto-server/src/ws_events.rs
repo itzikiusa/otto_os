@@ -204,7 +204,12 @@ fn scope_of(event: &Event) -> Scope<'_> {
             session_id,
             owner: None,
         },
-        Event::SessionRemoved {
+        Event::SessionRenamed {
+            session_id,
+            workspace_id,
+            ..
+        }
+        | Event::SessionRemoved {
             session_id,
             workspace_id,
         } => Scope::Session {

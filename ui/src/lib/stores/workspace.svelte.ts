@@ -897,6 +897,19 @@ class WorkspaceStore {
         );
         break;
       }
+      case 'session_renamed': {
+        // A session's title changed — user PATCH or the background auto-namer
+        // adopting the CLI's own session title. `session_meta_updated` only
+        // carries meta, so this is the only event that refreshes `title` live;
+        // pane header and sidebar re-render off `session.title` reactively.
+        this.sessions = this.sessions.map((s) =>
+          s.id === ev.session_id ? { ...s, title: ev.title } : s,
+        );
+        this.otherWsSessions = this.otherWsSessions.map((s) =>
+          s.id === ev.session_id ? { ...s, title: ev.title } : s,
+        );
+        break;
+      }
       case 'session_removed': {
         delete this.statusMap[ev.session_id];
         this.clearNeedsYou(ev.session_id);
