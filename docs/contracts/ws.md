@@ -33,7 +33,15 @@ Input frames from viewers are silently dropped server-side (and a single JSON
 {"type":"resize","cols":120,"rows":32}
 {"type":"scrollback","lines":2000}
 {"type":"search","query":"foo"}                     // server-side ring-buffer search (see below)
+{"type":"claim"}                                    // claim size authority (sent on terminal focus)
 ```
+
+**Size authority.** Multiple viewers share one PTY; the connection that most
+recently sent `input` or `claim` (editor+ only) owns the session's size, and
+`resize` frames from other connections are ignored while the owner is
+attached (a passive tile/preview/idle phone tab can no longer pin a wide
+pane's TUI to its own small grid). When the owner detaches, authority is
+released and the next `resize` wins.
 
 ### Server → client
 
@@ -42,12 +50,14 @@ Input frames from viewers are silently dropped server-side (and a single JSON
 
 ```json
 {"type":"scrollback","data":"<base64 bytes>","epoch":3}  // response to scrollback request; send BEFORE live bytes resume.
-                                                    // `epoch` = PTY spawn counter (0/absent when no live handle): when it
-                                                    // CHANGED since the client's last attach the process was respawned
-                                                    // (suspend→resume, restart, daemon restart) — the client resets its
-                                                    // local buffer and rebuilds from this snapshot instead of appending
-                                                    // under stale (dead-process) history. Same epoch → append/keep local
-                                                    // scrollback (deeper than the server's 1000-line emulator buffer).
+                                                    // `data` is a FULL rebuild: formatted history rows + a coherent
+                                                    // current-screen frame + input-mode restoration (bracketed paste,
+                                                    // keypad). The client MUST reset its terminal and repaint from this
+                                                    // snapshot — appending under locally-kept scrollback duplicates the
+                                                    // transcript once per reconnect. `epoch` = PTY spawn counter
+                                                    // (0/absent when no live handle), informational.
+                                                    // Also pushed unsolicited to resync a viewer whose output stream
+                                                    // lagged (dropped chunks) or whose dead session came back alive.
 {"type":"status","status":"working"}                // running|working|idle|exited|reconnectable
 {"type":"exit","code":0}                            // child exited; socket stays open
 {"type":"terminated"}                               // session force-terminated (admin terminate / share-link revoke); socket closes immediately after
@@ -92,13 +102,14 @@ transport layer (axum auto-responds to pings; server sends a ping every 30s).
 Every variant of `otto_core::event::Event` (`crates/otto-core/src/event.rs`). The tag is
 the `type` field (snake_case of the variant name); the remaining keys are the payload.
 Delivery scope: **session-family events** (`session_status`, `session_created`,
-`session_meta_updated`, `session_removed`, `trail_appended`, `tasks_updated`)
-reach only the session's owner (`created_by`), a workspace `admin`, or root —
-and only after the `viewer`+ membership gate on the event's `workspace_id`;
-other **workspace-scoped events** (improvement, swarm) reach every member with
-`viewer`+ on the event's `workspace_id` (root receives all); **broadcast
-events** (`Notice`) reach every authenticated client. There are 41 variants
-(the sections below cover them; each `## …`/`### …` heading is one feature family).
+`session_meta_updated`, `session_renamed`, `session_removed`, `trail_appended`,
+`tasks_updated`) reach only the session's owner (`created_by`), a workspace
+`admin`, or root — and only after the `viewer`+ membership gate on the event's
+`workspace_id`; other **workspace-scoped events** (improvement, swarm) reach
+every member with `viewer`+ on the event's `workspace_id` (root receives all);
+**broadcast events** (`Notice`) reach every authenticated client. There are 42
+variants (the sections below cover them; each `## …`/`### …` heading is one
+feature family).
 
 Session lifecycle (session-family — owner/admin/root, viewer-gated):
 
@@ -106,6 +117,7 @@ Session lifecycle (session-family — owner/admin/root, viewer-gated):
 {"type":"session_status","session_id":"…","workspace_id":"…","status":{…SessionStatus…}}
 {"type":"session_created","session":{…Session…}}
 {"type":"session_meta_updated","session_id":"…","workspace_id":"…","meta":{…}}
+{"type":"session_renamed","session_id":"…","workspace_id":"…","title":"…"}
 {"type":"session_removed","session_id":"…","workspace_id":"…"}
 ```
 
@@ -114,6 +126,11 @@ Session lifecycle (session-family — owner/admin/root, viewer-gated):
   the full `Session`.
 - `session_meta_updated` — a session's `meta` changed; carries the full merged `meta`
   object so clients update their cached session in place (e.g. live handover-progress flags).
+- `session_renamed` — a session's `title` changed; carries the new `title` so clients
+  update their cached session in place. Emitted on a user rename
+  (`PATCH /sessions/{id}`, `meta.title_source = "user"`) and by the background
+  provider-title auto-namer adopting the CLI's own session title
+  (`meta.title_source = "provider"`).
 - `session_removed` — a session row was removed (PTY killed).
 
 Notices & notifications:

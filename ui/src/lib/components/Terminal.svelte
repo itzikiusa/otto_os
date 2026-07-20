@@ -350,17 +350,16 @@
         const msg = JSON.parse(ev.data);
         switch (msg.type) {
           case 'scrollback': {
-            // `epoch` is the PTY spawn counter. A change since our last attach
-            // means the process was RESPAWNED (idle suspend→resume, ⟳ restart,
-            // daemon restart) — our local scrollback belongs to the dead
-            // process, possibly painted at a stale width. Rebuild from the
-            // server snapshot instead of appending under stale history. Same
-            // epoch (plain WS drop/reconnect) keeps local scrollback, which is
-            // deeper than the server's 1000-line buffer.
-            const epoch = typeof msg.epoch === 'number' && msg.epoch > 0 ? msg.epoch : null;
-            if (epoch !== null && srvEpoch !== null && epoch !== srvEpoch) term?.reset();
-            if (epoch !== null) srvEpoch = epoch;
+            // A snapshot fully reconstructs terminal state: history rows +
+            // coherent current-screen frame + input modes (bracketed paste,
+            // keypad). ALWAYS reset and rebuild from it — appending under the
+            // locally-kept scrollback stacked a duplicate copy of the whole
+            // transcript on every reconnect (the "scroll up and see the
+            // conversation N times" bug), and preserved history could belong
+            // to a dead process painted at a stale width. Deterministic
+            // rebuild keeps the buffer identical to what a fresh attach sees.
             if (msg.data) {
+              term?.reset();
               // Snapshot is a full-screen paint already; still force a clean
               // redraw so nothing from the previous process lingers.
               paintPtyBytes(base64ToBytes(msg.data), /* alwaysRedraw */ true);
@@ -412,10 +411,6 @@
   let lastCols = 0;
   let lastRows = 0;
 
-  // Last seen PTY spawn epoch (see the 'scrollback' frame handler). null until
-  // the first epoch-carrying frame; reset on session switch.
-  let srvEpoch: number | null = null;
-
   function sendResize(force = false): void {
     if (!term) return;
     const { cols, rows } = term;
@@ -423,10 +418,73 @@
     // shell-wrapping bug (a stale-narrow grid shows up as a too-small data-cols)
     // and asserted by the resize E2E.
     container?.setAttribute('data-cols', String(cols));
-    if (!force && cols === lastCols && rows === lastRows) return;
-    lastCols = cols;
-    lastRows = rows;
-    sendJson({ type: 'resize', cols, rows });
+    if (force) {
+      // Connect-time sync: flush any pending trailing send (it belongs to a
+      // pre-reconnect grid) and push immediately. No resync scheduled — the
+      // onopen path requests the initial snapshot right after this.
+      if (resizeSendTimer !== null) {
+        clearTimeout(resizeSendTimer);
+        resizeSendTimer = null;
+      }
+      lastCols = cols;
+      lastRows = rows;
+      lastResizeSentAt = performance.now();
+      sendJson({ type: 'resize', cols, rows });
+      return;
+    }
+    if (cols === lastCols && rows === lastRows) return;
+    // COALESCE the PTY notification. Every SIGWINCH makes claude/codex clear
+    // and reprint their transcript region; a drag-resize used to fire one per
+    // ResizeObserver tick, committing a staircase of mixed-width repaint
+    // frames into scrollback ("scroll after resize shows broken content until
+    // I reconnect"). The first change of a burst is sent immediately (a
+    // deliberate one-step resize stays snappy); further changes collapse into
+    // ONE trailing send once the grid stops moving, so the TUI reprints at
+    // most twice per drag instead of once per tick.
+    const now = performance.now();
+    if (resizeSendTimer === null && now - lastResizeSentAt > RESIZE_SETTLE_MS) {
+      lastCols = cols;
+      lastRows = rows;
+      lastResizeSentAt = now;
+      sendJson({ type: 'resize', cols, rows });
+      scheduleResizeResync();
+      return;
+    }
+    if (resizeSendTimer !== null) clearTimeout(resizeSendTimer);
+    resizeSendTimer = setTimeout(() => {
+      resizeSendTimer = null;
+      if (!term) return;
+      const { cols: c, rows: r } = term;
+      if (c === lastCols && r === lastRows) return;
+      lastCols = c;
+      lastRows = r;
+      lastResizeSentAt = performance.now();
+      sendJson({ type: 'resize', cols: c, rows: r });
+      scheduleResizeResync();
+    }, RESIZE_SETTLE_MS);
+  }
+
+  /** Trailing-debounce window for PTY resize + the settle threshold that lets
+   *  an isolated resize through immediately. */
+  const RESIZE_SETTLE_MS = 300;
+  let resizeSendTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastResizeSentAt = 0;
+
+  // After the grid settles, request a snapshot — the client rebuilds from it
+  // (see the 'scrollback' frame handler), replacing the transitional repaint
+  // frames with the server's coherent history, exactly like a reconnect does
+  // but automatically. AGENT panes only (`preferDom`): shells never reprint
+  // on SIGWINCH, so there are no transitional frames to clean — and xterm's
+  // own soft-wrap reflow of live shell content beats an emulator rebuild.
+  let resizeResyncTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleResizeResync(): void {
+    if (!preferDom) return;
+    if (resizeResyncTimer !== null) clearTimeout(resizeResyncTimer);
+    resizeResyncTimer = setTimeout(() => {
+      resizeResyncTimer = null;
+      if (!connected || !term) return;
+      sendJson({ type: 'scrollback', lines: term.options.scrollback ?? 10_000 });
+    }, 700);
   }
 
   // Belt-and-suspenders for PLAIN SHELLS: re-fit a couple of times shortly after
@@ -884,6 +942,13 @@
     const onFocus = () => {
       keyContext.terminalFocused = true;
       keyContext.openFind = openFind;
+      // Claim PTY size authority: multiple viewers share one PTY (pane +
+      // tiled-overview tile + phone tab) and last-resize-wins let a passive
+      // small viewer pin the size (sessions stuck at 80 cols in a 150-col
+      // pane). The server only honors resizes from the typing/focused owner;
+      // clicking into a pane reclaims it, then re-push our grid.
+      sendJson({ type: 'claim' });
+      sendResize(true);
     };
     const onBlur = () => {
       keyContext.terminalFocused = false;
@@ -930,6 +995,14 @@
       linkProvider.dispose();
       for (const t of verifyTimers) clearTimeout(t);
       if (refitTimer) clearTimeout(refitTimer);
+      if (resizeResyncTimer !== null) {
+        clearTimeout(resizeResyncTimer);
+        resizeResyncTimer = null;
+      }
+      if (resizeSendTimer !== null) {
+        clearTimeout(resizeSendTimer);
+        resizeSendTimer = null;
+      }
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -973,10 +1046,20 @@
     // guard each such re-run did a full close+reconnect, storming the WS. A real
     // session switch still falls through (connectedSid differs).
     if (sessionId === connectedSid) return;
-    // 1. Cancel any pending reconnect timer — it belongs to the old session.
+    // 1. Cancel timers that belong to the old session (reconnect + pending
+    //    resize-resync — the latter would request a spurious rebuild of the
+    //    NEW session's just-received snapshot).
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
+    }
+    if (resizeResyncTimer !== null) {
+      clearTimeout(resizeResyncTimer);
+      resizeResyncTimer = null;
+    }
+    if (resizeSendTimer !== null) {
+      clearTimeout(resizeSendTimer);
+      resizeSendTimer = null;
     }
     // 2. Close the old socket cleanly. Mark closedByUs BEFORE calling close() so
     //    the synchronous onclose callback (which scheduleReconnect reads) does not
@@ -991,7 +1074,6 @@
     exitCode = null;
     reconnectAttempts = 0;
     lastInjN = 0;
-    srvEpoch = null;
     // 4. Clear the xterm viewport and scrollback so old session output is gone
     //    before the new scrollback arrives. term.reset() resets the terminal state
     //    (cursor, attrs, etc.) and clears scrollback while keeping the DOM/WebGL

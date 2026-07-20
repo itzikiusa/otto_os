@@ -1,6 +1,7 @@
 //! SessionManager — owns live PTYs, the sessions DB rows and per-session
 //! status tasks (working/idle/exited detection + events).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -443,6 +444,216 @@ fn agy_conversation_fresh(
     })
 }
 
+/// Max length (chars) of an auto-derived provider title before it is clipped.
+const PROVIDER_TITLE_MAX: usize = 60;
+/// Ceiling on how many transcript lines the auto-namer parsers scan before
+/// giving up on finding a first user prompt — bounds the read on a large
+/// transcript that genuinely never carried one (all-system/tool content).
+const PROVIDER_TITLE_SCAN_LINES: usize = 4000;
+
+/// Collapse a raw provider prompt into a one-line session title: strip control
+/// characters / newlines to single spaces, squeeze runs of whitespace, and clip
+/// to [`PROVIDER_TITLE_MAX`] chars (char-boundary safe, `…` suffix). Returns
+/// `None` for an empty/blank result so callers skip it.
+fn clean_provider_title(s: &str) -> Option<String> {
+    let mut collapsed = String::with_capacity(s.len().min(256));
+    let mut last_space = true; // leading whitespace is dropped
+    for ch in s.chars() {
+        if ch.is_whitespace() || ch.is_control() {
+            if !last_space {
+                collapsed.push(' ');
+                last_space = true;
+            }
+        } else {
+            collapsed.push(ch);
+            last_space = false;
+        }
+    }
+    let trimmed = collapsed.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() <= PROVIDER_TITLE_MAX {
+        return Some(trimmed.to_string());
+    }
+    let mut out: String = trimmed.chars().take(PROVIDER_TITLE_MAX).collect();
+    // Don't leave a dangling space before the ellipsis.
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out.push('…');
+    Some(out)
+}
+
+/// True when a claude/codex transcript text line is a wrapper/meta prompt rather
+/// than a real user message: command echoes (`<command-name>…`), tool output
+/// (`<local-command-stdout>`), injected context (`# AGENTS.md instructions`,
+/// `<permissions instructions>`), or a Claude caveat preamble. These are never
+/// the human's own words, so the title parsers skip them.
+fn is_wrapper_prompt(text: &str) -> bool {
+    let t = text.trim_start();
+    t.is_empty()
+        || t.starts_with('<')
+        || t.starts_with("# AGENTS.md")
+        || t.starts_with("Caveat:")
+        || t.starts_with("# CLAUDE.md")
+}
+
+/// Pull the first genuine user prompt out of a Claude Code transcript JSONL
+/// (`~/.claude/projects/<enc-cwd>/<uuid>.jsonl`). Claude records no dedicated
+/// title/summary line in this format, so the first real `type:"user"` message is
+/// the best human-meaningful name. Skips meta lines (`isMeta`), tool-result
+/// user turns (array content with no text parts), and wrapper prompts
+/// (slash-command echoes, injected CLAUDE.md/AGENTS.md). `None` when none is
+/// found within [`PROVIDER_TITLE_SCAN_LINES`].
+fn parse_claude_first_prompt(contents: &str) -> Option<String> {
+    for line in contents.lines().take(PROVIDER_TITLE_SCAN_LINES) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
+            continue;
+        }
+        // Sidechain (subagent) turns and injected meta turns aren't the user.
+        if v.get("isMeta").and_then(|m| m.as_bool()) == Some(true)
+            || v.get("isSidechain").and_then(|m| m.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        let Some(content) = v.get("message").and_then(|m| m.get("content")) else {
+            continue;
+        };
+        let text = match content {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(parts) => {
+                // Concatenate text parts; a tool_result-only turn yields "".
+                let mut buf = String::new();
+                for p in parts {
+                    if p.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                            if !buf.is_empty() {
+                                buf.push(' ');
+                            }
+                            buf.push_str(t);
+                        }
+                    }
+                }
+                buf
+            }
+            _ => continue,
+        };
+        if is_wrapper_prompt(&text) {
+            continue;
+        }
+        if let Some(title) = clean_provider_title(&text) {
+            return Some(title);
+        }
+    }
+    None
+}
+
+/// Pull the first genuine user prompt out of a Codex rollout JSONL
+/// (`rollout-<ts>-<uuid>.jsonl`). Codex records the typed prompt as an
+/// `event_msg` of `payload.type == "user_message"` (`payload.message`) — the
+/// clean human message, distinct from the injected AGENTS.md context that
+/// arrives as a `response_item` user turn. Falls back to the first
+/// `response_item` user `input_text` that isn't a wrapper prompt for older
+/// rollouts that predate the `user_message` event. `None` when none is found
+/// within [`PROVIDER_TITLE_SCAN_LINES`].
+fn parse_codex_first_prompt(contents: &str) -> Option<String> {
+    let mut fallback: Option<String> = None;
+    for line in contents.lines().take(PROVIDER_TITLE_SCAN_LINES) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let payload = v.get("payload");
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("event_msg") => {
+                let Some(p) = payload else { continue };
+                if p.get("type").and_then(|t| t.as_str()) != Some("user_message") {
+                    continue;
+                }
+                if let Some(msg) = p.get("message").and_then(|m| m.as_str()) {
+                    if !is_wrapper_prompt(msg) {
+                        if let Some(title) = clean_provider_title(msg) {
+                            return Some(title);
+                        }
+                    }
+                }
+            }
+            // Fallback for pre-`user_message` rollouts: first non-wrapper user
+            // input_text. Recorded but not returned until the scan ends, so a
+            // later real `user_message` event still wins.
+            Some("response_item") if fallback.is_none() => {
+                let Some(p) = payload else { continue };
+                if p.get("type").and_then(|t| t.as_str()) != Some("message")
+                    || p.get("role").and_then(|r| r.as_str()) != Some("user")
+                {
+                    continue;
+                }
+                if let Some(parts) = p.get("content").and_then(|c| c.as_array()) {
+                    for part in parts {
+                        if part.get("type").and_then(|t| t.as_str()) == Some("input_text") {
+                            if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                if !is_wrapper_prompt(t) {
+                                    fallback = clean_provider_title(t);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    fallback
+}
+
+/// Gate for [`SessionManager::refresh_provider_titles`]: only LIVE (non-exited),
+/// non-archived foreground agent sessions on a title-bearing provider
+/// (claude/codex) with a captured provider session id and a
+/// not-user-and-not-already-provider `meta.title_source` are worth probing. The
+/// durable `title_source` marker is what keeps a resolved session from being
+/// re-probed after a daemon restart (the in-memory cache is empty then).
+fn title_eligible(s: &Session) -> bool {
+    if s.archived
+        || s.status == SessionStatus::Exited
+        || !s.is_foreground_agent()
+        || !matches!(s.provider.as_str(), "claude" | "codex")
+        || s.provider_session_id.is_none()
+    {
+        return false;
+    }
+    // "user" = the user owns the name; "provider" = already auto-named and the
+    // first prompt is stable, so there's nothing new to read.
+    !matches!(
+        s.meta.get("title_source").and_then(|v| v.as_str()),
+        Some("user") | Some("provider")
+    )
+}
+
+/// Read a provider transcript file and extract its first user prompt as a
+/// session title. Dispatches on provider; synchronous (callers run it on the
+/// blocking pool). `None` for unsupported providers, an unreadable file, or a
+/// transcript with no user prompt yet.
+fn read_provider_title(provider: &str, path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    match provider {
+        "claude" => parse_claude_first_prompt(&contents),
+        "codex" => parse_codex_first_prompt(&contents),
+        _ => None,
+    }
+}
+
 /// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
 /// Used for one-line trail summaries.
 fn trail_clip(s: &str, max: usize) -> String {
@@ -497,11 +708,20 @@ pub(crate) async fn wait_exit_code(
 pub struct AttachGuard {
     manager: Arc<SessionManager>,
     id: Id,
+    /// Daemon-unique id of this WS connection (size-authority tracking).
+    conn_id: u64,
+}
+
+impl AttachGuard {
+    /// This connection's daemon-unique id, passed to the size-authority calls.
+    pub fn conn_id(&self) -> u64 {
+        self.conn_id
+    }
 }
 
 impl Drop for AttachGuard {
     fn drop(&mut self) {
-        self.manager.detach(&self.id);
+        self.manager.detach(&self.id, self.conn_id);
     }
 }
 
@@ -528,6 +748,19 @@ pub struct RelayOutcome {
     pub text: String,
 }
 
+/// Per-session bookkeeping for the provider-title auto-namer. Keeps the sweep
+/// cheap: once a session is `resolved` (a provider title was adopted, or the
+/// user claimed the name) it is never read again; otherwise `mtime` skips a
+/// re-parse when the transcript hasn't grown since the last look.
+#[derive(Default)]
+struct TitleProbe {
+    /// Transcript mtime at the last parse. Skip re-reading when unchanged.
+    mtime: Option<std::time::SystemTime>,
+    /// Terminal state: a title was applied/matched, or the user owns the name.
+    /// The first user prompt is stable, so a resolved session never re-reads.
+    resolved: bool,
+}
+
 pub struct SessionManager {
     /// Shared so the per-session status task can evict an exited handle
     /// (otherwise dead PtyHandles — and their emulator + ring buffer — leak).
@@ -536,6 +769,10 @@ pub struct SessionManager {
     /// `ws::serve_terminal` on attach/detach; read by the idle-suspend sweep so
     /// it never suspends a session someone is actively watching.
     attached: Arc<DashMap<Id, usize>>,
+    /// Attached WS connection ids per session (see [`Self::may_resize`]).
+    attached_conns: Arc<DashMap<Id, Vec<u64>>>,
+    /// Size-authority owner per session: the conn that most recently typed.
+    size_owner: Arc<DashMap<Id, u64>>,
     /// Session ids whose PTY is being deliberately suspended (RAM release, not
     /// a real exit). The per-session status task consults this in its exit
     /// branch so it marks the session `Reconnectable` (still resumable) instead
@@ -602,6 +839,10 @@ pub struct SessionManager {
     /// theme (e.g. "Ronaldo"), unique among the workspace's open sessions.
     /// Absent ⇒ the legacy "{provider} #N" numbering.
     name_themes: Option<otto_state::NameThemesRepo>,
+    /// Per-session state for the provider-title auto-namer sweep
+    /// ([`Self::refresh_provider_titles`]). In-memory only: it's a read-cache,
+    /// and the durable `meta.title_source` marker survives restarts.
+    title_probe: Arc<DashMap<Id, TitleProbe>>,
 }
 
 impl SessionManager {
@@ -613,6 +854,8 @@ impl SessionManager {
         Self {
             live: Arc::new(DashMap::new()),
             attached: Arc::new(DashMap::new()),
+            attached_conns: Arc::new(DashMap::new()),
+            size_owner: Arc::new(DashMap::new()),
             suspending: Arc::new(DashMap::new()),
             suspend_cpu: Arc::new(DashMap::new()),
             repo,
@@ -638,6 +881,7 @@ impl SessionManager {
             mcp_tokens: Arc::new(DashMap::new()),
             codex_capture_lock: Arc::new(Mutex::new(())),
             name_themes: None,
+            title_probe: Arc::new(DashMap::new()),
         }
     }
 
@@ -1287,6 +1531,21 @@ impl SessionManager {
             obj.insert("name_handle".into(), alloc.handle.clone().into());
             obj.insert("name_full".into(), alloc.full.clone().into());
         }
+        // Record how this session got its title so the provider-title auto-namer
+        // knows whether it may replace it: "user" (explicit at creation — never
+        // touched), "theme" (a name-theme allocation), or "auto" (the
+        // "{provider} #N" fallback). Theme/auto titles are replaceable by the
+        // provider's own session title once it appears.
+        if let Some(obj) = meta.as_object_mut() {
+            let source = if req.title.as_deref().is_some_and(|t| !t.is_empty()) {
+                "user"
+            } else if name_alloc.is_some() {
+                "theme"
+            } else {
+                "auto"
+            };
+            obj.insert("title_source".into(), source.into());
+        }
 
         let session = self
             .repo
@@ -1363,7 +1622,19 @@ impl SessionManager {
                     // bundle and append the launch flags/env that load it
                     // (--add-dir / --append-system-prompt-file / codex
                     // developer_instructions). Nothing is written into the cwd.
-                    let injection = hook.before_spawn(ws, &session.cwd, &session.provider);
+                    // Materialize is synchronous disk churn (skill dir copies)
+                    // — run it on the blocking pool so it can't stall an async
+                    // worker (part of the intermittent create-session 2-3s
+                    // latency; see also the PtyHandle spawn below).
+                    let hook = Arc::clone(hook);
+                    let ws_owned = ws.clone();
+                    let cwd = session.cwd.clone();
+                    let prov = session.provider.clone();
+                    let injection = tokio::task::spawn_blocking(move || {
+                        hook.before_spawn(&ws_owned, &cwd, &prov)
+                    })
+                    .await
+                    .unwrap_or_default();
                     spec.args.extend(injection.args);
                     spec.env.extend(injection.env);
                 }
@@ -1393,7 +1664,16 @@ impl SessionManager {
         // as the very last step before spawn so it wraps the fully-injected spec.
         self.apply_sandbox(&mut spec, &session).await;
 
-        let handle = match PtyHandle::spawn_sized(&spec, grid_cols, grid_rows) {
+        // fork/exec of the agent CLI is a synchronous syscall path that can take
+        // tens-hundreds of ms — keep it off the async workers (blocked workers
+        // with idle CPU are exactly the intermittent everything-is-slow shape).
+        let spawn_spec = spec.clone();
+        let handle = match tokio::task::spawn_blocking(move || {
+            PtyHandle::spawn_sized(&spawn_spec, grid_cols, grid_rows)
+        })
+        .await
+        .unwrap_or_else(|e| Err(Error::Internal(format!("pty spawn task: {e}"))))
+        {
             Ok(h) => Arc::new(h),
             Err(e) => {
                 let _ = self.repo.delete(&session.id).await;
@@ -1545,23 +1825,65 @@ impl SessionManager {
 
     /// Register a WS terminal viewer for `id` (called on attach). Returns an
     /// [`AttachGuard`] that decrements the count on drop, so every WS exit path
-    /// (clean close, error, drop) releases the attachment.
+    /// (clean close, error, drop) releases the attachment. Each guard carries a
+    /// daemon-unique connection id used by the SIZE-AUTHORITY policy below.
     pub fn attach(self: &Arc<Self>, id: &Id) -> AttachGuard {
+        static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
+        let conn_id = CONN_SEQ.fetch_add(1, Ordering::Relaxed);
         *self.attached.entry(id.clone()).or_insert(0) += 1;
+        self.attached_conns
+            .entry(id.clone())
+            .or_default()
+            .push(conn_id);
         AttachGuard {
             manager: Arc::clone(self),
             id: id.clone(),
+            conn_id,
         }
     }
 
     /// Decrement the attached-viewer count for `id`, removing the entry at zero.
-    fn detach(&self, id: &Id) {
+    fn detach(&self, id: &Id, conn_id: u64) {
         if let Some(mut e) = self.attached.get_mut(id) {
             *e = e.saturating_sub(1);
             if *e == 0 {
                 drop(e);
                 self.attached.remove_if(id, |_, &v| v == 0);
             }
+        }
+        if let Some(mut conns) = self.attached_conns.get_mut(id) {
+            conns.retain(|&c| c != conn_id);
+            if conns.is_empty() {
+                drop(conns);
+                self.attached_conns.remove_if(id, |_, v| v.is_empty());
+            }
+        }
+        // A departing size owner releases authority (next typer claims it).
+        self.size_owner.remove_if(id, |_, &owner| owner == conn_id);
+    }
+
+    /// SIZE AUTHORITY: the connection that most recently TYPED into a session
+    /// owns its PTY size while attached. Multiple viewers share one PTY
+    /// (open pane + tiled-overview tile + a phone/share tab), each fitting to
+    /// its own box — last-writer-wins let a passive small viewer pin a wide
+    /// desktop pane's TUI to ~80 cols (observed live: working sessions stuck
+    /// at 80×48/60×47 while their pane was 150 cols). Typing claims the size;
+    /// resizes from non-owners are ignored while the owner stays attached.
+    pub fn note_input_authority(&self, id: &Id, conn_id: u64) {
+        self.size_owner.insert(id.clone(), conn_id);
+    }
+
+    /// Whether `conn_id` may resize `id` under the size-authority policy:
+    /// yes when it IS the owner, when nobody has typed yet, or when the owner
+    /// is no longer attached (stale entry — first resizer wins again).
+    pub fn may_resize(&self, id: &Id, conn_id: u64) -> bool {
+        match self.size_owner.get(id).map(|e| *e) {
+            None => true,
+            Some(owner) if owner == conn_id => true,
+            Some(owner) => !self
+                .attached_conns
+                .get(id)
+                .is_some_and(|conns| conns.contains(&owner)),
         }
     }
 
@@ -1702,10 +2024,26 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Rename a session.
+    /// Rename a session (the user-driven `PATCH /sessions/{id}` path). Marks the
+    /// title **user-owned** (`meta.title_source = "user"`) so the provider-title
+    /// auto-namer never overwrites it again, and broadcasts `SessionRenamed` so
+    /// every connected client updates in place.
     pub async fn update_title(&self, id: &Id, title: &str) -> Result<Session> {
         self.repo.set_title(id, title).await?;
-        self.repo.get(id).await
+        let _ = self
+            .repo
+            .merge_meta(id, &serde_json::json!({ "title_source": "user" }))
+            .await;
+        // The user owns the name from now on — retire the session from the
+        // auto-namer without touching disk again.
+        self.title_probe.entry(id.clone()).or_default().resolved = true;
+        let session = self.repo.get(id).await?;
+        let _ = self.events.send(Event::SessionRenamed {
+            session_id: session.id.clone(),
+            workspace_id: session.workspace_id.clone(),
+            title: session.title.clone(),
+        });
+        Ok(session)
     }
 
     /// Shallow-merge `patch` (a JSON object) into the session's existing meta.
@@ -1877,6 +2215,90 @@ impl SessionManager {
             _ => return None,
         };
         std::fs::metadata(&path).is_ok().then_some(path)
+    }
+
+    /// One sweep of the provider-title auto-namer. For every LIVE foreground
+    /// agent session whose name the user hasn't claimed, read the provider's own
+    /// session title (claude/codex first user prompt) and, when found and
+    /// different, rename the session to it and broadcast `SessionRenamed`.
+    ///
+    /// Cheap + robust: dead/archived/background/user-named sessions are skipped
+    /// without any disk work; an unchanged transcript (same mtime) is not
+    /// re-parsed; a resolved session is never read again; and every per-session
+    /// error is swallowed. All file reads run on the blocking pool. Returns the
+    /// number of sessions renamed this sweep. Driven by a ~20s loop in ottod.
+    pub async fn refresh_provider_titles(&self) -> usize {
+        let Ok(sessions) = self.repo.list_all().await else {
+            return 0;
+        };
+        let mut renamed = 0;
+        for session in sessions {
+            if !title_eligible(&session) {
+                continue;
+            }
+            match self.probe_and_apply_title(&session).await {
+                Ok(true) => renamed += 1,
+                Ok(false) => {}
+                Err(e) => tracing::debug!(session = %session.id, "provider-title probe: {e}"),
+            }
+        }
+        renamed
+    }
+
+    /// Probe one session's transcript and adopt its provider title when found.
+    /// Returns `Ok(true)` when the session was actually renamed. Uses the
+    /// in-memory [`TitleProbe`] cache to short-circuit resolved sessions and
+    /// unchanged transcripts; does the file read on the blocking pool.
+    async fn probe_and_apply_title(&self, s: &Session) -> Result<bool> {
+        // Already resolved in this daemon's lifetime — never re-read.
+        if self.title_probe.get(&s.id).is_some_and(|p| p.resolved) {
+            return Ok(false);
+        }
+        let Some(path) = self.activity_artifact(&s.id).await else {
+            // Transcript not on disk yet (id just captured, first turn pending).
+            return Ok(false);
+        };
+        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        // Nothing new since the last look — skip the re-parse.
+        if let Some(prev) = self.title_probe.get(&s.id) {
+            if mtime.is_some() && prev.mtime == mtime {
+                return Ok(false);
+            }
+        }
+        let provider = s.provider.clone();
+        let path_owned = path.clone();
+        let title = tokio::task::spawn_blocking(move || read_provider_title(&provider, &path_owned))
+            .await
+            .ok()
+            .flatten();
+        // Record the mtime we just parsed at so the next sweep can skip it.
+        {
+            let mut probe = self.title_probe.entry(s.id.clone()).or_default();
+            probe.mtime = mtime;
+            // A found title means the (stable) first prompt exists — done either
+            // way, whether it differs from the current name or already matches.
+            if title.is_some() {
+                probe.resolved = true;
+            }
+        }
+        let Some(title) = title else {
+            return Ok(false); // no user prompt yet — retry on a later sweep
+        };
+        if title == s.title {
+            return Ok(false);
+        }
+        self.repo.set_title(&s.id, &title).await?;
+        let _ = self
+            .repo
+            .merge_meta(&s.id, &serde_json::json!({ "title_source": "provider" }))
+            .await;
+        let _ = self.events.send(Event::SessionRenamed {
+            session_id: s.id.clone(),
+            workspace_id: s.workspace_id.clone(),
+            title: title.clone(),
+        });
+        self.record_lifecycle(s, format!("Auto-named from {} session", s.provider));
+        Ok(true)
     }
 
     /// One sweep of the idle-suspend policy: suspend every LIVE session that is
@@ -2190,6 +2612,7 @@ impl SessionManager {
         }
         self.repo.delete(id).await?;
         self.ingest_tokens.remove(id);
+        self.title_probe.remove(id);
         // Revoke the per-session token minted for the `otto` MCP tool server, so
         // its read-only credential dies with the session (best-effort).
         self.revoke_mcp_token(&session.created_by, id).await;
@@ -2269,7 +2692,16 @@ impl SessionManager {
         let (grid_cols, grid_rows) = resolve_grid(saved_cols, saved_rows);
         // OS-level confinement on resume too (mirrors create()).
         self.apply_sandbox(&mut spec, &session).await;
-        let handle = Arc::new(PtyHandle::spawn_sized(&spec, grid_cols, grid_rows)?);
+        // Blocking-pool fork/exec, mirroring create(): idle-resume runs on the
+        // terminal-attach path, so a blocked async worker here is user-visible.
+        let spawn_spec = spec.clone();
+        let handle = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                PtyHandle::spawn_sized(&spawn_spec, grid_cols, grid_rows)
+            })
+            .await
+            .unwrap_or_else(|e| Err(Error::Internal(format!("pty spawn task: {e}"))))?,
+        );
         self.live.insert(id.clone(), Arc::clone(&handle));
         self.repo.update_status(id, SessionStatus::Running).await?;
         let _ = self.events.send(Event::SessionStatus {
@@ -2546,6 +2978,175 @@ mod tests {
         );
     }
 
+    fn agent_session(provider: &str, status: SessionStatus, meta: serde_json::Value) -> Session {
+        Session {
+            id: new_id(),
+            workspace_id: new_id(),
+            kind: SessionKind::Agent,
+            provider: provider.into(),
+            title: "Messi".into(),
+            status,
+            cwd: "/tmp".into(),
+            provider_session_id: Some("019f-abc".into()),
+            connection_id: None,
+            created_by: new_id(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta,
+        }
+    }
+
+    #[test]
+    fn clean_provider_title_strips_newlines_and_clips() {
+        // Newlines/tabs collapse to single spaces; leading/trailing trimmed.
+        assert_eq!(
+            clean_provider_title("  fix the\n\tpty  redraw  bug\n"),
+            Some("fix the pty redraw bug".into())
+        );
+        // Blank / whitespace-only yields None.
+        assert_eq!(clean_provider_title("   \n\t "), None);
+        assert_eq!(clean_provider_title(""), None);
+        // Clipped to 60 chars + ellipsis, with no dangling space before it.
+        let long = "a".repeat(200);
+        let out = clean_provider_title(&long).unwrap();
+        assert_eq!(out.chars().count(), PROVIDER_TITLE_MAX + 1);
+        assert!(out.ends_with('…'));
+        // A word boundary landing on the clip point doesn't leave "word …".
+        let sentence = format!("{} zzzz", "word ".repeat(20));
+        let clipped = clean_provider_title(&sentence).unwrap();
+        assert!(!clipped.contains(" …"), "no space before ellipsis: {clipped:?}");
+    }
+
+    #[test]
+    fn parse_claude_first_prompt_skips_meta_and_wrappers() {
+        // Meta line, a slash-command wrapper, a tool_result-only turn, then the
+        // real prompt (string content). The first genuine user turn wins.
+        let jsonl = concat!(
+            r#"{"type":"summary"}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<system reminder>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":"hi"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"i have an issue\nwith the pty session"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"a later prompt"}}"#,
+        );
+        assert_eq!(
+            parse_claude_first_prompt(jsonl),
+            Some("i have an issue with the pty session".into())
+        );
+    }
+
+    #[test]
+    fn parse_claude_first_prompt_reads_array_text_parts() {
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"refactor the parser"}]}}"#;
+        assert_eq!(
+            parse_claude_first_prompt(jsonl),
+            Some("refactor the parser".into())
+        );
+    }
+
+    #[test]
+    fn parse_claude_first_prompt_none_when_no_user_turn() {
+        let jsonl = r#"{"type":"assistant","message":{"role":"assistant","content":"hi"}}"#;
+        assert_eq!(parse_claude_first_prompt(jsonl), None);
+    }
+
+    #[test]
+    fn parse_codex_first_prompt_prefers_user_message_event() {
+        // session_meta, the injected AGENTS.md as a response_item user turn, then
+        // the real typed prompt as an event_msg/user_message. The event wins.
+        let jsonl = concat!(
+            r#"{"type":"session_meta","payload":{"id":"019f","cwd":"/x"}}"#,
+            "\n",
+            r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\nblah"}]}}"##,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"scan the repo into the vault"}}"#,
+        );
+        assert_eq!(
+            parse_codex_first_prompt(jsonl),
+            Some("scan the repo into the vault".into())
+        );
+    }
+
+    #[test]
+    fn parse_codex_first_prompt_falls_back_to_input_text() {
+        // No user_message event (older rollout): the first non-wrapper user
+        // input_text is used, and the AGENTS.md wrapper before it is skipped.
+        let jsonl = concat!(
+            r#"{"type":"session_meta","payload":{"id":"019f","cwd":"/x"}}"#,
+            "\n",
+            r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions"}]}}"##,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add a retry to the client"}]}}"#,
+        );
+        assert_eq!(
+            parse_codex_first_prompt(jsonl),
+            Some("add a retry to the client".into())
+        );
+    }
+
+    #[test]
+    fn title_eligible_guards_ownership_and_lifecycle() {
+        // Theme-named live claude session → eligible.
+        assert!(title_eligible(&agent_session(
+            "claude",
+            SessionStatus::Idle,
+            serde_json::json!({ "title_source": "theme" }),
+        )));
+        // "auto" (#N fallback) and absent title_source are also eligible.
+        assert!(title_eligible(&agent_session(
+            "codex",
+            SessionStatus::Working,
+            serde_json::json!({ "title_source": "auto" }),
+        )));
+        assert!(title_eligible(&agent_session(
+            "claude",
+            SessionStatus::Running,
+            serde_json::json!({}),
+        )));
+        // User-owned → never touched.
+        assert!(!title_eligible(&agent_session(
+            "claude",
+            SessionStatus::Idle,
+            serde_json::json!({ "title_source": "user" }),
+        )));
+        // Already provider-named → nothing new to read.
+        assert!(!title_eligible(&agent_session(
+            "claude",
+            SessionStatus::Idle,
+            serde_json::json!({ "title_source": "provider" }),
+        )));
+        // Exited → skipped (a dead session gains no new prompt).
+        assert!(!title_eligible(&agent_session(
+            "claude",
+            SessionStatus::Exited,
+            serde_json::json!({ "title_source": "theme" }),
+        )));
+        // Provider without a human title source (shell/agy) → skipped.
+        assert!(!title_eligible(&agent_session(
+            "agy",
+            SessionStatus::Idle,
+            serde_json::json!({ "title_source": "theme" }),
+        )));
+        // Background (engine-owned) session → skipped.
+        assert!(!title_eligible(&agent_session(
+            "claude",
+            SessionStatus::Idle,
+            serde_json::json!({ "source": "review", "title_source": "theme" }),
+        )));
+        // No captured provider session id yet → skipped.
+        let mut no_psid = agent_session("claude", SessionStatus::Idle, serde_json::json!({}));
+        no_psid.provider_session_id = None;
+        assert!(!title_eligible(&no_psid));
+    }
+
     #[test]
     fn ps_time_parses_all_shapes() {
         assert_eq!(parse_ps_time_ms("0:00.05"), Some(50));
@@ -2816,6 +3417,33 @@ mod tests {
         drop(g2);
         assert_eq!(mgr.attached_count(&id), 0);
         assert!(!mgr.is_attached(&id));
+    }
+
+    #[tokio::test]
+    async fn size_authority_typing_owner_blocks_passive_resizers() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("sid-size")).await;
+
+        let pane = mgr.attach(&id); // the user's open pane
+        let tile = mgr.attach(&id); // a passive tiled-overview tile
+
+        // Nobody typed yet: first-come resize is allowed for both.
+        assert!(mgr.may_resize(&id, pane.conn_id()));
+        assert!(mgr.may_resize(&id, tile.conn_id()));
+
+        // Typing in the pane claims authority; the tile may no longer resize.
+        mgr.note_input_authority(&id, pane.conn_id());
+        assert!(mgr.may_resize(&id, pane.conn_id()));
+        assert!(!mgr.may_resize(&id, tile.conn_id()));
+
+        // A focus claim moves authority (e.g. user clicks the other viewer).
+        mgr.note_input_authority(&id, tile.conn_id());
+        assert!(!mgr.may_resize(&id, pane.conn_id()));
+        assert!(mgr.may_resize(&id, tile.conn_id()));
+
+        // Owner detaching releases authority — survivors may resize again.
+        drop(tile);
+        assert!(mgr.may_resize(&id, pane.conn_id()));
     }
 
     #[tokio::test]

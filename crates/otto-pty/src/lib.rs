@@ -44,6 +44,11 @@ pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
 /// Capacity of the output broadcast channel (chunks).
 const BROADCAST_CAPACITY: usize = 1024;
 
+/// Scrollback rows retained by the vt100 emulator — the replay depth clients
+/// rebuild from on reconnect. See the comment at the `Parser` construction in
+/// [`PtyHandle::spawn_sized`] for the memory tradeoff.
+pub const EMULATOR_SCROLLBACK_LINES: usize = 4000;
+
 /// A fully-resolved command to run inside a PTY.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
@@ -154,11 +159,15 @@ impl PtyHandle {
         let (tx, _) = broadcast::channel::<Bytes>(BROADCAST_CAPACITY);
         let (exit_tx, exit_rx) = watch::channel::<Option<i32>>(None);
         let ring = Arc::new(Mutex::new(RingBuffer::default()));
-        // 1000 lines of scrollback history kept by the emulator. Initialise at
-        // the requested grid size so the emulator agrees with the PTY from the
+        // Scrollback history kept by the emulator — this is the depth a client
+        // gets back on every reconnect rebuild, so it IS the user-visible
+        // scrollback for reopened sessions. Rows cost cols×32 bytes, so the cap
+        // trades replay depth against per-live-session memory (~25 MiB worst
+        // case at 200 cols when a long session fills it). Initialise at the
+        // requested grid size so the emulator agrees with the PTY from the
         // very first byte — avoids a spurious SIGWINCH on reconnect when the
         // client echoes back the same dimensions we already reported.
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, EMULATOR_SCROLLBACK_LINES)));
         let epoch = Instant::now();
         static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
         let spawn_seq = SPAWN_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -282,13 +291,16 @@ impl PtyHandle {
     /// (the rows that have scrolled off above the visible screen) before the
     /// coherent current-screen frame, so reconnecting doesn't lose history.
     ///
-    /// The history rows are emitted as plain text (one `\r\n`-terminated line
-    /// each); writing them scrolls them up into the client xterm's own
-    /// scrollback. The current screen is then drawn by [`screen_snapshot`],
-    /// whose leading `\x1b[2J\x1b[H` clears the grid (NOT the client's
-    /// scrollback) and redraws the live viewport with full formatting. The
-    /// visible rows are therefore rendered exactly once — history holds only
-    /// rows that scrolled off above the live screen, never the visible ones.
+    /// History rows are emitted FORMATTED (colors/attributes preserved), at
+    /// their full stored width, with soft-wrapped rows joined into logical
+    /// lines the client re-wraps at its own width (reflowable on resize).
+    /// Writing them scrolls them into the client xterm's scrollback; padding
+    /// CRLFs then push the tail off the grid before `\x1b[2J\x1b[H` clears it
+    /// (2J erases in place — without the padding the last screenful of
+    /// history vanished). The live viewport is then drawn with full
+    /// formatting. Visible rows are rendered exactly once — history holds
+    /// only rows that scrolled off above the live screen, never the visible
+    /// ones.
     ///
     /// `lines` is the cap on how many history rows to include (in addition to
     /// the current screen); it is further clamped to the emulator's retained
@@ -301,39 +313,38 @@ impl PtyHandle {
     }
 
     pub fn snapshot_with_history(&self, lines: usize) -> Vec<u8> {
-        let mut parser = lock_unpoisoned(&self.parser);
+        let parser = lock_unpoisoned(&self.parser);
+        let screen = parser.screen();
         if lines == 0 {
-            let screen = parser.screen();
             let mut out = b"\x1b[2J\x1b[H".to_vec();
             out.extend_from_slice(&screen.state_formatted());
             return out;
         }
 
-        let (_, cols) = parser.screen().size();
-        let screen = parser.screen_mut();
-        let saved_offset = screen.scrollback();
+        // History first: formatted (colors/attributes preserved), each row at
+        // its FULL stored width, soft-wrapped rows joined into one logical
+        // line — the receiving terminal re-wraps at ITS current width and can
+        // reflow on later resizes, instead of inheriting hard breaks from
+        // whatever width this emulator had when the row scrolled off. See the
+        // OTTO PATCH notes in vendor/vt100.
+        let mut out = screen.scrollback_rows_formatted(lines);
 
-        // Probe the retained history depth: set_scrollback clamps to the
-        // actual number of rows that have scrolled off, so reading it back
-        // tells us how far up we can go.
-        screen.set_scrollback(usize::MAX);
-        let total_history = screen.scrollback();
-        let take = lines.min(total_history);
-
-        // Read history rows from oldest to newest. At scrollback offset `d`
-        // the first visible row is exactly the row `d` positions above the
-        // live screen's top, so iterating d = take..=1 yields the most recent
-        // `take` history rows in display order.
-        let mut out = Vec::new();
-        for d in (1..=take).rev() {
-            screen.set_scrollback(d);
-            let line = screen.rows(0, cols).next().unwrap_or_default();
-            out.extend_from_slice(line.as_bytes());
-            out.extend_from_slice(b"\r\n");
+        if !out.is_empty() {
+            // Scroll the tail of the replayed history off the client's grid
+            // BEFORE clearing: xterm's `CSI 2J` erases in place, so without
+            // this the last screenful of history (the rows still on the grid
+            // after replay) simply vanished — seen as "the content just above
+            // the viewport is missing after reconnect". After the final CRLF
+            // the cursor is at most `rows - 1` lines above the bottom, so
+            // `rows - 1` CRLFs push every remaining history row into the
+            // client's scrollback and never push a blank one.
+            let (rows, _) = screen.size();
+            for _ in 1..rows {
+                out.extend_from_slice(b"\r\n");
+            }
         }
 
-        // Restore the viewport, then append the coherent current-screen frame.
-        screen.set_scrollback(saved_offset);
+        // Then the coherent current-screen frame on a clean grid.
         out.extend_from_slice(b"\x1b[2J\x1b[H");
         out.extend_from_slice(&screen.state_formatted());
         out
@@ -558,6 +569,267 @@ mod tests {
             handle.snapshot_with_history(0),
             handle.screen_snapshot(),
             "lines == 0 must equal the bare screen snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_history_captures_scroll_region_history() {
+        // Emulate how codex (ratatui `Terminal::insert_before`) emits finished
+        // transcript lines: a TOP-ANCHORED scroll region (rows 1..5 of the
+        // screen) is scrolled up by printing at its bottom row, pushing each
+        // finished line off the top of the screen. Upstream vt100 discards
+        // rows scrolled out while ANY region is active — which made reattach
+        // snapshots lose the entire codex history. The vendored patch
+        // (vendor/vt100/README-OTTO.md) keeps rows leaving the top of the
+        // screen, matching what xterm.js shows live in the browser.
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                // ESC[1;5r  → scroll region rows 1..5 (top-anchored)
+                // ESC[5;1H  → cursor to region bottom
+                // 30 lines  → 25+ of them scroll off the top of the screen
+                // ESC[r     → reset region; DONE marks completion
+                "printf '\\033[1;5r\\033[5;1H'; i=1; while [ $i -le 30 ]; do printf 'HIST_%04d\\n' $i; i=$((i+1)); done; printf '\\033[r\\033[24;1HDONE\\n'"
+                    .into(),
+            ],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn(&spec).expect("spawn sh");
+
+        let mut exit = handle.on_exit();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            exit.wait_for(|v| v.is_some()).await.expect("exit watch");
+        })
+        .await
+        .expect("child exited in time");
+
+        // Let the reader thread drain the tail of the output into the parser.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snap = String::from_utf8_lossy(&handle.snapshot_with_history(1000)).into_owned();
+            if snap.contains("DONE") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "DONE never appeared");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let snap = String::from_utf8_lossy(&handle.snapshot_with_history(1000)).into_owned();
+        // A line scrolled off the top of the screen through the region must
+        // survive into the history-inclusive snapshot…
+        assert!(
+            snap.contains("HIST_0001"),
+            "scroll-region history lost from snapshot (codex insert_before case)"
+        );
+        // …while the bare screen (region shows only the last 5 lines) must not
+        // contain it — proving it was recovered from scrollback, not the grid.
+        let screen_only = String::from_utf8_lossy(&handle.screen_snapshot()).into_owned();
+        assert!(
+            !screen_only.contains("HIST_0001"),
+            "HIST_0001 unexpectedly still on the live screen; test premise broken"
+        );
+    }
+
+    /// Drive a PTY to completion and return the history-inclusive snapshot
+    /// once `marker` shows up in it (the reader thread drains asynchronously).
+    async fn settled_snapshot(spec: &CommandSpec, marker: &str) -> (PtyHandle, String) {
+        let handle = PtyHandle::spawn(spec).expect("spawn sh");
+        let mut exit = handle.on_exit();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            exit.wait_for(|v| v.is_some()).await.expect("exit watch");
+        })
+        .await
+        .expect("child exited in time");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snap = String::from_utf8_lossy(&handle.snapshot_with_history(1000)).into_owned();
+            if snap.contains(marker) {
+                return (handle, snap);
+            }
+            assert!(Instant::now() < deadline, "{marker} never appeared");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn history_replay_joins_soft_wrapped_rows_for_client_reflow() {
+        // A 200-char line soft-wraps across three 80-col rows. Once it has
+        // scrolled into history, the replay must emit it as ONE logical line
+        // (no CR/LF between the segments) so the client terminal re-wraps it
+        // at its own width — and can REFLOW it on a later resize — instead of
+        // inheriting the emulator's historical hard breaks.
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "awk 'BEGIN{s=\"\";for(i=0;i<200;i++)s=s \"A\";print s}'; \
+                 i=1; while [ $i -le 30 ]; do printf 'PAD_%04d\\n' $i; i=$((i+1)); done; echo DONE"
+                    .into(),
+            ],
+            cwd: None,
+            env: vec![],
+        };
+        let (_handle, snap) = settled_snapshot(&spec, "DONE").await;
+        let run: String = std::iter::repeat_n('A', 200).collect();
+        assert!(
+            snap.contains(&run),
+            "soft-wrapped history line was not joined into one contiguous logical line"
+        );
+    }
+
+    // ---- vendored-vt100 reflow-on-resize (OTTO PATCH) unit tests ----------
+    // Drive the emulator directly: these pin the reflow semantics every
+    // terminal the user compares against (xterm.js, ghostty, iTerm) shares —
+    // resize must re-wrap content, never truncate it.
+
+    #[test]
+    fn vt100_reflow_narrow_keeps_all_content() {
+        let mut p = vt100::Parser::new(10, 80, 100);
+        p.process(&[b"A".repeat(200), b"\r\n$ ".to_vec()].concat());
+        p.screen_mut().set_size(10, 40);
+        let mut text = String::new();
+        for line in String::from_utf8_lossy(&p.screen().scrollback_rows_formatted(100))
+            .split("\r\n")
+        {
+            text.push_str(line.trim_end_matches(['\u{1b}', '[', '0', 'm']));
+        }
+        text.push_str(&p.screen().contents());
+        let count = text.chars().filter(|&c| c == 'A').count();
+        assert_eq!(count, 200, "narrowing resize lost soft-wrapped content");
+        // prompt survives at the cursor line
+        assert!(p.screen().contents().contains("$ "), "prompt lost on narrow");
+    }
+
+    #[test]
+    fn vt100_reflow_widen_rejoins_wrapped_lines() {
+        let mut p = vt100::Parser::new(10, 80, 100);
+        p.process(&[b"B".repeat(200), b"\r\n$ ".to_vec()].concat());
+        p.screen_mut().set_size(10, 120);
+        // visual row 0 must now be FULL at the new width (120 B's), row 1
+        // holds the remaining 80 — i.e. the wrapped rows re-joined and
+        // re-split at 120, instead of keeping the old 80-col breaks.
+        let row_b = |r: u16| {
+            (0..120)
+                .filter(|&c| {
+                    p.screen()
+                        .cell(r, c)
+                        .is_some_and(|cell| cell.contents() == "B")
+                })
+                .count()
+        };
+        assert_eq!(row_b(0), 120, "row 0 not re-wrapped to the new width");
+        assert_eq!(row_b(1), 80, "row 1 remainder wrong after widen");
+        let contents = p.screen().contents();
+        let count = contents.chars().filter(|&c| c == 'B').count();
+        assert_eq!(count, 200, "widening resize lost content");
+    }
+
+    #[test]
+    fn vt100_reflow_hard_lines_untouched() {
+        let mut p = vt100::Parser::new(10, 80, 100);
+        p.process(b"alpha\r\nbravo\r\ncharlie\r\n$ ");
+        p.screen_mut().set_size(10, 40);
+        let contents = p.screen().contents();
+        for l in ["alpha", "bravo", "charlie", "$ "] {
+            assert!(contents.contains(l), "hard line {l:?} damaged by reflow");
+        }
+        p.screen_mut().set_size(10, 100);
+        let contents = p.screen().contents();
+        for l in ["alpha", "bravo", "charlie"] {
+            assert!(contents.contains(l), "hard line {l:?} damaged by widen");
+        }
+    }
+
+    #[test]
+    fn vt100_reflow_blank_lines_never_panic_snapshot() {
+        // Blank transcript lines (claude prints them constantly) re-split to
+        // empty cell runs during rewrap; a zero-width row in scrollback made
+        // every subsequent snapshot panic on `cells[0]` — each WS replay
+        // killed its connection handler (seen as a reconnect loop after the
+        // first resize). Snapshot both directions and verify content.
+        let mut p = vt100::Parser::new(10, 80, 4000);
+        for i in 0..30 {
+            p.process(
+                format!("line {i} long enough to wrap once the pane narrows below it {i}\r\n\r\n")
+                    .as_bytes(),
+            );
+        }
+        p.screen_mut().set_size(10, 40);
+        let snap = p.screen().scrollback_rows_formatted(4000);
+        assert!(String::from_utf8_lossy(&snap).contains("line 0"));
+        p.screen_mut().set_size(10, 120);
+        let snap = p.screen().scrollback_rows_formatted(4000);
+        assert!(String::from_utf8_lossy(&snap).contains("line 0"));
+        // the newest line sits on the (bottom-anchored) visible grid
+        assert!(p.screen().contents().contains("line 29"));
+    }
+
+    #[test]
+    fn vt100_height_shrink_keeps_bottom_prompt() {
+        let mut p = vt100::Parser::new(10, 80, 100);
+        for i in 0..9 {
+            p.process(format!("line{i}\r\n").as_bytes());
+        }
+        p.process(b"$ tail");
+        p.screen_mut().set_size(5, 80);
+        let contents = p.screen().contents();
+        assert!(
+            contents.contains("$ tail"),
+            "height shrink must keep the bottom (prompt) — upstream truncated it: {contents:?}"
+        );
+        // pushed-off top rows live in scrollback, not the void
+        let hist = String::from_utf8_lossy(&p.screen().scrollback_rows_formatted(100)).into_owned();
+        assert!(hist.contains("line0"), "shrunk-off rows must enter scrollback");
+    }
+
+    #[test]
+    fn vt100_reflow_cursor_tracks_prompt() {
+        let mut p = vt100::Parser::new(10, 80, 100);
+        p.process(&[b"C".repeat(100), b"\r\n$ ".to_vec()].concat());
+        let before = p.screen().cursor_position();
+        assert_eq!(before.1, 2, "premise: cursor after '$ '");
+        p.screen_mut().set_size(10, 40);
+        let (r, c) = p.screen().cursor_position();
+        // the prompt row must be the row the cursor is on, right after "$ "
+        assert_eq!(c, 2, "cursor column lost through reflow");
+        let cell = |col: u16| -> String {
+            p.screen()
+                .cell(r, col)
+                .map(|x| x.contents().to_string())
+                .unwrap_or_default()
+        };
+        assert_eq!(cell(0), "$", "cursor detached from prompt row");
+        assert_eq!(cell(1), " ", "cursor detached from prompt row");
+    }
+
+    #[tokio::test]
+    async fn history_replay_survives_narrowing_without_truncation() {
+        // Emit a 60-char marker at the spawn width (80 cols), scroll it into
+        // history, then NARROW the PTY to 40 cols. Scrollback rows keep their
+        // captured width, and the replay must emit them untruncated — the old
+        // per-row path clipped every history row to the CURRENT grid width,
+        // literally cutting off replayed content after a narrowing resize.
+        let marker: String = ('a'..='z').chain('A'..='Z').chain('0'..='7').collect();
+        assert_eq!(marker.len(), 60);
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!(
+                    "echo {marker}; i=1; while [ $i -le 30 ]; do printf 'PAD_%04d\\n' $i; i=$((i+1)); done; echo DONE"
+                ),
+            ],
+            cwd: None,
+            env: vec![],
+        };
+        let (handle, _snap) = settled_snapshot(&spec, "DONE").await;
+        handle.resize(40, 24).expect("resize narrower");
+        let snap = String::from_utf8_lossy(&handle.snapshot_with_history(1000)).into_owned();
+        assert!(
+            snap.contains(&marker),
+            "history row emitted at the narrowed width — replayed content truncated"
         );
     }
 }

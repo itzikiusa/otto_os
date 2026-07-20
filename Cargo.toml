@@ -136,3 +136,9 @@ apache-avro = "0.21"
 [profile.release]
 lto = false
 strip = true
+
+# Vendored vt100 fork: top-anchored scroll regions feed scrollback so codex
+# (ratatui insert_before) transcript history survives reattach snapshots.
+# See vendor/vt100/README-OTTO.md for the single patched conditional.
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }

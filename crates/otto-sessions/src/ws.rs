@@ -66,7 +66,9 @@ enum ClientFrame {
     },
     // Request a history-inclusive snapshot: up to `lines` rows of scrollback
     // history (rows that scrolled off above the visible screen) followed by a
-    // coherent current-screen frame. Honors the requested `lines`.
+    // coherent current-screen frame. Honors the requested `lines`. The client
+    // treats every snapshot as a full rebuild (reset + repaint), so this must
+    // always carry the complete retained history.
     Scrollback {
         lines: usize,
     },
@@ -79,15 +81,20 @@ enum ClientFrame {
     Search {
         query: String,
     },
+    // Claim size authority without typing — sent when the terminal gains
+    // FOCUS, so clicking into a pane reclaims the PTY size from a stale
+    // viewer (e.g. a phone tab that typed once and stayed attached).
+    Claim,
 }
 
 /// Maximum number of matches returned per `Search` request.
 const MAX_SEARCH_RESULTS: usize = 200;
 
-/// Default scrollback depth used for the initial on-attach snapshot when the
-/// client has not yet asked for a specific amount. Capped well under the
-/// emulator's 1000-line history so reconnecting restores ample context.
-const DEFAULT_ATTACH_HISTORY_LINES: usize = 1000;
+/// Default scrollback depth used for server-initiated snapshot pushes (dead
+/// session revival, lagged-stream resync) and for a `lines: 0` request. Full
+/// emulator depth: clients rebuild from snapshots, so anything less silently
+/// truncates the user's visible scrollback.
+const DEFAULT_ATTACH_HISTORY_LINES: usize = otto_pty::EMULATOR_SCROLLBACK_LINES;
 
 /// Fixed first subprotocol the browser offers alongside the token; the gate
 /// echoes it back on a successful upgrade so the handshake completes. Mirrors
@@ -382,6 +389,10 @@ async fn serve_terminal<S: SessionsCtx>(
     // send error, recv end, drop), so the idle-suspend sweep never frees the
     // PTY of a session someone is actively watching.
     let _attach = ctx.manager().attach(&session_id);
+    // This connection's id for the size-authority policy: typing claims the
+    // session's PTY size; resizes from passive viewers (tiles, previews, an
+    // idle phone tab) are ignored while a typing owner is attached.
+    let conn_id = _attach.conn_id();
 
     // Auto-resume: if the session is an exited-but-resumable agent session,
     // spawn it now so the reconnect yields a live terminal instead of a black
@@ -449,7 +460,42 @@ async fn serve_terminal<S: SessionsCtx>(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::debug!(session = %session_id, "terminal ws lagged by {n} chunks");
+                        // This viewer fell behind the broadcast ring and chunks
+                        // were dropped. Dropped bytes are not just missing text:
+                        // TUI erase/repaint sequences vanish with them, leaving
+                        // stale frames on screen until the user reconnects.
+                        // Recover by discarding the entire backlog (its effects
+                        // are already absorbed by the emulator) and pushing a
+                        // fresh full snapshot; the client rebuilds from it.
+                        tracing::debug!(session = %session_id, "terminal ws lagged by {n} chunks; resyncing from snapshot");
+                        if let (Some(rx), Some(h)) = (out_rx.as_mut(), handle.as_ref()) {
+                            let drain = |rx: &mut broadcast::Receiver<Bytes>| {
+                                // Ok / Lagged keep draining; Empty / Closed stop.
+                                while matches!(
+                                    rx.try_recv(),
+                                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_))
+                                ) {}
+                            };
+                            drain(rx);
+                            let data = h.snapshot_with_history(DEFAULT_ATTACH_HISTORY_LINES);
+                            // Chunks that raced in while snapshotting were
+                            // parsed before the snapshot took the emulator lock,
+                            // so they are already reflected in it — discard them
+                            // rather than double-applying. (A chunk parsed in
+                            // the microseconds after the snapshot released the
+                            // lock can be lost here; the next output burst's
+                            // full repaint corrects it, unlike the unbounded
+                            // silent loss this path replaces.)
+                            drain(rx);
+                            let frame = format!(
+                                r#"{{"type":"scrollback","data":"{}","epoch":{}}}"#,
+                                B64.encode(&data),
+                                h.spawn_seq()
+                            );
+                            if socket.send(Message::Text(frame.into())).await.is_err() {
+                                return;
+                            }
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         out_rx = None;
@@ -532,12 +578,19 @@ async fn serve_terminal<S: SessionsCtx>(
                             continue;
                         }
                         if let Ok(bytes) = B64.decode(data.as_bytes()) {
+                            // Typing claims size authority for this viewer.
+                            ctx.manager().note_input_authority(&session_id, conn_id);
                             let _ = ctx.manager().input(&session_id, &bytes).await;
                         }
                     }
                     ClientFrame::Resize { cols, rows } => {
-                        if can_input {
+                        if can_input && ctx.manager().may_resize(&session_id, conn_id) {
                             let _ = ctx.manager().resize(&session_id, cols, rows).await;
+                        }
+                    }
+                    ClientFrame::Claim => {
+                        if can_input {
+                            ctx.manager().note_input_authority(&session_id, conn_id);
                         }
                     }
                     ClientFrame::Scrollback { lines } => {
