@@ -218,6 +218,37 @@ const scenarios = {
     }
   },
 
+  /** A PRIMARY pane (claims on attach) must not be shrunk by a passive viewer
+   *  that attaches LATER, even when nobody has typed yet — the "pane renders
+   *  at half size until I click into it" bug. */
+  async 'authority-claim-primary'() {
+    const s = await mkSession('shell', 'e2e-claim-primary');
+    const a = new TermClient(env.base, env.token, s.id, { cols: 150, rows: 40, claimOnConnect: true });
+    const b = new TermClient(env.base, env.token, s.id, { cols: 80, rows: 24 });
+    try {
+      await a.connect(); // primary pane: claim + resize, NO typing
+      await sleep(300);
+      await b.connect(); // passive preview attaches later at 80×24
+      await sleep(400);
+      let meta = (await api('GET', `/api/v1/sessions/${s.id}`)).meta ?? {};
+      check(meta.pty_cols === 150 && meta.pty_rows === 40,
+        `untyped primary pane holds its grid vs later passive attach (pty=${meta.pty_cols}x${meta.pty_rows}, want 150x40)`);
+      // Primary detaches → passive becomes the only viewer and may size freely.
+      a.close();
+      await sleep(500);
+      b.resize(80, 24);
+      b.resize(100, 30);
+      await sleep(RESIZE_SETTLE_MS + 400);
+      meta = (await api('GET', `/api/v1/sessions/${s.id}`)).meta ?? {};
+      check(meta.pty_cols === 100 && meta.pty_rows === 30,
+        `after primary detaches, the remaining viewer sizes the PTY (pty=${meta.pty_cols}x${meta.pty_rows}, want 100x30)`);
+    } finally {
+      a.close();
+      b.close();
+      await rmSession(s.id);
+    }
+  },
+
   /** Attach with a deep history must be fast (the "3–4s reload" complaint). */
   async 'attach-latency'() {
     const s = await mkSession('shell', 'e2e-latency');

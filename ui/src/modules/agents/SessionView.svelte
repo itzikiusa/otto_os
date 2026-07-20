@@ -453,7 +453,7 @@
     {/if}
   </header>
   <div class="pane-term">
-    <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} />
+    <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
   </div>
 </section>
 

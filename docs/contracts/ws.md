@@ -41,7 +41,12 @@ recently sent `input` or `claim` (editor+ only) owns the session's size, and
 `resize` frames from other connections are ignored while the owner is
 attached (a passive tile/preview/idle phone tab can no longer pin a wide
 pane's TUI to its own small grid). When the owner detaches, authority is
-released and the next `resize` wins.
+released and the next `resize` wins. The PRIMARY session pane sends `claim`
+immediately on attach (before its first `resize`) — without that, a session
+nobody has typed into has no owner and the LAST viewer to attach/refit set
+the grid, letting a later-attaching preview shrink an open pane. Preview /
+monitor embeds must never claim on attach; typing still transfers authority
+as usual.
 
 **Resize semantics.** A `resize` matching the PTY's current grid is dropped
 server-side before the ioctl — no SIGWINCH, no emulator rewrap, no meta

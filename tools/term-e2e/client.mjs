@@ -139,10 +139,11 @@ export async function ensureWorkspace(api) {
 // ── the faithful client ──────────────────────────────────────────────────────
 
 export class TermClient {
-  constructor(base, token, sessionId, { cols = 120, rows = 30 } = {}) {
+  constructor(base, token, sessionId, { cols = 120, rows = 30, claimOnConnect = false } = {}) {
     this.wsBase = base.replace('http', 'ws');
     this.token = token;
     this.sessionId = sessionId;
+    this.claimOnConnect = claimOnConnect;
     this.term = new Terminal({ cols, rows, scrollback: 10_000, allowProposedApi: true });
     // Faithful to Terminal.svelte's term.onData → input frame: xterm answers
     // terminal queries (DSR cursor-position, DA, mode reports) on onData, and
@@ -165,7 +166,9 @@ export class TermClient {
       this.sock = sock;
       const before = this.snapshotCount;
       sock.on('open', () => {
-        // Mirrors sock.onopen: forced resize first, then the ONE attach snapshot.
+        // Mirrors sock.onopen: primary panes claim authority first, then the
+        // forced resize, then the ONE attach snapshot.
+        if (this.claimOnConnect) this.sendJson({ type: 'claim' });
         this.lastSentCols = this.term.cols;
         this.lastSentRows = this.term.rows;
         this.sendJson({ type: 'resize', cols: this.term.cols, rows: this.term.rows });

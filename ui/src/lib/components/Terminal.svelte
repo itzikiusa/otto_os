@@ -68,8 +68,18 @@
      *  value); later pane-focus changes go through the exported focus(). Skipped
      *  on phones — the soft keyboard may only be raised by a user gesture. */
     autoFocus?: boolean;
+    /** Claim PTY size authority as soon as the socket opens — set by the
+     *  PRIMARY session pane (SessionView) only. Until someone types, a session
+     *  has no size owner and the LAST viewer to attach/refit sets the PTY —
+     *  a later tile/preview/phone tab silently pinned the pane's TUI to its
+     *  own smaller grid (content rendering at ~half the pane until a click).
+     *  Claiming on attach makes the real pane own the grid from the start;
+     *  typing elsewhere can still take authority over (server policy).
+     *  Preview/monitor embeds (review agents, share viewers, …) must NOT set
+     *  this. Default false. */
+    claimOnAttach?: boolean;
   }
-  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, onstatus, onsearchresult, showToolbar = true, autoFocus = false }: Props = $props();
+  let { sessionId, readOnly = false, resumable = false, restartable = false, onrestart, restartNonce = 0, forceDark = false, preferDom = false, shareToken, onstatus, onsearchresult, showToolbar = true, autoFocus = false, claimOnAttach = false }: Props = $props();
 
   const effScheme = $derived(forceDark ? 'dark' : ui.resolvedScheme);
 
@@ -322,6 +332,9 @@
       connected = true;
       reconnecting = false;
       reconnectAttempts = 0;
+      // Primary pane: take size authority BEFORE pushing our grid, so a
+      // passive viewer attaching later can't stomp it (see claimOnAttach doc).
+      if (claimOnAttach && !readOnly) sendJson({ type: 'claim' });
       // Re-measure against the CURRENT container box before syncing the PTY: the
       // earlier first-fit may have run while the pane was briefly narrow, and a
       // plain shell can't reflow stale output later — so fit here (forced resize
