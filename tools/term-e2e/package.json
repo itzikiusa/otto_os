@@ -1,0 +1,14 @@
+{
+  "name": "otto-term-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Protocol-level terminal robustness E2E: a faithful Terminal.svelte client (headless xterm) driven against a real ottod over /ws/term, including REAL claude/codex sessions.",
+  "scripts": {
+    "e2e": "node run.mjs"
+  },
+  "dependencies": {
+    "@xterm/headless": "^6.0.0",
+    "ws": "^8.18.0"
+  }
+}

@@ -821,8 +821,17 @@ async fn run(cfg: Config) -> Result<(), String> {
     // user-configurable local time (default 07:00, opt-out via settings) and
     // force-reloads open agent sessions onto the new binary (resume-aware).
     // Catch-up on a missed window via a last-run cursor, like insights.
-    let _cli_update_handle = otto_server::cli_update::CliUpdateScheduler::new(ctx.clone()).start();
-    tracing::info!("cli auto-update scheduler started");
+    // OTTO_CLI_UPDATE=0 disables the scheduler entirely — throwaway dev/E2E
+    // daemons have no last-run cursor, so the catch-up fires at startup and
+    // its session reload kills agent sessions seconds after they spawn.
+    let _cli_update_handle = if std::env::var("OTTO_CLI_UPDATE").is_ok_and(|v| v == "0") {
+        tracing::info!("cli auto-update scheduler disabled (OTTO_CLI_UPDATE=0)");
+        None
+    } else {
+        let h = otto_server::cli_update::CliUpdateScheduler::new(ctx.clone()).start();
+        tracing::info!("cli auto-update scheduler started");
+        Some(h)
+    };
 
     // --- Agent Swarm: reconcile stale runs, then scheduler + restore coords ---
     // A swarm run's background task dies with the process. A row left
