@@ -1104,6 +1104,13 @@ pub struct RefBranch {
     pub is_current: bool,
     pub upstream: Option<String>,
     pub remote: bool,
+    /// True when this branch's tip is already contained in the repo's cleanup
+    /// base branch (`git merge-base --is-ancestor`, surfaced as a bulk
+    /// `git branch --merged <base>`). A hint that the branch is safe to delete;
+    /// the base branch itself is never flagged. Defaults false for older
+    /// clients / responses that predate the field.
+    #[serde(default)]
+    pub merged_into_base: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1116,6 +1123,30 @@ pub struct RefsResp {
     pub local: Vec<RefBranch>,
     pub remote: Vec<RefBranch>,
     pub tags: Vec<RefTag>,
+    /// The base branch that `merged_into_base` was computed against (the per-repo
+    /// `cleanup_base_branch` override, else the detected default branch). `None`
+    /// when the repo has no resolvable base (e.g. no branches yet) — then no
+    /// branch is flagged merged.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+}
+
+/// GET/PUT `/repos/{id}/cleanup-base` — the per-repo base branch used for the
+/// "safe to delete (merged)" branch indicators. `base_branch` is the stored
+/// override (`None` = follow the detected default); `resolved` is what it
+/// currently resolves to (override if valid, else the detected default).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupBaseResp {
+    pub base_branch: Option<String>,
+    pub resolved: Option<String>,
+}
+
+/// PUT `/repos/{id}/cleanup-base` body. A `None`/empty `base_branch` clears the
+/// override so the repo follows its detected default branch again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetCleanupBaseReq {
+    #[serde(default)]
+    pub base_branch: Option<String>,
 }
 
 /// One entry from `git stash list`. Read-only; surfaced in the graph's STASHES

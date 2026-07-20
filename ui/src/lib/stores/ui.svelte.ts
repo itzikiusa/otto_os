@@ -55,6 +55,7 @@ const LS = {
   sidebarHidden: 'otto_sidebar_hidden',
   gitSideWidth: 'otto_git_side_width',
   gitGraphListWidth: 'otto_git_graph_list_width',
+  gitGraphSideWidth: 'otto_git_graph_side_width',
   apiSideWidth: 'otto_api_side_width',
   apiBuilderH: 'otto_api_builder_h',
 };
@@ -152,6 +153,11 @@ function clampGitSide(px: number): number {
 function clampGitGraphList(px: number): number {
   return Math.max(300, Math.min(720, Math.round(px)));
 }
+/** Git graph LEFT refs sidebar (LOCAL/REMOTE/TAGS/…). Floor keeps the section
+ *  headers legible; cap stops it from crowding out the commit graph. */
+function clampGitGraphSide(px: number): number {
+  return Math.max(180, Math.min(480, Math.round(px)));
+}
 /** API client Collections/History sidebar. */
 function clampApiSide(px: number): number {
   return Math.max(220, Math.min(520, Math.round(px)));
@@ -186,6 +192,8 @@ class UiStore {
   // Git page pane widths (Changes/History list; Graph list in detail mode).
   gitSideWidth = $state(clampGitSide(Number(lsGet(LS.gitSideWidth)) || 300));
   gitGraphListWidth = $state(clampGitGraphList(Number(lsGet(LS.gitGraphListWidth)) || 420));
+  // Git graph LEFT refs sidebar width (drag-resizable; default matches the CSS 220px).
+  gitGraphSideWidth = $state(clampGitGraphSide(Number(lsGet(LS.gitGraphSideWidth)) || 220));
   // API client sidebar width + builder pane height (0 = unset → CSS default).
   apiSideWidth = $state(clampApiSide(Number(lsGet(LS.apiSideWidth)) || 280));
   apiBuilderHeight = $state(
@@ -423,6 +431,10 @@ class UiStore {
   setGitGraphListWidth(px: number): void {
     this.gitGraphListWidth = clampGitGraphList(px);
     lsSet(LS.gitGraphListWidth, String(this.gitGraphListWidth));
+  }
+  setGitGraphSideWidth(px: number): void {
+    this.gitGraphSideWidth = clampGitGraphSide(px);
+    lsSet(LS.gitGraphSideWidth, String(this.gitGraphSideWidth));
   }
   setApiSideWidth(px: number): void {
     this.apiSideWidth = clampApiSide(px);

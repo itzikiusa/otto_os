@@ -1592,6 +1592,15 @@ mod tests {
             pol(Method::DELETE, "/api/v1/repos/{id}/review-config"),
             Require(Git, Edit)
         );
+        // Cleanup base branch (merged-branch indicators): GET=View, PUT=Edit.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/repos/{id}/cleanup-base"),
+            Require(Git, View)
+        );
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/repos/{id}/cleanup-base"),
+            Require(Git, Edit)
+        );
         // A1: new findings / merge-readiness routes — GET=View, POST=Edit.
         assert_eq!(
             pol(Method::GET, "/api/v1/reviews/{rid}/findings"),

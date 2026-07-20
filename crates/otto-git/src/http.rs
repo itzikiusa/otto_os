@@ -11,12 +11,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
-    AddRepoReq, BranchInfo, CheckoutReq, Collaborator, CommitInfo, CommitReq, ConflictFile,
-    CreateGitAccountReq, CreatePrReq, DiffResp, GitAccountTestResp, MergeBranchReq, MergeCommitReq,
-    MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult, NewPrCommentReq,
-    PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp, RepoStatusResp,
-    RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, StagePathsReq, StashInfo,
-    SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq, WorktreeInfo,
+    AddRepoReq, BranchInfo, CheckoutReq, CleanupBaseResp, Collaborator, CommitInfo, CommitReq,
+    ConflictFile, CreateGitAccountReq, CreatePrReq, DiffResp, GitAccountTestResp, MergeBranchReq,
+    MergeCommitReq, MergeConflictStatus, MergePrReq, MergePreview, MergePreviewReq, MergeResult,
+    NewPrCommentReq, PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp,
+    RepoStatusResp, RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, SetCleanupBaseReq,
+    StagePathsReq, StashInfo, SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq,
+    WorktreeInfo,
 };
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
@@ -62,6 +63,20 @@ pub trait GitCtx: Clone + Send + Sync + 'static {
         _ci: &crate::types::CiStatus,
     ) {
     }
+
+    /// The per-repo `cleanup_base_branch` override used by the "safe to delete
+    /// (merged)" branch indicators. The default returns `None` (follow the
+    /// detected default branch); `otto-server` overrides it to read the stored
+    /// setting.
+    async fn cleanup_base_branch(&self, _repo_id: &Id) -> Option<String> {
+        None
+    }
+
+    /// Persist (or clear, on `None`/empty) the per-repo `cleanup_base_branch`
+    /// override. The default is a no-op; `otto-server` overrides it.
+    async fn set_cleanup_base_branch(&self, _repo_id: &Id, _base: Option<String>) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Build the git router. Paths are relative to the `/api/v1` mount point.
@@ -93,6 +108,10 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/status", get(repo_status::<S>))
         .route("/repos/{id}/branches", get(repo_branches::<S>))
         .route("/repos/{id}/refs", get(repo_refs::<S>))
+        .route(
+            "/repos/{id}/cleanup-base",
+            get(repo_cleanup_base::<S>).put(repo_set_cleanup_base::<S>),
+        )
         .route("/repos/{id}/log", get(repo_log::<S>))
         .route("/repos/{id}/stashes", get(repo_stashes::<S>))
         .route("/repos/{id}/worktrees", get(repo_worktrees::<S>))
@@ -976,7 +995,48 @@ async fn repo_refs<S: GitCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<RefsResp>> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
-    Ok(Json(git.refs().await?))
+    // Flag merged branches against the per-repo cleanup base (else the detected
+    // default). Reading the setting is cheap and best-effort inside GitCtx.
+    let base = s.cleanup_base_branch(&id).await;
+    Ok(Json(git.refs_with_base(base.as_deref()).await?))
+}
+
+/// GET the repo's cleanup base branch: the stored override (or `None`) plus what
+/// it currently resolves to (override if valid, else detected default branch).
+async fn repo_cleanup_base<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<CleanupBaseResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
+    let base_branch = s.cleanup_base_branch(&id).await;
+    let resolved = git.resolve_cleanup_base(base_branch.as_deref()).await;
+    Ok(Json(CleanupBaseResp {
+        base_branch,
+        resolved,
+    }))
+}
+
+/// PUT the repo's cleanup base branch override. An empty/`None` value clears it
+/// so the repo follows its detected default branch again. Never deletes or moves
+/// any branch — this only picks which base the "merged" indicators compute against.
+async fn repo_set_cleanup_base<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<SetCleanupBaseReq>,
+) -> ApiResult<Json<CleanupBaseResp>> {
+    let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let base = req
+        .base_branch
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty());
+    s.set_cleanup_base_branch(&id, base.clone()).await?;
+    let resolved = git.resolve_cleanup_base(base.as_deref()).await;
+    Ok(Json(CleanupBaseResp {
+        base_branch: base,
+        resolved,
+    }))
 }
 
 async fn repo_fetch<S: GitCtx>(

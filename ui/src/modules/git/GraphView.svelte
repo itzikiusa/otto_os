@@ -14,6 +14,7 @@
     DiffResp,
     FileDiff,
     DiffLine,
+    CleanupBaseResp,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -644,6 +645,24 @@
           action: () => void clip(b.upstream!, b.upstream!),
         });
       }
+    }
+    // Cleanup base branch (Feature 3): choose which base the "merged → safe to
+    // delete" indicators compute against, or clear back to the detected default.
+    // Indicator-only; never deletes a branch.
+    const baseName = b.remote ? b.name.replace(/^[^/]+\//, '') : b.name;
+    items.push({ separator: true });
+    if (baseName === baseBranch) {
+      items.push({
+        label: 'Clear cleanup base (use default)',
+        icon: 'gear',
+        action: () => void setCleanupBase(null),
+      });
+    } else {
+      items.push({
+        label: `Set “${baseName}” as cleanup base`,
+        icon: 'gear',
+        action: () => void setCleanupBase(baseName),
+      });
     }
     ctxMenu.show(e, items);
   }
@@ -1288,8 +1307,8 @@
   });
   const worktreeBranches = $derived(new Set(worktreeByBranch.keys()));
 
-  /** Local branch click: open foreign worktree, else checkout. Never try to
-   *  checkout a branch already held by another worktree (git errors hard). */
+  /** Local branch DOUBLE-click: open foreign worktree, else checkout. Never try
+   *  to checkout a branch already held by another worktree (git errors hard). */
   function activateLocalBranch(b: RefBranch): void {
     if (b.is_current) return;
     const wt = worktreeByBranch.get(b.name);
@@ -1298,6 +1317,31 @@
       return;
     }
     void checkout(b.name, false);
+  }
+
+  /** The tip commit of a branch ref, if it's present in the loaded log — a local
+   *  branch decorates its tip with `<name>` (or `HEAD -> <name>`); a remote ref
+   *  decorates with its full `origin/<name>`. Used for single-click highlight. */
+  function branchTipCommit(b: RefBranch): CommitInfo | null {
+    for (const c of commits) {
+      for (const r of c.refs) {
+        if (r === b.name) return c;
+        if (!b.remote) {
+          const arrow = r.match(/^HEAD\s*->\s*(.+)$/);
+          if (arrow && arrow[1].trim() === b.name) return c;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Branch row SINGLE-click: select/highlight the branch's tip commit in the
+   *  graph (lights up its spine + opens the commit detail). Checkout is on
+   *  double-click (activateLocalBranch / checkoutRemote). No-op when the tip
+   *  isn't in the loaded log. */
+  function selectBranchRow(b: RefBranch): void {
+    const c = branchTipCommit(b);
+    if (c) void selectCommit(c);
   }
 
   // Set of remote-branch names (e.g. "origin/main") from the refs response, used
@@ -1452,6 +1496,79 @@
 
   function closeRefMenu(): void {
     refMenu = null;
+  }
+
+  // ── Left refs-sidebar drag-resize (desktop; persisted via gitGraphSideWidth) ──
+  // The GitKraken-style sidebar holds long branch names; a drag handle on its
+  // right edge lets the user widen it to read them. Mirrors startListResize.
+  let sideResizing = $state(false);
+  function startSideResize(e: MouseEvent): void {
+    e.preventDefault();
+    sideResizing = true;
+    const startX = e.clientX;
+    const startW = ui.gitGraphSideWidth;
+    // Under RTL the sidebar sits on the right, so dragging left widens it.
+    const dir = document.dir === 'rtl' ? -1 : 1;
+    const onMove = (ev: MouseEvent) =>
+      ui.setGitGraphSideWidth(startW + dir * (ev.clientX - startX));
+    const onUp = () => {
+      sideResizing = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  // Middle-ellipsize a long branch leaf so the DISTINGUISHING SUFFIX stays visible
+  // (e.g. "PROJ-1234-really-long…-retry-fix"). Returns null for short names (render
+  // plain). The head span shrinks + ellipsizes; the tail span is pinned (see CSS).
+  function midParts(label: string): { head: string; tail: string } | null {
+    if (label.length <= 18) return null;
+    const tailLen = Math.min(14, Math.floor(label.length / 2));
+    return {
+      head: label.slice(0, label.length - tailLen),
+      tail: label.slice(label.length - tailLen),
+    };
+  }
+
+  // ── Cleanup base branch (drives the "merged → safe to delete" indicators) ────
+  // The resolved base comes back on every refs response (`base_branch`); a branch
+  // is flagged when its tip is contained in that base. The current + base branches
+  // are never flagged. Changing the base persists per-repo and re-derives flags.
+  // Read `refs` through a local const to sidestep the runes null-narrowing quirk
+  // svelte-check trips on (same pattern as refKnowledge below).
+  const baseBranch = $derived.by((): string | null => {
+    const r: RefsResp | null = refs;
+    return r?.base_branch ?? null;
+  });
+
+  /** True when this branch row should show the "merged — safe to delete" mark. */
+  function showMerged(b: RefBranch): boolean {
+    if (!b.merged_into_base) return false;
+    if (b.remote) return true; // backend already excludes the base's remote twin
+    return !b.is_current && b.name !== baseBranch;
+  }
+
+  /** Set (or clear, on null) the per-repo cleanup base branch, then re-derive the
+   *  merged flags by refetching refs. Indicator-only — never deletes a branch. */
+  async function setCleanupBase(name: string | null): Promise<void> {
+    try {
+      const resp = await api.put<CleanupBaseResp>(`/repos/${repoId}/cleanup-base`, {
+        base_branch: name,
+      });
+      await refreshAfter();
+      toasts.success(
+        name ? 'Cleanup base branch set' : 'Cleanup base reset',
+        resp.resolved ?? 'default branch',
+      );
+    } catch (e) {
+      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+    }
   }
 
   // Drag-to-resize the commit-list column while the detail panel is open
@@ -1619,10 +1736,41 @@
       {#if refs}<span class="mob-sec-count">{refs.local.length + refs.remote.length + refs.tags.length}</span>{/if}
     </button>
   {/if}
-  <aside class="refs-panel" class:mob-collapsed={isMobile && !secRefsOpen}>
+  <aside
+    class="refs-panel"
+    class:mob-collapsed={isMobile && !secRefsOpen}
+    class:resizing={sideResizing}
+    style:width={!isMobile ? `${ui.gitGraphSideWidth}px` : null}
+  >
     {#if refsLoading}
       <div style="padding: 10px"><Skeleton rows={6} height={22} /></div>
     {:else if refs}
+      <!-- Branch leaf name with MIDDLE ellipsis so the distinguishing suffix
+           (e.g. "…-retry-fix") stays visible; short names render plain. -->
+      {#snippet refName(label: string)}
+        {@const mp = midParts(label)}
+        {#if mp}
+          <span class="mono ref-name mid"
+            ><span class="mid-head">{mp.head}</span><span class="mid-tail">{mp.tail}</span></span
+          >
+        {:else}
+          <span class="mono ref-name">{label}</span>
+        {/if}
+      {/snippet}
+
+      <!-- "Merged into base → safe to delete" indicator (Feature 3). Never shown
+           on the base branch itself or the current branch (see showMerged). -->
+      {#snippet mergedMark()}
+        <span
+          class="merged-mark"
+          title={baseBranch
+            ? `Merged into ${baseBranch} — safe to delete`
+            : 'Merged — safe to delete'}
+        >
+          <Icon name="check" size={10} />
+        </span>
+      {/snippet}
+
       <!-- One branch row, reused for loose branches and folder children. `label`
            is the short leaf name; `b.name` stays the full ref for every action. -->
       {#snippet localRow(leaf: BranchLeaf, nested: boolean)}
@@ -1642,13 +1790,14 @@
           ondragleave={() => onTargetDragLeave(b.name)}
           ondrop={(e) => onTargetDrop(e, b.name)}
           disabled={checkoutBusy !== '' || openWtBusy !== ''}
-          onclick={() => activateLocalBranch(b)}
+          onclick={() => selectBranchRow(b)}
+          ondblclick={() => activateLocalBranch(b)}
           oncontextmenu={(e) => branchMenu(e, b)}
           title={dragSource && isValidDropTarget(b.name)
             ? `Merge ${dragSourceName()} → ${b.name}`
             : wtElsewhere
-              ? `Open worktree · ${wtElsewhere.path}${wtElsewhere.branch ? ` · ${wtElsewhere.branch}` : ''}`
-              : b.name}
+              ? `Double-click to open worktree · ${wtElsewhere.path}${wtElsewhere.branch ? ` · ${wtElsewhere.branch}` : ''}`
+              : `${b.name} — click to highlight, double-click to checkout`}
         >
           {#if b.is_current}
             <span class="cur-pip" title="Checked out"><Icon name="check" size={9} /></span>
@@ -1657,7 +1806,8 @@
           {:else}
             <Icon name="dot" size={10} />
           {/if}
-          <span class="mono ref-name">{leaf.label}</span>
+          {@render refName(leaf.label)}
+          {#if showMerged(b)}{@render mergedMark()}{/if}
           {#if wtElsewhere}
             <span class="wt-open-hint" title="Open worktree (do not switch branch)">open worktree</span>
           {/if}
@@ -1692,12 +1842,14 @@
           ondragstart={(e) => onRefDragStart(e, b.name, true)}
           ondragend={onRefDragEnd}
           disabled={checkoutBusy !== ''}
-          onclick={() => checkoutRemote(b)}
+          onclick={() => selectBranchRow(b)}
+          ondblclick={() => checkoutRemote(b)}
           oncontextmenu={(e) => branchMenu(e, b)}
-          title="Drag onto a local branch to merge, or click to checkout as a local tracking branch"
+          title="Click to highlight · double-click to checkout as a local tracking branch · drag onto a local branch to merge"
         >
           <Icon name="dot" size={10} />
-          <span class="mono ref-name">{leaf.label}</span>
+          {@render refName(leaf.label)}
+          {#if showMerged(b)}{@render mergedMark()}{/if}
           {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
         </button>
       {/snippet}
@@ -1931,6 +2083,18 @@
     {/if}
   </aside>
 
+  <!-- Drag handle on the sidebar's right edge (desktop): widen it to read long
+       branch names. Double-click resets to the default width. -->
+  {#if !isMobile}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="refs-resizer"
+      onmousedown={startSideResize}
+      ondblclick={() => ui.setGitGraphSideWidth(220)}
+      title="Drag to resize · double-click to reset"
+    ></div>
+  {/if}
+
   <!-- ── MIDDLE: commit graph ─────────────────────────────────────────────── -->
   {#if isMobile}
     <button
@@ -2066,6 +2230,11 @@
                     : chip.label}
                   {@render chipView(chip, label)}
                 {/each}
+              {/if}
+              <!-- HEAD marker ("you are here") — rightmost so it stays visible as
+                   the cell clips on the left. -->
+              {#if isHead}
+                <span class="head-badge" title="HEAD — checked-out commit">HEAD</span>
               {/if}
             </div>
 
@@ -2386,6 +2555,49 @@
     border-inline-end: 1px solid var(--border);
     padding: 6px 0;
   }
+  /* Drag handle on the sidebar's right edge (desktop). Mirrors .graph-resizer:
+     a thin hit-area straddling the border that lights up on hover. */
+  .refs-resizer {
+    flex: 0 0 6px;
+    margin-inline-start: -3px;
+    cursor: col-resize;
+    z-index: 1;
+  }
+  .refs-resizer:hover {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  /* Middle-ellipsized branch name: the head span shrinks + ellipsizes while the
+     tail (distinguishing suffix) stays pinned and fully visible. */
+  .ref-name.mid {
+    display: inline-flex;
+    align-items: baseline;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .mid-head {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+  .mid-tail {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  /* "Merged into base → safe to delete" mark: a small, muted success check. */
+  .merged-mark {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    color: var(--status-working, #98c379);
+    opacity: 0.85;
+  }
+  .ref-row:hover .merged-mark {
+    opacity: 1;
+  }
   .ref-section {
     margin-bottom: 2px;
   }
@@ -2483,9 +2695,20 @@
   .ref-row.nested {
     padding-inline-start: 14px;
   }
+  /* The checked-out branch: accent text + a leading accent rail and faint wash so
+     the row itself is unmistakable, not just the check pip. */
   .ref-row.current {
     color: var(--accent);
     font-weight: 600;
+    background: color-mix(in srgb, var(--accent) 11%, transparent);
+    box-shadow: inset 2px 0 0 0 var(--accent);
+  }
+  .ref-row.current:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+  :global([dir='rtl']) .ref-row.current {
+    box-shadow: inset -2px 0 0 0 var(--accent);
   }
   .ref-row[draggable='true'] {
     cursor: grab;
@@ -2681,6 +2904,20 @@
   }
   :global([dir='rtl']) .graph-row-head:not(.graph-row-selected) {
     box-shadow: inset -2px 0 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+  /* "HEAD" badge on the checked-out commit row — a filled accent pill next to the
+     branch chip so the HEAD commit is unmistakable. */
+  .head-badge {
+    flex-shrink: 0;
+    font-size: 8.5px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 3px;
+    background: var(--accent);
+    color: var(--accent-contrast);
+    white-space: nowrap;
   }
   .gutter {
     display: block;

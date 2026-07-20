@@ -245,6 +245,33 @@ impl otto_git::GitCtx for ServerCtx {
         )
         .await;
     }
+
+    async fn cleanup_base_branch(&self, repo_id: &Id) -> Option<String> {
+        let settings = otto_state::SettingsRepo::new(self.pool.clone());
+        match settings.get(&cleanup_base_key(repo_id)).await {
+            Ok(Some(v)) => v.as_str().map(str::to_string).filter(|s| !s.is_empty()),
+            _ => None,
+        }
+    }
+
+    async fn set_cleanup_base_branch(
+        &self,
+        repo_id: &Id,
+        base: Option<String>,
+    ) -> otto_core::Result<()> {
+        let settings = otto_state::SettingsRepo::new(self.pool.clone());
+        let key = cleanup_base_key(repo_id);
+        match base.map(|b| b.trim().to_string()).filter(|b| !b.is_empty()) {
+            Some(b) => settings.put(&key, &serde_json::Value::String(b)).await,
+            None => settings.delete(&key).await,
+        }
+    }
+}
+
+/// Settings key holding one repo's cleanup base branch override (drives the
+/// "safe to delete (merged)" branch indicators). `None`/absent = detected default.
+fn cleanup_base_key(repo_id: &Id) -> String {
+    format!("cleanup_base:{repo_id}")
 }
 
 impl otto_issues::IssuesCtx for ServerCtx {

@@ -551,6 +551,16 @@ impl LocalGit {
     }
 
     pub async fn refs(&self) -> Result<RefsResp> {
+        self.refs_with_base(None).await
+    }
+
+    /// List refs, flagging every local/remote branch already contained in the
+    /// cleanup base branch (`base_override` if valid, else the detected default).
+    /// Containment is computed with two bulk `git branch --merged <base>` calls
+    /// (one local, one remote) — never a per-branch merge-base spawn. The base
+    /// branch itself is never flagged (it always "contains" itself). `base_branch`
+    /// in the response echoes the resolved base so the UI can exclude/label it.
+    pub async fn refs_with_base(&self, base_override: Option<&str>) -> Result<RefsResp> {
         // Local branches: name TAB upstream TAB HEAD-marker
         let local_out = self
             .run(&[
@@ -559,6 +569,13 @@ impl LocalGit {
                 "refs/heads",
             ])
             .await?;
+
+        // Resolve the base and gather the "merged into base" sets up front so each
+        // branch row is a cheap set lookup. A missing base (empty repo) leaves the
+        // sets empty → nothing flagged.
+        let base = self.resolve_cleanup_base(base_override).await;
+        let (merged_local, merged_remote) = self.merged_sets(base.as_deref()).await;
+
         let local = local_out
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -567,6 +584,8 @@ impl LocalGit {
                 let name = cols.next().unwrap_or("").to_string();
                 let upstream_raw = cols.next().unwrap_or("").trim().to_string();
                 let head = cols.next().unwrap_or("").trim();
+                let merged = base.as_deref() != Some(name.as_str())
+                    && merged_local.contains(name.as_str());
                 RefBranch {
                     name,
                     is_current: head == "*",
@@ -576,6 +595,7 @@ impl LocalGit {
                         Some(upstream_raw)
                     },
                     remote: false,
+                    merged_into_base: merged,
                 }
             })
             .collect();
@@ -587,11 +607,20 @@ impl LocalGit {
         let remote = remote_out
             .lines()
             .filter(|l| !l.trim().is_empty() && !l.trim().ends_with("/HEAD"))
-            .map(|line| RefBranch {
-                name: line.trim().to_string(),
-                is_current: false,
-                upstream: None,
-                remote: true,
+            .map(|line| {
+                let name = line.trim().to_string();
+                // Don't flag the base's own remote twin (origin/<base>) as safe.
+                let is_base_remote = base
+                    .as_deref()
+                    .is_some_and(|b| name.strip_prefix("origin/") == Some(b));
+                let merged = !is_base_remote && merged_remote.contains(name.as_str());
+                RefBranch {
+                    name,
+                    is_current: false,
+                    upstream: None,
+                    remote: true,
+                    merged_into_base: merged,
+                }
             })
             .collect();
 
@@ -617,7 +646,52 @@ impl LocalGit {
             local,
             remote,
             tags,
+            base_branch: base,
         })
+    }
+
+    /// Resolve the base branch for cleanup indicators: the override (verified to
+    /// exist) if given, else the detected [`default_branch`](Self::default_branch).
+    pub async fn resolve_cleanup_base(&self, base_override: Option<&str>) -> Option<String> {
+        if let Some(b) = base_override.map(str::trim).filter(|s| !s.is_empty()) {
+            if self.branch_exists(b).await || self.verify_commit_ref(b).await {
+                return Some(b.to_string());
+            }
+        }
+        self.default_branch().await
+    }
+
+    /// The `(local, remote)` sets of branch short-names whose tip is contained in
+    /// `base` — one bulk `git branch --merged` each. Empty when `base` is `None`
+    /// or the git call fails (best-effort: cleanup hints must never break `refs`).
+    async fn merged_sets(
+        &self,
+        base: Option<&str>,
+    ) -> (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    ) {
+        let Some(base) = base else {
+            return (Default::default(), Default::default());
+        };
+        let parse = |out: String| {
+            out.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.ends_with("/HEAD"))
+                .map(str::to_string)
+                .collect::<std::collections::HashSet<String>>()
+        };
+        let local = self
+            .run(&["branch", "--merged", base, "--format=%(refname:short)"])
+            .await
+            .map(parse)
+            .unwrap_or_default();
+        let remote = self
+            .run(&["branch", "-r", "--merged", base, "--format=%(refname:short)"])
+            .await
+            .map(parse)
+            .unwrap_or_default();
+        (local, remote)
     }
 
     /// Compute a diff for `target`. When `pathspec` is `Some(path)`, every git
@@ -2665,6 +2739,39 @@ mod tests {
             "merge diff lists the merged file: {:?}",
             diff.files.iter().map(|f| &f.path).collect::<Vec<_>>()
         );
+    }
+
+    /// `refs_with_base` flags a branch merged into the base and leaves an
+    /// unmerged one alone, while never flagging the base branch or the current
+    /// branch itself.
+    #[tokio::test]
+    async fn refs_flag_branches_merged_into_base() {
+        let (_tmp, dir) = fixture();
+        // `main` has two commits from the fixture. A `merged` branch forked and
+        // folded straight back (fast-forward → contained in main); a `feature`
+        // branch adds its own commit and stays ahead.
+        sh_git(&dir, &["checkout", "-b", "merged"]);
+        // No new commit: `merged` tip == main tip → contained in main.
+        sh_git(&dir, &["checkout", "main"]);
+        sh_git(&dir, &["checkout", "-b", "feature"]);
+        write(&dir, "feat.txt", "feature work\n");
+        sh_git(&dir, &["add", "feat.txt"]);
+        sh_git(&dir, &["commit", "-m", "feature commit"]);
+        sh_git(&dir, &["checkout", "main"]);
+
+        let git = LocalGit::new(&dir);
+        let refs = git.refs_with_base(Some("main")).await.unwrap();
+        assert_eq!(refs.base_branch.as_deref(), Some("main"));
+        let by = |name: &str| {
+            refs.local
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap_or_else(|| panic!("branch {name} present"))
+                .merged_into_base
+        };
+        assert!(by("merged"), "a branch contained in base is flagged");
+        assert!(!by("feature"), "a branch ahead of base is not flagged");
+        assert!(!by("main"), "the base branch is never flagged");
     }
 
     /// Untracked files with non-ASCII names must appear in the Working diff —
