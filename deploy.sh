@@ -151,7 +151,45 @@ if [[ -z "${OTTO_DEPLOY_DETACHED:-}" ]] && under_ottod; then
     # PATH-looks-up bare names — the detached copy would die with "No such file
     # or directory" before doing anything (and the parent exits 0, silently).
     SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-    OTTO_DEPLOY_DETACHED=1 OTTO_DEPLOY_LOG="$LOG" nohup bash "$SELF" "$@" >"$LOG" 2>&1 </dev/null & disown
+    # nohup+disown is NOT enough: the re-exec'd copy still lives in the
+    # com.otto.daemon launchd cgroup, and when phase 6 boots the daemon out,
+    # launchd sweeps the whole group — the "detached" deploy dies with SIGTERM
+    # (exit 143) at exactly that phase (observed repeatedly; survival was a
+    # race). Escape the cgroup by handing the copy to launchd as a ONE-SHOT
+    # job: unique per-run label, NO KeepAlive (can never loop — see the
+    # com.otto.deploy.* restart-loop incident), plist in a temp dir (never
+    # ~/Library/LaunchAgents) and deleted right after bootstrap, so nothing
+    # persists past this run, let alone to the next login.
+    RUN_LABEL="com.otto.deploy-once.$(date +%s).$$"
+    PLIST="$(mktemp -d)/$RUN_LABEL.plist"
+    cat >"$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$RUN_LABEL</string>
+  <key>RunAtLoad</key><true/>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>$SELF</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>OTTO_DEPLOY_DETACHED</key><string>1</string>
+    <key>OTTO_DEPLOY_LOG</key><string>$LOG</string>
+    <key>PATH</key><string>$PATH</string>
+    <key>HOME</key><string>$HOME</string>
+  </dict>
+  <key>StandardOutPath</key><string>$LOG</string>
+  <key>StandardErrorPath</key><string>$LOG</string>
+</dict></plist>
+PLISTEOF
+    if [[ $# -eq 0 ]] && launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
+        rm -f "$PLIST"    # job is running; the file is not needed again
+    else
+        # Fallback (bootstrap can fail on odd launchd states): the old racy
+        # nohup detach — better than not deploying at all.
+        rm -f "$PLIST"
+        OTTO_DEPLOY_DETACHED=1 OTTO_DEPLOY_LOG="$LOG" nohup bash "$SELF" "$@" >"$LOG" 2>&1 </dev/null & disown
+    fi
     exit 0
 fi
 
@@ -440,18 +478,28 @@ BUILT_SHA="$(shasum -a 256 "$BUILT_APP/Contents/MacOS/otto-desktop" | awk '{prin
 
 # sweep stale build artifacts: cargo never deletes superseded per-hash outputs
 # (each dep bump leaves another ~600MB libotto_server rlib in target/…/deps
-# forever — target has hit 79GB+). Anything the build we JUST completed didn't
-# touch within the window is dead weight; cargo transparently rebuilds if a
-# swept file is ever needed again. Runs only after a fully verified deploy.
+# forever — target has hit 79GB+). Runs only after a fully verified deploy.
 # 2 days ≈ several deploys back at the current cadence (a 7-day window was
 # measured to keep ~60GB of dead rlibs alive).
+#
+# NEVER touch build/ or .fingerprint/: build-script OUT_DIRs (libsqlite3-sys
+# bindgen.rs, tree-sitter stdlib-symbols.txt, …) keep their ORIGINAL mtime
+# forever while staying live — cargo trusts the fingerprint and hard-errors
+# on the missing include instead of regenerating. Sweeping them by mtime
+# corrupted the cache and broke the NEXT deploy's build, repeatedly (the
+# recurring "couldn't read OUT_DIR/bindgen.rs" failures). deps/ rlibs are
+# safe: cargo stats those artifacts and rebuilds when missing.
 SWEEP_DAYS=2
 swept_kb=0
 for tdir in "$ROOT/target" "$ROOT/apps/desktop/src-tauri/target"; do
     [[ -d "$tdir" ]] || continue
     before_kb=$(du -sk "$tdir" 2>/dev/null | awk '{print $1}')
-    find "$tdir" -type f -mtime +"$SWEEP_DAYS" -delete 2>/dev/null
-    find "$tdir" -type d -empty -delete 2>/dev/null
+    find "$tdir" \
+        \( -path '*/build/*' -o -path '*/.fingerprint/*' \) -prune \
+        -o -type f -mtime +"$SWEEP_DAYS" -delete 2>/dev/null
+    find "$tdir" \
+        \( -path '*/build' -o -path '*/.fingerprint' \) -prune \
+        -o -type d -empty -delete 2>/dev/null
     after_kb=$(du -sk "$tdir" 2>/dev/null | awk '{print $1}')
     swept_kb=$(( swept_kb + before_kb - after_kb ))
 done
