@@ -13,7 +13,9 @@ chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true
 tracing.workspace = true
+# Chunked prune yields the SQLite writer between batches (tokio::time::sleep);
+# sqlx already runs on the tokio runtime here.
+tokio.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true }
 tempfile = { workspace = true }

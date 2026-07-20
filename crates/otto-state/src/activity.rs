@@ -127,22 +127,40 @@ impl ActivityRepo {
     /// Keep only the newest `keep_per_session` trail rows per session; delete
     /// the rest. Returns the number of rows pruned. Run periodically so
     /// long-lived sessions don't grow the trail unbounded.
+    ///
+    /// Deletes in small chunks: SQLite has ONE writer at a time, and a bulk
+    /// DELETE over a large backlog held the write lock for seconds — every
+    /// interactive write (create-session, trail ingest) queued behind it
+    /// (observed as 3-6s "slow statement" warnings). Chunking yields the
+    /// writer between batches so interactive statements interleave.
     pub async fn prune_trail(&self, keep_per_session: i64) -> Result<u64> {
-        let res = sqlx::query(
-            "DELETE FROM agent_trail WHERE id IN (
-                 SELECT id FROM (
-                     SELECT id, ROW_NUMBER() OVER (
-                         PARTITION BY session_id ORDER BY ts DESC, id DESC
-                     ) AS rn
-                     FROM agent_trail
-                 ) WHERE rn > ?
-             )",
-        )
-        .bind(keep_per_session)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("prune trail"))?;
-        Ok(res.rows_affected())
+        const CHUNK: i64 = 500;
+        let mut total: u64 = 0;
+        loop {
+            let res = sqlx::query(
+                "DELETE FROM agent_trail WHERE id IN (
+                     SELECT id FROM (
+                         SELECT id, ROW_NUMBER() OVER (
+                             PARTITION BY session_id ORDER BY ts DESC, id DESC
+                         ) AS rn
+                         FROM agent_trail
+                     ) WHERE rn > ? LIMIT ?
+                 )",
+            )
+            .bind(keep_per_session)
+            .bind(CHUNK)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("prune trail"))?;
+            let n = res.rows_affected();
+            total += n;
+            if n < CHUNK as u64 {
+                return Ok(total);
+            }
+            // Brief yield so queued interactive writers acquire the lock
+            // before the next batch.
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 
     /// Per-session roll-up for every session in `workspace_id` that has any

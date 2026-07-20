@@ -4,7 +4,9 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+};
 use sqlx::SqlitePool;
 
 use otto_core::{Error, Result};
@@ -20,6 +22,13 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .map_err(|e| Error::Internal(format!("sqlite options: {e}")))?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
+        // WAL defaults to synchronous=FULL: an fsync (full disk barrier on
+        // macOS) on EVERY commit. With one writer at a time, concurrent write
+        // load queued interactive statements for seconds (observed: trivial
+        // agent_trail INSERTs at 3-6s, create-session at 2-3s). NORMAL is the
+        // documented safe pairing with WAL — the log survives app/OS crashes;
+        // only a power-loss can drop the last few commits, never corrupt.
+        .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5));
 
