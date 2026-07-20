@@ -406,85 +406,64 @@
     };
   }
 
-  // Only push a resize when the dimensions actually changed — sending a
-  // SIGWINCH on every fit() call makes claude/codex repaint and flicker.
+  // ── Resize policy (the "base model") ────────────────────────────────────────
+  // The client xterm buffer is the single source of truth for the live display:
+  // it reflows its own scrollback natively on every fit(), exactly like a
+  // desktop terminal. The PTY is told about a new grid exactly ONCE per settled
+  // resize (pure trailing debounce — never mid-drag, never leading), because
+  // every SIGWINCH makes claude/codex reprint their live region and codex
+  // re-emits transcript lines that permanently pollute scrollback. We never
+  // rebuild the buffer from a server snapshot while connected — snapshots are
+  // for (re)attach and the server's own lagged-drop recovery only. Rebuilding
+  // mid-session is what used to smear codex duplicates over the live view and
+  // yank the user's scroll position/prompt state.
+  const RESIZE_SETTLE_MS = 200;
+  let resizeSendTimer: ReturnType<typeof setTimeout> | null = null;
+  // Last grid actually SENT to the PTY (not the local xterm grid, which may be
+  // ahead of it while a trailing send is pending).
   let lastCols = 0;
   let lastRows = 0;
 
-  function sendResize(force = false): void {
+  /** Push the current grid now if it differs from the last one sent. */
+  function flushResize(): void {
+    if (resizeSendTimer !== null) {
+      clearTimeout(resizeSendTimer);
+      resizeSendTimer = null;
+    }
     if (!term) return;
     const { cols, rows } = term;
-    // Reflect the live grid on the host element — handy for debugging the
-    // shell-wrapping bug (a stale-narrow grid shows up as a too-small data-cols)
-    // and asserted by the resize E2E.
-    container?.setAttribute('data-cols', String(cols));
+    if (cols === lastCols && rows === lastRows) return;
+    lastCols = cols;
+    lastRows = rows;
+    sendJson({ type: 'resize', cols, rows });
+  }
+
+  function sendResize(force = false): void {
+    if (!term) return;
+    // Reflect the live grid on the host element — handy for debugging stale
+    // grids (shows up as a too-small data-cols) and asserted by the resize E2E.
+    container?.setAttribute('data-cols', String(term.cols));
     if (force) {
-      // Connect-time sync: flush any pending trailing send (it belongs to a
-      // pre-reconnect grid) and push immediately. No resync scheduled — the
-      // onopen path requests the initial snapshot right after this.
+      // Connect-time / focus-reclaim sync: the server may hold a different
+      // grid (daemon restart, another viewer resized while we were away), so
+      // push unconditionally. The server drops same-size resizes before they
+      // reach the PTY, so this is free when nothing actually changed.
       if (resizeSendTimer !== null) {
         clearTimeout(resizeSendTimer);
         resizeSendTimer = null;
       }
+      const { cols, rows } = term;
       lastCols = cols;
       lastRows = rows;
-      lastResizeSentAt = performance.now();
       sendJson({ type: 'resize', cols, rows });
       return;
     }
-    if (cols === lastCols && rows === lastRows) return;
-    // COALESCE the PTY notification. Every SIGWINCH makes claude/codex clear
-    // and reprint their transcript region; a drag-resize used to fire one per
-    // ResizeObserver tick, committing a staircase of mixed-width repaint
-    // frames into scrollback ("scroll after resize shows broken content until
-    // I reconnect"). The first change of a burst is sent immediately (a
-    // deliberate one-step resize stays snappy); further changes collapse into
-    // ONE trailing send once the grid stops moving, so the TUI reprints at
-    // most twice per drag instead of once per tick.
-    const now = performance.now();
-    if (resizeSendTimer === null && now - lastResizeSentAt > RESIZE_SETTLE_MS) {
-      lastCols = cols;
-      lastRows = rows;
-      lastResizeSentAt = now;
-      sendJson({ type: 'resize', cols, rows });
-      scheduleResizeResync();
-      return;
-    }
+    if (resizeSendTimer === null && term.cols === lastCols && term.rows === lastRows) return;
     if (resizeSendTimer !== null) clearTimeout(resizeSendTimer);
     resizeSendTimer = setTimeout(() => {
       resizeSendTimer = null;
-      if (!term) return;
-      const { cols: c, rows: r } = term;
-      if (c === lastCols && r === lastRows) return;
-      lastCols = c;
-      lastRows = r;
-      lastResizeSentAt = performance.now();
-      sendJson({ type: 'resize', cols: c, rows: r });
-      scheduleResizeResync();
+      flushResize();
     }, RESIZE_SETTLE_MS);
-  }
-
-  /** Trailing-debounce window for PTY resize + the settle threshold that lets
-   *  an isolated resize through immediately. */
-  const RESIZE_SETTLE_MS = 300;
-  let resizeSendTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastResizeSentAt = 0;
-
-  // After the grid settles, request a snapshot — the client rebuilds from it
-  // (see the 'scrollback' frame handler), replacing the transitional repaint
-  // frames with the server's coherent history, exactly like a reconnect does
-  // but automatically. AGENT panes only (`preferDom`): shells never reprint
-  // on SIGWINCH, so there are no transitional frames to clean — and xterm's
-  // own soft-wrap reflow of live shell content beats an emulator rebuild.
-  let resizeResyncTimer: ReturnType<typeof setTimeout> | null = null;
-  function scheduleResizeResync(): void {
-    if (!preferDom) return;
-    if (resizeResyncTimer !== null) clearTimeout(resizeResyncTimer);
-    resizeResyncTimer = setTimeout(() => {
-      resizeResyncTimer = null;
-      if (!connected || !term) return;
-      sendJson({ type: 'scrollback', lines: term.options.scrollback ?? 10_000 });
-    }, 700);
   }
 
   // Belt-and-suspenders for PLAIN SHELLS: re-fit a couple of times shortly after
@@ -995,10 +974,6 @@
       linkProvider.dispose();
       for (const t of verifyTimers) clearTimeout(t);
       if (refitTimer) clearTimeout(refitTimer);
-      if (resizeResyncTimer !== null) {
-        clearTimeout(resizeResyncTimer);
-        resizeResyncTimer = null;
-      }
       if (resizeSendTimer !== null) {
         clearTimeout(resizeSendTimer);
         resizeSendTimer = null;
@@ -1047,15 +1022,11 @@
     // session switch still falls through (connectedSid differs).
     if (sessionId === connectedSid) return;
     // 1. Cancel timers that belong to the old session (reconnect + pending
-    //    resize-resync — the latter would request a spurious rebuild of the
-    //    NEW session's just-received snapshot).
+    //    trailing resize — a stale send would push the old pane's grid at the
+    //    new session's PTY).
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
-    }
-    if (resizeResyncTimer !== null) {
-      clearTimeout(resizeResyncTimer);
-      resizeResyncTimer = null;
     }
     if (resizeSendTimer !== null) {
       clearTimeout(resizeSendTimer);

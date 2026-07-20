@@ -43,6 +43,17 @@ attached (a passive tile/preview/idle phone tab can no longer pin a wide
 pane's TUI to its own small grid). When the owner detaches, authority is
 released and the next `resize` wins.
 
+**Resize semantics.** A `resize` matching the PTY's current grid is dropped
+server-side before the ioctl — no SIGWINCH, no emulator rewrap, no meta
+write — so clients may re-push their grid unconditionally on focus/reconnect.
+Clients should send at most ONE `resize` per settled layout change (pure
+trailing debounce): every SIGWINCH makes agent TUIs reprint their live
+region, and codex re-emits transcript lines that permanently accumulate in
+scrollback. Clients must NOT rebuild their buffer from a `scrollback`
+snapshot in response to their own resize — snapshots are for (re)attach and
+the server's unsolicited lagged-drop recovery only; the client terminal's
+own native reflow is authoritative for the live view.
+
 ### Server → client
 
 - **Binary frames**: raw PTY output bytes — write straight into xterm.

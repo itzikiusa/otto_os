@@ -641,6 +641,17 @@ impl Grid {
         }
     }
 
+    /// OTTO PATCH 4 — CSI 3 J (xterm "erase saved lines"): drop the scrollback,
+    /// leaving the visible screen untouched. codex clears `2J` + `3J` and then
+    /// reprints its whole transcript on every SIGWINCH; without this the old
+    /// copy survives here and reconnect history gains a full duplicate per
+    /// resize (the ×N transcript bug). xterm.js implements 3J, so this also
+    /// keeps the server emulator convergent with the live client buffer.
+    pub fn erase_scrollback(&mut self) {
+        self.scrollback.clear();
+        self.scrollback_offset = 0;
+    }
+
     pub fn erase_all_forward(&mut self, attrs: crate::attrs::Attrs) {
         let pos = self.pos;
         for row in self.drawing_rows_mut().skip(usize::from(pos.row) + 1) {

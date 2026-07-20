@@ -2009,6 +2009,11 @@ impl SessionManager {
         let handle = self
             .live_handle(id)
             .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        // Same-size resizes are a no-op end to end — no SIGWINCH, no emulator
+        // rewrap, no meta write — so clients can re-push their grid freely.
+        if handle.size() == (cols, rows) {
+            return Ok(());
+        }
         handle.resize(cols, rows)?;
         // Persist the last known grid size so resume/reconnect can restore it
         // (prevents reflow flash on reconnect). Best-effort — no await. Uses the

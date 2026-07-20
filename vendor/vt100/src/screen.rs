@@ -1136,6 +1136,8 @@ impl Screen {
             0 => self.grid_mut().erase_all_forward(attrs),
             1 => self.grid_mut().erase_all_backward(attrs),
             2 => self.grid_mut().erase_all(attrs),
+            // OTTO PATCH 4: xterm's "erase saved lines" — see grid.rs.
+            3 => self.grid_mut().erase_scrollback(),
             _ => unhandled(self),
         }
     }

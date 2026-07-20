@@ -236,11 +236,26 @@ impl PtyHandle {
             .map_err(|e| Error::Internal(format!("pty write: {e}")))
     }
 
+    /// Current emulator grid as `(cols, rows)`.
+    pub fn size(&self) -> (u16, u16) {
+        let parser = lock_unpoisoned(&self.parser);
+        let (rows, cols) = parser.screen().size();
+        (cols, rows)
+    }
+
     /// Resize the terminal (PTY + the screen emulator).
+    ///
+    /// Same-size calls are dropped entirely — no emulator rewrap and no
+    /// TIOCSWINSZ — so clients can re-push their grid unconditionally on
+    /// focus/reconnect without triggering a TUI repaint (codex re-emits its
+    /// transcript on every SIGWINCH; each spurious one pollutes scrollback).
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        lock_unpoisoned(&self.parser)
-            .screen_mut()
-            .set_size(rows, cols);
+        let mut parser = lock_unpoisoned(&self.parser);
+        if parser.screen().size() == (rows, cols) {
+            return Ok(());
+        }
+        parser.screen_mut().set_size(rows, cols);
+        drop(parser);
         lock_unpoisoned(&self.master)
             .resize(PtySize {
                 rows,
@@ -383,6 +398,55 @@ impl Drop for PtyHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Same-size resizes must be dropped before the ioctl: a shell trapping
+    /// SIGWINCH sees NOTHING for repeats of the current grid and exactly one
+    /// signal for a real change. (codex reprints its transcript per SIGWINCH —
+    /// spurious ones from focus/reconnect re-pushes polluted scrollback.)
+    #[tokio::test]
+    async fn same_size_resize_sends_no_sigwinch() {
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "trap 'echo GOT_WINCH' WINCH; echo READY; while :; do sleep 1; done".into(),
+            ],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn_sized(&spec, 120, 40).expect("spawn");
+        let wait_for = |needle: &'static str, h: &PtyHandle| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if String::from_utf8_lossy(&h.scrollback(50)).contains(needle) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+        assert!(wait_for("READY", &handle), "shell never became ready");
+
+        assert_eq!(handle.size(), (120, 40));
+        // Re-push the exact same grid a few times (focus reclaim / reconnect).
+        for _ in 0..3 {
+            handle.resize(120, 40).expect("same-size resize");
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let out = String::from_utf8_lossy(&handle.scrollback(100)).to_string();
+        assert!(
+            !out.contains("GOT_WINCH"),
+            "same-size resize must not SIGWINCH the child: {out}"
+        );
+
+        // A real change delivers the signal and updates the emulator grid.
+        handle.resize(100, 30).expect("real resize");
+        assert_eq!(handle.size(), (100, 30));
+        assert!(
+            wait_for("GOT_WINCH", &handle),
+            "changed-size resize should SIGWINCH the child"
+        );
+    }
 
     /// True iff the OS still has a live (non-reaped) process for `pid`.
     fn pid_alive(pid: &str) -> bool {
@@ -630,6 +694,52 @@ mod tests {
             !screen_only.contains("HIST_0001"),
             "HIST_0001 unexpectedly still on the live screen; test premise broken"
         );
+    }
+
+    /// codex's SIGWINCH repaint: `ESC[r ESC[H ESC[2J ESC[3J` then a reprint of
+    /// the ENTIRE transcript. `3J` (xterm "erase saved lines") must drop the
+    /// emulator scrollback exactly like xterm.js does live — otherwise every
+    /// resize banks one more full transcript copy into reattach snapshots
+    /// (the "essay ×7/×20 after resizes" bug). OTTO PATCH 4 in vendor/vt100.
+    #[tokio::test]
+    async fn codex_3j_resize_repaint_keeps_single_transcript_copy() {
+        let emit = "i=1; while [ $i -le 40 ]; do printf 'TSCPT_%04d\\n' $i; i=$((i+1)); done";
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                // transcript → (codex repaint: full clear incl. scrollback →
+                // reprint transcript) × 3 — as after three SIGWINCHes.
+                format!(
+                    "{emit}; n=1; while [ $n -le 3 ]; do printf '\\033[r\\033[H\\033[2J\\033[3J'; {emit}; n=$((n+1)); done; printf 'REPAINTS_DONE\\n'"
+                ),
+            ],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn_sized(&spec, 80, 24).expect("spawn sh");
+        let mut exit = handle.on_exit();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            exit.wait_for(|v| v.is_some()).await.expect("exit watch");
+        })
+        .await
+        .expect("child exited in time");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let snap = loop {
+            let snap = String::from_utf8_lossy(&handle.snapshot_with_history(4000)).into_owned();
+            if snap.contains("REPAINTS_DONE") {
+                break snap;
+            }
+            assert!(Instant::now() < deadline, "REPAINTS_DONE never appeared");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let copies = snap.matches("TSCPT_0001").count();
+        assert_eq!(
+            copies, 1,
+            "3J must wipe the previous transcript from scrollback; snapshot holds {copies} copies"
+        );
+        assert!(snap.contains("TSCPT_0040"), "latest transcript tail missing");
     }
 
     /// Drive a PTY to completion and return the history-inclusive snapshot

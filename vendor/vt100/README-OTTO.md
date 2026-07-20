@@ -52,12 +52,27 @@ xterm client driving a real daemon + real `claude` through resize storms
 (clean), plus `vt100_reflow_*` / `vt100_height_*` tests in `crates/otto-pty`.
 Support: `Row::{into_cells, from_cells, pad_to, content_len, is_blank}`.
 
+## Patch 4: CSI 3 J erases scrollback (xterm "erase saved lines")
+
+`src/screen.rs` `ed()` mode 3 → new `src/grid.rs` `Grid::erase_scrollback()`:
+drops all scrollback rows (and resets the scrollback view offset), leaving the
+visible screen untouched. Upstream ignores mode 3.
+
+Why: codex's SIGWINCH repaint is `ESC[r ESC[H ESC[2J ESC[3J` followed by a
+reprint of its ENTIRE transcript. xterm.js implements 3J, so the live client
+buffer is wiped + replaced and always holds exactly one copy. Without 3J here,
+the server emulator kept the old scrollback AND banked the reprint — one full
+duplicate transcript per resize in every reattach snapshot (the "essay appears
+×7 / ×20 after resizes" bug). Regression: `codex_3j_resize_repaint_keeps_
+single_transcript_copy` in `crates/otto-pty`.
+
 ## Upgrading
 
 Re-vendor the new upstream version and re-apply the changes marked
 `OTTO PATCH` (the `Grid::scroll_up` conditional, `Screen::
 scrollback_rows_formatted`, `Grid::scrollback_rows`, `Row::cols`
-visibility). Regression tests live in `crates/otto-pty`
+visibility, the `Grid::set_size` reflow path + helpers, and
+`ed` mode 3 → `Grid::erase_scrollback`). Regression tests live in `crates/otto-pty`
 (`snapshot_with_history_captures_scroll_region_history`,
 `history_replay_joins_soft_wrapped_rows_for_client_reflow`,
 `history_replay_survives_narrowing_without_truncation`).
