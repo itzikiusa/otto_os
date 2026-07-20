@@ -88,6 +88,17 @@ fn strip_mention(text: &str) -> &str {
     t
 }
 
+/// Message subtypes that announce channel membership changes rather than carry
+/// user content. They must never spawn an agent session: a batch invite emits
+/// one `channel_join` per user (a session flood), and Slack refuses thread
+/// replies on them (`cannot_reply_to_message`).
+fn is_membership_subtype(subtype: Option<&str>) -> bool {
+    matches!(
+        subtype,
+        Some("channel_join" | "channel_leave" | "group_join" | "group_leave")
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Adapter implementation
 // ---------------------------------------------------------------------------
@@ -577,11 +588,18 @@ async fn handle_event(
 
     // Policy: accept ALL user messages. We never drop a message for having an
     // unknown subtype — when in doubt, forward it and let the agent read/act.
-    // The two exceptions carry no new user content: a deletion is a tombstone,
-    // and an edit (`message_changed`) carries its content under `message`.
+    // The exceptions carry no new user content: a deletion is a tombstone, an
+    // edit (`message_changed`) carries its content under `message`, and
+    // membership notices ("X has joined") are system announcements — a batch
+    // invite emits dozens at once, each of which would spawn an agent session,
+    // and Slack rejects threading onto them (`cannot_reply_to_message`).
     let subtype = event["subtype"].as_str();
     if subtype == Some("message_deleted") {
         info!(event_type, "slack: deletion skipped (nothing to forward)");
+        return;
+    }
+    if is_membership_subtype(subtype) {
+        info!(event_type, subtype, "slack: membership notice skipped (no user content)");
         return;
     }
     let content = if subtype == Some("message_changed") {
@@ -732,4 +750,25 @@ async fn download_slack_file(
     let path = std::env::temp_dir().join(format!("otto-slack-{id}-{safe_name}"));
     tokio::fs::write(&path, &bytes).await?;
     Ok(path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn membership_subtypes_are_skipped() {
+        for s in ["channel_join", "channel_leave", "group_join", "group_leave"] {
+            assert!(is_membership_subtype(Some(s)), "{s} must be skipped");
+        }
+    }
+
+    #[test]
+    fn content_subtypes_are_forwarded() {
+        // No subtype (plain message) and content-bearing subtypes still flow.
+        assert!(!is_membership_subtype(None));
+        for s in ["message_changed", "thread_broadcast", "file_share", "me_message"] {
+            assert!(!is_membership_subtype(Some(s)), "{s} must be forwarded");
+        }
+    }
 }
