@@ -1858,8 +1858,13 @@ impl SessionManager {
                 self.attached_conns.remove_if(id, |_, v| v.is_empty());
             }
         }
-        // A departing size owner releases authority (next typer claims it).
-        self.size_owner.remove_if(id, |_, &owner| owner == conn_id);
+        // Authority is STICKY: a departing owner does NOT release it. While
+        // the user is away from the pane the session must keep the pane's
+        // grid — releasing let a passive tile/preview re-pin the PTY narrow
+        // and everything the agent printed meanwhile stayed hard-wrapped at
+        // that width forever (the "old parts of the transcript are half
+        // width" damage). The next claim/typing (pane re-attach claims on
+        // open) simply takes authority over; a daemon restart clears the map.
     }
 
     /// SIZE AUTHORITY: the connection that most recently TYPED into a session
@@ -1874,16 +1879,15 @@ impl SessionManager {
     }
 
     /// Whether `conn_id` may resize `id` under the size-authority policy:
-    /// yes when it IS the owner, when nobody has typed yet, or when the owner
-    /// is no longer attached (stale entry — first resizer wins again).
+    /// yes when it IS the owner, or when nobody has ever claimed/typed (a
+    /// session only ever watched by claim-less embeds — e.g. a vault-run or
+    /// workflow panel — is sized by whoever views it). Once claimed, only a
+    /// newer claim/typing transfers the right — never a passive viewer, not
+    /// even while the owner is detached (see the sticky note in `detach`).
     pub fn may_resize(&self, id: &Id, conn_id: u64) -> bool {
         match self.size_owner.get(id).map(|e| *e) {
             None => true,
-            Some(owner) if owner == conn_id => true,
-            Some(owner) => !self
-                .attached_conns
-                .get(id)
-                .is_some_and(|conns| conns.contains(&owner)),
+            Some(owner) => owner == conn_id,
         }
     }
 
@@ -3446,8 +3450,13 @@ mod tests {
         assert!(!mgr.may_resize(&id, pane.conn_id()));
         assert!(mgr.may_resize(&id, tile.conn_id()));
 
-        // Owner detaching releases authority — survivors may resize again.
+        // Authority is STICKY: the owner detaching does NOT hand the size to
+        // survivors — a passive pane/tile still may not resize (agent output
+        // printed while the user is away must keep the owner's width)…
         drop(tile);
+        assert!(!mgr.may_resize(&id, pane.conn_id()));
+        // …until the survivor claims (pane re-attach claims on open).
+        mgr.note_input_authority(&id, pane.conn_id());
         assert!(mgr.may_resize(&id, pane.conn_id()));
     }
 

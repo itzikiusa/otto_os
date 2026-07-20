@@ -233,15 +233,25 @@ const scenarios = {
       let meta = (await api('GET', `/api/v1/sessions/${s.id}`)).meta ?? {};
       check(meta.pty_cols === 150 && meta.pty_rows === 40,
         `untyped primary pane holds its grid vs later passive attach (pty=${meta.pty_cols}x${meta.pty_rows}, want 150x40)`);
-      // Primary detaches → passive becomes the only viewer and may size freely.
+      // Authority is STICKY: the primary detaching must NOT let the passive
+      // viewer re-pin the grid (agent output printed while the user is away
+      // would be hard-wrapped narrow forever).
       a.close();
       await sleep(500);
       b.resize(80, 24);
       b.resize(100, 30);
       await sleep(RESIZE_SETTLE_MS + 400);
       meta = (await api('GET', `/api/v1/sessions/${s.id}`)).meta ?? {};
-      check(meta.pty_cols === 100 && meta.pty_rows === 30,
-        `after primary detaches, the remaining viewer sizes the PTY (pty=${meta.pty_cols}x${meta.pty_rows}, want 100x30)`);
+      check(meta.pty_cols === 150 && meta.pty_rows === 40,
+        `authority sticks after primary detaches — passive resize denied (pty=${meta.pty_cols}x${meta.pty_rows}, want 150x40)`);
+      // A NEW primary (claims on attach) takes the grid over.
+      const a2 = new TermClient(env.base, env.token, s.id, { cols: 120, rows: 36, claimOnConnect: true });
+      await a2.connect();
+      await sleep(400);
+      meta = (await api('GET', `/api/v1/sessions/${s.id}`)).meta ?? {};
+      check(meta.pty_cols === 120 && meta.pty_rows === 36,
+        `a re-attaching primary claims the grid back (pty=${meta.pty_cols}x${meta.pty_rows}, want 120x36)`);
+      a2.close();
     } finally {
       a.close();
       b.close();
