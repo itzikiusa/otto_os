@@ -101,7 +101,19 @@ fn install_daemon() -> Result<String, String> {
     let src = bundled_ottod().ok_or("bundled ottod not found next to app binary")?;
     let dst = installed_bin();
     std::fs::create_dir_all(dst.parent().unwrap()).map_err(|e| e.to_string())?;
-    std::fs::copy(&src, &dst).map_err(|e| format!("copy ottod: {e}"))?;
+    // Copy to a temp sibling and rename() into place. NEVER copy over dst
+    // in place: the kernel caches the code signature per inode, so rewriting
+    // a previously-executed (or currently-running) binary's inode leaves a
+    // stale signature seal → every subsequent exec dies with SIGKILL
+    // (Code Signature Invalid) and launchd KeepAlive turns that into a
+    // respawn/throttle loop. rename() gives new execs a fresh inode with an
+    // intact seal, and is atomic on the same volume.
+    let tmp = dst.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::copy(&src, &tmp).map_err(|e| format!("copy ottod: {e}"))?;
+    std::fs::rename(&tmp, &dst).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("swap ottod into place: {e}")
+    })?;
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

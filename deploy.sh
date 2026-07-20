@@ -33,10 +33,20 @@
 # relaunch clobber, and the app's signature seal stays intact (we copy FROM the bundle,
 # never overwrite into it).
 #
+# WHY the exit trap + lock (hard-won): deploys DO die mid-flight (reaped shells,
+# Ctrl-C, build crashes) — and a deploy that stops between "daemon booted out"
+# and "daemon bootstrapped" leaves the machine with NO daemon and no explanation.
+# So: a lock dir refuses concurrent deploys, every phase is checkpointed to a
+# status file (~/Library/Logs/Otto/deploy-last.status), and an EXIT trap rolls
+# back whatever teardown had happened (restore the old app, re-bootstrap the
+# daemon) before reporting FAILED-at-phase-N. `./deploy.sh --status` shows the
+# last outcome + whether a deploy is running right now.
+#
 # Usage:
 #   ./deploy.sh                 # full rebuild + redeploy (default)
 #   ./deploy.sh --dmg           # also produce a DMG alongside the .app
 #   ./deploy.sh --force-ci      # force `npm ci` even if node_modules looks fresh
+#   ./deploy.sh --status        # last deploy outcome + live progress, then exit
 #   ./deploy.sh -h | --help
 #
 set -uo pipefail
@@ -55,6 +65,9 @@ TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/host: //p')"; TRIPLE="${TRIPLE:-aarc
 SIDECAR_SRC="$ROOT/apps/desktop/src-tauri/binaries/ottod-${TRIPLE}"
 BUILT_APP="$ROOT/apps/desktop/src-tauri/target/release/bundle/macos/Otto.app"
 KEEP_BACKUPS=3
+LOG_DIR="$HOME/Library/Logs/Otto"
+STATUS_FILE="$LOG_DIR/deploy-last.status"
+LOCK_DIR="$LOG_DIR/deploy.lock"
 
 WANT_DMG=0
 FORCE_CI=0
@@ -62,8 +75,16 @@ for arg in "$@"; do
     case "$arg" in
         --dmg)       WANT_DMG=1 ;;
         --force-ci)  FORCE_CI=1 ;;
+        --status)
+            if [[ -d "$LOCK_DIR" ]] && kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null)" 2>/dev/null; then
+                echo "deploy RUNNING (pid $(cat "$LOCK_DIR/pid"), log $(cat "$LOCK_DIR/log" 2>/dev/null || echo '?'))"
+            else
+                echo "no deploy running"
+            fi
+            [[ -f "$STATUS_FILE" ]] && { echo "last deploy:"; cat "$STATUS_FILE"; }
+            exit 0 ;;
         -h|--help)
-            sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
     esac
@@ -72,11 +93,31 @@ done
 # ---- pretty output --------------------------------------------------------
 BOLD=$'\033[1m'; DIM=$'\033[2m'; GRN=$'\033[32m'; RED=$'\033[31m'; YEL=$'\033[33m'; RST=$'\033[0m'
 START_TS=$(date +%s)
-step() { echo; echo "${BOLD}▸ $*${RST}"; }
+PHASE="preflight"
+step() { PHASE="$*"; checkpoint "RUNNING"; echo; echo "${BOLD}▸ [$(date +%H:%M:%S)] $*${RST}"; }
 ok()   { echo "  ${GRN}✓${RST} $*"; }
 warn() { echo "  ${YEL}!${RST} $*"; }
 die()  { echo; echo "${RED}✗ FAILED:${RST} $*" >&2; echo "${DIM}  (nothing irreversible past the build phase unless noted above)${RST}" >&2; exit 1; }
 run()  { echo "  ${DIM}\$ $*${RST}"; "$@"; }
+
+# Checkpoint every phase transition so `--status` (and a human tailing the log)
+# can always tell where a deploy is — or where a dead one stopped.
+checkpoint() {
+    mkdir -p "$LOG_DIR"
+    printf '%s  pid=%s  phase=%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" $$ "$PHASE" "$1" >"$STATUS_FILE" 2>/dev/null || true
+}
+
+# Run a command with a hard time limit (macOS has no GNU `timeout`). Anything
+# that talks to another process (osascript quit, open) can hang indefinitely —
+# e.g. on an unsaved-changes dialog — and silently wedge the whole deploy.
+bounded() {
+    local secs="$1"; shift
+    "$@" & local cmd_pid=$!
+    ( sleep "$secs"; kill -9 "$cmd_pid" 2>/dev/null ) & local killer_pid=$!
+    wait "$cmd_pid" 2>/dev/null; local rc=$?
+    kill "$killer_pid" 2>/dev/null; wait "$killer_pid" 2>/dev/null
+    return $rc
+}
 
 # ---- self-detach if running under the daemon we're about to restart -------
 # A terminal / agent session lives as a CHILD of the ottod daemon. When phase 6
@@ -110,9 +151,66 @@ if [[ -z "${OTTO_DEPLOY_DETACHED:-}" ]] && under_ottod; then
     # PATH-looks-up bare names — the detached copy would die with "No such file
     # or directory" before doing anything (and the parent exits 0, silently).
     SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-    OTTO_DEPLOY_DETACHED=1 nohup bash "$SELF" "$@" >"$LOG" 2>&1 </dev/null & disown
+    OTTO_DEPLOY_DETACHED=1 OTTO_DEPLOY_LOG="$LOG" nohup bash "$SELF" "$@" >"$LOG" 2>&1 </dev/null & disown
     exit 0
 fi
+
+# ---- single-deploy lock + phase-aware rollback trap -----------------------
+# One deploy at a time: two concurrent runs (a terminal + an agent, or a re-run
+# while a detached copy is still going) interleave bootout/bootstrap/mv and
+# reliably wreck each other. mkdir is atomic; a lock whose pid is dead is stale
+# (a previous deploy was killed) and gets swept.
+mkdir -p "$LOG_DIR"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    HOLDER="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+    if [[ -n "$HOLDER" ]] && kill -0 "$HOLDER" 2>/dev/null; then
+        die "another deploy is already running (pid $HOLDER, log $(cat "$LOCK_DIR/log" 2>/dev/null || echo '?')) — try ./deploy.sh --status"
+    fi
+    warn "sweeping stale deploy lock (pid ${HOLDER:-?} is gone)"
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" || die "could not take deploy lock at $LOCK_DIR"
+fi
+echo $$ >"$LOCK_DIR/pid"
+echo "${OTTO_DEPLOY_LOG:-terminal}" >"$LOCK_DIR/log"
+
+# Rollback state — updated as the deploy progresses, read by the EXIT trap.
+DEPLOY_DONE=0        # set to 1 only after every verification passed
+DAEMON_TORN_DOWN=0   # 1 between bootout (phase 6) and bootstrap (phase 9)
+STAGING=""           # hidden staged bundle (delete on failure)
+OLD=""               # previous app moved aside (restore on failure)
+
+# Whatever kills this script — die(), Ctrl-C, SIGTERM, a crash — the trap puts
+# the system back into a RUNNING state: restore the old app if the swap was
+# mid-flight, re-bootstrap the daemon if it was torn down, record the outcome.
+on_exit() {
+    local rc=$?
+    trap - EXIT
+    if [[ $DEPLOY_DONE -eq 1 ]]; then
+        checkpoint "SUCCESS"
+    else
+        echo; echo "${RED}✗ deploy did not complete (phase: $PHASE) — rolling back${RST}" >&2
+        if [[ -n "$OLD" && -d "$OLD" && ! -d "$APP_DST" ]]; then
+            mv "$OLD" "$APP_DST" 2>/dev/null && echo "  restored previous $APP_DST" >&2
+        fi
+        [[ -n "$STAGING" ]] && rm -rf "$STAGING" 2>/dev/null
+        if [[ $DAEMON_TORN_DOWN -eq 1 ]] && ! daemon_healthy; then
+            echo "  daemon was down — re-bootstrapping previous daemon" >&2
+            bootstrap_daemon
+            if curl -fsS --retry 10 --retry-delay 1 --retry-all-errors --max-time 20 "$HEALTH_URL" >/dev/null 2>&1; then
+                echo "  ${GRN}daemon restored and healthy${RST}" >&2
+            else
+                echo "  ${RED}daemon still down — run: launchctl kickstart -k $GUI_DOMAIN/$DAEMON_LABEL${RST}" >&2
+            fi
+        fi
+        checkpoint "FAILED (exit $rc)"
+        echo "  status: $STATUS_FILE" >&2
+    fi
+    rm -rf "$LOCK_DIR"
+    exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---- launchd helpers ------------------------------------------------------
 # `launchctl bootout` is ASYNCHRONOUS — bootstrapping the same label before the
@@ -208,7 +306,9 @@ ok "staged + verified at $(basename "$STAGING")"
 # PHASE 4 — STOP the running app + daemon
 # =====================================================================
 step "6/9  Quit running app + stop daemon"
-osascript -e 'tell application "Otto" to quit' >/dev/null 2>&1 || true
+# bounded: `osascript … quit` blocks for as long as the app takes to answer the
+# Apple event — a wedged app or a modal dialog stalls the deploy forever.
+bounded 15 osascript -e 'tell application "Otto" to quit' >/dev/null 2>&1 || true
 for _ in $(seq 1 16); do
     pgrep -f 'Otto.app/Contents/MacOS/otto-desktop' >/dev/null 2>&1 || break
     sleep 0.5
@@ -222,6 +322,7 @@ pgrep -f 'Otto.app/Contents/MacOS/otto-desktop' >/dev/null 2>&1 \
     && die "otto-desktop still running — refusing to replace /Applications" || ok "app not running"
 launchctl bootout "$GUI_DOMAIN/${DAEMON_LABEL}" 2>/dev/null || true
 wait_daemon_gone
+DAEMON_TORN_DOWN=1
 ok "daemon booted out"
 
 # =====================================================================
@@ -246,7 +347,12 @@ step "8/9  Sync daemon binary == bundle sidecar (byte-identical)"
 mkdir -p "$INSTALL_DIR"
 if [[ -f "$INSTALLED_OTTOD" ]]; then
     BAK="$INSTALLED_OTTOD.bak.$(date +%s)"
-    mv "$INSTALLED_OTTOD" "$BAK" && ok "backed up old daemon → $(basename "$BAK")"
+    # FATAL if this fails: writing the new daemon over the old file's inode
+    # leaves the kernel's cached code signature stale → every exec dies with
+    # SIGKILL (Code Signature Invalid) and KeepAlive respawns into a kill loop.
+    # The mv guarantees the ditto below creates a FRESH inode.
+    mv "$INSTALLED_OTTOD" "$BAK" || die "could not move old daemon aside (would overwrite in place → stale-signature SIGKILL loop)"
+    ok "backed up old daemon → $(basename "$BAK")"
 fi
 # prune old backups, keep the most recent $KEEP_BACKUPS (deploy cruft, not user data).
 # Portable: no `mapfile` (absent in macOS stock bash 3.2).
@@ -257,6 +363,7 @@ while IFS= read -r bak; do
 done < <(ls -1t "$INSTALL_DIR"/ottod.bak.* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)))
 [[ $pruned -gt 0 ]] && ok "pruned $pruned old backup(s), kept $KEEP_BACKUPS"
 run ditto "$APP_DST/Contents/MacOS/ottod" "$INSTALLED_OTTOD" || die "could not sync daemon binary"
+run codesign --verify --strict "$INSTALLED_OTTOD" || die "installed daemon failed signature verification — refusing to bootstrap a binary the kernel will SIGKILL"
 BIN_SHA="$(shasum -a 256 "$INSTALLED_OTTOD" | awk '{print $1}')"
 BUNDLE_SHA="$(shasum -a 256 "$APP_DST/Contents/MacOS/ottod" | awk '{print $1}')"
 [[ "$BIN_SHA" == "$BUNDLE_SHA" ]] || die "bin/ottod != bundle sidecar (clobber risk): $BIN_SHA vs $BUNDLE_SHA"
@@ -270,19 +377,35 @@ bootstrap_daemon
 # health (curl retries until the daemon answers or we give up). A swallowed
 # bootstrap error (launchd reap race) shows up here as no health → retry ONE
 # clean teardown+bootstrap before giving up, so the race self-heals.
+# When the daemon won't come up, SAY WHY: surface the launchd state and any
+# fresh crash report (a "Code Signature Invalid" .ips here means a stale-inode
+# / bad-signature binary — the kernel kills it before it can log a single line).
+diagnose_daemon() {
+    echo "  ${DIM}-- launchd state --${RST}"
+    launchctl print "$GUI_DOMAIN/${DAEMON_LABEL}" 2>/dev/null | grep -E 'state|last exit|spawn' | sed 's/^/  /'
+    local ips
+    ips="$(ls -t "$HOME"/Library/Logs/DiagnosticReports/ottod-*.ips 2>/dev/null | head -1)"
+    if [[ -n "$ips" && -n "$(find "$ips" -newermt "@$START_TS" 2>/dev/null)" ]]; then
+        echo "  ${DIM}-- crash report $(basename "$ips") --${RST}"
+        grep -oE '"signal":"[^"]*"|"type":"[^"]*"|"terminationReason[^,]*' "$ips" 2>/dev/null | head -5 | sed 's/^/  /'
+    fi
+}
 if curl -fsS --retry 15 --retry-delay 1 --retry-all-errors --max-time 30 "$HEALTH_URL" >/dev/null 2>&1; then
+    DAEMON_TORN_DOWN=0
     ok "daemon healthy: $(curl -fsS "$HEALTH_URL")"
 else
     warn "daemon didn't answer on first bootstrap (launchd reap race) — retrying"
     bootstrap_daemon
     if curl -fsS --retry 20 --retry-delay 1 --retry-all-errors --max-time 40 "$HEALTH_URL" >/dev/null 2>&1; then
+        DAEMON_TORN_DOWN=0
         ok "daemon healthy after retry: $(curl -fsS "$HEALTH_URL")"
     else
+        diagnose_daemon
         die "daemon did NOT come up healthy at $HEALTH_URL — check ~/Library/Logs/Otto/ottod.log.*"
     fi
 fi
 open -a "$APP_DST" || warn "could not 'open' the app"
-osascript -e 'tell application "Otto" to activate' >/dev/null 2>&1 || true
+bounded 10 osascript -e 'tell application "Otto" to activate' >/dev/null 2>&1 || true
 ok "app launched + activated"
 
 # settle past the supervisor relaunch-clobber window, then confirm the daemon
@@ -292,6 +415,7 @@ DSTATE="$(launchctl print "$GUI_DOMAIN/${DAEMON_LABEL}" 2>/dev/null | grep -E '^
 if curl -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
     ok "post-launch daemon still healthy (state=${DSTATE:-?})"
 else
+    diagnose_daemon
     die "daemon DROPPED after app launch (state=${DSTATE:-?}) — likely codesigning throttle; bin/bundle hash mismatch?"
 fi
 
@@ -333,6 +457,7 @@ for tdir in "$ROOT/target" "$ROOT/apps/desktop/src-tauri/target"; do
 done
 [[ $swept_kb -gt 0 ]] && ok "swept $(( swept_kb / 1024 ))MB of stale build artifacts (>${SWEEP_DAYS}d old)"
 
+DEPLOY_DONE=1
 ELAPSED=$(( $(date +%s) - START_TS ))
 echo
 echo "${BOLD}${GRN}✓ Deploy complete${RST} in ${ELAPSED}s — Otto is running on the new build."
