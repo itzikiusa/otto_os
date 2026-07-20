@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use otto_core::domain::Channel;
+use otto_core::domain::{Channel, SessionStatus};
 use otto_core::Id;
 use otto_sessions::SessionManager;
 
@@ -59,6 +59,19 @@ const LONG_REPLY_THRESHOLD: usize = 1800;
 const LONG_REPLY_HEAD_CHARS: usize = 1500;
 /// How often to send the typing indicator while the agent is working.
 const TYPING_INTERVAL: Duration = Duration::from_secs(4);
+/// Maximum consecutive failed feed sends/edits (of any kind) before the feed
+/// is disabled for the rest of the turn. A safety net on top of the permanent-
+/// error detection: even an error we misclassify as transient can't retry
+/// unboundedly.
+const MAX_FEED_FAILURES: u32 = 5;
+/// How long to pause feed sends after the channel rate-limits us (HTTP 429 /
+/// Slack `ratelimited`). Well above [`EDIT_THROTTLE`] so a limited tailer backs
+/// off instead of re-hitting the limit on its next tick.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+/// How many status ticks between session-liveness probes (~30s at
+/// [`STATUS_TICK`]). A tailer whose session was deleted/archived/exited must
+/// wind down instead of posting (and retrying) forever as a zombie.
+const LIVENESS_EVERY_TICKS: u32 = 8;
 /// How often the rolling feed's header advances to the next liveness phrase
 /// while a turn is in progress. Kept above [`EDIT_THROTTLE`] so a status tick is
 /// always a legitimate (non-throttled) edit. Slack has no typing indicator, so
@@ -257,6 +270,12 @@ impl Mirror {
         let mut last_edit = Instant::now() - EDIT_THROTTLE * 2; // allow first edit immediately
         let mut last_posted_final: Option<String> = None;
         let mut status_idx: usize = 0;
+        // Feed health: a permanent send error (e.g. the thread can't be replied
+        // to) or too many consecutive failures disables the feed for the rest
+        // of the turn — without this, every status tick would retry the doomed
+        // send forever, flooding the channel API into 429s.
+        let mut feed = FeedHealth::new();
+        let mut ticks_since_liveness: u32 = 0;
         let thread_ref = thread.as_deref();
         // Slack renders mrkdwn (``` code fences) in chat.update text; Telegram's
         // in-place edit carries no parse mode, so fences would show literally —
@@ -280,6 +299,7 @@ impl Mirror {
                 last_posted_final = None;
                 status_idx = 0;
                 last_edit = Instant::now() - EDIT_THROTTLE * 2; // post the new turn's first update at once
+                feed = FeedHealth::new();
                 typing_active.store(true, Ordering::Relaxed);
             }
 
@@ -301,10 +321,10 @@ impl Mirror {
                             if activity_lines.len() > MAX_ACTIVITY_LINES {
                                 activity_lines.remove(0);
                             }
-                            if last_edit.elapsed() >= EDIT_THROTTLE {
+                            if feed.can_send() && last_edit.elapsed() >= EDIT_THROTTLE {
                                 last_edit = Instant::now();
                                 let body = render_feed(&status_header(status_idx), &activity_lines);
-                                post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await;
+                                feed.apply(post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await);
                             }
                         }
                         TranscriptEvent::Final { text } => {
@@ -324,7 +344,9 @@ impl Mirror {
                             let header = format!("🧠 done — {n} step{}", if n == 1 { "" } else { "s" });
                             let done_body = render_feed(&header, &activity_lines);
                             last_edit = Instant::now();
-                            post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &done_body).await;
+                            if feed.can_send() {
+                                feed.apply(post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &done_body).await);
+                            }
 
                             // Otto posts the reply itself via the adapter (the bot that
                             // received the message) — the agent never uses .env/tokens.
@@ -385,16 +407,32 @@ impl Mirror {
                     if cancel.load(Ordering::Relaxed) {
                         break;
                     }
+                    // Liveness probe: a tailer must not outlive its session. The
+                    // task is a detached spawn whose cancel flag is only set on
+                    // shutdown, so without this check a deleted/archived/exited
+                    // session leaves a zombie tailer posting (and retrying) into
+                    // the channel forever.
+                    ticks_since_liveness += 1;
+                    if ticks_since_liveness >= LIVENESS_EVERY_TICKS {
+                        ticks_since_liveness = 0;
+                        match self.manager.get(&session_id).await {
+                            Ok(s) if !s.archived && s.status != SessionStatus::Exited => {}
+                            _ => {
+                                info!(session = %session_id, "mirror: session gone, stopping tailer");
+                                break;
+                            }
+                        }
+                    }
                     // While the turn is live, refresh the header (creating the feed
                     // even before the first tool call so a long opening think still
                     // shows "Analyzing…"), then advance the phrase for next time.
                     // `interval`'s first tick fires immediately, so rendering before
                     // the increment makes "Analyzing…" (idx 0) the opening phrase.
                     if typing_active.load(Ordering::Relaxed) {
-                        if last_edit.elapsed() >= EDIT_THROTTLE {
+                        if feed.can_send() && last_edit.elapsed() >= EDIT_THROTTLE {
                             last_edit = Instant::now();
                             let body = render_feed(&status_header(status_idx), &activity_lines);
-                            post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await;
+                            feed.apply(post_or_edit_feed(&adapter, &chat, thread_ref, &mut rolling_msg_id, &body).await);
                         }
                         status_idx = status_idx.wrapping_add(1);
                     }
@@ -468,25 +506,117 @@ fn render_tool_line(display: &str, code: Option<&str>, code_blocks: bool) -> Str
     }
 }
 
+/// Outcome of a rolling-feed send/edit attempt, driving the caller's retry
+/// policy: `Permanent` kills the feed for the rest of the turn, `RateLimited`
+/// backs off for [`RATE_LIMIT_COOLDOWN`], `Transient` just waits for the next
+/// throttled tick.
+#[derive(Debug, PartialEq)]
+enum FeedSend {
+    Ok,
+    Transient,
+    RateLimited,
+    Permanent,
+}
+
+/// Channel errors that will never succeed on retry for this feed — the thread
+/// target refuses replies (Slack rejects threading onto join/system messages),
+/// or the destination itself is gone. Matched on the adapter's error string,
+/// which embeds the Slack API error code verbatim.
+fn classify_send_error(e: &anyhow::Error) -> FeedSend {
+    let s = e.to_string();
+    const PERMANENT: &[&str] = &[
+        "cannot_reply_to_message",
+        "thread_not_found",
+        "message_not_found",
+        "channel_not_found",
+        "is_archived",
+        "not_in_channel",
+        "account_inactive",
+        "token_revoked",
+        "invalid_auth",
+    ];
+    if PERMANENT.iter().any(|p| s.contains(p)) {
+        FeedSend::Permanent
+    } else if s.contains("Too Many Requests") || s.contains("ratelimited") {
+        FeedSend::RateLimited
+    } else {
+        FeedSend::Transient
+    }
+}
+
+/// Per-turn feed retry policy. Trips permanently on a [`FeedSend::Permanent`]
+/// error or [`MAX_FEED_FAILURES`] consecutive failures, and backs off for
+/// [`RATE_LIMIT_COOLDOWN`] after a rate limit. Rebuilt each turn — a new turn
+/// may target a different (repliable) thread.
+struct FeedHealth {
+    dead: bool,
+    failures: u32,
+    cooldown_until: Instant,
+}
+
+impl FeedHealth {
+    fn new() -> Self {
+        Self {
+            dead: false,
+            failures: 0,
+            cooldown_until: Instant::now(),
+        }
+    }
+
+    fn can_send(&self) -> bool {
+        !self.dead && Instant::now() >= self.cooldown_until
+    }
+
+    fn apply(&mut self, outcome: FeedSend) {
+        match outcome {
+            FeedSend::Ok => self.failures = 0,
+            FeedSend::Permanent => {
+                self.dead = true;
+                warn!("mirror feed: permanent send error — feed disabled for this turn");
+            }
+            FeedSend::RateLimited => {
+                self.failures += 1;
+                self.cooldown_until = Instant::now() + RATE_LIMIT_COOLDOWN;
+            }
+            FeedSend::Transient => self.failures += 1,
+        }
+        if !self.dead && self.failures >= MAX_FEED_FAILURES {
+            self.dead = true;
+            warn!(
+                "mirror feed: {MAX_FEED_FAILURES} consecutive send failures — feed disabled for this turn"
+            );
+        }
+    }
+}
+
 /// Post `body` as a new rolling-feed message, or edit the existing one in place.
-/// Best-effort: send/edit failures are logged and swallowed.
+/// Best-effort: send/edit failures are logged and swallowed, but the returned
+/// [`FeedSend`] tells the caller whether retrying can ever work.
 async fn post_or_edit_feed(
     adapter: &Arc<dyn Adapter>,
     chat: &str,
     thread: Option<&str>,
     rolling_msg_id: &mut Option<String>,
     body: &str,
-) {
+) -> FeedSend {
     match rolling_msg_id.as_deref() {
         None => match adapter.send(chat, thread, body).await {
-            Ok(mid) => *rolling_msg_id = Some(mid),
-            Err(e) => warn!("mirror feed send: {e}"),
-        },
-        Some(mid) => {
-            if let Err(e) = adapter.edit(chat, mid, body).await {
-                warn!("mirror feed edit: {e}");
+            Ok(mid) => {
+                *rolling_msg_id = Some(mid);
+                FeedSend::Ok
             }
-        }
+            Err(e) => {
+                warn!("mirror feed send: {e}");
+                classify_send_error(&e)
+            }
+        },
+        Some(mid) => match adapter.edit(chat, mid, body).await {
+            Ok(()) => FeedSend::Ok,
+            Err(e) => {
+                warn!("mirror feed edit: {e}");
+                classify_send_error(&e)
+            }
+        },
     }
 }
 
@@ -731,6 +861,59 @@ mod tests {
             strip_file_directives("oops ⟦otto-file⟧/tmp/x"),
             "oops ⟦otto-file⟧/tmp/x"
         );
+    }
+
+    #[test]
+    fn classify_send_error_matches_slack_error_codes() {
+        // Slack API errors embedded by the adapter (verbatim error code).
+        for code in ["cannot_reply_to_message", "thread_not_found", "channel_not_found", "is_archived"] {
+            let e = anyhow::anyhow!("slack chat.postMessage: {code}");
+            assert_eq!(classify_send_error(&e), FeedSend::Permanent, "{code}");
+        }
+        // HTTP 429 (reqwest error_for_status Display) and Slack's own code.
+        let e = anyhow::anyhow!(
+            "HTTP status client error (429 Too Many Requests) for url (https://slack.com/api/chat.postMessage)"
+        );
+        assert_eq!(classify_send_error(&e), FeedSend::RateLimited);
+        let e = anyhow::anyhow!("slack chat.postMessage: ratelimited");
+        assert_eq!(classify_send_error(&e), FeedSend::RateLimited);
+        // Anything else (network blips, timeouts) retries on the next tick.
+        let e = anyhow::anyhow!("error sending request: connection reset by peer");
+        assert_eq!(classify_send_error(&e), FeedSend::Transient);
+    }
+
+    #[test]
+    fn feed_health_trips_on_permanent_error() {
+        let mut feed = FeedHealth::new();
+        assert!(feed.can_send());
+        feed.apply(FeedSend::Permanent);
+        assert!(!feed.can_send(), "permanent error kills the feed for the turn");
+    }
+
+    #[test]
+    fn feed_health_trips_after_max_consecutive_failures() {
+        let mut feed = FeedHealth::new();
+        for _ in 0..MAX_FEED_FAILURES - 1 {
+            feed.apply(FeedSend::Transient);
+        }
+        // A success in between resets the counter.
+        feed.apply(FeedSend::Ok);
+        assert!(feed.can_send());
+        for _ in 0..MAX_FEED_FAILURES {
+            feed.apply(FeedSend::Transient);
+        }
+        assert!(!feed.can_send(), "cap on consecutive failures trips the feed");
+    }
+
+    #[test]
+    fn feed_health_backs_off_on_rate_limit() {
+        let mut feed = FeedHealth::new();
+        feed.apply(FeedSend::RateLimited);
+        assert!(!feed.can_send(), "rate limit starts a cooldown");
+        assert!(!feed.dead, "rate limit alone does not kill the feed");
+        // Cooldown elapsed → sending resumes.
+        feed.cooldown_until = Instant::now() - Duration::from_secs(1);
+        assert!(feed.can_send());
     }
 
     #[test]
