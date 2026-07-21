@@ -224,52 +224,145 @@ fn codex_sessions_root() -> std::path::PathBuf {
     home.join("sessions")
 }
 
-/// Capture the codex session UUID for a just-spawned session by scanning its
-/// rollout files (`<root>/YYYY/MM/DD/rollout-*.jsonl`). Matches a TOP-LEVEL
-/// interactive session (`originator == "codex-tui"`, `thread_source == "user"`)
-/// whose recorded `cwd` equals ours, that isn't already `claimed`, and whose
-/// file is at/after `spawn_time`. Returns the OLDEST such match — the rollout
-/// THIS launch created (a later concurrent same-cwd spawn's rollout is newer and
-/// belongs to it). Polls briefly because codex writes the rollout a moment after
-/// launch. `None` if nothing matches in the window — caller leaves the session
-/// non-resumable rather than guessing and resuming the wrong conversation.
-async fn capture_codex_session_id(
-    sessions_root: &std::path::Path,
-    cwd: &str,
-    spawn_time: std::time::SystemTime,
-    claimed: &[String],
-) -> Option<String> {
-    use std::collections::HashSet;
-    let claimed: HashSet<&str> = claimed.iter().map(String::as_str).collect();
-    // A touch before spawn to tolerate clock/fs skew; a prior session's rollout
-    // in this cwd is either older than this floor or already in `claimed`.
-    let floor = spawn_time
-        .checked_sub(Duration::from_secs(2))
-        .unwrap_or(std::time::UNIX_EPOCH);
-    // 60s window: codex-tui can take 20s+ to mint its rollout when it boots
-    // with heavy context/MCP config, and a concurrent same-cwd capture holding
-    // `codex_capture_lock` delays this one's first scan further. A miss here
-    // leaves the session permanently non-resumable (it opens DEAD after the
-    // next daemon restart), so err long — the loop exits on first match.
-    for _ in 0..120 {
-        if let Some(sid) = scan_codex_rollout(sessions_root, cwd, floor, &claimed) {
-            return Some(sid);
+/// Normalize raw PTY input bytes into the plain text codex will record as the
+/// session's first `user_message`: strips ESC/CSI sequences (bracketed-paste
+/// markers included), applies backspace/DEL editing, folds CR/LF into spaces,
+/// collapses whitespace runs, and caps the result. Used to content-match a
+/// session's typed prompt against candidate rollouts.
+fn normalize_pty_input(bytes: &[u8]) -> String {
+    let mut out: Vec<char> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() && out.len() < 512 {
+        let b = bytes[i];
+        match b {
+            0x1b => {
+                // ESC sequence: CSI (`ESC [ … final 0x40-0x7E`) or a 2-byte one.
+                i += 1;
+                if bytes.get(i) == Some(&b'[') {
+                    i += 1;
+                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                }
+                i += 1; // consume the final byte (or the single ESC-following char)
+                continue;
+            }
+            0x08 | 0x7f => {
+                // Backspace/DEL: the user edited the composed line — mirror it.
+                out.pop();
+            }
+            b'\r' | b'\n' | b'\t' => out.push(' '),
+            0x00..=0x1f => {} // other control bytes carry no text
+            _ => {
+                // Decode the UTF-8 sequence starting here (input is valid UTF-8
+                // in practice; a broken byte is simply skipped).
+                let len = match b {
+                    0x00..=0x7f => 1,
+                    0xc0..=0xdf => 2,
+                    0xe0..=0xef => 3,
+                    _ => 4,
+                };
+                if let Ok(s) = std::str::from_utf8(&bytes[i..(i + len).min(bytes.len())]) {
+                    out.extend(s.chars());
+                }
+                i += len;
+                continue;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        i += 1;
+    }
+    // Collapse whitespace runs and trim.
+    let mut s = String::with_capacity(out.len());
+    let mut in_ws = true; // leading whitespace is dropped
+    for c in out {
+        if c.is_whitespace() {
+            if !in_ws {
+                s.push(' ');
+            }
+            in_ws = true;
+        } else {
+            s.push(c);
+            in_ws = false;
+        }
+    }
+    while s.ends_with(' ') {
+        s.pop();
+    }
+    s
+}
+
+/// First `user_message` text recorded in a rollout, if any. codex flushes the
+/// rollout lazily — meta line and first user message land together when the
+/// first prompt is submitted — so `None` means "no prompt reached this
+/// conversation yet".
+fn codex_rollout_first_user_message(path: &std::path::Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file).lines().take(200) {
+        let Ok(line) = line else { break };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let p = v.get("payload")?;
+        if p.get("type").and_then(|t| t.as_str()) == Some("user_message") {
+            return p
+                .get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_owned);
+        }
     }
     None
 }
 
-/// One scan-and-pick pass: the OLDEST unclaimed top-level codex rollout for `cwd`
-/// at/after `floor`. Split out from the polling loop so it's synchronously
-/// testable. See [`capture_codex_session_id`].
-fn scan_codex_rollout(
+/// First input a session's PTY received while its provider-id capture was
+/// pending. `first_at` gates and floors the rollout scan; `raw` (capped) is
+/// normalized and content-matched against candidate rollouts' first
+/// user_message. Registered empty at spawn, fed by [`SessionManager::input`].
+#[derive(Default)]
+struct CaptureProbe {
+    first_at: Option<std::time::SystemTime>,
+    raw: Vec<u8>,
+}
+
+/// Outcome of one [`pick_codex_rollout`] pass.
+#[derive(Debug, PartialEq)]
+enum RolloutPick {
+    /// Exactly one coherent candidate — claim this provider session id.
+    Claim(String),
+    /// Multiple candidates and no content evidence to tell them apart. Never
+    /// guess: the caller keeps polling (or gives up and leaves the session
+    /// non-resumable).
+    Ambiguous,
+    /// No (acceptable) candidate yet.
+    Nothing,
+}
+
+/// Minimum normalized characters before typed-prompt content is trusted to
+/// confirm or contradict a candidate rollout.
+const CAPTURE_PROBE_MIN_CHARS: usize = 16;
+
+/// One scan-and-pick pass over the unclaimed top-level rollouts for `cwd`
+/// at/after `floor`.
+///
+/// `probe` is the normalized text of the first input THIS session's PTY
+/// received (None when unknown, or when this is the only in-flight capture for
+/// the cwd and content arbitration is unnecessary). Rules:
+/// - a candidate whose first `user_message` matches the probe is CONFIRMED —
+///   the oldest confirmed candidate wins;
+/// - a candidate whose message clearly differs is someone else's conversation
+///   and is excluded outright;
+/// - with no usable probe, a SOLE candidate is claimed (the common single-spawn
+///   case) but multiple candidates are refused as [`RolloutPick::Ambiguous`] —
+///   the 2026-07-21 cross-wire incident was the old code claiming the oldest of
+///   many and resuming other sessions' conversations.
+fn pick_codex_rollout(
     sessions_root: &std::path::Path,
     cwd: &str,
     floor: std::time::SystemTime,
     claimed: &std::collections::HashSet<&str>,
-) -> Option<String> {
-    let mut best: Option<(std::time::SystemTime, String)> = None;
+    probe: Option<&str>,
+) -> RolloutPick {
+    let mut candidates: Vec<(std::time::SystemTime, String, std::path::PathBuf)> = Vec::new();
     for path in recent_codex_rollouts(sessions_root, floor) {
         let Some((session_id, mtime)) = codex_rollout_match(&path, cwd) else {
             continue;
@@ -277,15 +370,98 @@ fn scan_codex_rollout(
         if claimed.contains(session_id.as_str()) {
             continue;
         }
-        let take = match &best {
-            Some((t, _)) => mtime < *t,
-            None => true,
+        candidates.push((mtime, session_id, path));
+    }
+    if candidates.is_empty() {
+        return RolloutPick::Nothing;
+    }
+    let probe = probe.filter(|p| p.chars().count() >= CAPTURE_PROBE_MIN_CHARS);
+    let Some(probe) = probe else {
+        return match candidates.len() {
+            1 => RolloutPick::Claim(candidates.remove(0).1),
+            _ => RolloutPick::Ambiguous,
         };
-        if take {
-            best = Some((mtime, session_id));
+    };
+    // Content arbitration: compare the probe against each candidate's first
+    // user_message over their common prefix (bounded, char-safe).
+    let mut confirmed: Vec<(std::time::SystemTime, String)> = Vec::new();
+    let mut inconclusive: Vec<String> = Vec::new();
+    for (mtime, sid, path) in candidates {
+        match codex_rollout_first_user_message(&path) {
+            Some(msg) => {
+                let msg = normalize_pty_input(msg.as_bytes());
+                let a: Vec<char> = probe.chars().take(120).collect();
+                let b: Vec<char> = msg.chars().take(120).collect();
+                let n = a.len().min(b.len());
+                if n >= CAPTURE_PROBE_MIN_CHARS && a[..n] == b[..n] {
+                    confirmed.push((mtime, sid));
+                }
+                // else: recorded prompt clearly differs → excluded.
+            }
+            None => inconclusive.push(sid),
         }
     }
-    best.map(|(_, sid)| sid)
+    confirmed.sort_by_key(|(t, _)| *t);
+    if let Some((_, sid)) = confirmed.into_iter().next() {
+        return RolloutPick::Claim(sid);
+    }
+    match inconclusive.len() {
+        0 => RolloutPick::Nothing,
+        // A single not-yet-flushed-message candidate: claim it (transient
+        // window; also keeps capture working if codex stops recording
+        // user_message events).
+        1 => RolloutPick::Claim(inconclusive.remove(0)),
+        _ => RolloutPick::Ambiguous,
+    }
+}
+
+/// True when the rollout file for `psid` is being actively written by some
+/// process right now (size/mtime advances across a short settle window).
+/// `ensure_live` uses this as a resume-fork guard: `codex resume <psid>` on a
+/// conversation that is still live in another PTY forks it — the incident's
+/// "duplicated sessions".
+async fn rollout_actively_written(
+    sessions_root: &std::path::Path,
+    psid: &str,
+    settle: Duration,
+) -> bool {
+    fn find(dir: &std::path::Path, psid: &str, depth: usize) -> Option<std::path::PathBuf> {
+        if depth > 5 {
+            return None;
+        }
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => {
+                    if let Some(p) = find(&path, psid, depth + 1) {
+                        return Some(p);
+                    }
+                }
+                Ok(_)
+                    if path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.contains(psid) && n.ends_with(".jsonl")) =>
+                {
+                    return Some(path);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    let Some(path) = find(sessions_root, psid, 0) else {
+        return false;
+    };
+    let stat = |p: &std::path::Path| {
+        std::fs::metadata(p)
+            .ok()
+            .map(|m| (m.len(), m.modified().ok()))
+    };
+    let before = stat(&path);
+    tokio::time::sleep(settle).await;
+    let after = stat(&path);
+    before != after
 }
 
 /// Recursively collect `*.jsonl` rollout files under `root` modified at/after
@@ -370,44 +546,12 @@ fn agy_cli_root() -> std::path::PathBuf {
         .join("antigravity-cli")
 }
 
-/// Capture the agy conversation UUID for a just-spawned session. agy mints its
-/// own conversation id (like codex) and records the most-recent conversation per
-/// cwd in `cache/last_conversations.json`; the id names a `conversations/<id>.db`
-/// (or `.pb`) file. We poll that map for OUR cwd and accept the mapped id once its
-/// conversation file is FRESH (mtime at/after `spawn_time`) and not already
-/// `claimed` by another Otto session — so we never capture a stale pre-existing
-/// conversation for the same cwd. Polls because agy writes the conversation a
-/// moment after launch. `None` if nothing matches in the window — the session
-/// stays non-resumable rather than resuming the wrong conversation.
-async fn capture_agy_session_id(
-    cli_root: &std::path::Path,
-    cwd: &str,
-    spawn_time: std::time::SystemTime,
-    claimed: &[String],
-) -> Option<String> {
-    use std::collections::HashSet;
-    let claimed: HashSet<&str> = claimed.iter().map(String::as_str).collect();
-    // A touch before spawn to tolerate clock/fs skew; a prior session's
-    // conversation in this cwd is either older than this floor or already claimed.
-    let floor = spawn_time
-        .checked_sub(Duration::from_secs(2))
-        .unwrap_or(std::time::UNIX_EPOCH);
-    // agy may only persist the conversation after the first turn, so poll a touch
-    // longer than codex (≈20s) before giving up.
-    for _ in 0..40 {
-        if let Some(sid) = scan_agy_conversation(cli_root, cwd, floor, &claimed) {
-            return Some(sid);
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    None
-}
-
 /// One scan-and-pick pass: read `cache/last_conversations.json`, look up `cwd`,
 /// and accept the mapped conversation id when its `conversations/<id>.{db,pb}`
 /// file exists, is modified at/after `floor`, and isn't already `claimed`. Split
-/// out from the polling loop so it's synchronously testable.
-/// See [`capture_agy_session_id`].
+/// out from the capture loop (`spawn_session_id_capture`) so it's synchronously
+/// testable. agy mints its own conversation id (like codex); the cwd-keyed map
+/// makes this inherently sole-candidate.
 fn scan_agy_conversation(
     cli_root: &std::path::Path,
     cwd: &str,
@@ -834,6 +978,18 @@ pub struct SessionManager {
     /// runs under this lock and persists its claim before releasing, so the next
     /// one sees it in the claimed set. See `spawn_session_id_capture`.
     codex_capture_lock: Arc<Mutex<()>>,
+    /// First-input probe per session with a PENDING provider-id capture.
+    /// Registered (empty) at spawn; [`Self::input`] records the first input
+    /// moment and accumulates the initial bytes. The capture task gates its
+    /// rollout scan on the input moment (a promptless TUI never mints a rollout,
+    /// so scanning before input can only claim someone ELSE's conversation) and
+    /// content-matches the bytes against candidate rollouts' first user_message.
+    capture_probes: Arc<DashMap<Id, CaptureProbe>>,
+    /// In-flight provider-id captures per canonical cwd. When >1, concurrent
+    /// same-cwd spawns are racing and a capture only claims a rollout its own
+    /// typed prompt confirms; when this session is alone, the sole-candidate
+    /// fast path applies (see [`pick_codex_rollout`]).
+    captures_in_flight: Arc<DashMap<String, usize>>,
     /// Optional name-themes store. When set, a new agent session whose title is
     /// not explicitly provided is auto-named from the creating user's active
     /// theme (e.g. "Ronaldo"), unique among the workspace's open sessions.
@@ -880,6 +1036,8 @@ impl SessionManager {
                 .unwrap_or_else(|| "ottod".to_string()),
             mcp_tokens: Arc::new(DashMap::new()),
             codex_capture_lock: Arc::new(Mutex::new(())),
+            capture_probes: Arc::new(DashMap::new()),
+            captures_in_flight: Arc::new(DashMap::new()),
             name_themes: None,
             title_probe: Arc::new(DashMap::new()),
         }
@@ -1711,14 +1869,31 @@ impl SessionManager {
     /// and agy (`agy --conversation <uuid>`, read from its `last_conversations`
     /// cache).
     ///
-    /// Runs under `codex_capture_lock` so two such sessions launched in the same
-    /// cwd claim DISTINCT ids (each persists its claim before the next runs).
-    /// Best-effort: if no matching session appears within the window the session
-    /// simply stays non-resumable (safe — we never guess and resume the wrong
-    /// conversation). Never blocks the spawn.
+    /// The scan is GATED on this session's first PTY input: codex flushes its
+    /// rollout lazily (nothing on disk until the first prompt), so a promptless
+    /// session has nothing of its own to match and scanning early can only
+    /// claim someone else's conversation — the 2026-07-21 cross-wire incident
+    /// (12 same-cwd spawns; captures paired "longest-waiting task" with "next
+    /// prompt typed anywhere", then suspend/resume forked live conversations).
+    /// When several same-cwd captures are in flight, a rollout is only claimed
+    /// if its recorded first user_message matches OUR typed input (see
+    /// [`pick_codex_rollout`]). Claims are persisted under `codex_capture_lock`
+    /// (acquired per scan pass, not across the whole window) so concurrent
+    /// captures see each other's claims. Best-effort: no match within the
+    /// window leaves the session non-resumable — we never guess and resume the
+    /// wrong conversation.
     fn spawn_session_id_capture(&self, session: &Session) {
+        /// Give-up horizon for a session that never receives any input.
+        const NO_INPUT_GIVEUP: Duration = Duration::from_secs(30 * 60);
+        /// Scan window after the first input. Generous: under a many-spawn CPU
+        /// storm codex-tui has been observed taking 2min+ to boot and consume
+        /// the (kernel-buffered) input, and only then does it flush the rollout.
+        const WINDOW_AFTER_INPUT: Duration = Duration::from_secs(180);
+
         let repo = self.repo.clone();
         let lock = Arc::clone(&self.codex_capture_lock);
+        let probes = Arc::clone(&self.capture_probes);
+        let in_flight = Arc::clone(&self.captures_in_flight);
         let id = session.id.clone();
         // codex/agy record a symlink-RESOLVED cwd (macOS `/var` → `/private/var`,
         // `/tmp` → `/private/tmp`) in their session files; the scans below compare
@@ -1728,30 +1903,90 @@ impl SessionManager {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| session.cwd.clone());
         let provider = session.provider.clone();
-        // Captured at the spawn moment so we match THIS launch's session, not a
-        // later concurrent same-cwd spawn's (whose file mtime is newer).
-        let spawn_time = std::time::SystemTime::now();
+        probes.insert(id.clone(), CaptureProbe::default());
+        *in_flight.entry(cwd.clone()).or_insert(0) += 1;
         tokio::spawn(async move {
-            let _guard = lock.lock().await;
-            let claimed = repo.provider_session_ids().await.unwrap_or_default();
-            let captured = match provider.as_str() {
-                "codex" => {
-                    capture_codex_session_id(&codex_sessions_root(), &cwd, spawn_time, &claimed)
-                        .await
-                }
-                "agy" => capture_agy_session_id(&agy_cli_root(), &cwd, spawn_time, &claimed).await,
-                _ => None,
-            };
-            match captured {
-                Some(psid) => match repo.set_provider_session(&id, &psid).await {
-                    Ok(()) => tracing::info!(
-                        session = %id, provider = %provider, provider_session = %psid,
-                        "captured provider session id — session is now resumable"
-                    ),
-                    Err(e) => {
-                        tracing::warn!(session = %id, "provider id capture: persist failed: {e}")
+            let started = std::time::Instant::now();
+            let mut captured: Option<String> = None;
+            let mut logged_ambiguous = false;
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                // Snapshot the probe (guard must not be held across awaits).
+                let Some((first_at, probe_text)) = probes
+                    .get(&id)
+                    .map(|p| (p.first_at, normalize_pty_input(&p.raw)))
+                else {
+                    break; // session removed
+                };
+                let Some(first_at) = first_at else {
+                    if started.elapsed() > NO_INPUT_GIVEUP {
+                        break;
                     }
-                },
+                    continue; // no input yet — nothing of ours can be on disk
+                };
+                let since_input = std::time::SystemTime::now()
+                    .duration_since(first_at)
+                    .unwrap_or_default();
+                if since_input > WINDOW_AFTER_INPUT {
+                    break;
+                }
+                let floor = first_at
+                    .checked_sub(Duration::from_secs(2))
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                // Content arbitration is only needed while OTHER same-cwd
+                // captures race us; alone, the sole-candidate path is exact and
+                // tolerant of probe-garbling edits (arrow keys etc.).
+                let contended = in_flight.get(&cwd).map(|v| *v).unwrap_or(1) > 1;
+                let probe = Some(probe_text.as_str()).filter(|_| contended);
+                let _guard = lock.lock().await;
+                let claimed_rows = repo.provider_session_ids().await.unwrap_or_default();
+                let claimed: std::collections::HashSet<&str> =
+                    claimed_rows.iter().map(String::as_str).collect();
+                let pick = match provider.as_str() {
+                    "codex" => pick_codex_rollout(&codex_sessions_root(), &cwd, floor, &claimed, probe),
+                    "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed)
+                        .map(RolloutPick::Claim)
+                        .unwrap_or(RolloutPick::Nothing),
+                    _ => break,
+                };
+                match pick {
+                    RolloutPick::Claim(psid) => {
+                        // Persist under the lock so the next capture's claimed
+                        // set already contains this id.
+                        match repo.set_provider_session(&id, &psid).await {
+                            Ok(()) => captured = Some(psid),
+                            Err(e) => tracing::warn!(
+                                session = %id, "provider id capture: persist failed: {e}"
+                            ),
+                        }
+                        break;
+                    }
+                    RolloutPick::Ambiguous => {
+                        if !logged_ambiguous {
+                            logged_ambiguous = true;
+                            tracing::info!(
+                                session = %id, cwd = %cwd,
+                                "provider id capture: multiple unclaimed candidates, no content match yet — waiting"
+                            );
+                        }
+                    }
+                    RolloutPick::Nothing => {}
+                }
+            }
+            // Success drops the probe; a miss KEEPS it so the late (reopen-time)
+            // capture can still content-match. Removed with the session either way.
+            if captured.is_some() {
+                probes.remove(&id);
+            }
+            if let Some(mut e) = in_flight.get_mut(&cwd) {
+                *e = e.saturating_sub(1);
+            }
+            in_flight.remove_if(&cwd, |_, v| *v == 0);
+            match captured {
+                Some(psid) => tracing::info!(
+                    session = %id, provider = %provider, provider_session = %psid,
+                    "captured provider session id — session is now resumable"
+                ),
                 None => tracing::warn!(
                     session = %id, provider = %provider,
                     "provider id capture: no matching session found; won't auto-resume"
@@ -1965,6 +2200,31 @@ impl SessionManager {
             && session.provider_session_id.is_some()
             && self.providers.supports_resume(&session.provider);
         if resumable {
+            // Resume-fork guard: if the claimed codex rollout is being written
+            // by another live process RIGHT NOW, `codex resume` would fork that
+            // conversation into this session (two independent copies of one
+            // conversation — the 2026-07-21 "duplicated sessions"). Refuse; the
+            // session stays reconnectable and can be reopened once the other
+            // process is done (or the claim is corrected).
+            if session.provider == "codex" {
+                if let Some(psid) = &session.provider_session_id {
+                    if rollout_actively_written(
+                        &codex_sessions_root(),
+                        psid,
+                        Duration::from_millis(750),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            session = %id, provider_session = %psid,
+                            "refusing resume: conversation is being written by another live process (fork guard)"
+                        );
+                        return Err(Error::Conflict(
+                            "codex conversation is active in another process; refusing to resume a fork of it".into(),
+                        ));
+                    }
+                }
+            }
             self.restart(id, None).await.map(|_| ())?;
         }
         Ok(())
@@ -1972,11 +2232,14 @@ impl SessionManager {
 
     /// One synchronous scan for a non-resumable codex/agy session's on-disk
     /// id, run at reopen time instead of spawn time. Same matching rules as
-    /// [`Self::spawn_session_id_capture`] (canonical cwd, oldest UNCLAIMED
-    /// match at/after the floor, serialized by `codex_capture_lock`) — only
-    /// the floor differs: the session's `created_at`, since the spawn moment
-    /// is long gone. No polling: by reopen time the file either exists or
-    /// never will.
+    /// [`Self::spawn_session_id_capture`] (canonical cwd, unclaimed candidates
+    /// at/after the floor, serialized by `codex_capture_lock`) — only the floor
+    /// differs: the session's `created_at`, since the spawn moment is long
+    /// gone. No polling: by reopen time the file either exists or never will.
+    /// A retained spawn-time probe (capture missed but daemon never restarted)
+    /// still content-matches; otherwise only a SOLE candidate is claimed —
+    /// claiming the oldest of several here is how a blank session could adopt
+    /// another session's conversation and fork it on resume.
     async fn late_capture_provider_id(&self, session: &Session) -> Option<String> {
         let _guard = self.codex_capture_lock.lock().await;
         let claimed_rows = self.repo.provider_session_ids().await.unwrap_or_default();
@@ -1989,7 +2252,29 @@ impl SessionManager {
             .checked_sub(Duration::from_secs(2))
             .unwrap_or(std::time::UNIX_EPOCH);
         match session.provider.as_str() {
-            "codex" => scan_codex_rollout(&codex_sessions_root(), &cwd, floor, &claimed),
+            "codex" => {
+                let probe_text = self
+                    .capture_probes
+                    .get(&session.id)
+                    .map(|p| normalize_pty_input(&p.raw));
+                match pick_codex_rollout(
+                    &codex_sessions_root(),
+                    &cwd,
+                    floor,
+                    &claimed,
+                    probe_text.as_deref(),
+                ) {
+                    RolloutPick::Claim(sid) => Some(sid),
+                    RolloutPick::Ambiguous => {
+                        tracing::warn!(
+                            session = %session.id, cwd = %cwd,
+                            "late provider id capture: multiple unclaimed candidates — refusing to guess"
+                        );
+                        None
+                    }
+                    RolloutPick::Nothing => None,
+                }
+            }
             "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed),
             _ => None,
         }
@@ -2005,6 +2290,17 @@ impl SessionManager {
         let handle = self
             .live_handle(id)
             .ok_or_else(|| Error::Conflict("session is not live".into()))?;
+        // Feed the pending provider-id capture's probe (absent for sessions
+        // without one — the common case, a single map lookup).
+        if let Some(mut probe) = self.capture_probes.get_mut(id) {
+            if probe.first_at.is_none() {
+                probe.first_at = Some(std::time::SystemTime::now());
+            }
+            let room = 4096usize.saturating_sub(probe.raw.len());
+            if room > 0 {
+                probe.raw.extend_from_slice(&data[..data.len().min(room)]);
+            }
+        }
         handle.write(data)
     }
 
@@ -2626,6 +2922,9 @@ impl SessionManager {
         self.repo.delete(id).await?;
         self.ingest_tokens.remove(id);
         self.title_probe.remove(id);
+        // Also ends a pending provider-id capture task (it exits on the missing
+        // probe entry at its next poll).
+        self.capture_probes.remove(id);
         // Revoke the per-session token minted for the `otto` MCP tool server, so
         // its read-only credential dies with the session (best-effort).
         self.revoke_mcp_token(&session.created_by, id).await;
@@ -3282,34 +3581,213 @@ mod tests {
         );
     }
 
+    /// Append a `user_message` event line to a rollout, as codex does when the
+    /// first prompt is submitted (before that the file holds only the meta line).
+    fn append_user_message(path: &std::path::Path, text: &str) {
+        use std::io::Write;
+        let line = serde_json::json!({
+            "timestamp": "2026-07-21T05:05:02.536Z",
+            "type": "event_msg",
+            "payload": { "type": "user_message", "message": text }
+        });
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
     #[test]
-    fn scan_codex_rollout_picks_unclaimed_top_level_match() {
+    fn normalize_pty_input_strips_wrapping_and_collapses() {
+        // Bracketed-paste markers, CSI sequences, CR/LF and whitespace runs all
+        // reduce to the plain text codex records as the user_message.
+        let raw = b"\x1b[200~Scan the  repository koala-vivo-go\rline2\x1b[201~\r";
+        assert_eq!(
+            normalize_pty_input(raw),
+            "Scan the repository koala-vivo-go line2"
+        );
+        assert_eq!(normalize_pty_input(b"  hi \r\n there \x1b[A\x7f"), "hi there");
+        assert_eq!(normalize_pty_input(b"\x1b[200~\x1b[201~\r"), "");
+    }
+
+    #[test]
+    fn rollout_first_user_message_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("2026/07/21");
+        let p = write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
+        // Meta-only rollout (pre-first-prompt): no message yet.
+        assert_eq!(codex_rollout_first_user_message(&p), None);
+        append_user_message(&p, "Scan the repository koala-vivo-go into the Vault");
+        assert_eq!(
+            codex_rollout_first_user_message(&p).as_deref(),
+            Some("Scan the repository koala-vivo-go into the Vault")
+        );
+    }
+
+    /// THE 2026-07-21 incident regression: two concurrent same-cwd spawns; the
+    /// rollout whose first user_message matches THIS session's typed input must
+    /// win, regardless of which rollout is older on disk. The old
+    /// oldest-mtime-unclaimed heuristic claimed another session's conversation.
+    #[test]
+    fn pick_claims_content_match_over_older_rollout() {
         use std::collections::HashSet;
         let tmp = tempfile::tempdir().unwrap();
-        let day = tmp.path().join("2026/06/25");
-        write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
-        write_rollout(
-            &day,
-            "b.jsonl",
-            "BBB",
-            "/work/proj",
-            "codex-tui",
-            "subagent",
-        );
-        write_rollout(&day, "c.jsonl", "CCC", "/elsewhere", "codex-tui", "user");
-        let floor = std::time::SystemTime::UNIX_EPOCH;
+        let day = tmp.path().join("2026/07/21");
+        let a = write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
+        append_user_message(&a, "Scan the repository koala-turbogames-go into the Vault");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let b = write_rollout(&day, "b.jsonl", "BBB", "/work/proj", "codex-tui", "user");
+        append_user_message(&b, "Scan the repository koala-vivo-go into the Vault");
 
-        // Picks the only top-level rollout for this cwd.
-        let none_claimed: HashSet<&str> = HashSet::new();
+        let none: HashSet<&str> = HashSet::new();
+        let floor = std::time::SystemTime::UNIX_EPOCH;
         assert_eq!(
-            scan_codex_rollout(tmp.path(), "/work/proj", floor, &none_claimed),
-            Some("AAA".to_string())
+            pick_codex_rollout(
+                tmp.path(),
+                "/work/proj",
+                floor,
+                &none,
+                Some("Scan the repository koala-vivo-go into the Vault"),
+            ),
+            RolloutPick::Claim("BBB".to_string())
         );
-        // Once AAA is claimed by another session, there's nothing left to claim.
+    }
+
+    /// Multiple same-cwd candidates and no content evidence to tell them apart:
+    /// never guess — report ambiguity so the caller keeps waiting / gives up.
+    #[test]
+    fn pick_refuses_ambiguous_without_content() {
+        use std::collections::HashSet;
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("2026/07/21");
+        write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
+        write_rollout(&day, "b.jsonl", "BBB", "/work/proj", "codex-tui", "user");
+
+        let none: HashSet<&str> = HashSet::new();
+        let floor = std::time::SystemTime::UNIX_EPOCH;
+        // No probe at all → ambiguous.
+        assert_eq!(
+            pick_codex_rollout(tmp.path(), "/work/proj", floor, &none, None),
+            RolloutPick::Ambiguous
+        );
+        // A too-short probe can't discriminate either.
+        assert_eq!(
+            pick_codex_rollout(tmp.path(), "/work/proj", floor, &none, Some("hi")),
+            RolloutPick::Ambiguous
+        );
+    }
+
+    /// The common single-spawn case must keep working without any probe: one
+    /// candidate in the cwd → claim it; already claimed → nothing.
+    #[test]
+    fn pick_sole_candidate_claims_without_probe() {
+        use std::collections::HashSet;
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("2026/07/21");
+        write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
+
+        let none: HashSet<&str> = HashSet::new();
+        let floor = std::time::SystemTime::UNIX_EPOCH;
+        assert_eq!(
+            pick_codex_rollout(tmp.path(), "/work/proj", floor, &none, None),
+            RolloutPick::Claim("AAA".to_string())
+        );
         let claimed: HashSet<&str> = ["AAA"].into_iter().collect();
         assert_eq!(
-            scan_codex_rollout(tmp.path(), "/work/proj", floor, &claimed),
-            None
+            pick_codex_rollout(tmp.path(), "/work/proj", floor, &claimed, None),
+            RolloutPick::Nothing
+        );
+    }
+
+    /// A sole candidate whose recorded first message CONTRADICTS what this
+    /// session's PTY received is someone else's conversation — never claim it.
+    #[test]
+    fn pick_never_claims_contradicting_content() {
+        use std::collections::HashSet;
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("2026/07/21");
+        let a = write_rollout(&day, "a.jsonl", "AAA", "/work/proj", "codex-tui", "user");
+        append_user_message(&a, "Scan the repository koala-turbogames-go into the Vault");
+
+        let none: HashSet<&str> = HashSet::new();
+        let floor = std::time::SystemTime::UNIX_EPOCH;
+        assert_eq!(
+            pick_codex_rollout(
+                tmp.path(),
+                "/work/proj",
+                floor,
+                &none,
+                Some("Scan the repository koala-vivo-go into the Vault"),
+            ),
+            RolloutPick::Nothing
+        );
+    }
+
+    /// `input()` must feed the capture probe (first-input time + normalized
+    /// text) for sessions with a pending provider-id capture.
+    #[tokio::test]
+    async fn input_records_capture_probe() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, None).await;
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 30".into()],
+            // Explicit cwd: under a parallel workspace run another test can
+            // drop the tempdir the process cwd points at, and inheriting a
+            // deleted cwd makes spawn fail with ENOENT.
+            cwd: Some("/".into()),
+            env: vec![],
+        };
+        mgr.live
+            .insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+        // A pending capture registers an empty probe at spawn.
+        mgr.capture_probes.insert(id.clone(), CaptureProbe::default());
+
+        mgr.input(&id, b"\x1b[200~hello world\x1b[201~\r")
+            .await
+            .unwrap();
+
+        let probe = mgr.capture_probes.get(&id).unwrap();
+        assert!(probe.first_at.is_some(), "first input moment recorded");
+        assert_eq!(normalize_pty_input(&probe.raw), "hello world");
+        // Sessions WITHOUT a pending capture don't accumulate probes.
+        let other = seed_session(&repo, &ws, &user, Some("sid")).await;
+        mgr.live
+            .insert(other.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
+        mgr.input(&other, b"x").await.unwrap();
+        assert!(mgr.capture_probes.get(&other).is_none());
+    }
+
+    /// Resume-fork guard: a rollout that another live process is appending to
+    /// must be detected so ensure_live refuses to `codex resume` a fork of it.
+    #[tokio::test]
+    async fn rollout_actively_written_detects_writer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("2026/07/21");
+        let p = write_rollout(
+            &day,
+            "rollout-2026-07-21T08-03-46-PSID1.jsonl",
+            "PSID1",
+            "/work/proj",
+            "codex-tui",
+            "user",
+        );
+        // Static file → not actively written.
+        assert!(
+            !rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await
+        );
+        // A concurrent writer appending during the settle window → detected.
+        let writer = std::thread::spawn({
+            let p = p.clone();
+            move || {
+                for _ in 0..6 {
+                    append_user_message(&p, "more output");
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                }
+            }
+        });
+        assert!(rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await);
+        writer.join().unwrap();
+        // Unknown psid → never blocks a resume.
+        assert!(
+            !rollout_actively_written(tmp.path(), "NOPE", Duration::from_millis(50)).await
         );
     }
 
