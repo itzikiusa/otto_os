@@ -174,7 +174,7 @@
     display: flex;
     flex-direction: column;
     border-top: 1px solid var(--border);
-    background: var(--panel, #1c1c1e);
+    background: var(--surface);
   }
   .bar {
     display: flex;
@@ -189,7 +189,7 @@
     flex-shrink: 0;
   }
   .bar select {
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 7px;
     color: var(--text);
@@ -203,7 +203,7 @@
   .bar input {
     flex: 1;
     min-width: 0;
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 7px;
     color: var(--text);
@@ -219,7 +219,7 @@
     gap: 6px;
     background: var(--accent, #4c6fff);
     border: none;
-    color: #fff;
+    color: var(--accent-contrast, #fff);
     border-radius: 7px;
     padding: 6px 14px;
     font-size: 12.5px;

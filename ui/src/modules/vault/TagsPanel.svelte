@@ -33,7 +33,7 @@
     padding: 8px;
   }
   input {
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 7px;
     color: var(--text);

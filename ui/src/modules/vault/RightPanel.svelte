@@ -198,7 +198,7 @@
   }
   .badge.err {
     background: rgba(214, 86, 72, 0.25);
-    color: #e88;
+    color: var(--status-exited);
   }
   .item {
     display: block;
@@ -248,10 +248,10 @@
     padding: 4px 8px;
   }
   .none.ok {
-    color: #7fc97f;
+    color: var(--status-working);
   }
   .none.warn {
-    color: #d6a548;
+    color: var(--status-warn);
   }
   .props {
     width: 100%;
@@ -279,16 +279,16 @@
   .mini {
     font-size: 11px;
     border: 1px solid var(--border);
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     color: var(--text);
     border-radius: 6px;
     padding: 3px 8px;
     cursor: pointer;
   }
   .finding.err .t b {
-    color: #e88;
+    color: var(--status-exited);
   }
   .finding.warn .t b {
-    color: #d6a548;
+    color: var(--status-warn);
   }
 </style>

@@ -105,7 +105,7 @@
   .panel {
     width: min(620px, 92vw);
     max-height: 60vh;
-    background: var(--panel, #1c1c1e);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
@@ -142,7 +142,7 @@
   }
   .hit.sel,
   .hit:hover {
-    background: var(--accent-dim, rgba(90, 120, 255, 0.18));
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
   }
   .t {
     font-size: 13px;

@@ -384,7 +384,7 @@
     background: var(--hover, rgba(127, 127, 127, 0.12));
   }
   .row.active {
-    background: var(--accent-dim, rgba(90, 120, 255, 0.18));
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
   }
   .row.reserved .name {
     opacity: 0.65;
@@ -422,7 +422,7 @@
     visibility: visible;
   }
   .row.checked {
-    background: var(--accent-dim, rgba(90, 120, 255, 0.12));
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .sel-bar {
     display: flex;
@@ -430,7 +430,7 @@
     gap: 6px;
     padding: 6px 8px;
     border-top: 1px solid var(--border);
-    background: var(--panel, #1c1c1e);
+    background: var(--surface);
   }
   .sel-row {
     display: flex;
@@ -445,7 +445,7 @@
   .sel-input {
     flex: 1;
     min-width: 0;
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 6px;
     color: var(--text);
@@ -455,7 +455,7 @@
   .sel-select {
     flex: 0 0 auto;
     max-width: 45%;
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 6px;
     color: var(--text);
@@ -495,7 +495,7 @@
   .prov {
     font-size: 10px;
     color: var(--accent, #9ab4ff);
-    background: var(--accent-dim, rgba(90, 120, 255, 0.12));
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-radius: 999px;
     padding: 0 7px;
     white-space: nowrap;
@@ -507,7 +507,7 @@
     position: absolute;
     inset-inline-start: 40px;
     inset-inline-end: 8px;
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--accent, #7a9cff);
     border-radius: 4px;
     color: var(--text);

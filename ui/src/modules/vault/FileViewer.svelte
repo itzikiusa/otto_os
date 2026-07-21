@@ -6,12 +6,14 @@
   // syntax-highlighted code. Content is loaded by the store (vault.openFile).
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
+  import { formatHtml } from '../../lib/formatHtml';
   import { ensureHljs, highlightLine, langFromPath } from '../../lib/hl';
   import { ui } from '../../lib/stores/ui.svelte';
   import { parse as parseYaml } from 'yaml';
   import { renderD2 } from '../canvas/d2';
   import OpenApiView from './OpenApiView.svelte';
-  import { vault } from './vault.svelte';
+  import { RICH_TEXT_MAX, vault } from './vault.svelte';
 
   const path = $derived(vault.filePath ?? '');
   const name = $derived(path.split('/').pop() ?? path);
@@ -20,6 +22,15 @@
   const IMG = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico']);
   const isImage = $derived(IMG.has(ext));
   const isPdf = $derived(ext === 'pdf');
+
+  // Files past the rich-view budget (parse/pretty-print/highlight would freeze
+  // the webview) render in a virtualized plain-text viewer instead.
+  const isLarge = $derived(!isImage && !isPdf && vault.fileSize > RICH_TEXT_MAX);
+
+  // .html renders in a sandboxed iframe (mockups/reference views agents drop in
+  // the vault) with a Source toggle. No allow-same-origin: scripts run in an
+  // opaque origin and can't reach the app or the daemon.
+  const isHtml = $derived(ext === 'html' || ext === 'htm');
 
   // .d2 files render as diagrams (WASM, lazy) with a Source toggle — d2 is the
   // preferred format for data-model diagrams (sql_table), so agents drop these
@@ -33,7 +44,7 @@
     const dark = ui.resolvedScheme === 'dark';
     d2Svg = null;
     d2Error = null;
-    if (!isD2 || text == null) return;
+    if (!isD2 || isLarge || text == null) return;
     const id = `vault-d2-file-${++d2Seq}`;
     void renderD2(id, text, { dark }).then(({ svg, error }) => {
       if (vault.fileText !== text) return; // switched files meanwhile
@@ -48,6 +59,7 @@
 
   /** json/yaml parsed (null = not parseable / not structured). */
   const parsed = $derived.by(() => {
+    if (isLarge) return null;
     const text = vault.fileText;
     if (text == null) return null;
     try {
@@ -66,11 +78,13 @@
     }
     return null;
   });
-  /** OpenAPI: toggle between the structured view and the raw source. */
+  /** OpenAPI/D2/HTML: toggle between the rendered view and the raw source. */
   let showRaw = $state(false);
   $effect(() => {
     void path;
     showRaw = false;
+    bigPretty = null;
+    bigPrettyError = '';
   });
 
   const prettyJson = $derived(
@@ -115,6 +129,7 @@
   }
 
   const csvRows = $derived.by(() => {
+    if (isLarge) return null;
     if (ext !== 'csv' && ext !== 'tsv') return null;
     const text = vault.fileText;
     if (!text) return null;
@@ -127,12 +142,21 @@
   const CODE_MAX_LINES = 10_000;
   const codeHtml = $derived.by(() => {
     void hlReady;
-    if (isImage || isPdf) return null;
+    if (isImage || isPdf || isLarge) return null;
     if (openapi && !showRaw) return null;
     if (isD2 && !showRaw && d2Svg) return null;
+    if (isHtml && !showRaw) return null;
     if (csvRows) return null;
-    const text = prettyJson ?? vault.fileText;
+    let text = prettyJson ?? vault.fileText;
     if (text == null) return null;
+    if (isHtml) {
+      // Agents save mockups minified (one huge line) — pretty-print for display.
+      try {
+        text = formatHtml(text);
+      } catch {
+        /* best-effort — show as saved */
+      }
+    }
     const lang = ext === 'json' ? 'json' : langFromPath(path);
     const lines = text.split('\n');
     const shown = lines.slice(0, CODE_MAX_LINES);
@@ -141,6 +165,65 @@
       truncated: lines.length > CODE_MAX_LINES,
       total: lines.length,
     };
+  });
+
+  // -- large files: virtualized plain text ---------------------------------------
+  // Long lines (minified JSON is one giant line) are chunked so every row has a
+  // bounded width; row count is capped so the sizer never exceeds the browser's
+  // max element height (~33.5M px in WebKit).
+  const BIG_LINE_CHUNK = 2000;
+  const BIG_MAX_ROWS = 1_500_000;
+  const BIG_ROW_H = 18;
+  /** Pretty-printing is opt-in (a click) — parse+stringify of a huge JSON blocks
+   * for seconds and roughly triples memory, so cap where we offer it. */
+  const BIG_PRETTY_MAX = 64_000_000;
+  let bigPretty = $state<string | null>(null);
+  let bigPrettyError = $state('');
+  let bigFormatting = $state(false);
+  const canPrettyBig = $derived(
+    isLarge && ext === 'json' && bigPretty === null && vault.fileSize <= BIG_PRETTY_MAX,
+  );
+  function formatBigJson(): void {
+    const text = vault.fileText;
+    if (text == null || bigFormatting) return;
+    bigFormatting = true;
+    bigPrettyError = '';
+    // Let the button repaint to its "Formatting…" state before we block.
+    setTimeout(() => {
+      try {
+        bigPretty = JSON.stringify(JSON.parse(text), null, 2);
+      } catch (e) {
+        bigPrettyError = e instanceof Error ? e.message : String(e);
+      } finally {
+        bigFormatting = false;
+      }
+    }, 30);
+  }
+
+  const bigLines = $derived.by(() => {
+    if (!isLarge) return null;
+    const text = bigPretty ?? vault.fileText;
+    if (text == null) return null;
+    const rows: string[] = [];
+    let truncated = false;
+    outer: for (const line of text.split('\n')) {
+      if (line.length <= BIG_LINE_CHUNK) {
+        rows.push(line);
+        if (rows.length >= BIG_MAX_ROWS) {
+          truncated = true;
+          break;
+        }
+      } else {
+        for (let i = 0; i < line.length; i += BIG_LINE_CHUNK) {
+          rows.push(line.slice(i, i + BIG_LINE_CHUNK));
+          if (rows.length >= BIG_MAX_ROWS) {
+            truncated = true;
+            break outer;
+          }
+        }
+      }
+    }
+    return { rows, truncated };
   });
 </script>
 
@@ -155,10 +238,10 @@
         {/if}
       {/each}
     </nav>
-    {#if openapi || (isD2 && d2Svg)}
+    {#if !isLarge && (openapi || (isD2 && d2Svg) || isHtml)}
       <button class="mode-btn" onclick={() => (showRaw = !showRaw)}>
         <Icon name={showRaw ? 'eye' : 'function'} size={13} />
-        {showRaw ? (openapi ? 'Spec view' : 'Diagram') : 'Source'}
+        {showRaw ? (openapi ? 'Spec view' : isHtml ? 'Preview' : 'Diagram') : 'Source'}
       </button>
     {/if}
   </header>
@@ -174,6 +257,30 @@
       </div>
     {:else if isPdf && vault.fileBlobUrl}
       <iframe class="pdf" src={vault.fileBlobUrl} title={name}></iframe>
+    {:else if bigLines}
+      <div class="big-bar">
+        <span class="dim">
+          Large file ({(vault.fileSize / 1024 / 1024).toFixed(1)} MB) — plain text view
+        </span>
+        {#if canPrettyBig || bigFormatting}
+          <button class="mode-btn" onclick={formatBigJson} disabled={bigFormatting}>
+            <Icon name="function" size={13} />
+            {bigFormatting ? 'Formatting…' : 'Pretty-print JSON'}
+          </button>
+        {/if}
+        {#if bigPrettyError}
+          <span class="err">Not valid JSON: {bigPrettyError}</span>
+        {/if}
+      </div>
+      <VirtualList items={bigLines.rows} estimateHeight={BIG_ROW_H} class="big-lines">
+        {#snippet row(line: string)}<div class="big-ln">{line}</div>{/snippet}
+      </VirtualList>
+      {#if bigLines.truncated}
+        <div class="notice">Showing the first {BIG_MAX_ROWS.toLocaleString()} lines.</div>
+      {/if}
+    {:else if isHtml && !showRaw && vault.fileText != null}
+      <iframe class="html-frame" sandbox="allow-scripts" srcdoc={vault.fileText} title={name}
+      ></iframe>
     {:else if isD2 && !showRaw && d2Svg}
       <div class="d2-wrap">{@html d2Svg}</div>
     {:else if isD2 && !showRaw && d2Error}
@@ -267,7 +374,7 @@
     font-size: 12.5px;
   }
   .notice.err {
-    color: #e88;
+    color: var(--status-exited);
   }
   .img-wrap {
     display: flex;
@@ -298,6 +405,13 @@
     border: none;
     min-height: 0;
   }
+  .html-frame {
+    flex: 1;
+    border: none;
+    min-height: 0;
+    /* Mockups usually assume a light page; srcdoc iframes are transparent. */
+    background: #fff;
+  }
   .table-wrap {
     padding: 12px 14px;
     overflow: auto;
@@ -319,7 +433,7 @@
   th {
     position: sticky;
     top: 0;
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
   }
   .code {
     margin: 0;
@@ -328,5 +442,36 @@
     line-height: 1.55;
     overflow: auto;
     flex: 1;
+  }
+  .big-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    font-size: 12.5px;
+    border-bottom: 1px solid var(--border);
+  }
+  .big-bar .dim {
+    color: var(--text-dim);
+  }
+  .big-bar .err {
+    color: var(--status-exited);
+  }
+  .file-view :global(.big-lines) {
+    flex: 1;
+    min-height: 0;
+    padding: 8px 14px 40px;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 12px;
+  }
+  /* Let long rows extend the scroll width instead of being clipped to the pane. */
+  .file-view :global(.big-lines .vlist-win) {
+    inset-inline-end: auto;
+    min-width: 100%;
+  }
+  .big-ln {
+    white-space: pre;
+    height: 18px;
+    line-height: 18px;
   }
 </style>

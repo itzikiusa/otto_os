@@ -286,7 +286,7 @@
     margin: 8px 0 4px;
   }
   .servers code {
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 2px 8px;
@@ -395,7 +395,7 @@
   }
   .pname.req::after {
     content: '*';
-    color: #e88;
+    color: var(--status-exited);
   }
   .ptype {
     color: var(--accent, #9ab4ff);
@@ -407,7 +407,7 @@
     font-size: 11.5px;
   }
   .ex {
-    background: var(--panel-2, #1d1d1f);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 10px 12px;
@@ -422,8 +422,8 @@
     font-size: 12px;
     margin-inline-end: 8px;
   }
-  .resp .code.ok { color: #7fc97f; }
-  .resp .code.bad { color: #e88; }
+  .resp .code.ok { color: var(--status-working); }
+  .resp .code.bad { color: var(--status-exited); }
   .rdesc {
     color: var(--text-dim);
     font-size: 12px;

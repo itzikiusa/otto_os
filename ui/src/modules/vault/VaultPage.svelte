@@ -458,7 +458,7 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: 8px;
@@ -491,7 +491,7 @@
     animation: pulse 1.2s ease-in-out infinite;
   }
   .scan-chip.err {
-    color: #e88;
+    color: var(--status-exited);
     animation: none;
   }
   .run-chip {
@@ -500,7 +500,7 @@
     gap: 5px;
     font-size: 11px;
     color: var(--accent, #9ab4ff);
-    background: var(--accent-dim, rgba(90, 120, 255, 0.14));
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
     border: 1px solid var(--accent, #7a9cff);
     border-radius: 999px;
     padding: 2px 9px;
@@ -573,7 +573,7 @@
   }
   .left-modes button.active {
     color: var(--accent, #9ab4ff);
-    background: var(--accent-dim, rgba(90, 120, 255, 0.14));
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .resizer {
     width: 4px;
@@ -581,7 +581,7 @@
     flex-shrink: 0;
   }
   .resizer:hover {
-    background: var(--accent-dim, rgba(90, 120, 255, 0.3));
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .center {
     flex: 1;
@@ -626,7 +626,7 @@
   }
   .vtab.active {
     color: var(--text);
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border-color: var(--border);
   }
   .vtab-name {
@@ -675,10 +675,10 @@
     color: var(--text-dim);
   }
   .vault-statusbar .ok {
-    color: #7fc97f;
+    color: var(--status-working);
   }
   .vault-statusbar .bad {
-    color: #e88;
+    color: var(--status-exited);
   }
   .vault-statusbar .dim {
     opacity: 0.7;
@@ -707,7 +707,7 @@
   .actions .primary {
     background: var(--accent, #4c6fff);
     border: none;
-    color: #fff;
+    color: var(--accent-contrast, #fff);
     border-radius: 8px;
     padding: 8px 18px;
     font-size: 13px;
@@ -726,7 +726,7 @@
   }
   .dialog {
     width: min(460px, 92vw);
-    background: var(--panel, #1c1c1e);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 16px;
@@ -746,7 +746,7 @@
     color: var(--text-dim);
   }
   .fld input {
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 7px;
     color: var(--text);
@@ -763,7 +763,7 @@
   }
   .browse {
     border: 1px solid var(--border);
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     color: var(--text);
     border-radius: 7px;
     padding: 0 12px;
@@ -772,7 +772,7 @@
     white-space: nowrap;
   }
   .err {
-    color: #e88;
+    color: var(--status-exited);
     font-size: 12px;
     border: 1px solid rgba(214, 86, 72, 0.4);
     background: rgba(214, 86, 72, 0.08);
@@ -793,7 +793,7 @@
   }
   .actions button {
     border: 1px solid var(--border);
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     color: var(--text);
     border-radius: 7px;
     padding: 6px 14px;

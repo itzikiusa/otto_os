@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace, seedVaultDir } from './seed';
 import { expectNoHorizontalOverflow, openPage } from './helpers';
@@ -238,6 +238,33 @@ test('ui: OpenAPI viewer resolves $ref parameters; multi-d2 notes render every d
   await expect(blocks.nth(0).locator('svg').first()).toBeVisible({ timeout: 30_000 });
   await expect(blocks.nth(1).locator('svg').first()).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.read')).not.toContainText('[object Object]');
+});
+
+// Large text files (past the rich-view budget) must render in the virtualized
+// plain-text viewer — not the old "File is too large to display" dead end —
+// with pretty-print as an opt-in click for JSON.
+test('ui: large minified json renders virtualized, pretty-print opt-in', async ({ page }) => {
+  // ~2.6 MB on ONE line — past RICH_TEXT_MAX and the worst case for row chunking.
+  const big =
+    '{"items":[' +
+    Array.from({ length: 80_000 }, (_, i) => `{"id":${i},"name":"item-${i}"}`).join(',') +
+    ']}';
+  writeFileSync(join(vaultDir, 'services', 'manifest.json'), big);
+
+  await openPage(page, 'vault');
+  const tree = page.locator('.tree');
+  await expect(tree.getByText('services', { exact: true })).toBeVisible({ timeout: 15_000 });
+  await tree.getByText('services', { exact: true }).click();
+  await tree.getByText('manifest.json', { exact: true }).click();
+
+  // Plain view, not the size error; rows are bounded-width chunks.
+  await expect(page.locator('.big-bar')).toContainText('Large file', { timeout: 15_000 });
+  await expect(page.locator('.file-view')).not.toContainText('too large to display');
+  await expect(page.locator('.big-ln').first()).toBeVisible();
+
+  // Opt-in pretty-print reflows the single line into an indented document.
+  await page.getByRole('button', { name: 'Pretty-print JSON' }).click();
+  await expect(page.locator('.big-ln').first()).toHaveText('{', { timeout: 30_000 });
 });
 
 test('ui: OKF panel validates and reports', async ({ page }) => {

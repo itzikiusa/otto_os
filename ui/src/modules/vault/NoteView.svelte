@@ -342,7 +342,7 @@
   .mode-btn.refine-on {
     border-color: var(--accent, #7a9cff);
     color: var(--accent, #9ab4ff);
-    background: var(--accent-dim, rgba(90, 120, 255, 0.14));
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .conflict {
     display: flex;
@@ -357,7 +357,7 @@
   }
   .conflict button {
     border: 1px solid var(--border);
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     color: var(--text);
     border-radius: 6px;
     padding: 3px 10px;
@@ -366,7 +366,7 @@
   }
   .conflict button.danger {
     border-color: #a33;
-    color: #e88;
+    color: var(--status-exited);
   }
   .editor-wrap {
     flex: 1;
@@ -404,7 +404,7 @@
     border-bottom: 1px dashed currentColor;
   }
   .read :global(span.tag) {
-    background: var(--accent-dim, rgba(90, 120, 255, 0.16));
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
     color: var(--accent, #9ab4ff);
     border-radius: 999px;
     padding: 1px 8px;
@@ -428,7 +428,7 @@
   }
   .read :global(blockquote.callout) {
     border-inline-start: 3px solid var(--accent, #7a9cff);
-    background: var(--accent-dim, rgba(90, 120, 255, 0.08));
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
     border-radius: 6px;
     padding: 8px 12px;
     margin: 8px 0;
@@ -441,7 +441,7 @@
   }
   .read :global(blockquote.callout-warning),
   .read :global(blockquote.callout-caution) {
-    border-inline-start-color: #d6a548;
+    border-inline-start-color: var(--status-warn);
     background: rgba(214, 165, 72, 0.08);
   }
   .read :global(blockquote.callout-danger),
@@ -461,7 +461,7 @@
     border-radius: 10px;
     padding: 14px;
     margin: 10px 0;
-    background: var(--panel, rgba(127, 127, 127, 0.04));
+    background: var(--surface-2);
     overflow-x: auto;
   }
   .read :global(div.diagram-block.diagram-ok) {
@@ -476,7 +476,7 @@
     height: auto;
   }
   .read :global(div.diagram-error) {
-    color: #e88;
+    color: var(--status-exited);
     font-size: 12px;
     margin-bottom: 8px;
   }

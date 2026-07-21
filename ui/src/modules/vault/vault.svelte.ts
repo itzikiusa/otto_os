@@ -50,8 +50,11 @@ export interface VaultTab {
   path: string;
 }
 
-/** Text files bigger than this render a "too large" notice, not the body. */
-const MAX_TEXT_FILE = 2_000_000;
+/** Text files bigger than this lose the rich views (pretty JSON, OpenAPI,
+ * syntax highlight) and render in the virtualized plain-text viewer instead. */
+export const RICH_TEXT_MAX = 2_000_000;
+/** Absolute ceiling for loading a text file into the webview at all. */
+const MAX_TEXT_FILE = 200_000_000;
 
 /** A row of the flattened, lazily-loaded file tree. */
 export interface TreeNode {
@@ -99,6 +102,7 @@ class VaultStore {
   filePath = $state<string | null>(null);
   fileText = $state<string | null>(null);
   fileBlobUrl = $state<string | null>(null);
+  fileSize = $state(0);
   fileLoading = $state(false);
   fileError = $state('');
 
@@ -536,6 +540,7 @@ class VaultStore {
     this.filePath = null;
     this.fileText = null;
     this.fileBlobUrl = null;
+    this.fileSize = 0;
     this.fileError = '';
     this.fileLoading = false;
   }
@@ -554,10 +559,15 @@ class VaultStore {
         URL.revokeObjectURL(url);
         return;
       }
-      this.fileBlobUrl = url;
-      if (!/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico|pdf)$/i.test(path)) {
+      if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico|pdf)$/i.test(path)) {
+        this.fileBlobUrl = url;
+      } else {
+        // Text files never use the blob URL — read the body and drop the URL so
+        // a 100 MB JSON isn't held in memory twice (blob + string).
         const blob = await (await fetch(url)).blob();
+        URL.revokeObjectURL(url);
         if (this.filePath !== path) return;
+        this.fileSize = blob.size;
         if (blob.size > MAX_TEXT_FILE) {
           this.fileError = `File is too large to display (${(blob.size / 1024 / 1024).toFixed(1)} MB)`;
         } else {

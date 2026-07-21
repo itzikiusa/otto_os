@@ -92,7 +92,7 @@
   }
   .panel {
     width: min(440px, 92vw);
-    background: var(--panel, #1c1c1e);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 16px;
@@ -105,7 +105,7 @@
     font-size: 14px;
   }
   input:not([type]) {
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 7px;
     color: var(--text);
@@ -119,7 +119,7 @@
     font-size: 12.5px;
   }
   select {
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -133,7 +133,7 @@
   }
   .actions button {
     border: 1px solid var(--border);
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     color: var(--text);
     border-radius: 7px;
     padding: 6px 14px;
@@ -143,7 +143,7 @@
   .actions .primary {
     background: var(--accent, #4c6fff);
     border-color: transparent;
-    color: #fff;
+    color: var(--accent-contrast, #fff);
   }
   .actions .primary:disabled {
     opacity: 0.5;

@@ -55,7 +55,7 @@
     padding: 8px;
   }
   input {
-    background: var(--panel-2, #222);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 7px;
     color: var(--text);
@@ -104,7 +104,7 @@
     margin-top: 2px;
   }
   .s :global(mark) {
-    background: var(--accent-dim, rgba(90, 120, 255, 0.3));
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
     color: var(--text);
     border-radius: 3px;
     padding: 0 1px;
