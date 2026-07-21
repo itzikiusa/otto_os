@@ -578,7 +578,45 @@
     } catch {
       return false;
     }
+    applyAutoFontFit();
     return true;
+  }
+
+  // ── Column floor via auto font shrink ───────────────────────────────────────
+  // A pane in a dense tile grid (6 sessions ⇒ ~45 cols at normal font) used to
+  // size the PTY to the tile — everything the agent printed while tiled was
+  // hard-wrapped that narrow FOREVER (no terminal can re-wrap printed line
+  // breaks). Instead of letting the grid drop below MIN_FIT_COLS, shrink the
+  // FONT so the tile keeps ≥80 real columns: the tile becomes a small-text
+  // monitor, the agent keeps rendering at sane width, and a later maximize
+  // (+ the one-shot compact) shows a clean wide transcript. The font returns
+  // to the user's preference as soon as the pane is wide enough. Desktop only —
+  // phone keeps its readability floor.
+  const MIN_FIT_COLS = 80;
+  const MIN_FIT_FONT = 6;
+  function applyAutoFontFit(): void {
+    if (!term || !fit || viewport.isPhone) return;
+    const cols = term.cols;
+    const cur = term.options.fontSize ?? effFontSize;
+    let target = cur;
+    if (cols < MIN_FIT_COLS) {
+      // cols scale ≈ 1/fontSize: pick the font that yields ≥ MIN_FIT_COLS.
+      target = Math.max(MIN_FIT_FONT, Math.floor((cur * cols) / MIN_FIT_COLS));
+    } else {
+      // Room available — restore toward the user's preferred size, but never
+      // past the size that would dip back under the floor (hysteresis).
+      const maxFont = Math.floor((cur * cols) / MIN_FIT_COLS);
+      target = Math.min(effFontSize, maxFont);
+    }
+    if (target === cur) return;
+    term.options.fontSize = target;
+    clearWebglAtlas();
+    try {
+      fit.fit(); // re-measure at the new metrics (container already validated)
+    } catch {
+      /* detached mid-change */
+    }
+    forceViewportRefresh();
   }
 
   /** Cap below which a shell frame is treated as interactive (not a stream dump).
