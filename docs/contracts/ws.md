@@ -62,10 +62,15 @@ settle window mid-flight, and a single mid-animation measurement SIGWINCHes
 the TUI into re-rendering its transcript at a transient width that then
 fossilizes in scrollback (measured: 0.8s at 69×44 on a 165×48 pane). Every
 SIGWINCH makes agent TUIs reprint their live region, and codex re-emits
-transcript lines that permanently accumulate in scrollback. Clients must NOT rebuild their buffer from a `scrollback`
-snapshot in response to their own resize — snapshots are for (re)attach and
-the server's unsolicited lagged-drop recovery only; the client terminal's
-own native reflow is authoritative for the live view.
+transcript lines that permanently accumulate in scrollback. Clients must
+NOT rebuild their buffer from a `scrollback` snapshot mid-resize; the
+client terminal's own native reflow is authoritative for the live view.
+ONE deterministic rebuild is allowed (and recommended for agent panes)
+~1s AFTER a stability-confirmed grid change lands: a bottom-anchored TUI's
+post-widen repaint leaves a blank void between the rejoined transcript and
+its live region, and the snapshot (contiguous by construction) closes it —
+the automated version of the manual reconnect users performed. Skip it
+while the viewport is scrolled up (a rebuild yanks it to the bottom).
 
 ### Server → client
 

@@ -294,6 +294,59 @@ const scenarios = {
     });
   },
 
+  /** REAL claude in a split-width pane, then MAXIMIZE: the post-widen repaint
+   *  must not leave a blank void between the transcript and the live region
+   *  once the one-shot compact (snapshot rebuild ~1s after the confirmed
+   *  resize — the automated manual-reconnect) has run. */
+  async 'real-claude-maximize'() {
+    const s = await mkSession('claude', 'e2e-claude-max');
+    const c = new TermClient(env.base, env.token, s.id, { cols: 82, rows: 44 });
+    const marker = 'OTTO_E2E_MARK_MAX';
+    try {
+      await c.connect();
+      await waitFor(() => c.bufferText().trim().length > 80, 45_000);
+      await waitBufferStable(c, { quietMs: 3500, timeoutMs: 90_000 });
+      let echoed = false;
+      for (let attempt = 0; attempt < 4 && !echoed; attempt++) {
+        c.type(`Reply with exactly the single line ${marker} and nothing else.`);
+        echoed = !!(await waitFor(() => c.bufferText().includes(marker), 5000, 250));
+        if (!echoed) await sleep(2000);
+      }
+      check(echoed, 'claude echoed prompt at split width');
+      await sleep(600);
+      c.type('\r');
+      await waitFor(() => count(c.bufferText(), marker) >= 2, 150_000, 500);
+      await waitBufferStable(c, { quietMs: 4000, timeoutMs: 60_000 });
+
+      // MAXIMIZE: 82×44 → 165×48, then model the component's one-shot compact.
+      await c.resizeSettled(165, 48, 1200);
+      const before = c.snapshotCount;
+      c.sendJson({ type: 'scrollback', lines: 10_000 });
+      await waitFor(() => c.snapshotCount > before, 10_000, 100);
+      await sleep(600);
+
+      const vp = c.viewportText().split('\n');
+      // Largest run of fully-blank rows between first and last content row.
+      let firstContent = -1, lastContent = -1;
+      vp.forEach((l, i) => {
+        if (l.trim() !== '') {
+          if (firstContent === -1) firstContent = i;
+          lastContent = i;
+        }
+      });
+      let run = 0, maxRun = 0;
+      for (let i = firstContent; i <= lastContent; i++) {
+        if (vp[i].trim() === '') { run++; maxRun = Math.max(maxRun, run); } else run = 0;
+      }
+      check(maxRun <= 8, `no blank void after maximize+compact (largest gap ${maxRun} rows)`);
+      check(count(c.bufferText(), marker) >= 1, 'response survived maximize+compact');
+      check(count(c.viewportText(), marker) <= 2, `screen coherent (marker ×${count(c.viewportText(), marker)})`);
+    } finally {
+      c.close();
+      await rmSession(s.id);
+    }
+  },
+
   /** REAL codex: same flow. codex re-emits transcript lines on SIGWINCH (in
    *  every terminal — iTerm included), so scrollback growth up to ~2 lines per
    *  resize is upstream parity; MULTIPLICATION (the ×20 bug) must be gone and

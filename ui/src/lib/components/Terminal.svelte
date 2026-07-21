@@ -472,16 +472,44 @@
       const force = resizeForcePending;
       resizeForcePending = false;
       if (!force && cols === lastCols && rows === lastRows) return;
+      const changed = cols !== lastCols || rows !== lastRows;
       lastCols = cols;
       lastRows = rows;
       // Forced path pushes even when unchanged locally: the server may hold a
       // different grid (daemon restart / another viewer) and drops same-size
       // resizes before the ioctl, so this is free when nothing changed.
       sendJson({ type: 'resize', cols, rows });
+      if (changed) scheduleResizeCompact();
       return;
     }
     confirmGrid = { cols, rows };
     resizeSendTimer = setTimeout(confirmResizeStep, RESIZE_CONFIRM_MS);
+  }
+
+  // One-shot COMPACT after the TUI has repainted at the confirmed grid:
+  // rebuild from the server snapshot, exactly what a manual reconnect did.
+  // A bottom-anchored TUI (claude) repaints its live region at the screen
+  // bottom after a big widen while the rejoined transcript above moved up —
+  // leaving a large blank void between them (the "maximize after a split
+  // looks broken until I reconnect" report). The server emulator holds the
+  // contiguous truth, so one deterministic rebuild closes the gap. Safe now
+  // (unlike the old mid-resize resync): geometry is stability-confirmed
+  // first, codex's 3J keeps the emulator duplicate-free, and the rebuild is
+  // skipped while the user is scrolled up reading (it would yank the
+  // viewport to the bottom). Agent panes only — shells never leave gaps.
+  const RESIZE_COMPACT_MS = 900;
+  let resizeCompactTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleResizeCompact(): void {
+    if (!preferDom) return;
+    if (resizeCompactTimer !== null) clearTimeout(resizeCompactTimer);
+    resizeCompactTimer = setTimeout(() => {
+      resizeCompactTimer = null;
+      if (!term || !connected) return;
+      if (resizeSendTimer !== null) return; // grid moving again — the next commit reschedules
+      const buf = term.buffer.active;
+      if (buf.viewportY !== buf.baseY) return; // user is reading scrollback
+      sendJson({ type: 'scrollback', lines: term.options.scrollback ?? 10_000 });
+    }, RESIZE_COMPACT_MS);
   }
 
   function sendResize(force = false): void {
@@ -1013,6 +1041,10 @@
       if (refitTimer) clearTimeout(refitTimer);
       cancelResizeTimer();
       resizeForcePending = false;
+      if (resizeCompactTimer !== null) {
+        clearTimeout(resizeCompactTimer);
+        resizeCompactTimer = null;
+      }
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -1065,6 +1097,10 @@
     }
     cancelResizeTimer();
     resizeForcePending = false;
+    if (resizeCompactTimer !== null) {
+      clearTimeout(resizeCompactTimer);
+      resizeCompactTimer = null;
+    }
     // 2. Close the old socket cleanly. Mark closedByUs BEFORE calling close() so
     //    the synchronous onclose callback (which scheduleReconnect reads) does not
     //    kick off a reconnect to the old session.
