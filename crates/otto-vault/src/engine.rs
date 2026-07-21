@@ -262,7 +262,7 @@ impl VaultEngine {
             let stem = base.strip_suffix(".md").or_else(|| base.strip_suffix(".MD")).unwrap_or(base);
             let reserved = matches!(stem.to_ascii_lowercase().as_str(), "index" | "log")
                 && base.to_ascii_lowercase().ends_with(".md");
-            let title = parsed.title.clone().unwrap_or_else(|| stem.to_string());
+            let title = parse::derive_title(&parsed, rel);
             let hash = hex_sha256(&content);
             let row = NoteRow {
                 path: rel.clone(),

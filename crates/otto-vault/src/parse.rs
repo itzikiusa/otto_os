@@ -496,6 +496,28 @@ pub fn percent_encode_spaces(s: &str) -> String {
     s.replace(' ', "%20")
 }
 
+/// Display title for a note: frontmatter `title`, else the first H1 heading,
+/// else — for reserved `index.md`/`log.md`, which OKF forbids frontmatter on —
+/// the parent directory name (`log` keeps a " log" suffix so a bundle's index
+/// and log nodes stay distinguishable), else the filename stem.
+pub fn derive_title(parsed: &ParsedNote, rel: &str) -> String {
+    if let Some(t) = &parsed.title {
+        return t.clone();
+    }
+    if let Some(h1) = parsed.headings.iter().find(|h| h.level == 1 && !h.text.trim().is_empty()) {
+        return h1.text.trim().to_string();
+    }
+    let base = rel.rsplit('/').next().unwrap_or(rel);
+    let stem = base.strip_suffix(".md").or_else(|| base.strip_suffix(".MD")).unwrap_or(base);
+    let lower = stem.to_ascii_lowercase();
+    if lower == "index" || lower == "log" {
+        if let Some(parent) = rel.rsplit('/').nth(1).filter(|p| !p.is_empty()) {
+            return if lower == "log" { format!("{parent} log") } else { parent.to_string() };
+        }
+    }
+    stem.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,5 +645,35 @@ mod tests {
         let n = parse_note("עברית [[קישור|כינוי]] וגם #תג-עברי טקסט\n");
         assert_eq!(n.links[0].raw_target, "קישור");
         assert_eq!(n.tags, vec!["תג-עברי"]);
+    }
+
+    #[test]
+    fn derive_title_frontmatter_wins() {
+        let n = parse_note("---\ntitle: Auth API\n---\n# Ignored H1\n");
+        assert_eq!(derive_title(&n, "services/auth.md"), "Auth API");
+    }
+
+    #[test]
+    fn derive_title_h1_fallback_for_reserved_index() {
+        let n = parse_note("# koala-smartsoft-go\n\nGroove reverse-integration host.\n");
+        assert_eq!(derive_title(&n, "koala-smartsoft-go/index.md"), "koala-smartsoft-go");
+        let nested = parse_note("# Endpoints\n\n* [x](x.md)\n");
+        assert_eq!(derive_title(&nested, "koala-smartsoft-go/endpoints/index.md"), "Endpoints");
+    }
+
+    #[test]
+    fn derive_title_parent_dir_for_reserved_without_h1() {
+        let log = parse_note("## 2026-07-20\n\n* entry\n");
+        assert_eq!(derive_title(&log, "koala-smartsoft-go/log.md"), "koala-smartsoft-go log");
+        let idx = parse_note("just text, no headings\n");
+        assert_eq!(derive_title(&idx, "koala-smartsoft-go/index.md"), "koala-smartsoft-go");
+    }
+
+    #[test]
+    fn derive_title_stem_last_resort() {
+        let root = parse_note("no headings\n");
+        assert_eq!(derive_title(&root, "index.md"), "index");
+        let concept = parse_note("no frontmatter, no h1\n");
+        assert_eq!(derive_title(&concept, "services/auth.md"), "auth");
     }
 }
