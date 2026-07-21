@@ -431,24 +431,57 @@
   // mid-session is what used to smear codex duplicates over the live view and
   // yank the user's scroll position/prompt state.
   const RESIZE_SETTLE_MS = 200;
+  // A settled grid must additionally re-measure IDENTICAL this much later
+  // before we SIGWINCH. A macOS window/fullscreen animation can pause longer
+  // than the settle window mid-flight — one such pause measured 69×44 for
+  // 0.8s on a 165×48 pane, and claude re-rendered its transcript at 69 cols
+  // into scrollback (permanent narrow block). A mid-animation box keeps
+  // changing, so it never confirms; only the final geometry is ever sent.
+  const RESIZE_CONFIRM_MS = 150;
   let resizeSendTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set while a forced (connect/focus) sync is pending confirmation. */
+  let resizeForcePending = false;
+  /** Grid captured at settle, awaiting the identical re-measure. */
+  let confirmGrid: { cols: number; rows: number } | null = null;
   // Last grid actually SENT to the PTY (not the local xterm grid, which may be
   // ahead of it while a trailing send is pending).
   let lastCols = 0;
   let lastRows = 0;
 
-  /** Push the current grid now if it differs from the last one sent. */
-  function flushResize(): void {
+  function cancelResizeTimer(): void {
     if (resizeSendTimer !== null) {
       clearTimeout(resizeSendTimer);
       resizeSendTimer = null;
     }
-    if (!term) return;
+    confirmGrid = null;
+  }
+
+  /** Stability step: re-measure; commit only when two consecutive
+   *  measurements RESIZE_CONFIRM_MS apart agree. */
+  function confirmResizeStep(): void {
+    resizeSendTimer = null;
+    if (!term || !connected) {
+      confirmGrid = null;
+      resizeForcePending = false;
+      return;
+    }
+    safeFit(); // re-measure the CURRENT box (no-op when unchanged/not laid out)
     const { cols, rows } = term;
-    if (cols === lastCols && rows === lastRows) return;
-    lastCols = cols;
-    lastRows = rows;
-    sendJson({ type: 'resize', cols, rows });
+    if (confirmGrid && confirmGrid.cols === cols && confirmGrid.rows === rows) {
+      confirmGrid = null;
+      const force = resizeForcePending;
+      resizeForcePending = false;
+      if (!force && cols === lastCols && rows === lastRows) return;
+      lastCols = cols;
+      lastRows = rows;
+      // Forced path pushes even when unchanged locally: the server may hold a
+      // different grid (daemon restart / another viewer) and drops same-size
+      // resizes before the ioctl, so this is free when nothing changed.
+      sendJson({ type: 'resize', cols, rows });
+      return;
+    }
+    confirmGrid = { cols, rows };
+    resizeSendTimer = setTimeout(confirmResizeStep, RESIZE_CONFIRM_MS);
   }
 
   function sendResize(force = false): void {
@@ -457,26 +490,17 @@
     // grids (shows up as a too-small data-cols) and asserted by the resize E2E.
     container?.setAttribute('data-cols', String(term.cols));
     if (force) {
-      // Connect-time / focus-reclaim sync: the server may hold a different
-      // grid (daemon restart, another viewer resized while we were away), so
-      // push unconditionally. The server drops same-size resizes before they
-      // reach the PTY, so this is free when nothing actually changed.
-      if (resizeSendTimer !== null) {
-        clearTimeout(resizeSendTimer);
-        resizeSendTimer = null;
-      }
-      const { cols, rows } = term;
-      lastCols = cols;
-      lastRows = rows;
-      sendJson({ type: 'resize', cols, rows });
+      // Connect-time / focus-reclaim sync: skip the settle wait but still
+      // require the stability confirmation (an attach can race a window
+      // restore animation just like a drag can).
+      resizeForcePending = true;
+      cancelResizeTimer();
+      confirmResizeStep();
       return;
     }
     if (resizeSendTimer === null && term.cols === lastCols && term.rows === lastRows) return;
-    if (resizeSendTimer !== null) clearTimeout(resizeSendTimer);
-    resizeSendTimer = setTimeout(() => {
-      resizeSendTimer = null;
-      flushResize();
-    }, RESIZE_SETTLE_MS);
+    cancelResizeTimer();
+    resizeSendTimer = setTimeout(confirmResizeStep, RESIZE_SETTLE_MS);
   }
 
   // Belt-and-suspenders for PLAIN SHELLS: re-fit a couple of times shortly after
@@ -987,10 +1011,8 @@
       linkProvider.dispose();
       for (const t of verifyTimers) clearTimeout(t);
       if (refitTimer) clearTimeout(refitTimer);
-      if (resizeSendTimer !== null) {
-        clearTimeout(resizeSendTimer);
-        resizeSendTimer = null;
-      }
+      cancelResizeTimer();
+      resizeForcePending = false;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -1041,10 +1063,8 @@
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
-    if (resizeSendTimer !== null) {
-      clearTimeout(resizeSendTimer);
-      resizeSendTimer = null;
-    }
+    cancelResizeTimer();
+    resizeForcePending = false;
     // 2. Close the old socket cleanly. Mark closedByUs BEFORE calling close() so
     //    the synchronous onclose callback (which scheduleReconnect reads) does not
     //    kick off a reconnect to the old session.

@@ -56,9 +56,13 @@ stays first-come-sized.
 server-side before the ioctl — no SIGWINCH, no emulator rewrap, no meta
 write — so clients may re-push their grid unconditionally on focus/reconnect.
 Clients should send at most ONE `resize` per settled layout change (pure
-trailing debounce): every SIGWINCH makes agent TUIs reprint their live
-region, and codex re-emits transcript lines that permanently accumulate in
-scrollback. Clients must NOT rebuild their buffer from a `scrollback`
+trailing debounce), and only after the measured grid re-measures IDENTICAL
+~150ms later: a macOS window/fullscreen animation can pause longer than a
+settle window mid-flight, and a single mid-animation measurement SIGWINCHes
+the TUI into re-rendering its transcript at a transient width that then
+fossilizes in scrollback (measured: 0.8s at 69×44 on a 165×48 pane). Every
+SIGWINCH makes agent TUIs reprint their live region, and codex re-emits
+transcript lines that permanently accumulate in scrollback. Clients must NOT rebuild their buffer from a `scrollback`
 snapshot in response to their own resize — snapshots are for (re)attach and
 the server's unsolicited lagged-drop recovery only; the client terminal's
 own native reflow is authoritative for the live view.
