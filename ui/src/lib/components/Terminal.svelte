@@ -502,14 +502,24 @@
   function scheduleResizeCompact(): void {
     if (!preferDom) return;
     if (resizeCompactTimer !== null) clearTimeout(resizeCompactTimer);
-    resizeCompactTimer = setTimeout(() => {
-      resizeCompactTimer = null;
-      if (!term || !connected) return;
-      if (resizeSendTimer !== null) return; // grid moving again — the next commit reschedules
-      const buf = term.buffer.active;
-      if (buf.viewportY !== buf.baseY) return; // user is reading scrollback
-      sendJson({ type: 'scrollback', lines: term.options.scrollback ?? 10_000 });
-    }, RESIZE_COMPACT_MS);
+    resizeCompactTimer = setTimeout(runResizeCompact, RESIZE_COMPACT_MS);
+  }
+  function runResizeCompact(): void {
+    resizeCompactTimer = null;
+    if (!term || !connected) return;
+    if (resizeSendTimer !== null) {
+      // Grid still moving (pane add/remove animates the tile layout for a
+      // while — a confirm cycle is often in flight when this fires). RETRY
+      // after it settles instead of abandoning: dropping the compact here is
+      // what left "played with session counts → broken until I reconnect".
+      scheduleResizeCompact();
+      return;
+    }
+    const buf = term.buffer.active;
+    // Skip only when the user is CLEARLY reading scrollback — a TUI repaint
+    // routinely leaves the viewport a row or two shy of the bottom.
+    if (buf.baseY - buf.viewportY > 3) return;
+    sendJson({ type: 'scrollback', lines: term.options.scrollback ?? 10_000 });
   }
 
   function sendResize(force = false): void {
