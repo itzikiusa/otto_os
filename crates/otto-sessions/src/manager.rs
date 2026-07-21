@@ -2015,9 +2015,13 @@ impl SessionManager {
             .ok_or_else(|| Error::Conflict("session is not live".into()))?;
         // Same-size resizes are a no-op end to end — no SIGWINCH, no emulator
         // rewrap, no meta write — so clients can re-push their grid freely.
-        if handle.size() == (cols, rows) {
+        let (old_cols, old_rows) = handle.size();
+        if (old_cols, old_rows) == (cols, rows) {
             return Ok(());
         }
+        // Forensic trail for the half-width bug class: every real grid change
+        // is logged, so a narrow re-pin can be timed and attributed.
+        tracing::info!(session = %id, "pty resize {old_cols}x{old_rows} -> {cols}x{rows}");
         handle.resize(cols, rows)?;
         // Persist the last known grid size so resume/reconnect can restore it
         // (prevents reflow flash on reconnect). Best-effort — no await. Uses the

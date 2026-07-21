@@ -586,6 +586,15 @@ async fn serve_terminal<S: SessionsCtx>(
                     ClientFrame::Resize { cols, rows } => {
                         if can_input && ctx.manager().may_resize(&session_id, conn_id) {
                             let _ = ctx.manager().resize(&session_id, cols, rows).await;
+                        } else if can_input {
+                            // Forensic trail for the half-width bug class: a
+                            // denied resize is a viewer that WOULD have re-pinned
+                            // the grid under the old policy.
+                            tracing::info!(
+                                session = %session_id,
+                                conn = conn_id,
+                                "terminal resize denied (not size owner): {cols}x{rows}"
+                            );
                         }
                     }
                     ClientFrame::Claim => {
