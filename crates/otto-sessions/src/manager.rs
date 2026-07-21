@@ -1937,7 +1937,7 @@ impl SessionManager {
                 // captures race us; alone, the sole-candidate path is exact and
                 // tolerant of probe-garbling edits (arrow keys etc.).
                 let contended = in_flight.get(&cwd).map(|v| *v).unwrap_or(1) > 1;
-                let probe = Some(probe_text.as_str()).filter(|_| contended);
+                let probe = contended.then_some(probe_text.as_str());
                 let _guard = lock.lock().await;
                 let claimed_rows = repo.provider_session_ids().await.unwrap_or_default();
                 let claimed: std::collections::HashSet<&str> =
