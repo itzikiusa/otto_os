@@ -2858,10 +2858,17 @@ pub(crate) async fn review_open_counts_by_severity(ctx: &ServerCtx, review_id: &
     let mut warn = 0u64;
     let mut info = 0u64;
     for f in all.iter().filter(|f| is_open(f)) {
-        match f.severity.as_str() {
-            "bug" => bug += 1,
-            "warn" => warn += 1,
-            _ => info += 1,
+        // Findings arrive in two severity vocabularies depending on which agent
+        // wrote them: the reviewer contract (bug/warn/info) and the summarizer's
+        // comment tiers (high/medium/info, plus occasional blocker/critical/
+        // major/minor). Bucket by synonym — an unrecognized severity counts as
+        // the middle tier, NOT info: silently down-weighting unknown severities
+        // let 5-high/10-medium reviews score 80 "passed".
+        match f.severity.to_ascii_lowercase().as_str() {
+            "bug" | "blocker" | "critical" | "high" => bug += 1,
+            "warn" | "warning" | "major" | "medium" | "minor" => warn += 1,
+            "info" | "nit" | "note" | "low" => info += 1,
+            _ => warn += 1,
         }
     }
     (bug, warn, info)
