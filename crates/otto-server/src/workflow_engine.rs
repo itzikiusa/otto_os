@@ -759,17 +759,22 @@ pub async fn run_workflow(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                declared.push(crate::workflow_context::RepoEntry {
-                    repo: wd.to_string(),
-                    repo_id: None,
-                    repo_name: None,
-                    kind: "worktree".into(),
-                    name: wd.to_string(),
-                    source: None,
-                    worktree: None,
-                    base: None,
-                    error: None,
-                });
+                // A comma-separated `Working Directory:` declares SEVERAL repos
+                // (e.g. a cross-service change reviewed as one run) — one entry
+                // per path, all sharing the run's base hint.
+                for path in wd.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    declared.push(crate::workflow_context::RepoEntry {
+                        repo: path.to_string(),
+                        repo_id: None,
+                        repo_name: None,
+                        kind: "worktree".into(),
+                        name: path.to_string(),
+                        source: None,
+                        worktree: None,
+                        base: None,
+                        error: None,
+                    });
+                }
             }
         }
         let mut entries =
