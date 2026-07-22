@@ -33,22 +33,9 @@ use otto_core::{Id, Result};
 use otto_dbviewer::QueryRequest;
 use otto_state::{swarm::NewTask as NewSwarmTask, WorkflowsRepo};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::state::ServerCtx;
-
-/// Compute a stable hex digest over an arbitrary JSON value for cache keying.
-/// The value is first serialized in sorted-key form to ensure canonical output.
-fn hash_value(v: &Value) -> String {
-    // Use serde_json's built-in canonical string (it doesn't sort keys but the
-    // params/input structures are stable enough for node-cache purposes). For
-    // stricter canonicalization the engine could sort object keys; the current
-    // contract is "same structure produced by the same graph + input → same hash".
-    let s = serde_json::to_string(v).unwrap_or_default();
-    let digest = Sha256::digest(s.as_bytes());
-    format!("{:x}", digest)
-}
 
 /// A changed node bigger than this (serialized) is dropped from the event; the
 /// UI falls back to a rev-guarded refetch. Keeps broadcast frames bounded when a
@@ -378,38 +365,13 @@ fn param_str_list(params: &Value, key: &str) -> Vec<String> {
     }
 }
 
-/// Node kinds that must NEVER be served from (or write to) the node-result
-/// cache. Two families:
-/// - GATES whose decision belongs to the run being executed: a replayed
-///   `human_approval` would auto-approve with no operator; a replayed
-///   `budget_gate` would wave through a now-exceeded budget.
-/// - SIDE-EFFECTING nodes: replaying `git_pr`/`channel_notify`/`swarm_task`/
-///   `http_request`/`api_run`/`self_improve`/`product_*`/`canvas`/`review_run`
-///   reports "done" while the PR/message/task/request/review never happened;
-///   `prepare_context` writes step files a replay can't recreate.
-///
-/// Pure-compute kinds (transform/condition/agent_prompt/…) stay cacheable for
-/// the "run from here" flow.
-fn cache_exempt_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "prepare_context"
-            | "human_approval"
-            | "budget_gate"
-            | "channel_notify"
-            | "git_pr"
-            | "swarm_task"
-            | "http_request"
-            | "api_run"
-            | "self_improve"
-            | "product_publish"
-            | "product_analyze"
-            | "product_rewrite"
-            | "product_plan"
-            | "canvas"
-            | "review_run"
-    )
-}
+// (Cross-run node-result caching removed: the cache keyed only on
+// (node, params, upstream JSON input), but agent nodes' REAL input includes the
+// run's repos/worktrees and external state — a multi-repo run replayed a prior
+// single-repo run's checkout/vault outputs verbatim ("Success (cached)", 0ms)
+// and reviewed the wrong scope. Every node now executes in its own run;
+// `workflow_node_cache` stays only as a dormant table (migrations are
+// append-only).)
 
 /// Global wall-clock budget for a whole run. A run can't execute forever: once
 /// the cumulative time across all nodes exceeds this, the run is failed at the
@@ -1080,79 +1042,8 @@ pub async fn run_workflow(
             NodeDecision::Run(satisfied) => assemble_input(&satisfied, &outputs, &input),
         };
 
-        // --- node-result cache check ----------------------------------------
-        // Cache is keyed by (workflow_id, node_id, params_hash, input_hash) —
-        // GLOBAL across runs. Agent nodes are expensive but their outputs are
-        // LLM-non-deterministic; we still cache them so a user can opt-in to
-        // "run from here" and skip earlier unchanged nodes. Kinds whose
-        // execution must belong to THIS run are exempt (see cache_exempt_kind):
-        // replaying a cached human_approval would auto-approve a gate no human
-        // saw; a cached budget_gate would wave through a now-exceeded budget;
-        // cached git_pr/channel_notify/… would report side effects that never
-        // happened. A node can also opt out via `params.no_cache: true`.
-        let params_hash = hash_value(&node.params);
-        let input_hash = hash_value(&node_input);
-        let no_cache = cache_exempt_kind(&node.kind)
-            || node
-                .params
-                .get("no_cache")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            // Retry re-entry: the user asked for a FRESH execution of the
-            // in-scope nodes — a cache hit (possibly from an older run with
-            // the same input) would silently replay the very output being
-            // retried. Successful re-runs still WRITE the cache below.
-            || prior_nodes.is_some();
-        let cached_out = if !no_cache {
-            repo.get_cached_output(&workflow.id, &node_id, &params_hash, &input_hash)
-                .await
-        } else {
-            None
-        };
-        if let Some(cached_out) = cached_out {
-            states[idx].status = NodeStatus::Success;
-            states[idx].output = Some(cached_out.clone());
-            states[idx].logs = vec!["Success (cached)".into()];
-            states[idx].duration_ms = Some(0);
-            states[idx].attempts = Some(0);
-            // A cached agent/product/canvas node still carries its session id in
-            // the cached output — surface it so the run can open it.
-            harvest_session_ids(&cached_out, &mut states[idx].sessions);
-            // A cached node still consumes a step number and leaves its step
-            // files (from the cached output) — the context-file trail stays
-            // complete for downstream agents. Published refs merge too.
-            step_counter += 1;
-            let base_name = crate::workflow_context::step_base_name(
-                step_counter,
-                node_display_name(node),
-                None,
-                None,
-            );
-            let mut flogs = files.persist_step(
-                &base_name,
-                &node.kind,
-                node_display_name(node),
-                &cached_out,
-                &[],
-                None,
-                None,
-            );
-            states[idx].logs.append(&mut flogs);
-            merge_published_refs(&files, &cached_out);
-            // Prune outgoing edges whose condition fails on the cached output.
-            let (pruned, mut plogs) =
-                eval_outgoing(&workflow.graph, node, &cached_out, &node_input, &input);
-            inactive_edges.extend(pruned);
-            states[idx].logs.append(&mut plogs);
-            outputs.insert(node_id.clone(), cached_out);
-            let rev = repo
-                .update_run_progress(&run_id, &states)
-                .await
-                .unwrap_or(0);
-            emit_run_updated(&ctx, &workflow.workspace_id, &run_id, "running", Some(&node_id), rev, Some(&states[idx]), &states, false);
-            continue;
-        }
-        // --------------------------------------------------------------------
+        // (No cross-run node-result cache: every node executes in its own run —
+        // see the removal note above the old `cache_exempt_kind` site.)
 
         let start_line = format!("▶ {} started", node.kind);
         states[idx].status = NodeStatus::Running;
@@ -1366,14 +1257,6 @@ pub async fn run_workflow(
                 // review_run streams its own block but its file rides too.
                 if progress.enabled() && (is_reportable(&node.kind) || node.kind == "review_run") {
                     progress.post_step_file(&files, &step_file_base);
-                }
-                // Persist to the node cache for future re-runs — except the
-                // gating/side-effecting kinds (see the matching read-side
-                // guard above and `cache_exempt_kind`).
-                if !no_cache {
-                    let _ = repo
-                        .set_cached_output(&workflow.id, &node_id, &params_hash, &input_hash, &out)
-                        .await;
                 }
                 outputs.insert(node_id.clone(), out);
             }
