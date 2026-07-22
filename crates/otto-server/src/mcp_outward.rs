@@ -256,9 +256,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
                 "repo_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},
                 "source_branch":{"type":"string"},"target_branch":{"type":"string"}}}}),
         json!({"name":"otto.comment_pr","mutating":true,"category":"Git",
-            "description":"Post a comment on a pull request. DANGEROUS: outward-facing — approval-gated.",
+            "description":"Post a comment on a pull request — general, inline when `path` (and optionally `line`) anchor it to a file in the diff, or a threaded reply when `in_reply_to` names an existing comment id. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["repo_id","number","body"],"properties":{
-                "repo_id":{"type":"string"},"number":{"type":"integer"},"body":{"type":"string"}}}}),
+                "repo_id":{"type":"string"},"number":{"type":"integer"},"body":{"type":"string"},
+                "path":{"type":"string"},"line":{"type":"integer"},"in_reply_to":{"type":"string"}}}}),
         json!({"name":"otto.start_pr_review","mutating":true,"category":"Code Review",
             "description":"Start Otto's multi-agent review of a pull request (fan-out). DANGEROUS: spawns agents — approval-gated.",
             "inputSchema":{"type":"object","required":["repo_id","pr_number"],"properties":{
@@ -1111,7 +1112,12 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "comment_pr" => {
             let repo = arg_str(args, "repo_id")?;
             let n = arg_i64(args, "number")?;
-            let body = json!({ "body": arg_str(args, "body")? });
+            let body = json!({
+                "body": arg_str(args, "body")?,
+                "path": args.get("path").and_then(Value::as_str),
+                "line": args.get("line").and_then(Value::as_u64),
+                "in_reply_to": args.get("in_reply_to").and_then(Value::as_str),
+            });
             SelfCall::post(format!("/api/v1/repos/{}/prs/{}/comments", seg(&repo), n), body)
         }
         "start_pr_review" => {
