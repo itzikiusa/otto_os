@@ -260,7 +260,23 @@ async fn generate_graph(ctx: &ServerCtx, cwd: &str, description: &str) -> Workfl
          {{\"nodes\":[{{\"id\":\"n1\",\"kind\":\"<kind>\",\"name\":\"<label>\",\"params\":{{}}}}],\
          \"edges\":[{{\"id\":\"e1\",\"source\":\"n1\",\"target\":\"n2\"}}]}}. \
          Start with a manual_trigger. Use only the listed kinds. Wire nodes left-to-right to \
-         accomplish the goal. No prose, no markdown fences.\n\nGoal: {description}"
+         accomplish the goal. No prose, no markdown fences.\n\n\
+         Engine rules — a graph that violates these will run but silently misbehave:\n\
+         - Params are LITERAL values. There is NO template interpolation: never write \
+         `{{{{input.x}}}}` or any `{{{{...}}}}` placeholder — it reaches the node as that exact string.\n\
+         - Agent nodes receive the run input and prior step results as context files \
+         (run-brief.md, repos.json, jira-<KEY>.md, stepN-*.md) in the run context directory; \
+         write prompts that tell the agent to read those. Omit `cwd` — agents run in the \
+         run's prepared repo worktree.\n\
+         - prepare_context: omit `key`; it resolves the Jira key from the run input itself.\n\
+         - A condition node's `expression` evaluates on the node's INPUT (its upstream's \
+         output), so place it directly after the node whose fields it tests. Edge \
+         `condition` strings evaluate on the source node's OUTPUT and need the `output.` \
+         prefix, e.g. `output.result == true`.\n\
+         - review_run params: {{\"threshold\":80,\"reviewers\":[{{\"lens\":\"<skill>\",\
+         \"providers\":[\"claude\",\"codex\"]}}],\"summarizer\":{{\"provider\":\"claude\"}},\
+         \"scoring\":{{\"bug\":10,\"warn\":5,\"info\":1}}}} — the flat `providers`/`lenses` \
+         form is legacy and runs a single provider.\n\nGoal: {description}"
     );
 
     let parsed = match ctx
@@ -306,13 +322,56 @@ fn extract_graph(text: &str) -> Option<WorkflowGraph> {
     None
 }
 
-/// Drop nodes with unknown kinds and edges referencing missing nodes.
+/// Drop nodes with unknown kinds and edges referencing missing nodes; scrub
+/// params/conditions the engine would take literally and silently misrun.
 fn sanitize(mut g: WorkflowGraph) -> WorkflowGraph {
     g.nodes.retain(|n| workflow_engine::is_known_kind(&n.kind));
+    for n in &mut g.nodes {
+        strip_placeholder_params(&mut n.params);
+    }
     let ids: std::collections::HashSet<&str> = g.nodes.iter().map(|n| n.id.as_str()).collect();
     g.edges
         .retain(|e| ids.contains(e.source.as_str()) && ids.contains(e.target.as_str()));
+    for e in &mut g.edges {
+        // Edge conditions evaluate in `output.*` scope; the LLM habitually emits
+        // bare `result == …`, which never matches and silently skips the branch.
+        if let Some(c) = &e.condition {
+            let t = c.trim();
+            if t.starts_with("result") || t.starts_with("value") {
+                e.condition = Some(format!("output.{t}"));
+            }
+        }
+    }
     g
+}
+
+/// Remove object entries / array items whose string value is a pure `{{…}}`
+/// placeholder — the engine has no template interpolation, so such params reach
+/// the node verbatim (a literal `{{input.x}}` Jira key, cwd, …). Dropping them
+/// falls back to each node's own input-resolution defaults, which is what the
+/// placeholder was trying to express. Longer strings that merely embed a
+/// placeholder (agent prompts) are kept: agents read the run context and can
+/// interpret the intent.
+fn strip_placeholder_params(v: &mut Value) {
+    fn is_placeholder(val: &Value) -> bool {
+        matches!(val, Value::String(s)
+            if s.trim().starts_with("{{") && s.trim().ends_with("}}"))
+    }
+    match v {
+        Value::Object(map) => {
+            map.retain(|_, val| !is_placeholder(val));
+            for val in map.values_mut() {
+                strip_placeholder_params(val);
+            }
+        }
+        Value::Array(items) => {
+            items.retain(|val| !is_placeholder(val));
+            for val in items {
+                strip_placeholder_params(val);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Minimal always-valid graph when generation fails.
