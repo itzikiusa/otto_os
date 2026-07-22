@@ -127,13 +127,27 @@ const WF_TRIGGER_TEMPLATE: &str = "@<your-bot>\n\
 Action: Workflow\n\
 Name: <workflow name>\n\
 Msg: <what you want done — instructions for the agents>\n\
-Jira ticket: <optional, e.g. PROJ-123>\n\
-Working Directory: ~/path/to/repo\n\
-Branch: <base branch>, create wt from it\n\
-Relevant Info: ~/other/repo, ~/docs\n\
+Jira ticket: <optional, e.g. PROJ-123 — fetched IN FULL: description, fields and all comments>\n\
+Working Directory: /abs/path/to/repo, /abs/path/to/other-repo\n\
+Branch: <BASE branch the PR merges into, e.g. develop — the run diffs/reviews against it>\n\
+Relevant Info: /abs/path/to/extra-repo, /abs/path/to/docs\n\
 Goals:\n\
   - <goal 1>\n\
   - <goal 2>";
+
+/// Per-field guidance rendered under the template in the help guide — the
+/// explanations users actually need to fill it in right (semantics that have
+/// bitten in practice: `Branch:` is the review BASE, not the feature branch).
+const WF_TRIGGER_FIELD_NOTES: &str = "\
+• *Name* — must match a workflow from the list below exactly.\n\
+• *Working Directory* — absolute path(s) (no `~`); comma-separate SEVERAL repos to \
+review them as one run (cross-repo interactions included).\n\
+• *Branch* — the branch the PR merges INTO (e.g. `develop`); the run cuts an isolated \
+worktree from it and reviews the diff against it. Do NOT put the feature branch here — \
+it is discovered from the Jira ticket / open PR.\n\
+• *Jira ticket* — fetched in full (description, fields, every comment) into the run \
+context for all agents.\n\
+• *Msg / Goals* — free-text instructions and goal list; agents read them verbatim.";
 
 /// Parse a short chat message into a control command. Slack tokens are stripped,
 /// whitespace normalized, and only SHORT (≤ 48 char) command-like messages match
@@ -163,8 +177,9 @@ pub fn wf_controls_help() -> String {
     s.push_str("🛠 *Otto workflow commands*\n\n");
     s.push_str("*1. Start a workflow* — post this (edit the fields):\n```\n");
     s.push_str(WF_TRIGGER_TEMPLATE);
-    s.push_str("\n```\n\n");
-    s.push_str("*2. Control a running workflow* — reply in the run's thread:\n");
+    s.push_str("\n```\n");
+    s.push_str(WF_TRIGGER_FIELD_NOTES);
+    s.push_str("\n\n*2. Control a running workflow* — reply in the run's thread:\n");
     for op in WF_OPS {
         let others: Vec<&str> =
             op.synonyms.iter().copied().filter(|x| *x != op.canonical).take(4).collect();
@@ -736,9 +751,26 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
         let control = parse_wf_control(text)?;
 
         // Help is the discoverability entry point — reply with the full guide
-        // unconditionally (no active run / workflow binding required).
+        // unconditionally (no active run / workflow binding required), plus the
+        // workspace's actual workflows so users see what `Name:` can be.
         if control == WfControl::Help {
-            return Some(WorkflowChatAck { reply: wf_controls_help() });
+            let repo = WorkflowsRepo::new(self.ctx.pool.clone());
+            let mut reply = wf_controls_help();
+            if let Ok(wfs) = repo.list(&workspace_id.to_string()).await {
+                if !wfs.is_empty() {
+                    reply.push_str("\n\n*3. Available workflows* (use as `Name:`):\n");
+                    for w in wfs {
+                        // First line of the description as a one-line hint.
+                        let hint = w.description.lines().next().unwrap_or("").trim().to_string();
+                        if hint.is_empty() {
+                            reply.push_str(&format!("• *{}*\n", w.name));
+                        } else {
+                            reply.push_str(&format!("• *{}* — {}\n", w.name, hint));
+                        }
+                    }
+                }
+            }
+            return Some(WorkflowChatAck { reply: reply.trim_end().to_string() });
         }
 
         // status / skip / abort target the run active on THIS thread.
