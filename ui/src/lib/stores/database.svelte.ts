@@ -342,6 +342,15 @@ export interface QueryTab {
    * persisted).
    */
   offset: number;
+  /**
+   * The in-flight (or orphaned) run this tab is attached to. Set for the whole
+   * life of a run; when the HTTP wait is lost without a user Stop (page
+   * navigation / reload / network blip), the server keeps executing detached
+   * and this is what `reattach` polls (`db/query-status`) to recover the
+   * result. Persisted so a full reload can still re-attach; cleared when the
+   * result lands, the user stops the query, or the server no longer knows the id.
+   */
+  pending?: { queryId: string; connId: Id } | null;
 }
 
 /** Normalize a persisted vars blob — legacy `Record<string,string>` (bare value)
@@ -378,6 +387,7 @@ function blankTab(statement = ''): QueryTab {
     mask: false,
     vars: {},
     offset: 0,
+    pending: null,
   };
 }
 
@@ -564,6 +574,8 @@ class DatabaseStore {
     number,
     { controller: AbortController; queryId: string; connId: Id }
   >();
+  /** Tab ids with an active `reattach` poll loop — dedupes concurrent kicks. */
+  private reattaching = new Set<number>();
 
   // ── UI tabs ────────────────────────────────────────────────────────────────
   mainTab: DbMainTab = $state('query');
@@ -880,6 +892,7 @@ class DatabaseStore {
             statement: t.statement,
             vars: t.vars,
             savedQueryId: t.savedQueryId,
+            pending: t.pending ?? undefined,
           })),
           activeTab: this.activeTab,
           activeDb: this.activeDb,
@@ -900,7 +913,13 @@ class DatabaseStore {
     if (!raw) return null;
     try {
       const p = JSON.parse(raw) as {
-        tabs?: { name?: string; statement?: string; vars?: unknown; savedQueryId?: string }[];
+        tabs?: {
+          name?: string;
+          statement?: string;
+          vars?: unknown;
+          savedQueryId?: string;
+          pending?: { queryId?: string; connId?: string } | null;
+        }[];
         activeTab?: number;
         activeDb?: string | null;
       };
@@ -909,6 +928,12 @@ class DatabaseStore {
         name: t.name || 'Query',
         vars: normalizeVars(t.vars),
         savedQueryId: t.savedQueryId,
+        // Revive a pending run marker only when it's complete and belongs to
+        // THIS connection — reattach polls it against the server.
+        pending:
+          t.pending && t.pending.queryId && t.pending.connId === connId
+            ? { queryId: t.pending.queryId, connId: t.pending.connId }
+            : null,
       }));
       if (!tabs.length) return null;
       const activeTab = Math.min(Math.max(0, p.activeTab ?? 0), tabs.length - 1);
@@ -1164,6 +1189,10 @@ class DatabaseStore {
     this.history = snap.history;
     this.mainTab = snap.mainTab;
     this.sideTab = snap.sideTab;
+    // A tab may have lost its HTTP wait while this connection was in the
+    // background (e.g. the daemon blipped and the earlier poll loop gave up) —
+    // resume recovering its detached run. No-op for live/settled tabs.
+    this.reattachPendingTabs();
     return true;
   }
 
@@ -1318,6 +1347,10 @@ class DatabaseStore {
     // Fresh window of history for this connection.
     this.historyLimit = 100;
     await Promise.all([this.loadCapabilities(id), this.loadSchemaRoot(id), this.loadHistory(id)]);
+    // A restored tab may reference a run whose HTTP wait died with the previous
+    // page (reload / app restart) while the server kept executing it detached —
+    // re-attach and recover the result instead of silently dropping it.
+    this.reattachPendingTabs();
     // Best-effort health probe for the tab-strip chip (server version + latency).
     // Fire-and-forget so it never blocks the first render; only when connected.
     if (this.connStatus.get(id)?.phase === 'ready') void this.probeHealth(id);
@@ -1697,11 +1730,14 @@ class DatabaseStore {
     this.abortQuery(t.id);
     const controller = new AbortController();
     // Per-run id the server registers the query under; the same id lets the
-    // cancel endpoint issue engine-native cancellation (KILL QUERY / etc.).
+    // cancel endpoint issue engine-native cancellation (KILL QUERY / etc.) and
+    // the query-status endpoint re-attach to a run whose HTTP wait was lost.
     const queryId = newQueryId();
     this.runControllers.set(t.id, { controller, queryId, connId: id });
     t.running = true;
     t.error = null;
+    t.pending = { queryId, connId: id };
+    this.persistTabs();
     try {
       // Honor an explicit LIMIT in the SQL; otherwise apply the configured
       // default row cap. The server also injects this LIMIT into the SQL so a
@@ -1747,6 +1783,7 @@ class DatabaseStore {
           const ok = await this.confirmGuardedWrite();
           if (!ok) {
             toasts.info('Write cancelled');
+            this.clearPending(t);
             return null;
           }
           result = await post(true);
@@ -1755,6 +1792,7 @@ class DatabaseStore {
         }
       }
       t.result = result;
+      this.clearPending(t);
       void this.loadHistory(id);
       return result;
     } catch (e) {
@@ -1763,8 +1801,17 @@ class DatabaseStore {
         toasts.info('Query stopped');
         return null;
       }
-      t.error = errMsg(e);
-      toasts.error('Query failed', errMsg(e));
+      // The server answered → the query itself finished with an error.
+      if (e instanceof ApiError) {
+        this.clearPending(t);
+        t.error = errMsg(e);
+        toasts.error('Query failed', errMsg(e));
+        return null;
+      }
+      // The HTTP wait was lost (page teardown / network blip) but the server
+      // keeps executing the query detached — re-attach by query_id instead of
+      // declaring failure.
+      void this.reattach(t);
       return null;
     } finally {
       // Only clear running/controller if this run is still the current one
@@ -1931,19 +1978,108 @@ class DatabaseStore {
   abortQuery(tabId?: number): void {
     const id = tabId ?? this.tab?.id;
     if (id == null) return;
+    const t = this.tabs.find((x) => x.id === id);
     const entry = this.runControllers.get(id);
-    if (!entry) return;
+    // The run's identity: the live controller entry, or — when the HTTP wait
+    // was already lost and the tab is in re-attach mode — its pending marker.
+    const target = entry ?? (t?.pending ? { ...t.pending } : null);
+    if (!target) return;
     this.runControllers.delete(id);
     // 1) Ask the server to cancel the query engine-side (fire-and-forget).
     void api
-      .post(`${this.connBase(entry.connId)}/cancel`, { query_id: entry.queryId })
+      .post(`${this.connBase(target.connId)}/cancel`, { query_id: target.queryId })
       .catch(() => {
         /* best-effort: server may have already finished/evicted the query */
       });
-    // 2) Abort our fetch and clear the tab's running state.
-    entry.controller.abort();
-    const t = this.tabs.find((x) => x.id === id);
-    if (t) t.running = false;
+    // 2) Abort our fetch (if still held) and clear the tab's run state. A user
+    // Stop also forgets the pending marker — re-attach must not resurrect a
+    // query the user explicitly killed.
+    entry?.controller.abort();
+    if (t) {
+      t.running = false;
+      this.clearPending(t);
+    }
+  }
+
+  /** Forget a tab's pending run marker (persisted with the tabs). */
+  private clearPending(t: QueryTab): void {
+    if (!t.pending) return;
+    t.pending = null;
+    this.persistTabs();
+  }
+
+  /**
+   * Re-attach a tab to a run whose HTTP wait was lost: poll the server's
+   * `db/query-status` for the tab's `pending` run until it reports `done`
+   * (install the parked result/error) or `unknown` (daemon restarted or the
+   * outcome expired — stop quietly). The query itself keeps executing
+   * server-side the whole time; this only recovers its outcome.
+   */
+  async reattach(t: QueryTab): Promise<void> {
+    const pending = t.pending;
+    if (!pending) return;
+    // One poll loop per tab — a second kick (restore + catch both fire) joins
+    // the existing loop instead of doubling the polling.
+    if (this.reattaching.has(t.id)) return;
+    this.reattaching.add(t.id);
+    try {
+      await this.reattachLoop(t, pending);
+    } finally {
+      this.reattaching.delete(t.id);
+    }
+  }
+
+  private async reattachLoop(
+    t: QueryTab,
+    pending: { queryId: string; connId: Id },
+  ): Promise<void> {
+    t.running = true;
+    let failures = 0;
+    // Re-entrancy / staleness guard: stop when the tab moved on to a different
+    // run (a new runQuery replaces `pending`) or the marker was cleared.
+    while (t.pending && t.pending.queryId === pending.queryId) {
+      let st: { status: string; result?: QueryResult; error?: string };
+      try {
+        st = await api.post<{ status: string; result?: QueryResult; error?: string }>(
+          `${this.connBase(pending.connId)}/query-status`,
+          { query_id: pending.queryId },
+        );
+        failures = 0;
+      } catch {
+        // Daemon unreachable (sleep/restart in progress): retry a few times,
+        // then give up for now — the persisted marker lets a later visit retry.
+        if (++failures >= 5) {
+          t.running = false;
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      if (st.status === 'running') {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      if (t.pending?.queryId !== pending.queryId) return; // superseded mid-poll
+      if (st.status === 'done') {
+        if (st.error != null) t.error = st.error;
+        else if (st.result) {
+          t.result = st.result;
+          t.error = null;
+        }
+        void this.loadHistory(pending.connId);
+      }
+      // done or unknown: either way this run is over for the client.
+      t.running = false;
+      this.clearPending(t);
+      return;
+    }
+  }
+
+  /** Kick off re-attach polling for every tab restored with a pending run. */
+  private reattachPendingTabs(): void {
+    for (const t of this.tabs) {
+      if (t.pending && !this.runControllers.has(t.id)) void this.reattach(t);
+    }
   }
 
   // ── Table actions (schema-tree context menu) ──────────────────────────────

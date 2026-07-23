@@ -36,7 +36,8 @@ use otto_ssh::SshTunnel;
 use crate::types::{
     statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse,
     DbQueryPlan, Engine, GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail,
-    QueryHandle, QueryRequest, QueryResult, ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
+    QueryHandle, QueryRequest, QueryResult, QueryStatus, ResolvedConfig, SchemaGraph, SchemaNode,
+    TestResult,
 };
 
 /// Stable marker prefixed to the write-gate rejection message so the UI can
@@ -121,6 +122,72 @@ struct InFlightQuery {
     token: CancelToken,
 }
 
+/// How long a finished-but-unclaimed query outcome is parked for re-attach.
+const FINISHED_TTL: Duration = Duration::from_secs(10 * 60);
+/// Cap on parked outcomes; the oldest is evicted first when full.
+const FINISHED_MAX: usize = 50;
+
+/// Outcome of a detached query whose HTTP waiter was gone when it finished
+/// (the user navigated away and the browser dropped the request). Parked so the
+/// client can re-attach by `query_id` and still see the result.
+struct FinishedQuery {
+    conn_id: Id,
+    outcome: std::result::Result<QueryResult, String>,
+    at: Instant,
+}
+
+/// Bounded TTL store for [`FinishedQuery`]: expired entries are pruned on every
+/// touch, and the oldest entry is evicted beyond [`FINISHED_MAX`]. Row counts
+/// are already capped per query (`max_rows`), so worst-case memory is bounded
+/// by `FINISHED_MAX × one result page`. Pure map logic so it's unit-testable.
+#[derive(Default)]
+struct FinishedStore {
+    map: HashMap<String, FinishedQuery>,
+}
+
+impl FinishedStore {
+    fn park(
+        &mut self,
+        query_id: String,
+        conn_id: Id,
+        outcome: std::result::Result<QueryResult, String>,
+        now: Instant,
+    ) {
+        self.prune(now);
+        if self.map.len() >= FINISHED_MAX {
+            if let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, f)| f.at)
+                .map(|(k, _)| k.clone())
+            {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(
+            query_id,
+            FinishedQuery {
+                conn_id,
+                outcome,
+                at: now,
+            },
+        );
+    }
+
+    fn prune(&mut self, now: Instant) {
+        self.map
+            .retain(|_, f| now.duration_since(f.at) < FINISHED_TTL);
+    }
+
+    /// The parked outcome for `(query_id, conn_id)`, if present and unexpired.
+    /// The connection must match — a status probe must not read another
+    /// connection's result through a guessed/reused query id.
+    fn get(&mut self, query_id: &str, conn_id: &Id, now: Instant) -> Option<&FinishedQuery> {
+        self.prune(now);
+        self.map.get(query_id).filter(|f| &f.conn_id == conn_id)
+    }
+}
+
 #[derive(Clone)]
 pub struct DbViewerService {
     connections: ConnectionsRepo,
@@ -135,6 +202,10 @@ pub struct DbViewerService {
     /// `std::sync::Mutex` (held only for the brief map insert/remove/lookup, never
     /// across an await) — distinct from the tokio `Mutex` guarding `tunnels`.
     in_flight: Arc<std::sync::Mutex<HashMap<String, InFlightQuery>>>,
+    /// Outcomes of detached queries that finished with no HTTP waiter left,
+    /// keyed by `query_id`, kept for [`FINISHED_TTL`] so the client can
+    /// re-attach ([`Self::query_status`]) after navigating away.
+    finished: Arc<std::sync::Mutex<FinishedStore>>,
 }
 
 /// Removes an in-flight query from the registry when a `run` ends — on success,
@@ -202,6 +273,7 @@ impl DbViewerService {
             registry: Registry::new(),
             tunnels: Arc::new(Mutex::new(HashMap::new())),
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            finished: Arc::new(std::sync::Mutex::new(FinishedStore::default())),
         }
     }
 
@@ -666,26 +738,71 @@ impl DbViewerService {
         let r = self.resolve(conn_id).await?;
         let token = CancelToken::new();
 
-        // Register the in-flight query so a cancel can find it. The guard removes
-        // the entry on drop regardless of how `run_tracked` returns.
-        let _guard = req.query_id.as_deref().filter(|s| !s.is_empty()).map(|qid| {
-            if let Ok(mut map) = self.in_flight.lock() {
-                map.insert(
-                    qid.to_string(),
-                    InFlightQuery {
-                        conn_id: conn_id.clone(),
-                        token: token.clone(),
-                    },
-                );
-            }
-            InFlightGuard {
-                map: Arc::clone(&self.in_flight),
-                key: qid.to_string(),
-            }
-        });
+        // Without a `query_id` there is nothing to cancel or re-attach to —
+        // request-scoped execution (agents over MCP, widgets) stays inline.
+        let Some(qid) = req.query_id.clone().filter(|s| !s.is_empty()) else {
+            return self.execute_recorded(r, conn_id, user_id, req, &token).await;
+        };
 
+        // Register the in-flight query so a cancel can find it. The guard moves
+        // into the detached task below, so the entry lives exactly as long as
+        // the execution — not as long as the HTTP request.
+        if let Ok(mut map) = self.in_flight.lock() {
+            map.insert(
+                qid.clone(),
+                InFlightQuery {
+                    conn_id: conn_id.clone(),
+                    token: token.clone(),
+                },
+            );
+        }
+        let guard = InFlightGuard {
+            map: Arc::clone(&self.in_flight),
+            key: qid.clone(),
+        };
+
+        // Detached execution: the query runs in its own task, so a dropped HTTP
+        // request (page navigation, window close, network blip) no longer
+        // cancels the database work — only an explicit `cancel` does. The task
+        // hands the outcome back over a oneshot; when the waiter is already
+        // gone, the outcome is parked in `finished` instead, for the client to
+        // collect via [`Self::query_status`]. Outcomes are parked ONLY when
+        // nobody was waiting, so the common delivered-response path retains
+        // nothing.
+        let (out_tx, out_rx) = tokio::sync::oneshot::channel();
+        let svc = self.clone();
+        let (cid, uid, req_owned) = (conn_id.clone(), user_id.clone(), req.clone());
+        tokio::spawn(async move {
+            let _guard = guard;
+            let result = svc
+                .execute_recorded(r, &cid, &uid, &req_owned, &token)
+                .await;
+            if let Err(result) = out_tx.send(result) {
+                let outcome = result.map_err(|e| e.to_string());
+                if let Ok(mut store) = svc.finished.lock() {
+                    store.park(qid, cid, outcome, Instant::now());
+                }
+            }
+            // `_guard` drops here — AFTER parking — so `query_status` never
+            // reports "unknown" in the gap between running and parked.
+        });
+        out_rx
+            .await
+            .map_err(|_| Error::Internal("query task dropped its result".into()))?
+    }
+
+    /// Drive the resolved driver, apply opt-in masking, and record history —
+    /// the shared tail of [`Self::run`] for both inline and detached execution.
+    async fn execute_recorded(
+        &self,
+        r: Resolved,
+        conn_id: &Id,
+        user_id: &Id,
+        req: &QueryRequest,
+        token: &CancelToken,
+    ) -> Result<QueryResult> {
         let started = Instant::now();
-        let result = r.driver.run_tracked(&r.config, req, &token).await;
+        let result = r.driver.run_tracked(&r.config, req, token).await;
         let elapsed = started.elapsed().as_millis() as i64;
 
         // Apply server-side PII masking when the request opts in. Raw cell values
@@ -724,6 +841,47 @@ impl DbViewerService {
             }
         }
         result
+    }
+
+    /// Re-attach probe for a query previously submitted with `query_id`:
+    /// `"running"` while its detached task executes, `"done"` (+ result/error)
+    /// while its parked outcome is retained, `"unknown"` otherwise (never seen,
+    /// delivered to a live waiter, or expired). Scoped to `conn_id` — a probe
+    /// must not read another connection's outcome through a reused id.
+    pub fn query_status(&self, conn_id: &Id, query_id: &str) -> QueryStatus {
+        let running = self
+            .in_flight
+            .lock()
+            .map(|m| m.get(query_id).is_some_and(|q| &q.conn_id == conn_id))
+            .unwrap_or(false);
+        if running {
+            return QueryStatus {
+                status: "running",
+                result: None,
+                error: None,
+            };
+        }
+        if let Ok(mut store) = self.finished.lock() {
+            if let Some(f) = store.get(query_id, conn_id, Instant::now()) {
+                return match &f.outcome {
+                    Ok(res) => QueryStatus {
+                        status: "done",
+                        result: Some(res.clone()),
+                        error: None,
+                    },
+                    Err(e) => QueryStatus {
+                        status: "done",
+                        result: None,
+                        error: Some(e.clone()),
+                    },
+                };
+            }
+        }
+        QueryStatus {
+            status: "unknown",
+            result: None,
+            error: None,
+        }
     }
 
     /// Run a query on behalf of an **agent over MCP**, enforcing read-only
@@ -1534,6 +1692,61 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("q1".to_string(), entry("conn-A", None));
         assert!(cancel_handle_for(&map, &"conn-A".to_string(), "q1").is_none());
+    }
+
+    // ---- FinishedStore: parked outcomes for detached-query re-attach ------
+
+    fn ok_result() -> QueryResult {
+        QueryResult::empty()
+    }
+
+    #[test]
+    fn finished_store_parks_and_serves_scoped_to_connection() {
+        let mut store = FinishedStore::default();
+        let now = Instant::now();
+        store.park("q1".into(), "conn-A".into(), Ok(ok_result()), now);
+        // Same connection → served; other connection → invisible.
+        assert!(store.get("q1", &"conn-A".to_string(), now).is_some());
+        assert!(store.get("q1", &"conn-B".to_string(), now).is_none());
+        assert!(store.get("q2", &"conn-A".to_string(), now).is_none());
+    }
+
+    #[test]
+    fn finished_store_expires_entries_past_ttl() {
+        let mut store = FinishedStore::default();
+        let now = Instant::now();
+        store.park("q1".into(), "conn-A".into(), Err("boom".into()), now);
+        assert!(store.get("q1", &"conn-A".to_string(), now).is_some());
+        let later = now + FINISHED_TTL + Duration::from_secs(1);
+        assert!(
+            store.get("q1", &"conn-A".to_string(), later).is_none(),
+            "entry must expire after the TTL"
+        );
+    }
+
+    #[test]
+    fn finished_store_evicts_oldest_beyond_cap() {
+        let mut store = FinishedStore::default();
+        let base = Instant::now();
+        for i in 0..FINISHED_MAX {
+            store.park(
+                format!("q{i}"),
+                "conn-A".into(),
+                Ok(ok_result()),
+                base + Duration::from_millis(i as u64),
+            );
+        }
+        // One over the cap evicts the OLDEST (q0), keeps everything newer.
+        store.park(
+            "q-new".into(),
+            "conn-A".into(),
+            Ok(ok_result()),
+            base + Duration::from_secs(1),
+        );
+        let now = base + Duration::from_secs(1);
+        assert!(store.get("q0", &"conn-A".to_string(), now).is_none());
+        assert!(store.get("q1", &"conn-A".to_string(), now).is_some());
+        assert!(store.get("q-new", &"conn-A".to_string(), now).is_some());
     }
 
     // ---- RC2: node → schema derivation -----------------------------------

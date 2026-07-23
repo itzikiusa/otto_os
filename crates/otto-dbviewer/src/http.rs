@@ -201,6 +201,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
             post(export_to_path::<S>),
         )
         .route("/connections/{id}/db/cancel", post(cancel_query::<S>))
+        .route("/connections/{id}/db/query-status", post(query_status::<S>))
         .route("/connections/{id}/db/completion", post(completion::<S>))
         .route(
             "/connections/{id}/db/completion/refresh",
@@ -485,6 +486,29 @@ async fn cancel_query<S: DbViewerCtx>(
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
     ctx.db().cancel(&id, &req.query_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for the query re-attach status probe.
+#[derive(Debug, Deserialize)]
+struct QueryStatusReq {
+    /// The `query_id` the client sent on the `db/query` request to re-attach to.
+    query_id: String,
+}
+
+/// Status/result of a previously-submitted query. A query with a `query_id`
+/// executes detached from its HTTP request, so a client that navigated away
+/// (dropping its wait) re-attaches here: `running` while it executes, `done`
+/// (+ result/error) while the parked outcome is retained, `unknown` otherwise.
+/// Gated at `Editor` like `run_query` — it returns query result data.
+async fn query_status<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<QueryStatusReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    Ok(Json(ctx.db().query_status(&id, &req.query_id)).into_response())
 }
 
 /// Request body for the server-side export endpoint.

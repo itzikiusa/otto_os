@@ -534,6 +534,24 @@ impl CancelToken {
     }
 }
 
+/// Re-attach status for a previously-submitted `query_id` (see
+/// `POST /connections/{id}/db/query-status`). A detached execution outlives the
+/// HTTP request that started it; a client that navigated away polls this to
+/// find out whether the query is still running and to collect the parked
+/// outcome once it finished.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryStatus {
+    /// `"running"` | `"done"` | `"unknown"` (never seen, already delivered to a
+    /// live waiter, or expired past the park TTL).
+    pub status: &'static str,
+    /// The successful result, when `status == "done"` and the query succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<QueryResult>,
+    /// The failure message, when `status == "done"` and the query errored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Column {
     pub name: String,
