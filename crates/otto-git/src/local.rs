@@ -850,6 +850,67 @@ impl LocalGit {
         Ok(())
     }
 
+    /// Check out `branch` and bring it up to date in one gesture (the graph's
+    /// "check out branch" action): stash local changes when the tree is dirty,
+    /// switch (creating a tracking branch from origin when the name only exists
+    /// remotely), pull the upstream (merge, never rebase), then pop the stash.
+    /// Returns a short human summary of the steps taken.
+    ///
+    /// Failure contract: a failed switch pops the stash back so the tree is as
+    /// it was; a failed pull leaves the changes STASHED (popping onto a
+    /// half-merged tree would bury them) and says so in the error; a pop that
+    /// hits conflicts is reported in the summary — git keeps the stash entry,
+    /// nothing is lost.
+    pub async fn checkout_update(&self, branch: &str, token: Option<String>) -> Result<String> {
+        let mut steps: Vec<String> = Vec::new();
+        let dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
+        if dirty {
+            self.run(&["stash", "push", "-m", "otto: auto-stash for branch switch"])
+                .await?;
+            steps.push("stashed local changes".to_string());
+        }
+        let local = self
+            .verify_commit_ref(&format!("refs/heads/{branch}"))
+            .await;
+        if let Err(e) = self.checkout(branch, !local).await {
+            if dirty {
+                let _ = self.run(&["stash", "pop"]).await;
+            }
+            return Err(e);
+        }
+        steps.push(format!("checked out {branch}"));
+        // Pull only when the branch tracks an upstream — a local-only branch has
+        // nothing to pull. `run_raw`: no upstream exits non-zero and that's a
+        // normal outcome here, not an error worth a log line.
+        let has_upstream = self
+            .run_raw(&["rev-parse", "--abbrev-ref", "@{u}"], &[])
+            .await
+            .map(|(ok, ..)| ok)
+            .unwrap_or(false);
+        if has_upstream {
+            match self.pull(token).await {
+                Ok(_) => steps.push("pulled upstream".to_string()),
+                Err(e) => {
+                    let kept = if dirty {
+                        " — your local changes remain stashed (git stash pop to restore)"
+                    } else {
+                        ""
+                    };
+                    return Err(Error::Upstream(format!("pull failed: {e}{kept}")));
+                }
+            }
+        }
+        if dirty {
+            match self.run(&["stash", "pop"]).await {
+                Ok(_) => steps.push("restored local changes".to_string()),
+                Err(_) => steps.push(
+                    "stash pop hit conflicts — resolve them; the stash entry was kept".to_string(),
+                ),
+            }
+        }
+        Ok(steps.join(", "))
+    }
+
     pub async fn stage(&self, paths: &[String]) -> Result<()> {
         if paths.is_empty() {
             return Err(Error::Invalid("no paths to stage".into()));

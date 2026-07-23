@@ -128,6 +128,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/push", post(repo_push::<S>))
         .route("/repos/{id}/pull", post(repo_pull::<S>))
         .route("/repos/{id}/checkout", post(repo_checkout::<S>))
+        .route("/repos/{id}/checkout-update", post(repo_checkout_update::<S>))
         // graph context-menu ops (commit / branch / tag)
         .route("/repos/{id}/cherry-pick", post(repo_cherry_pick::<S>))
         .route("/repos/{id}/revert", post(repo_revert::<S>))
@@ -1261,6 +1262,35 @@ async fn repo_checkout<S: GitCtx>(
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.checkout(&req.branch, req.create).await?;
     Ok(Json(git.status().await?))
+}
+
+#[derive(Deserialize)]
+struct CheckoutUpdateReq {
+    branch: String,
+}
+
+/// `POST /repos/{id}/checkout-update` — the graph's "check out branch" gesture:
+/// stash local changes if the tree is dirty, check the branch out (creating a
+/// tracking branch from origin when it only exists remotely), pull its
+/// upstream, then pop the stash. Returns the fresh status plus a human summary
+/// of the steps taken, for the UI toast.
+async fn repo_checkout_update<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<CheckoutUpdateReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let branch = req.branch.trim();
+    if branch.is_empty() {
+        return Err(Error::Invalid("branch must not be empty".into()).into());
+    }
+    let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
+    let token = optional_token(&s, &user, &repo).await?;
+    let summary = git.checkout_update(branch, token).await?;
+    Ok(Json(serde_json::json!({
+        "status": git.status().await?,
+        "summary": summary,
+    })))
 }
 
 // ---------------------------------------------------------------------------

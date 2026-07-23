@@ -394,10 +394,47 @@
     ];
   }
 
+  /** Branch names decorating a commit (`HEAD -> x`, `x`, `origin/x` → `x`),
+   *  deduped, excluding tags/stash/detached-HEAD markers and branches held by a
+   *  FOREIGN worktree (checking those out errors hard — the refs tree routes
+   *  them to their worktree instead). */
+  function commitBranchNames(c: CommitInfo): string[] {
+    const { localNames } = refKnowledge;
+    const names: string[] = [];
+    for (const r of c.refs) {
+      const arrow = r.match(/^HEAD\s*->\s*(.+)$/);
+      const raw = (arrow ? arrow[1] : r).trim();
+      if (!raw || raw === 'HEAD' || isTagRef(raw)) continue;
+      if (raw === 'refs/stash' || /^stash@\{/.test(raw)) continue;
+      // A remote decoration (origin/x) maps to its short local name.
+      const name = localNames.has(raw) ? raw : raw.replace(/^[^/]+\//, '');
+      if (!name || names.includes(name) || worktreeBranches.has(name)) continue;
+      names.push(name);
+    }
+    return names;
+  }
+
   // ── Commit context menu ─────────────────────────────────────────────────────
   function commitMenu(e: MouseEvent, c: CommitInfo): void {
     const { currentBranch } = refKnowledge;
-    const items: MenuItem[] = [
+    const items: MenuItem[] = [];
+    // Branches on this commit → one-click "check out + update" entries. The
+    // server stashes local changes if needed, checks out (tracking origin when
+    // the branch is remote-only), pulls, and pops the stash — so a branch
+    // that's easy to SPOT on the graph but hard to find in a crowded refs tree
+    // is one click from being current and up to date.
+    for (const name of commitBranchNames(c)) {
+      items.push({
+        label:
+          name === currentBranch
+            ? `Update ${name} (stash · pull · pop)`
+            : `Check out ${name} (stash · pull · pop)`,
+        icon: 'branch',
+        action: () => void checkoutBranchUpdate(name),
+      });
+    }
+    if (items.length > 0) items.push({ separator: true });
+    items.push(
       {
         label: 'Check out commit (detached)',
         icon: 'branch',
@@ -412,7 +449,7 @@
         icon: 'tag',
         action: () => void createTagAt(c.sha, true),
       },
-    ];
+    );
     // Open a PR from the checked-out branch (the "from a commit while on a
     // branch" case) — only meaningful when a branch is checked out.
     if (currentBranch) {
@@ -969,6 +1006,30 @@
     // strip "origin/" prefix to get local branch name
     const localName = b.name.replace(/^[^/]+\//, '');
     void checkout(localName, true);
+  }
+
+  /** The graph's "check out branch" gesture: the server stashes local changes
+   *  when the tree is dirty, checks the branch out (tracking origin when it
+   *  only exists remotely), pulls its upstream, then pops the stash. The
+   *  returned summary says exactly which of those steps ran. */
+  async function checkoutBranchUpdate(branch: string): Promise<void> {
+    checkoutBusy = branch;
+    try {
+      const resp = await api.post<{ status: RepoStatusResp; summary: string }>(
+        `/repos/${repoId}/checkout-update`,
+        { branch },
+      );
+      toasts.success(`Switched to ${branch}`, resp.summary);
+      // Pull may have added commits — refresh refs AND the log, not just refs.
+      await refreshAfter(resp.status);
+    } catch (e) {
+      toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
+      // The stash/pull may have partially landed — resync so the graph tells
+      // the truth about where the tree actually is.
+      await refreshAfter().catch(() => {});
+    } finally {
+      checkoutBusy = '';
+    }
   }
 
   async function selectCommit(commit: CommitInfo): Promise<void> {
