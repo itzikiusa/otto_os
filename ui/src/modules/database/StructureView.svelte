@@ -287,7 +287,7 @@
                   onclick={() => (openIdxDef = openIdxDef === i ? null : i)}
                 >
                   <Icon name="key" size={11} />
-                  <span class="idx-name mono">{idx.name}</span>
+                  <span class="idx-name mono" title={idx.name}>{idx.name}</span>
                   {#if idx.unique}<span class="tag unique">unique</span>{/if}
                   {#if idx.method}<span class="tag">{idx.method}</span>{/if}
                   <span class="idx-cols mono">({idx.columns.join(', ')})</span>
@@ -701,11 +701,15 @@
   .idx-item {
     display: flex;
     flex-direction: column;
+    /* Flex items refuse to shrink below content by default; without this a
+       long auto-generated index name blows the whole section (and page) wide. */
+    min-width: 0;
   }
   /* The index row is a button so the full definition can expand under it.
      Indexes without a definition render identically but aren't clickable. */
   button.idx {
     width: 100%;
+    min-width: 0;
     font: inherit;
     font-size: 11.5px;
     color: var(--text-dim);
@@ -734,6 +738,13 @@
   .fk-name {
     font-weight: 600;
     color: var(--text);
+    /* A Mongo compound-index name is one huge unbreakable token — ellipsize it
+       instead of letting it push the row (and page) sideways. The expandable
+       definition below always shows the full name. */
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .idx-cols,
   .fk-map {
@@ -741,6 +752,8 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    min-width: 0;
+    overflow: hidden;
   }
   .tag {
     font-size: 9.5px;
