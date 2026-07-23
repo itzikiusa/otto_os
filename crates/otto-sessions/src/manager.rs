@@ -3525,6 +3525,35 @@ mod tests {
         (mgr, repo, ws, user)
     }
 
+    /// RAII: set an env var for one test and restore the previous value on drop
+    /// (panic-safe). The environment is process-global and tests run in
+    /// parallel, so a `set_var` that outlives its test leaks to every test
+    /// scheduled after it — a leaked HOME pointing at a dropped tempdir made
+    /// unrelated PTY spawns fail with ENOENT (portable-pty uses $HOME as the
+    /// child cwd when none is given). Declare the guard AFTER the tempdir it
+    /// points at, so reverse drop order restores the var before the dir vanishes.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     /// Write a codex rollout file with a `session_meta` first line, returning its
     /// path. `thread_source`/`originator` let tests forge subagent / non-codex rows.
     fn write_rollout(
@@ -3995,7 +4024,7 @@ mod tests {
         let codex_home = tempfile::tempdir().unwrap();
         let day = codex_home.path().join("sessions").join("2026/07/16");
         write_rollout(&day, "r.jsonl", "LATE-1", &cwd, "codex-tui", "user");
-        std::env::set_var("CODEX_HOME", codex_home.path());
+        let _codex_home = EnvVarGuard::set("CODEX_HOME", codex_home.path());
 
         assert_eq!(
             mgr.late_capture_provider_id(&s).await.as_deref(),
@@ -4079,8 +4108,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Safe in tests: this process owns its env. Set HOME for the check.
-        std::env::set_var("HOME", home.path());
+        // Scoped: restored on drop, BEFORE the tempdir is deleted.
+        let _home = EnvVarGuard::set("HOME", home.path());
         let pruned = mgr.prune_dead_sessions().await;
         assert_eq!(pruned, 0, "existing transcript must be kept");
         assert!(repo.get(&id).await.is_ok());
