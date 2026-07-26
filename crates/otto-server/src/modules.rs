@@ -2474,7 +2474,22 @@ async fn summarize_and_persist(
         .join("\n\n");
     let summarizer_prompt = format!("{}\n\n{}", summarizer_cfg.prompt, batches);
 
-    tracing::info!(review = %review_id, "running summarizer agent ({total_findings} findings in)");
+    // The summarizer used to get a flat 120s regardless of how much it had to
+    // consolidate. That was survivable while it was capped at 20 items; with the
+    // cap gone it must dedupe and re-emit EVERY finding, and a 180-file review
+    // (12 agents, 36k-line diff) blew straight through it — dropping to the
+    // deterministic fallback, whose own cap then produced exactly 20 findings,
+    // all `high`. The run looked clean; it was truncated twice over. Scale the
+    // budget with the work: ~1s per finding on top of a 2-minute floor, capped
+    // at 20 minutes so a wedged summarizer still fails rather than hanging.
+    let summarizer_timeout = Duration::from_secs(
+        (120 + total_findings as u64).clamp(120, 1_200),
+    );
+    tracing::info!(
+        review = %review_id,
+        "running summarizer agent ({total_findings} findings in, {}s budget)",
+        summarizer_timeout.as_secs()
+    );
     let mut summary_fallback = false;
     // Run the summarizer on its CONFIGURED provider (the ReviewPanel exposes a
     // summarizer-provider picker). claude/unset ⇒ the fast orchestrator PTY
@@ -2487,7 +2502,7 @@ async fn summarize_and_persist(
                 &summarizer_prompt,
                 repo_path,
                 model_opt(&summarizer_cfg.model),
-                Duration::from_secs(120),
+                summarizer_timeout,
             )
             .await
             .map_err(|e| e.to_string())
@@ -2506,7 +2521,7 @@ async fn summarize_and_persist(
             sp,
             meta,
             &summarizer_prompt,
-            Duration::from_secs(120),
+            summarizer_timeout,
             |_id| {},
         )
         .await

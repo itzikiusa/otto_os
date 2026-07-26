@@ -13,8 +13,12 @@ use otto_core::domain::ReviewFinding;
 use otto_core::finding::FindingSeverity;
 use otto_state::review_findings::fallback_dedupe_key;
 
-/// The summarizer enforces "at most 20 items"; the fallback honors the same cap.
-const MAX_FINAL: usize = 20;
+/// No cap. This mirrored the summarizer's old "at most 20 items" rule, which
+/// has been removed — a fixed ceiling silently discarded real defects on large
+/// PRs, and because the ranking is severity-first the survivors were ALL bugs,
+/// so the output looked like a clean high-severity list rather than a truncated
+/// one. Keep the ordering (it decides what a reader sees first); drop the
+/// truncation. Dedupe still bounds the list to distinct findings.
 
 /// One merged finding, pre-serialization (summarizer output shape).
 #[derive(serde::Serialize)]
@@ -91,7 +95,6 @@ pub fn deterministic_summary(batches: &[Vec<ReviewFinding>]) -> String {
             .then(a.finding.line.cmp(&b.finding.line))
             .then(a.order.cmp(&b.order))
     });
-    slots.truncate(MAX_FINAL);
 
     let merged: Vec<MergedFinding> = slots
         .into_iter()
@@ -192,11 +195,21 @@ mod tests {
     }
 
     #[test]
-    fn caps_at_twenty_like_the_summarizer() {
+    fn never_truncates_however_many_findings() {
+        // Regression: this used to assert a hard cap of 20. A real review of a
+        // 180-file / 36k-line PR fell back to this path and emitted exactly 20
+        // findings — all `high`, no warns or infos — because the cap cut a
+        // severity-ranked list. The truncation is gone; every distinct finding
+        // must survive.
         let many: Vec<ReviewFinding> = (0..25)
             .map(|i| f(&format!("f{i}.rs"), i, "warn", &format!("finding {i}")))
             .collect();
         let out = parse(&deterministic_summary(&[many]));
-        assert_eq!(out.len(), 20);
+        assert_eq!(out.len(), 25);
+
+        let lots: Vec<ReviewFinding> = (0..150)
+            .map(|i| f(&format!("g{i}.rs"), i, "info", &format!("nit {i}")))
+            .collect();
+        assert_eq!(parse(&deterministic_summary(&[lots])).len(), 150);
     }
 }

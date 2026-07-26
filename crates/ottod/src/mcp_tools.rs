@@ -294,10 +294,29 @@ impl Ctx {
     /// empty list (gateway off, no workspace, or the session user lacks MCP
     /// access) leaves the inward catalog unchanged.
     async fn gateway_tools(&self) -> Vec<Value> {
-        let Some(ws) = &self.workspace_id else { return vec![] };
+        let Some(ws) = &self.workspace_id else {
+            eprintln!(
+                "ottod mcp-tools: gateway tools skipped — session has no workspace_id; \
+                 only the static read-only catalog is advertised"
+            );
+            return vec![];
+        };
         match self.get_json(&format!("/mcp/gateway/tools?workspace_id={}", seg(ws))).await {
             Ok(v) => v.get("tools").and_then(Value::as_array).cloned().unwrap_or_default(),
-            Err(_) => vec![],
+            // Swallowing this silently made the advertised tool list vary between
+            // otherwise-identical runs with no trace: when the gateway answered,
+            // agents saw the downstream write tools; when it errored they saw a
+            // read-only catalog and correctly reported the tool "missing". Same
+            // code, same token, different answer — and nothing to grep for. Still
+            // best-effort (the static catalog stands on its own), but never quiet.
+            Err(e) => {
+                eprintln!(
+                    "ottod mcp-tools: gateway tools unavailable for workspace {ws}: {e} — \
+                     advertising the static read-only catalog only; write tools \
+                     (e.g. comment_pr) will NOT appear on this stdio surface"
+                );
+                vec![]
+            }
         }
     }
 
@@ -586,6 +605,28 @@ fn tool_catalog() -> Value {
                 "inputSchema": { "type": "object", "properties": { "review_id": { "type": "string" } }, "required": ["review_id"] }
             },
             {
+                "name": "otto_list_prs",
+                "description": "Read-only: list a repo's pull requests (number, title, state, source/destination branches, author, url). Use this to find the PR number for otto_get_pr / otto_comment_pr.",
+                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string" } }, "required": ["repo_id"] }
+            },
+            {
+                "name": "otto_get_pr",
+                "description": "Read-only: one pull request plus its existing review comments (id, body, path, line, thread_id). Call this BEFORE commenting so you can dedupe and reply in-thread instead of posting duplicates.",
+                "inputSchema": { "type": "object", "properties": { "repo_id": { "type": "string" }, "pr_number": { "type": "integer" } }, "required": ["repo_id", "pr_number"] }
+            },
+            {
+                "name": "otto_comment_pr",
+                "description": "Post a comment on a pull request. Pass `path` (and optionally `line`) to anchor it INLINE on a file in the diff; omit both for a PR-level comment; pass `in_reply_to` with an existing comment id to reply in that thread. Mutating and outward-facing — the comment is visible to everyone on the PR.",
+                "inputSchema": { "type": "object", "properties": {
+                    "repo_id": { "type": "string" },
+                    "pr_number": { "type": "integer" },
+                    "body": { "type": "string", "description": "Markdown comment body." },
+                    "path": { "type": "string", "description": "Repo-relative file path to anchor the comment to." },
+                    "line": { "type": "integer", "description": "1-indexed line in `path` to anchor to." },
+                    "in_reply_to": { "type": "string", "description": "Existing comment id to reply to." }
+                }, "required": ["repo_id", "pr_number", "body"] }
+            },
+            {
                 "name": "otto_usage_summary",
                 "description": "Read-only: token-usage rollups by provider/day/session/feature (root-only endpoint; non-root callers get a clean error). Optional `days` (default 30).",
                 "inputSchema": { "type": "object", "properties": { "days": { "type": "integer" } } }
@@ -759,6 +800,8 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "swarm_utilization",
     "otto_search_memory",
     "otto_list_repos",
+    "otto_list_prs",
+    "otto_get_pr",
     "otto_list_sessions",
     "otto_list_product_stories",
     "otto_list_findings",
@@ -849,6 +892,14 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
         "otto_list_findings" => {
             ReadCall::get(format!("/reviews/{}/findings", seg(&arg_str(args, "review_id")?)))
         }
+        "otto_list_prs" => {
+            ReadCall::get(format!("/repos/{}/prs", seg(&arg_str(args, "repo_id")?)))
+        }
+        "otto_get_pr" => ReadCall::get(format!(
+            "/repos/{}/prs/{}",
+            seg(&arg_str(args, "repo_id")?),
+            arg_u64(args, "pr_number")?
+        )),
         "otto_usage_summary" => {
             let mut path = "/usage/summary".to_string();
             if let Some(d) = args.get("days").and_then(Value::as_u64) {
@@ -930,6 +981,23 @@ fn arg_str(args: &Value, key: &str) -> Result<String, String> {
         .map(str::to_owned)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("missing required string argument `{key}`"))
+}
+
+/// Required unsigned integer. Accepts a JSON number or a numeric string — some
+/// MCP clients stringify every argument, and a PR number arriving as `"52"`
+/// should not read as "missing".
+fn arg_u64(args: &Value, key: &str) -> Result<u64, String> {
+    match args.get(key) {
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .ok_or_else(|| format!("argument `{key}` must be a non-negative integer")),
+        Some(Value::String(s)) => s
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| format!("argument `{key}` must be a non-negative integer")),
+        Some(_) => Err(format!("argument `{key}` must be a number")),
+        None => Err(format!("missing required integer argument `{key}`")),
+    }
 }
 
 /// Required string that may be explicitly empty (valid for file content).
@@ -1292,6 +1360,37 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
         // repos / sessions / product / findings / usage / self-improvement). All
         // route through the pure `read_route` and post-process identically: the raw
         // upstream value is capped + redacted by `finalize`.
+        // PR comment — the one WRITE on this surface. It lives here rather than
+        // behind the gateway because the review workflow's whole product is
+        // comments on a PR, and routing it through a gateway that silently
+        // returns an empty tool list on any error left agents reporting
+        // "comment_pr does not exist" and the PR at zero comments. Same daemon
+        // route the Otto UI uses; the caller's own session token authorizes it,
+        // and the call is audited like every other.
+        "otto_comment_pr" => {
+            let repo_id = arg_str(args, "repo_id")?;
+            let number = arg_u64(args, "pr_number")?;
+            let body = arg_str(args, "body")?;
+            let mut payload = json!({ "body": body });
+            // path/line anchor the comment inline; in_reply_to threads it. All
+            // optional — omitting them posts a PR-level comment.
+            if let Some(path) = arg_optional_string(args, "path")? {
+                payload["path"] = json!(path);
+            }
+            if let Some(line) = args.get("line").and_then(Value::as_u64) {
+                payload["line"] = json!(line);
+            }
+            if let Some(reply) = arg_optional_string(args, "in_reply_to")? {
+                payload["in_reply_to"] = json!(reply);
+            }
+            let raw = ctx
+                .post_json(
+                    &format!("/repos/{}/prs/{number}/comments", seg(&repo_id)),
+                    &payload,
+                )
+                .await?;
+            Ok(finalize(raw))
+        }
         name if FEATURE_READ_TOOLS.contains(&name) => {
             let call = read_route(name, args, ctx.workspace_id.as_deref())?;
             let raw = if call.post {
