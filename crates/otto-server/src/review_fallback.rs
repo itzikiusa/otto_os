@@ -13,12 +13,12 @@ use otto_core::domain::ReviewFinding;
 use otto_core::finding::FindingSeverity;
 use otto_state::review_findings::fallback_dedupe_key;
 
-/// No cap. This mirrored the summarizer's old "at most 20 items" rule, which
-/// has been removed — a fixed ceiling silently discarded real defects on large
-/// PRs, and because the ranking is severity-first the survivors were ALL bugs,
-/// so the output looked like a clean high-severity list rather than a truncated
-/// one. Keep the ordering (it decides what a reader sees first); drop the
-/// truncation. Dedupe still bounds the list to distinct findings.
+// No cap. This mirrored the summarizer's old "at most 20 items" rule, which
+// has been removed — a fixed ceiling silently discarded real defects on large
+// PRs, and because the ranking is severity-first the survivors were ALL bugs,
+// so the output looked like a clean high-severity list rather than a truncated
+// one. Keep the ordering (it decides what a reader sees first); drop the
+// truncation. Dedupe still bounds the list to distinct findings.
 
 /// One merged finding, pre-serialization (summarizer output shape).
 #[derive(serde::Serialize)]
