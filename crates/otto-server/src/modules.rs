@@ -1787,8 +1787,13 @@ fn default_review_config(default_provider: &str) -> ReviewConfig {
                      summary; `category` is one of security|correctness|performance|architecture|\
                      devex|test|docs|style|other; `evidence` is the offending code excerpt or quote \
                      that proves the issue; `reasoning` is why it is a problem; `suggested_fix` is a \
-                     concrete fix. Drop trivial duplicates. Return at most 20 items ranked by \
-                     severity (bug first). Here are the batches of comments from each agent:"
+                     concrete fix. Deduplicate: merge findings that describe the SAME defect at \
+                     the same file:line into the single best-evidenced version, and drop trivial \
+                     duplicates. There is NO cap on the number of items — return EVERY distinct \
+                     verified finding, however many that is (on a large diff, 100+ is normal). \
+                     Never drop a finding merely to shorten the list, and never drop one just \
+                     because other findings are more severe. Rank by severity (bug first). \
+                     Here are the batches of comments from each agent:"
                 .to_string(),
             skill: String::new(),
         },
@@ -1889,12 +1894,21 @@ fn review_agent_timeout(diff_len: usize, override_secs: Option<u64>) -> Duration
     if let Some(s) = override_secs {
         return Duration::from_secs(s);
     }
+    // The top tier used to be a flat 30 min for "≥ 20k chars", which lumped a
+    // 20 KB diff together with a 1 MB one — and a reviewer told to sweep EVERY
+    // changed file (see the coverage mandate in the agent prompt) cannot do that
+    // for 170 files in 30 minutes. Scale the ceiling with the diff instead, so
+    // the grace period tracks the work actually being asked for.
     let secs = if diff_len < 4_000 {
         600 // ≲ small diff: 10 min
     } else if diff_len < 20_000 {
         1_200 // medium: 20 min
-    } else {
+    } else if diff_len < 100_000 {
         1_800 // large: 30 min
+    } else if diff_len < 400_000 {
+        3_600 // very large: 1 h
+    } else {
+        7_200 // huge (a whole module landing at once): 2 h
     };
     Duration::from_secs(secs)
 }
@@ -2157,6 +2171,25 @@ async fn run_review_core(
     }
     let diff_path_str = diff_path.to_string_lossy().to_string();
 
+    // Diff SCALE, stated to every reviewer. Without it an agent has no idea
+    // whether it was handed a 3-file tweak or a 170-file module, so it reviews
+    // until it has "enough" findings and stops — satisficing that reads as a
+    // shallow review on a large PR. Naming the size, and requiring the agent to
+    // account for every file, converts "find some bugs" into a bounded sweep it
+    // can be held to.
+    let changed_files = diff_text
+        .lines()
+        .filter(|l| l.starts_with("+++ b/"))
+        .count()
+        .max(1);
+    let changed_lines = diff_text
+        .lines()
+        .filter(|l| {
+            (l.starts_with('+') && !l.starts_with("+++"))
+                || (l.starts_with('-') && !l.starts_with("---"))
+        })
+        .count();
+
     // 4. Run each reviewer as a real, openable session. Each task persists its
     //    own live state (running → waiting → done/error) so the UI poll shows
     //    progress; one stuck/failed agent never aborts the others.
@@ -2242,14 +2275,25 @@ async fn run_review_core(
              symbol\", has a \"missing import\", \"breaks callers\", or uses a \"method/field/overload \
              that does not exist\": first OPEN the relevant definition the line depends on and \
              CONFIRM it, citing the `file:line` you verified against. If the actual code \
-             contradicts your hypothesis, DROP the finding. A confident-but-wrong finding is worse \
-             than a missed one — prefer false negatives over false positives.\n\n\
+             contradicts your hypothesis, DROP the finding. An UNVERIFIED claim is worse than a \
+             missed one — so verify, then report. This is a rule about EVIDENCE, not about volume: \
+             once you have verified a real defect, report it. Do NOT drop a confirmed finding \
+             because it seems small, because you already have several, or because you are unsure \
+             it is worth someone's time. Severity is the summarizer's job; completeness is yours.\n\n\
+             COVERAGE — this is a {} -file diff ({} changed lines). It is LARGE, and a handful of \
+             findings from the first few files is NOT a review of it. You are not done when you \
+             have found something worth reporting; you are done when every changed file has been \
+             looked at through your lens. Work through the diff file-by-file to the end — budget \
+             your time across the whole set rather than spending it all on the first interesting \
+             file. If your lens genuinely does not apply to a file, that is fine — but you must \
+             have LOOKED. Do not stop early because the findings you have feel sufficient.\n\n\
              Do NOT diff against other branches.\n\n\
              {}\n\n{}{}Diff file — read it fully (it may be large; read it in chunks if needed):\n\
              {}\n\nReview the change as described above and output ONLY a JSON array of findings \
              (no prose, no markdown fence, NO file edits). Every finding must be one you verified \
-             against the actual code. Output [] if there are no real, verified findings.",
-            run.prompt_lens, user_ctx, jira_ctx, diff_path_str
+             against the actual code. Output [] ONLY if you swept every changed file and found no \
+             real, verified defect — not as a shortcut when the diff is large.",
+            changed_files, changed_lines, run.prompt_lens, user_ctx, jira_ctx, diff_path_str
         );
         // Persist the prompt so a per-agent Retry can re-run exactly this agent:
         // temp file for the in-flight injection path, DB row (0100) so retry

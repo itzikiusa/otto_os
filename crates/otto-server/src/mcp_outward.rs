@@ -510,6 +510,54 @@ async fn require_approval_dangerous(ctx: &ServerCtx) -> bool {
         .unwrap_or(true)
 }
 
+/// Whether an explicit per-token write grant (`McpScope.allow_writes`) counts as
+/// having already approved DANGEROUS tools for that token. Default **true**:
+/// minting a read+write MCP token IS the approval decision, and asking again per
+/// call strands automation without adding a real check. Set
+/// `mcp_trust_token_write_grant: false` to restore the per-call prompt for
+/// write-scoped tokens too.
+async fn trust_token_write_grant(ctx: &ServerCtx) -> bool {
+    SettingsRepo::new(ctx.pool.clone())
+        .get("mcp_trust_token_write_grant")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// Short tool names exempted from the DANGEROUS approval gate — set via the
+/// `mcp_approval_exempt_tools` setting (a JSON array of short names, e.g.
+/// `["comment_pr"]`).
+///
+/// WHY this exists: the gate was all-or-nothing. An operator who deliberately
+/// enabled ONE outward-facing tool (say, PR comments for the review workflow)
+/// could only stop the second approval prompt by clearing
+/// `mcp_require_approval_dangerous`, which simultaneously disarms `create_pr`,
+/// `run_workflow`, `produce_broker_message`, `vault_delete`, `broadcast_message`
+/// and every other write. Enabling one tool should not require disarming all of
+/// them, so exemption is per-tool and opt-in.
+///
+/// A tool must STILL be enabled (`tool_enabled`) to run at all — this only skips
+/// the approval prompt for a capability already granted. Calls remain audited.
+async fn approval_exempt_tools(ctx: &ServerCtx) -> Vec<String> {
+    SettingsRepo::new(ctx.pool.clone())
+        .get("mcp_approval_exempt_tools")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| {
+            v.as_array().map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.trim().trim_start_matches("otto.").to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
 /// Build the human-facing approval detail. For scheduled-task create/update it
 /// surfaces the prompt + cadence + destination so the approver knows exactly what
 /// recurring autonomous capability they are granting (security review fix).
@@ -724,7 +772,30 @@ pub(crate) async fn governed_invoke(
     }
 
     let dangerous = DANGEROUS.contains(&short.as_str());
-    let needs_approval = dangerous && require_approval_dangerous(ctx).await;
+    // An operator who granted this specific tool in the control plane has already
+    // made the call — don't ask a second time for the same decision. Exemption is
+    // per-tool and opt-in, so the rest of DANGEROUS stays gated.
+    let exempt = approval_exempt_tools(ctx)
+        .await
+        .iter()
+        .any(|t| t == short.as_str());
+    // A `kind='mcp'` token carrying an EXPLICIT write grant (`allow_writes`) has
+    // already cleared this decision at issue time: someone deliberately minted a
+    // read+write token for this caller. Re-prompting per call asks the same
+    // question twice and strands automation (a workflow step posting 21 review
+    // comments filed 21 approvals and posted none). The scope check above still
+    // runs first, so a read-only token, a tool outside the token's allowed set,
+    // or a workspace-pinned mismatch is denied outright rather than reaching here.
+    // Session/api callers have `mcp_scope == None` — no explicit grant, so they
+    // stay gated. Governed by `mcp_trust_token_write_grant` for operators who
+    // want the belt-and-braces prompt back. Calls remain audited either way.
+    let token_write_grant = auth
+        .mcp_scope
+        .as_ref()
+        .is_some_and(|scope| scope.allow_writes)
+        && trust_token_write_grant(ctx).await;
+    let needs_approval =
+        dangerous && !exempt && !token_write_grant && require_approval_dangerous(ctx).await;
     let args_hash = canonical_hash(arguments);
     let ws = arguments.get("workspace_id").and_then(Value::as_str).map(str::to_string);
 
