@@ -65,6 +65,23 @@
     resultIdx = 0;
   });
 
+  // What to say when a result carries no columns. SQL engines return column
+  // metadata even for an empty SELECT, so a column-less result there really is a
+  // bare statement ack — but Mongo is schemaless: its columns are inferred from
+  // the returned documents, so a `find` that matches NOTHING also arrives with
+  // zero columns. Labelling that "Statement OK" reads as "your query ran but the
+  // data is hidden". Distinguish by the write metadata the drivers do set:
+  // `rows_affected` (and a `message`) mark a write; their absence is a read that
+  // matched nothing.
+  const emptyResultLabel = $derived(
+    result?.message ??
+      (result?.rows_affected != null
+        ? `${result.rows_affected} row(s) affected`
+        : result
+          ? 'No rows returned'
+          : 'Statement OK'),
+  );
+
   // ── Running overlay elapsed counter ──────────────────────────────────────────
   // Ticks while the active tab's query is in flight so the overlay shows elapsed
   // seconds; stops + resets when the query settles or the component unmounts.
@@ -1613,10 +1630,7 @@
   {:else}
     <div class="grid-empty">
       <Icon name="check" size={mini ? 16 : 22} />
-      <span>
-        {result?.message ??
-          (result?.rows_affected != null ? `${result.rows_affected} row(s) affected` : 'Statement OK')}
-      </span>
+      <span>{emptyResultLabel}</span>
     </div>
   {/if}
 {:else}
