@@ -165,6 +165,11 @@ impl otto_brokers::BrokersCtx for ServerCtx {
     fn roles(&self) -> &Arc<dyn RoleChecker> {
         &self.roles
     }
+    fn pool(&self) -> Option<otto_state::SqlitePool> {
+        // Lets the global-cluster branch consult the caller's `Database` grant
+        // instead of falling back to root-only.
+        Some(self.pool.clone())
+    }
 }
 
 impl otto_mcp::McpCtx for ServerCtx {

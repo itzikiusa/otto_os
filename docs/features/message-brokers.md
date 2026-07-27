@@ -62,11 +62,18 @@ pool is evicted whenever a cluster profile is edited or deleted.
   delete topic, alter configs, produce, reset offsets, replay, sections) require
   workspace **Editor**.
 - **Global clusters** (`workspace_id = null`) are a shared infrastructure
-  library visible in every workspace and are **managed by root only** — a
-  non-root Editor gets `403` on management calls against them. In the current
-  build, clusters created through the API are created workspace-independent
-  (global library, like DB connections); the path workspace is used only to
-  authorize the caller.
+  library visible in every workspace. They have no workspace role to check, so
+  they resolve on the **feature axis** instead: brokers have no Feature key of
+  their own and are gated on **`Database`** (see `policy.rs`), so browsing takes
+  `Database:View` and mutating takes `Database:Edit`. Root passes everything.
+  In the current build, clusters created through the API are created
+  workspace-independent (global library, like DB connections); the path
+  workspace is used only to authorize the caller.
+
+  > Until 2026-07-27 this branch was **root-only**, which — since every cluster
+  > is created global — meant no non-root account could use the Kafka viewer at
+  > all (`403 "global broker clusters are managed by root"`). Same defect, and
+  > same fix, as the DB/connections gate.
 
 ---
 

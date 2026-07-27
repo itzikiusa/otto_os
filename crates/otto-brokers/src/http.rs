@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
-use otto_core::domain::{User, WorkspaceRole};
+use otto_core::domain::{Feature, User, WorkspaceRole};
 use otto_core::{Error, Id};
 use otto_state::BrokerClusterRow;
 use serde::Deserialize;
@@ -26,6 +26,13 @@ use std::collections::HashMap;
 pub trait BrokersCtx: Clone + Send + Sync + 'static {
     fn brokers(&self) -> &Arc<BrokersService>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
+
+    /// SQLite pool used to resolve per-user feature grants for **global**
+    /// (workspace-less) clusters. `None` — the default, for check-only test
+    /// contexts with no state DB — keeps that branch root-only.
+    fn pool(&self) -> Option<otto_state::SqlitePool> {
+        None
+    }
 }
 
 /// Local problem mapper (orphan rule: can't impl `IntoResponse` for `Error`).
@@ -141,7 +148,14 @@ pub fn api_router<S: BrokersCtx>() -> Router<S> {
 
 // ---- authorization helpers ------------------------------------------------
 
-/// Fetch the cluster row and enforce the workspace role (root for globals).
+/// Fetch the cluster row and enforce the workspace role; for **global**
+/// (workspace-less) clusters the caller's `Database` grant answers instead.
+///
+/// Same shape as the connections / DB Explorer gates: a row with no workspace
+/// has no workspace role to check, and falling back to root-only made every
+/// global cluster unusable for every other account. Brokers have no dedicated
+/// Feature key — `policy.rs` gates them on `Database` (read=View, mutate=Edit),
+/// so that's the axis here too. A context without a pool fails closed.
 async fn authorize<S: BrokersCtx>(
     ctx: &S,
     user: &User,
@@ -151,13 +165,28 @@ async fn authorize<S: BrokersCtx>(
     let row = ctx.brokers().get_row(id).await?;
     match &row.workspace_id {
         Some(ws) => ctx.roles().check(user, ws, min).await?,
-        None => {
-            if !user.is_root {
+        None => match ctx.pool() {
+            Some(pool) => {
+                let need = otto_state::capability_for_role(min);
+                otto_state::GrantsRepo::new(pool)
+                    .check_global(
+                        user,
+                        Feature::Database,
+                        need,
+                        &format!(
+                            "global broker clusters need the Database '{}' grant",
+                            need.as_str()
+                        ),
+                    )
+                    .await?;
+            }
+            None if user.is_root => {}
+            None => {
                 return Err(Error::Forbidden(
                     "global broker clusters are managed by root".into(),
                 ));
             }
-        }
+        },
     }
     Ok(row)
 }
