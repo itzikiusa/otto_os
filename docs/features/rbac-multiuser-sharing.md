@@ -436,7 +436,7 @@ or root`; `root`. Authoritative source: [`../contracts/api.md`](../contracts/api
 |---|---|---|
 | `GET /users/{id}/grants` · `PUT /users/{id}/grants` | Users:Admin or root | PUT **atomically replaces** all grants; audited `grant.changed` |
 | `GET /users/{id}/plugin-grants` · `PUT /users/{id}/plugin-grants` | root | string-keyed plugin axis (`feature` = slug) |
-| `GET /workspaces/{id}/members` · `PUT /workspaces/{id}/members` | ws admin | the workspace-role matrix |
+| `GET /workspaces/{id}/members` · `PUT /workspaces/{id}/members` | ws admin | the workspace-role matrix. **PUT replaces the whole member list** for that workspace — send every member, not just the one you're changing. Membership is per workspace, so a user reaches several workspaces only by appearing in each one's list; **Settings → Users → Workspace roles → By user** does that in one screen (one PUT per workspace, plus a "set all" shortcut). |
 
 ### Admin overview, terminate, impersonation
 | Method & path | Auth | Notes |
@@ -530,7 +530,7 @@ or root`; `root`. Authoritative source: [`../contracts/api.md`](../contracts/api
 |---|---|---|
 | User sees an empty nav / 403 on every feature | No grants (default-deny) | Assign capabilities in **Settings → Users → Feature grants**, **Save grants** |
 | Feature works in UI but `403 requires <feature>:<cap>` from a script | PAT inherits the user's (insufficient) capability | Grant the needed capability to the **token owner**, or use a root-owned token |
-| User can't reach a workspace's connections despite a `Connections` grant | Not a member of that workspace | Add them in **Workspace roles** (`Editor`/`Admin`) |
+| User can't reach a workspace's connections despite a `Connections` grant | Not a member of that workspace | Add them in **Workspace roles** (`Editor`/`Admin`) — use the **By user** tab to grant several workspaces at once |
 | 403 "global connections need the Connections/Database '…' grant" in the DB Explorer | Every connection the UI creates is **global** (no workspace), so the feature grant — not the workspace role — decides. The user holds less than the required capability | Grant `Database:Edit` (run queries) / `Connections:Edit` (use), or `Database:View` for schema-browsing only, in **Feature grants**. Editing or deleting a shared connection record additionally takes `Connections:Admin` |
 | User can't see another user's session | Working as designed — ownership isolation | Use **Settings → Sessions** (Users:Admin/root) for the cross-user view, or impersonate |
 | **Impersonate** button disabled / 403 | Target is root or a `Users:Admin`, is yourself, is disabled, or you're already impersonating | Pick a non-root, non-admin, enabled target; exit any active impersonation first |

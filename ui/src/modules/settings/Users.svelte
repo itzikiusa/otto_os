@@ -53,6 +53,88 @@
   let members: MemberEntry[] = $state([]);
   let matrixLoading = $state(false);
 
+  // ---- membership axis ----------------------------------------------------
+  //
+  // "By workspace" answers *who is in this workspace*; "By user" answers *which
+  // workspaces does this user reach* — the question you actually have when
+  // onboarding a shared account, which otherwise means re-picking the workspace
+  // dropdown once per workspace. Both drive the same
+  // `PUT /workspaces/{id}/members` (a full replace, so we keep every
+  // workspace's member list in hand).
+  let membershipAxis: 'workspace' | 'user' = $state('workspace');
+  /** Selected user for the by-user view. */
+  let memberUserId: string = $state('');
+  /** workspace id → its full member list. Loaded for the by-user view. */
+  let allMembers: Record<string, MemberEntry[]> = $state({});
+  let allMembersLoading = $state(false);
+  /** Workspace ids currently mid-save (disables that row's buttons). */
+  let savingWs: string[] = $state([]);
+
+  /** Load every workspace's member list (by-user view needs them all). */
+  async function loadAllMembers(): Promise<void> {
+    allMembersLoading = true;
+    try {
+      const pairs = await Promise.all(
+        ws.workspaces.map(async (w) => {
+          try {
+            return [w.id, await api.get<MemberEntry[]>(`/workspaces/${w.id}/members`)] as const;
+          } catch {
+            return [w.id, [] as MemberEntry[]] as const;
+          }
+        }),
+      );
+      allMembers = Object.fromEntries(pairs);
+    } finally {
+      allMembersLoading = false;
+    }
+  }
+
+  function roleIn(wsId: string, userId: string): WorkspaceRole | 'none' {
+    return allMembers[wsId]?.find((m) => m.user_id === userId)?.role ?? 'none';
+  }
+
+  /** Set (or clear) `userId`'s role in one workspace. */
+  async function setRoleIn(
+    wsId: string,
+    userId: string,
+    role: WorkspaceRole | 'none',
+  ): Promise<void> {
+    if (roleIn(wsId, userId) === role) return;
+    const current = allMembers[wsId] ?? [];
+    const next = current.filter((m) => m.user_id !== userId);
+    if (role !== 'none') next.push({ user_id: userId, username: '', display_name: '', role });
+    savingWs = [...savingWs, wsId];
+    try {
+      const saved = await api.put<MemberEntry[]>(`/workspaces/${wsId}/members`, {
+        members: next.map((m) => ({ user_id: m.user_id, role: m.role })),
+      });
+      allMembers = { ...allMembers, [wsId]: saved };
+      // Keep the by-workspace view honest when it's showing the same workspace.
+      if (matrixWs === wsId) members = saved;
+    } catch (e) {
+      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      savingWs = savingWs.filter((id) => id !== wsId);
+    }
+  }
+
+  /** Give the selected user the same role in EVERY workspace (or remove them). */
+  async function setRoleEverywhere(role: WorkspaceRole | 'none'): Promise<void> {
+    const userId = memberUserId;
+    if (!userId) return;
+    const targets = ws.workspaces.filter((w) => roleIn(w.id, userId) !== role);
+    if (targets.length === 0) return;
+    await Promise.all(targets.map((w) => setRoleIn(w.id, userId, role)));
+    toasts.success(
+      role === 'none' ? 'Removed from all workspaces' : `Set to ${role} in all workspaces`,
+      `${targets.length} workspace${targets.length === 1 ? '' : 's'} updated`,
+    );
+  }
+
+  const memberWsCount = $derived(
+    memberUserId ? ws.workspaces.filter((w) => roleIn(w.id, memberUserId) !== 'none').length : 0,
+  );
+
   // ---- feature grant matrix -----------------------------------------------
   const ALL_FEATURES: Feature[] = [
     'agents', 'mission_control', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
@@ -105,6 +187,20 @@
   $effect(() => {
     if (grantUserId === '' && nonRootUsers.length > 0) {
       grantUserId = nonRootUsers[0].id;
+    }
+  });
+
+  // Auto-select the same user for the by-user membership view.
+  $effect(() => {
+    if (memberUserId === '' && nonRootUsers.length > 0) {
+      memberUserId = nonRootUsers[0].id;
+    }
+  });
+
+  // Load every workspace's members the first time the by-user view is opened.
+  $effect(() => {
+    if (membershipAxis === 'user' && Object.keys(allMembers).length === 0) {
+      void loadAllMembers();
     }
   });
 
@@ -300,31 +396,110 @@
     </div>
 
     <div class="section-title">Workspace roles</div>
+    <div class="sub" style="margin-bottom: 10px">
+      A user only reaches the workspaces they're a member of. Switch to <b>By user</b> to grant one
+      account several workspaces at once.
+    </div>
     <div class="row" style="margin-bottom: 10px">
-      <select class="input" bind:value={matrixWs} style="max-width: 220px">
-        {#each ws.workspaces as w (w.id)}
-          <option value={w.id}>{w.name}</option>
-        {/each}
-      </select>
+      <div class="segmented axis">
+        <button
+          class:active={membershipAxis === 'workspace'}
+          onclick={() => (membershipAxis = 'workspace')}
+          data-testid="membership-axis-workspace"
+        >
+          By workspace
+        </button>
+        <button
+          class:active={membershipAxis === 'user'}
+          onclick={() => (membershipAxis = 'user')}
+          data-testid="membership-axis-user"
+        >
+          By user
+        </button>
+      </div>
+      {#if membershipAxis === 'workspace'}
+        <select class="input" bind:value={matrixWs} style="max-width: 220px">
+          {#each ws.workspaces as w (w.id)}
+            <option value={w.id}>{w.name}</option>
+          {/each}
+        </select>
+      {:else}
+        <select class="input" bind:value={memberUserId} style="max-width: 220px">
+          {#each nonRootUsers as u (u.id)}
+            <option value={u.id}>{u.display_name} (@{u.username})</option>
+          {/each}
+        </select>
+      {/if}
     </div>
 
-    {#if matrixLoading}
-      <Skeleton rows={3} height={32} />
+    {#if membershipAxis === 'workspace'}
+      {#if matrixLoading}
+        <Skeleton rows={3} height={32} />
+      {:else}
+        <div class="card matrix">
+          <div class="matrix-head">
+            <span>User</span>
+            <span>Role in workspace</span>
+          </div>
+          {#each users.filter((u) => !u.is_root) as u (u.id)}
+            <div class="matrix-row">
+              <span class:dim={u.disabled}>{u.display_name} <span class="dim">@{u.username}</span></span>
+              <div class="segmented">
+                {#each roleOptions as r (r)}
+                  <button
+                    class:active={roleOf(u.id) === r}
+                    disabled={u.disabled}
+                    onclick={() => setRole(u.id, r)}
+                  >
+                    {r}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {:else}
+            <div class="matrix-empty dim">No non-root users yet.</div>
+          {/each}
+        </div>
+      {/if}
+    {:else if nonRootUsers.length === 0}
+      <div class="dim" style="padding: 8px 0">No non-root users yet.</div>
+    {:else if allMembersLoading}
+      <Skeleton rows={4} height={32} />
     {:else}
+      <div class="row" style="margin-bottom: 10px; gap: 8px; align-items: center">
+        <span class="dim">
+          Member of {memberWsCount} of {ws.workspaces.length} workspace{ws.workspaces.length === 1
+            ? ''
+            : 's'}
+        </span>
+        <span class="grow"></span>
+        <span class="dim">Set all:</span>
+        {#each roleOptions as r (r)}
+          <button
+            class="btn small"
+            disabled={savingWs.length > 0}
+            onclick={() => void setRoleEverywhere(r)}
+          >
+            {r === 'none' ? 'remove' : r}
+          </button>
+        {/each}
+      </div>
       <div class="card matrix">
         <div class="matrix-head">
-          <span>User</span>
-          <span>Role in workspace</span>
+          <span>Workspace</span>
+          <span>Role</span>
         </div>
-        {#each users.filter((u) => !u.is_root) as u (u.id)}
+        {#each ws.workspaces as w (w.id)}
           <div class="matrix-row">
-            <span class:dim={u.disabled}>{u.display_name} <span class="dim">@{u.username}</span></span>
+            <span class="ws-label" title={w.root_path}>
+              {w.name} <span class="dim">{w.root_path}</span>
+            </span>
             <div class="segmented">
               {#each roleOptions as r (r)}
                 <button
-                  class:active={roleOf(u.id) === r}
-                  disabled={u.disabled}
-                  onclick={() => setRole(u.id, r)}
+                  class:active={roleIn(w.id, memberUserId) === r}
+                  disabled={savingWs.includes(w.id)}
+                  onclick={() => void setRoleIn(w.id, memberUserId, r)}
                 >
                   {r}
                 </button>
@@ -332,7 +507,7 @@
             </div>
           </div>
         {:else}
-          <div class="matrix-empty dim">No non-root users yet.</div>
+          <div class="matrix-empty dim">No workspaces yet.</div>
         {/each}
       </div>
     {/if}
@@ -495,6 +670,19 @@
   .matrix-empty {
     padding: 16px;
     text-align: center;
+  }
+  /* Membership axis switch (By workspace / By user). */
+  .segmented.axis {
+    flex: 0 0 auto;
+  }
+  /* Workspace name + its root path on one line; the path is what disambiguates
+     two same-named repos, so keep it visible but let it clip rather than push
+     the role buttons out of the card. */
+  .ws-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* ---- feature grant matrix ---- */
   .grant-matrix {
