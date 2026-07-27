@@ -259,15 +259,33 @@ GUI_DOMAIN="gui/$(id -u)"
 daemon_loaded() { launchctl print "$GUI_DOMAIN/${DAEMON_LABEL}" >/dev/null 2>&1; }
 daemon_healthy() { curl -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; }
 # Wait (bounded) until the service is fully un-loaded; best-effort.
+# BUDGET (measured, not guessed): ottod's shutdown terminates live sessions,
+# flushes ClickHouse and closes Slack sockets first — 0.2–0.4s idle but 4.9–6.0s
+# under load. The old 24×0.25s = 6.0s budget sat *inside* that range (a 6.02s
+# shutdown was observed), so the wait could return while the job was still dying
+# and the bootstrap below would fail. 30s is far past the worst case.
 wait_daemon_gone() {
-    for _ in $(seq 1 24); do daemon_loaded || return 0; sleep 0.25; done
+    for _ in $(seq 1 120); do daemon_loaded || return 0; sleep 0.25; done
+    return 1
 }
 # Cleanly (re)bootstrap: tear down any lingering instance, wait for the reap,
 # then bootstrap. Idempotent — safe to call even when nothing is loaded.
+# Retries, because `bootout` is async and bootstrapping into its tail fails with
+# "Input/output error". Echoes the real launchd error instead of swallowing it —
+# a silently-swallowed bootstrap failure leaves the machine with NO daemon and no
+# explanation, which is the failure this whole dance exists to prevent.
 bootstrap_daemon() {
     launchctl bootout "$GUI_DOMAIN/${DAEMON_LABEL}" 2>/dev/null || true
-    wait_daemon_gone
-    launchctl bootstrap "$GUI_DOMAIN" "$PLIST" 2>/dev/null || true
+    wait_daemon_gone || warn "daemon still loaded after 30s — bootstrapping anyway"
+    local err rc
+    for _ in $(seq 1 20); do
+        err="$(launchctl bootstrap "$GUI_DOMAIN" "$PLIST" 2>&1)"; rc=$?
+        [[ $rc -eq 0 ]] && return 0
+        case "$err" in *"already bootstrapped"*) return 0 ;; esac
+        sleep 0.5
+    done
+    warn "launchctl bootstrap failed after 20 attempts: ${err:-unknown error}"
+    return 1
 }
 
 cd "$ROOT" || die "cannot cd into repo root $ROOT"

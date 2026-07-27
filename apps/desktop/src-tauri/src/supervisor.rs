@@ -143,20 +143,39 @@ fn install_daemon() -> Result<String, String> {
     std::fs::write(&pp, plist).map_err(|e| e.to_string())?;
 
     let uid = libc_getuid();
+    let domain = format!("gui/{uid}");
+    let target = format!("{domain}/{LAUNCHD_LABEL}");
+
     // Re-bootstrap: boot out any existing instance, then bootstrap the new one.
-    // `launchctl bootout` is ASYNCHRONOUS — an immediate `bootstrap` of the same
-    // label races with launchd's teardown and fails ("Input/output error"),
-    // leaving NO agent loaded. Retry bootstrap with a short backoff until the
-    // old instance has finished unloading.
+    //
+    // THE GOTCHA (debugged the hard way): `launchctl bootout` is ASYNCHRONOUS and
+    // ottod's own shutdown is NOT instant — it terminates live sessions, flushes
+    // ClickHouse and closes Slack sockets first. Measured on this machine: 0.2–0.4s
+    // when idle but 4.9–6.0s under load. Bootstrapping the same label before launchd
+    // has reaped the old job fails with "Input/output error", so a retry budget
+    // shorter than the shutdown burns every attempt against a still-dying instance
+    // and gives up. The failure is SILENT and total: the plist is on disk but the
+    // service is unregistered ("Could not find service … in domain for user gui"),
+    // so KeepAlive/RunAtLoad can never fire and NOTHING retries — the app comes up
+    // with no daemon behind it. The old budget was 12 × 300ms = 3.6s, i.e. inside
+    // the observed shutdown range, which is exactly why this struck intermittently.
+    //
+    // THE FIX: don't race the teardown — WAIT for the label to actually disappear,
+    // then bootstrap with a budget far past the worst observed shutdown, and verify
+    // the service is really loaded rather than trusting a single exit code.
     let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
+        .args(["bootout", &target])
         .output();
+    // Best-effort: if it somehow never unloads we still try to bootstrap below —
+    // "already bootstrapped" is treated as success there.
+    wait_service_gone(&target, Duration::from_secs(20));
+
     let mut last_err = String::new();
     let mut bootstrapped = false;
-    for _ in 0..12 {
-        std::thread::sleep(Duration::from_millis(300));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
         let out = std::process::Command::new("launchctl")
-            .args(["bootstrap", &format!("gui/{uid}"), pp.to_str().unwrap()])
+            .args(["bootstrap", &domain, pp.to_str().unwrap()])
             .output()
             .map_err(|e| e.to_string())?;
         if out.status.success() {
@@ -169,15 +188,59 @@ fn install_daemon() -> Result<String, String> {
             bootstrapped = true;
             break;
         }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
     }
     if !bootstrapped {
-        return Err(format!("launchctl bootstrap failed: {last_err}"));
+        return Err(format!(
+            "launchctl bootstrap failed after 20s: {last_err} \
+             (recover with: launchctl bootstrap {domain} {})",
+            pp.display()
+        ));
     }
     // RunAtLoad starts it, but kickstart guarantees it's running right now.
     let _ = std::process::Command::new("launchctl")
-        .args(["kickstart", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
+        .args(["kickstart", &target])
         .output();
+    // Never report success on an unregistered service: that is the exact state
+    // that used to go unnoticed until the user found a UI with no backend.
+    if !service_loaded(&target) {
+        return Err(format!(
+            "launchctl reported success but {LAUNCHD_LABEL} is not loaded \
+             (recover with: launchctl bootstrap {domain} {})",
+            pp.display()
+        ));
+    }
     Ok("installed and started".into())
+}
+
+/// Is the launchd job registered in the domain? `launchctl print` exits non-zero
+/// ("Could not find service …") when it is not.
+fn service_loaded(target: &str) -> bool {
+    std::process::Command::new("launchctl")
+        .args(["print", target])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Poll until the job is gone from the domain, up to `budget`. `bootout` returns
+/// immediately while launchd is still tearing the job down, and bootstrapping in
+/// that window fails — so callers must wait it out rather than retry blindly.
+/// Returns false if it was still loaded when the budget ran out.
+fn wait_service_gone(target: &str, budget: Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if !service_loaded(target) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn libc_getuid() -> u32 {
@@ -221,9 +284,13 @@ pub async fn ensure_daemon() -> DaemonReport {
         }
     }
 
-    let detail = match install_daemon() {
-        Ok(d) => d,
-        Err(e) => format!("install failed: {e}"),
+    // spawn_blocking: install_daemon() waits out the old daemon's shutdown and
+    // retries bootstrap, so it can block for tens of seconds — never on a runtime
+    // worker thread.
+    let detail = match tokio::task::spawn_blocking(install_daemon).await {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => format!("install failed: {e}"),
+        Err(e) => format!("install panicked: {e}"),
     };
 
     // Give launchd a moment, then re-check.
@@ -268,8 +335,18 @@ pub async fn daemon_start() -> Result<DaemonReport, String> {
 #[tauri::command]
 pub async fn daemon_restart() -> Result<String, String> {
     let uid = libc_getuid();
+    let target = format!("gui/{uid}/{LAUNCHD_LABEL}");
+    // `kickstart` only restarts an ALREADY-REGISTERED job — against an unloaded
+    // label it just fails with "Could not find service". That is precisely the
+    // state a user hits "Restart daemon" in, so fall back to a full (re)install,
+    // which writes the plist and bootstraps.
+    if !service_loaded(&target) {
+        return tokio::task::spawn_blocking(install_daemon)
+            .await
+            .map_err(|e| format!("install panicked: {e}"))?;
+    }
     let out = std::process::Command::new("launchctl")
-        .args(["kickstart", "-k", &format!("gui/{uid}/{LAUNCHD_LABEL}")])
+        .args(["kickstart", "-k", &target])
         .output()
         .map_err(|e| e.to_string())?;
     if out.status.success() {
@@ -282,5 +359,7 @@ pub async fn daemon_restart() -> Result<String, String> {
 /// Force reinstall (used after an app update ships a newer ottod).
 #[tauri::command]
 pub async fn daemon_install() -> Result<String, String> {
-    install_daemon()
+    tokio::task::spawn_blocking(install_daemon)
+        .await
+        .map_err(|e| format!("install panicked: {e}"))?
 }

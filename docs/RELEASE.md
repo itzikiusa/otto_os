@@ -43,14 +43,19 @@ cd ui && npm ci && npm run check && cd ..
 cd ui && npm run build && cd ..
 
 # 2. Daemon (release)
-cargo build --release -p ottod
-#   For REMOTE / phone access (serve the SPA from the daemon over HTTP/Cloudflare
-#   Tunnel), build with the `embed-ui` feature INSTEAD — it bakes ui/dist into the
-#   binary so https://<host>/ returns the app same-origin (hash-router deep links /
-#   refresh / back all resolve correctly). Build order matters: step 1 (npm run
-#   build → ui/dist) MUST run first, because rust-embed reads ui/dist at compile time.
-#       cargo build --release -p ottod --features embed-ui
+cargo build --release -p ottod --features embed-ui
+#   `embed-ui` bakes ui/dist into the binary so the daemon serves the SPA
+#   same-origin — https://<host>/ returns the app (hash-router deep links /
+#   refresh / back all resolve correctly). REQUIRED for remote / phone access
+#   over HTTP or a Cloudflare Tunnel; without it those requests get the
+#   "UI not embedded" placeholder while /api/v1/health still reports ok, so a
+#   redeploy that drops the feature breaks sharing with no obvious symptom.
+#   Drop the flag only for a local desktop-only build (the Tauri webview loads
+#   the frontend from the app bundle, not from the daemon).
+#   Build order matters: step 1 (npm run build → ui/dist) MUST run first,
+#   because rust-embed reads ui/dist at compile time.
 #   See docs/remote-access-runbook.md for exposure (Cloudflare Tunnel) + PWA install.
+#   `packaging/deploy.sh` does all of this with embed-ui on by default.
 
 # 3. Bundle the daemon as the app's sidecar (Tauri externalBin).
 #    The filename MUST carry the host target triple.
