@@ -694,6 +694,16 @@
       { label: 'Expand value', icon: 'maximize', action: () => openCell(v, rowIdx, ci) },
       { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : cellStr(v)) },
     );
+    // Copy as INSERT — acts on the whole selection when this row is part of it,
+    // otherwise on just this row (so a single row needs no checkbox first).
+    if (copyTarget) {
+      const rows = selected.has(rowIdx) ? selectedIndices() : [rowIdx];
+      items.push({
+        label: rows.length > 1 ? `Copy ${rows.length} rows as INSERT` : 'Copy row as INSERT',
+        icon: 'file',
+        action: () => copyRowsAsInsert(rows),
+      });
+    }
     // Delete actions — only for editable results (single table/collection with a
     // resolved key). Builds a statement and opens the review modal; never runs
     // immediately.
@@ -826,6 +836,28 @@
   let editFks = $state<DbForeignKey[]>([]);
 
   const editable = $derived(editPkCols.length > 0 && editTable !== null);
+
+  /** Target table/collection for "Copy as INSERT".
+   *
+   *  Deliberately NOT the same gate as `editable`. Editing needs a primary key
+   *  because it has to TARGET an existing row; generating INSERTs only needs a
+   *  name plus the values already on screen. Sharing the gate meant the action
+   *  disappeared for every ClickHouse table whose `is_in_primary_key` doesn't
+   *  resolve (Log/Memory engines, views) — and appeared on Mongo only to emit
+   *  SQL. Resolved synchronously: no `object_detail` round-trip needed. */
+  const copyTarget = $derived.by((): { db: string | null; table: string } | null => {
+    const sql = statement;
+    if (!sql || !connectionId || !result || result.columns.length === 0) return null;
+    if (engine === 'mongodb') {
+      const coll = mongoCollectionForEdit(sql);
+      return coll ? { db: database.activeDb, table: coll } : null;
+    }
+    if (database.capabilities?.sql !== true) return null; // Redis etc.
+    const parsed = parseSimpleSelect(sql);
+    if (!parsed) return null;
+    const db = parsed.db ?? (database.schemaRoot.find((n) => n.kind === 'database')?.label ?? null);
+    return { db, table: parsed.table };
+  });
 
   /** Parse a simple SELECT … FROM <table>. Returns {db, table} or null. */
   function parseSimpleSelect(sql: string): { db: string | null; table: string } | null {
@@ -1256,22 +1288,69 @@
     return order.filter((i) => i >= 0 && i < liveRows.length);
   }
 
-  /** Build `INSERT INTO <table> (cols) VALUES (…)` lines for the selected rows
-   *  (all result columns), then open them in a new tab — NOT run. */
-  function copySelectedAsInsert(): void {
-    if (!editable || !editTable) return;
-    const idxs = selectedIndices();
-    if (idxs.length === 0) return;
-    const cols = result!.columns.map((c) => qid(c.name)).join(', ');
-    const lines = idxs.map((i) => {
-      const vals = result!.columns.map((_, ci) => valueLiteral(liveRows[i][ci])).join(', ');
-      return `INSERT INTO ${tableRef()} (${cols}) VALUES (${vals});`;
-    });
-    void database.openInNewTab(lines.join('\n'), {
-      name: `INSERT ${editTable}`,
+  /** Qualified `db.table` for a copy target, quoted for the active engine. */
+  function copyTableRef(t: { db: string | null; table: string }): string {
+    const q = qid(t.table);
+    return t.db ? `${qid(t.db)}.${q}` : q;
+  }
+
+  /** JSON for a stored Mongo value inside a generated document. An `_id` that
+   *  looks like an ObjectId hex is wrapped as `{"$oid": …}` — the same
+   *  convention `mongoIdFilter` uses — so the document round-trips as a real
+   *  ObjectId instead of degrading into a plain string. */
+  function mongoValueLiteral(name: string, v: unknown): string {
+    if (v === undefined || v === null) return 'null';
+    if (name === '_id' && typeof v === 'string' && /^[a-f0-9]{24}$/i.test(v)) {
+      return `{"$oid": ${JSON.stringify(v)}}`;
+    }
+    return JSON.stringify(v);
+  }
+
+  /** Insert statements for the given rows (all result columns), in the active
+   *  engine's own syntax: `insertMany` for Mongo, `INSERT INTO … VALUES` for the
+   *  SQL engines (ClickHouse included — it accepts the same backtick quoting).
+   *  Returns null when there is no resolvable target. */
+  function buildInsertStatements(idxs: number[]): string | null {
+    const target = copyTarget;
+    if (!target || !result || idxs.length === 0) return null;
+    if (engine === 'mongodb') {
+      const docs = idxs.map((i) => {
+        const fields = result!.columns.map(
+          (c, ci) => `${JSON.stringify(c.name)}: ${mongoValueLiteral(c.name, liveRows[i][ci])}`,
+        );
+        return `  { ${fields.join(', ')} }`;
+      });
+      return `db.${target.table}.insertMany([\n${docs.join(',\n')}\n])`;
+    }
+    const ref = copyTableRef(target);
+    const cols = result.columns.map((c) => qid(c.name)).join(', ');
+    return idxs
+      .map((i) => {
+        const vals = result!.columns.map((_, ci) => valueLiteral(liveRows[i][ci])).join(', ');
+        return `INSERT INTO ${ref} (${cols}) VALUES (${vals});`;
+      })
+      .join('\n');
+  }
+
+  /** Open the given rows as insert statements in a new tab — NOT run. */
+  function copyRowsAsInsert(idxs: number[]): void {
+    const text = buildInsertStatements(idxs);
+    if (!text || !copyTarget) return;
+    void database.openInNewTab(text, {
+      name: `INSERT ${copyTarget.table}`,
       node: database.activeDb ?? undefined,
     });
-    toasts.success('Generated', `${idxs.length} INSERT statement${idxs.length === 1 ? '' : 's'}`);
+    const n = idxs.length;
+    toasts.success(
+      'Generated',
+      engine === 'mongodb'
+        ? `insertMany with ${n} document${n === 1 ? '' : 's'}`
+        : `${n} INSERT statement${n === 1 ? '' : 's'}`,
+    );
+  }
+
+  function copySelectedAsInsert(): void {
+    copyRowsAsInsert(selectedIndices());
   }
 
   /** Build a `pk IN (…)` (single-PK) or OR-of-ANDs (composite) predicate for the
@@ -1711,14 +1790,18 @@
     {#if !mini && selected.size > 0}
       <div class="sel-bar">
         <span class="sel-count">{selected.size} selected</span>
-        {#if editable}
+        {#if copyTarget}
           <button
             class="sel-gen"
             onclick={copySelectedAsInsert}
-            title="Open the selected rows as INSERT statements in a new tab (not run)"
+            title={engine === 'mongodb'
+              ? 'Open the selected rows as an insertMany(…) in a new tab (not run)'
+              : 'Open the selected rows as INSERT statements in a new tab (not run)'}
           >
             <Icon name="file" size={11} />Copy as INSERT
           </button>
+        {/if}
+        {#if editable}
           <button
             class="sel-gen"
             onclick={copySelectedWhere}
