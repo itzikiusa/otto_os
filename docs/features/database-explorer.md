@@ -805,7 +805,10 @@ response puts the first statement's result at the top level with the rest in
   a SQL→Mongo translation for a single-base-collection `SELECT` (WHERE / ORDER BY /
   LIMIT / COUNT / GROUP BY / aggregates / INNER & LEFT equi-joins → `$lookup`).
   RIGHT/FULL/CROSS joins, non-equi joins, subqueries, UNION, HAVING, and DISTINCT
-  are not translated.
+  are not translated. A translated `SELECT` counts as a **read** for the
+  production / read-only write-guard, like the `.find(…)` spelling it compiles to
+  (before 2026-07-27 the guard only knew the Mongo spellings, so every `SELECT`
+  on a prod/read-only connection came back `write_blocked` — a 409).
 - **`approx_row_count`** (MySQL `information_schema.table_rows`) is an InnoDB
   estimate (can be wildly off) and is opt-in because it costs an extra query.
 - **File import** (§10b) covers the SQL engines (MySQL/ClickHouse/PostgreSQL —

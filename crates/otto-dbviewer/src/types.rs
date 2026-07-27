@@ -1134,6 +1134,17 @@ const REDIS_READ_COMMANDS: &[&str] = &[
 /// else (including raw command JSON we can't safely vet) is treated as a write.
 fn mongo_is_write(statement: &str) -> bool {
     let s = statement.trim();
+    // A Mongo connection also accepts SQL: `run` translates a `SELECT` into a
+    // find/aggregate via `mongo_sql`. The shapes below don't know that spelling,
+    // so a plain `SELECT … FROM coll` used to fall through to "unrecognised ⇒
+    // write" and get refused by the production / read-only guard — the one
+    // translation path the feature exists for. Classify it the way the SQL
+    // engines do instead. `looks_like_sql` only matches a leading `SELECT` (and
+    // `translate` rejects anything that isn't a single SELECT), so no mutating
+    // SQL can enter through here; `sql_is_write` is still the one that decides.
+    if crate::drivers::mongo_sql::looks_like_sql(s) {
+        return sql_is_write(s);
+    }
     let lower = s.to_ascii_lowercase();
     // `db.coll.find(...)`, `.findOne(...)`, `.aggregate(...)` (read pipelines may
     // contain `$merge`/`$out`, but those are uncommon in the explorer console —
@@ -1621,5 +1632,24 @@ mod tests {
         // Aggregation that writes via $out / $merge is a write.
         assert!(is_write("db.users.aggregate([{$out:\"copy\"}])"));
         assert!(is_write("anything unrecognised"));
+    }
+
+    #[test]
+    fn mongo_sql_selects_are_reads_not_writes() {
+        // A Mongo connection accepts SQL — `run` translates a SELECT into a
+        // find/aggregate. The classifier must recognise that spelling, or the
+        // production / read-only guard refuses the very queries the SQL→Mongo
+        // translation exists to serve (it did: every SELECT came back
+        // `write_blocked` on a guarded connection).
+        let is_write = |s: &str| statement_is_write(Engine::Mongodb, s);
+        assert!(!is_write("SELECT * FROM users"));
+        assert!(!is_write("select name, age from users where age > 21 limit 10"));
+        assert!(!is_write("  SELECT count(*) FROM orders  "));
+        // Mutating SQL never matches `looks_like_sql` (it only accepts a leading
+        // SELECT), so it still falls through to "unrecognised ⇒ write".
+        assert!(is_write("DELETE FROM users"));
+        assert!(is_write("UPDATE users SET a = 1"));
+        assert!(is_write("DROP TABLE users"));
+        assert!(is_write("INSERT INTO users VALUES (1)"));
     }
 }
