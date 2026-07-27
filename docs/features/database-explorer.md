@@ -654,7 +654,7 @@ engine error verbatim.
 ## 10. Export
 
 Two export paths, both gated at the same role as running a query (workspace
-**Editor**; global connections: root):
+**Editor**; global connections: `Database:Edit`):
 
 **A. Browser download (`POST …/db/export`).** Re-runs the statement **uncapped**
 and returns the whole result as a file attachment the browser downloads —
@@ -727,7 +727,7 @@ result.
   then retries with `confirm_write`. The dialog streams an `application/x-ndjson`
   line and ends with **"Imported N rows in B batches"** (then re-runs the active
   query / refreshes the table's structure) or the error.
-- **Role gate.** Workspace **Editor** (global connections: root), the same as
+- **Role gate.** Workspace **Editor** (global connections: `Database:Edit`), the same as
   running a query / exporting.
 - **v1 scope: SQL engines only** (MySQL/ClickHouse). Mongo `insertMany` and Redis
   are explicit follow-ups (see §12).
@@ -739,7 +739,7 @@ result.
 `docs/contracts/api.md` is authoritative; `ui/src/lib/api/types.ts` mirrors it.
 
 **Engine access** (`/connections/{id}/db/*`) — reads = `ws viewer`, live-DB
-execution/cancel/export = `ws editor` (global connections: root):
+execution/cancel/export = `ws editor` (global connections: `Database:Edit`):
 
 | Method & path | Purpose |
 |---|---|
@@ -847,7 +847,7 @@ response puts the first statement's result at the top level with the rest in
   still blocked (the SQL drivers execute by statement text); only a genuine
   `EXPLAIN`-prefixed statement classifies as a read.
 - **Execution role.** Running a query, cancelling, exporting, and **running a
-  dashboard widget** all require workspace **Editor** (global connections: root) —
+  dashboard widget** all require workspace **Editor** (global connections: `Database:Edit`) —
   a widget runs arbitrary stored SQL, so it can't be triggered by a mere Viewer.
 - **Ownership.** Saved queries / dashboards / widgets are owner-private: a
   same-workspace co-member who learns a resource id still can't read/mutate/run it

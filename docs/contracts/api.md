@@ -9,6 +9,17 @@ Roles: `root` = global; workspace roles `viewer < editor < admin`. Root passes e
 "member" below means any authenticated user; workspace-scoped routes require at least the
 listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their workspace.
 
+**Global (workspace-less) connections.** `POST /workspaces/{id}/connections` always
+persists `workspace_id = NULL` — connections are a *global library*, visible from every
+workspace (row #25). A row with no workspace has no workspace role to check, so those
+routes fall through to the **feature axis** instead of the workspace axis, on the same
+ladder (`viewer→View`, `editor→Edit`, `admin→Admin`): reading a global connection's schema
+takes `Database:View`, running a query takes `Database:Edit`, using one takes
+`Connections:Edit`, and editing/deleting the shared *record* takes `Connections:Admin` —
+so an Edit-level teammate can use the shared library without rewriting it for everyone.
+Root still passes everything. (Before, this branch was root-only, which made the entire
+connection library unusable for every non-root account.)
+
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 1 | GET /api/v1/health | public | — | `{"ok":true}` |
@@ -37,9 +48,9 @@ listed role IN THAT WORKSPACE. Sessions/connections/repos/PRs inherit their work
 | 24 | POST /api/v1/workspaces/{id}/orchestrate/execute | ws editor | ExecutePlanReq | `{"results":[{"action_index":0,"ok":true,"detail":"...","session_ids":["..."]}]}` |
 | 25 | GET /api/v1/workspaces/{id}/connections | ws viewer | — | `Connection[]` (includes global ones; secret never present) |
 | 26 | POST /api/v1/workspaces/{id}/connections | ws editor | UpsertConnectionReq | Connection |
-| 27 | PATCH /api/v1/connections/{id} | ws editor (global: root) | UpsertConnectionReq (PATCH semantics: absent secret = keep; absent `environment`/`read_only` = **preserve** the stored value — never reset to dev/false, so a partial PATCH can't disable the write-guard) | Connection |
-| 27a | PATCH /api/v1/connections/{id}/pin | ws editor (global: root) | `{pinned: bool}` | Toggle pinned/frecency flag; returns updated Connection |
-| 28 | DELETE /api/v1/connections/{id} | ws editor (global: root) | — | 204 (deletes Keychain secret too) |
+| 27 | PATCH /api/v1/connections/{id} | ws editor (global: `Connections:Admin`) | UpsertConnectionReq (PATCH semantics: absent secret = keep; absent `environment`/`read_only` = **preserve** the stored value — never reset to dev/false, so a partial PATCH can't disable the write-guard) | Connection |
+| 27a | PATCH /api/v1/connections/{id}/pin | ws editor (global: `Connections:Edit`) | `{pinned: bool}` | Toggle pinned/frecency flag; returns updated Connection |
+| 28 | DELETE /api/v1/connections/{id} | ws editor (global: `Connections:Admin`) | — | 204 (deletes Keychain secret too) |
 | 29 | POST /api/v1/connections/{id}/open | ws editor | `{"title":null}` optional | Session |
 | 30 | POST /api/v1/connections/{id}/test | ws editor | — | TestConnectionResp (`warn_key_perms?: string` — set when the connection's SSH private key file is group/other-readable; carries the `chmod 600 <path>` fix, independent of `ok`) |
 | 30a | GET /api/v1/workspaces/{id}/connections/import/sources | ws editor | — | `SourceStatus[]` — detects MySQL Workbench / DBeaver / DataGrip / NoSQLBooster at their default macOS config paths (the daemon runs locally and reads the files itself; the user picks a tool, never a file) |
@@ -121,7 +132,7 @@ Notes:
   `explain:true` is still blocked. The UI requires a typed confirmation before sending
   `confirm_write`.
 - DB read-only MCP query (`POST /api/v1/connections/{id}/db/mcp-query`, ws **viewer**;
-  global connections: root) — the agent-facing query path used by `ottod mcp-tools`. Body
+  global connections: `Database:View`) — the agent-facing query path used by `ottod mcp-tools`. Body
   `{statement, max_rows?, node?}` → `QueryResult`. Read-only is enforced **unconditionally**
   (independent of the connection's write-guard): a statement classified as a write/DDL is
   rejected with `403 forbidden` and a `Problem.message` prefixed `mcp_read_only: ` **before**
@@ -611,7 +622,7 @@ body (so a tunnelled ClickHouse writes the user's local path, **not** a
 server-side `INTO OUTFILE` on the tunnel host). Only row-returning statements are
 exportable; a write/DDL is rejected (and a write on a guarded production/read-only
 connection is blocked as elsewhere). Gated at the same role as `query` (`ws
-editor`; global connections: root).
+editor`; global connections: `Database:Edit`).
 
 `ImportReq` = `{ local_path, format, table, batch_size?, confirm_write? }`.
 `format` is one of `csv`/`tsv` (first row = header) or `ndjson`/`json` (objects;
@@ -630,7 +641,7 @@ NDJSON/JSON keep their types), guarded the same way. Redis is not supported. The
 line: `{ done: true, rows, batches }` (rows inserted, batches run) or `{ error }`
 — a guarded connection without `confirm_write` yields `{ error }` whose text
 starts `write_blocked:` (the client re-sends with `confirm_write: true` after a
-typed confirmation). Gated `ws editor` (global connections: root).
+typed confirmation). Gated `ws editor` (global connections: `Database:Edit`).
 
 `NlToSqlReq` = `{ question, node?, max_attempts? }`. `max_attempts` is the
 draft→validate retry budget (default 3, clamped 1..=4). The server asks the
@@ -641,7 +652,7 @@ Prod/read-only connection), and feeds any engine error back to the drafter for a
 bounded retry. On success it returns `NlToSqlOutcome` =
 `{ sql, plan, attempts, warnings[] }` — an `EXPLAIN`-validated **read** query,
 its plan text, the attempt count, and any non-fatal notes. Gated `ws editor`
-(global connections: root) because validation runs `EXPLAIN` live; unavailable
+(global connections: `Database:Edit`) because validation runs `EXPLAIN` live; unavailable
 for Redis (no plan surface).
 
 `RunQueryReq` may include an optional client-generated `query_id` (string). When
@@ -650,7 +661,7 @@ with the same `query_id` then issues **engine-native** cancellation on a
 *separate* connection — MySQL `KILL QUERY <connid>`, ClickHouse `KILL QUERY WHERE
 query_id = '<id>'` — so the database stops the heavy query and frees the cached
 connection, not just the client's HTTP wait. Cancel is gated at the same role as
-`query` (`ws editor`; global connections: root). Cancelling an unknown /
+`query` (`ws editor`; global connections: `Database:Edit`). Cancelling an unknown /
 already-finished query, a query on a different connection, or one on an engine
 without a native per-query cancel (Redis/MongoDB) is a no-op success (`204`).
 

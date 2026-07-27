@@ -32,6 +32,13 @@ them**:
 3. **Ownership** — sessions, DB query history, saved queries/dashboards, and
    (optionally) connections are private to their creator. Answers *"whose data."*
 
+> **Workspace-less rows.** Connections are deliberately created *global*
+> (`workspace_id = NULL` — one library visible from every workspace), so axis 2
+> has nothing to answer for them. Those routes fall through to axis 1 on the
+> same ladder (`viewer→View`, `editor→Edit`, `admin→Admin`), with the shared
+> *record*'s edit/delete raised to `Connections:Admin`. See the note at the top
+> of [`../contracts/api.md`](../contracts/api.md).
+
 Effective access = the request passes the **feature gate** **and** the
 **workspace gate** **and** (for per-user resources) the **ownership gate**. Root
 passes everything.
@@ -524,6 +531,7 @@ or root`; `root`. Authoritative source: [`../contracts/api.md`](../contracts/api
 | User sees an empty nav / 403 on every feature | No grants (default-deny) | Assign capabilities in **Settings → Users → Feature grants**, **Save grants** |
 | Feature works in UI but `403 requires <feature>:<cap>` from a script | PAT inherits the user's (insufficient) capability | Grant the needed capability to the **token owner**, or use a root-owned token |
 | User can't reach a workspace's connections despite a `Connections` grant | Not a member of that workspace | Add them in **Workspace roles** (`Editor`/`Admin`) |
+| 403 "global connections need the Connections/Database '…' grant" in the DB Explorer | Every connection the UI creates is **global** (no workspace), so the feature grant — not the workspace role — decides. The user holds less than the required capability | Grant `Database:Edit` (run queries) / `Connections:Edit` (use), or `Database:View` for schema-browsing only, in **Feature grants**. Editing or deleting a shared connection record additionally takes `Connections:Admin` |
 | User can't see another user's session | Working as designed — ownership isolation | Use **Settings → Sessions** (Users:Admin/root) for the cross-user view, or impersonate |
 | **Impersonate** button disabled / 403 | Target is root or a `Users:Admin`, is yourself, is disabled, or you're already impersonating | Pick a non-root, non-admin, enabled target; exit any active impersonation first |
 | Impersonation banner gone / 401 mid-session | The 30-min token expired (never slid) | **Stop**, then re-impersonate |

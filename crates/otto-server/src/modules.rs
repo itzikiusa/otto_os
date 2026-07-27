@@ -113,6 +113,11 @@ impl otto_dbviewer::DbViewerCtx for ServerCtx {
     fn roles(&self) -> &Arc<dyn RoleChecker> {
         &self.roles
     }
+    fn pool(&self) -> Option<otto_state::SqlitePool> {
+        // Lets the global-connection branch of the route gates consult the
+        // caller's `Database` grant instead of falling back to root-only.
+        Some(self.pool.clone())
+    }
     fn drafter(&self) -> Option<std::sync::Arc<dyn otto_dbviewer::nl::SqlDrafter>> {
         // Wire the verified NL→SQL loop to the real agent/LLM via the same
         // one-shot orchestrator path the commit-/PR-draft endpoints use. The

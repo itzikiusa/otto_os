@@ -16,9 +16,28 @@
 use std::sync::Arc;
 
 use otto_core::auth::GrantsInvalidator;
-use otto_core::domain::{Capability, Feature, User};
+use otto_core::domain::{Capability, Feature, User, WorkspaceRole};
 use otto_core::{Error, Result};
 use sqlx::SqlitePool;
+
+/// The feature capability that answers for a **global** (workspace-less) row
+/// when a gate would otherwise demand the workspace role `min`.
+///
+/// Some resources — connections above all — are deliberately created
+/// workspace-independent ("a global library"), so the workspace axis has
+/// nothing to check for them. Falling back to *root only* on that branch locks
+/// every non-root user out of the entire library, which is not what the feature
+/// model promises. The feature axis answers instead, on the identical ladder:
+/// `Viewer→View`, `Editor→Edit`, `Admin→Admin`. `effective =
+/// min(feature_grant, ws_role)` still holds — for a global row the workspace
+/// term is simply vacuous.
+pub fn capability_for_role(min: WorkspaceRole) -> Capability {
+    match min {
+        WorkspaceRole::Viewer => Capability::View,
+        WorkspaceRole::Editor => Capability::Edit,
+        WorkspaceRole::Admin => Capability::Admin,
+    }
+}
 
 /// No-op [`GrantsInvalidator`] used when no cache is wired in.
 struct NoopInvalidator;
@@ -80,6 +99,29 @@ impl GrantsRepo {
                 Capability::parse(&s)
                     .ok_or_else(|| Error::Internal(format!("bad capability value '{s}'")))
             }
+        }
+    }
+
+    /// Gate a **global** (workspace-less) resource on the feature axis.
+    ///
+    /// Root always passes; otherwise the caller's grant for `feature` must be
+    /// at least `need` (see [`capability_for_role`] for how a workspace-role
+    /// bar maps onto that ladder). `denied` is the 403 body — say which grant
+    /// is missing, since the caller can't infer it from a bare "forbidden".
+    pub async fn check_global(
+        &self,
+        user: &User,
+        feature: Feature,
+        need: Capability,
+        denied: &str,
+    ) -> Result<()> {
+        if user.is_root {
+            return Ok(());
+        }
+        if self.capability_of(user, feature).await? >= need {
+            Ok(())
+        } else {
+            Err(Error::Forbidden(denied.to_string()))
         }
     }
 

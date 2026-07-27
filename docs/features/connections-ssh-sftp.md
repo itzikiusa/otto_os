@@ -344,7 +344,10 @@ both pages render one tree).
 ## 7. API / contract reference
 
 `docs/contracts/api.md` is authoritative; all paths are under `/api/v1`. Auth is
-the connection's workspace role (global connections: root for mutations).
+the connection's workspace role — or, for **global** (workspace-less) connections,
+the caller's `Connections` grant: `Edit` to use one, `Admin` to edit/delete the
+shared record. Every connection the UI creates is global, so in practice that
+grant is what decides access.
 
 ### Connection CRUD (#25–30)
 
@@ -446,8 +449,9 @@ would require per-CLI env-passing support).
 - **Loopback by default.** The daemon binds `127.0.0.1:7700`; tunnels and SOCKS
   proxies bind `127.0.0.1:<ephemeral>` too. Don't widen the listener casually.
 - **RBAC.** Reads = ws Viewer (`Connections:View`); mutations/transfers = ws
-  Editor (`Connections:Edit`); global connections are root-managed. See
-  [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md).
+  Editor (`Connections:Edit`). For global connections the same grant answers on
+  its own (no workspace to check), and editing/deleting the record takes
+  `Connections:Admin`. See [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md).
 
 ---
 
@@ -464,7 +468,8 @@ would require per-CLI env-passing support).
 | **SFTP: "path contains a control character (rejected for safety)"** | A filename held a control char; this is the injection guard. Rename the remote file from a real shell. |
 | **SFTP: 400 "SFTP is only available for SSH connections"** | The connection isn't `kind == ssh`. SFTP is SSH-only. |
 | **SFTP download "saved" but file is empty / wrong place** | Remember `get`/`put` hit the **daemon host's** disk; `~` expands to the daemon user's home. If the local path is an existing dir, the remote basename is used. |
-| **"opening a global connection requires 'workspace_id'"** | A global (root-managed) connection has no workspace — pass `workspace_id` in the open body. |
+| **"opening a global connection requires 'workspace_id'"** | A global connection has no workspace, but the session it opens needs one — pass `workspace_id` in the open body. |
+| **403 "global connections need the Connections 'edit' grant"** | The caller isn't root and holds less than `Connections:Edit`. Grant it in **Settings → Users → Feature grants** (`Database:Edit` for the DB Explorer's query path). |
 
 ---
 

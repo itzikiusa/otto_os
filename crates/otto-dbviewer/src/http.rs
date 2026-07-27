@@ -12,9 +12,9 @@ use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
-use otto_core::domain::{Connection, User, WorkspaceRole};
+use otto_core::domain::{Connection, Feature, User, WorkspaceRole};
 use otto_core::{Error, Id};
-use otto_state::{NewSavedQuery, NewWidget};
+use otto_state::{capability_for_role, GrantsRepo, NewSavedQuery, NewWidget};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -26,6 +26,15 @@ use crate::types::{statement_is_write, CompletionContext, Engine, QueryRequest};
 pub trait DbViewerCtx: Clone + Send + Sync + 'static {
     fn db(&self) -> &Arc<DbViewerService>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
+
+    /// SQLite pool used to resolve per-user feature grants when a connection is
+    /// **global** (no workspace to check a role against). `None` — the default,
+    /// used only by this crate's check-only unit tests, which have no live
+    /// state DB — makes that branch root-only, as it was before grants answered
+    /// for it. `ServerCtx` overrides it with the real pool.
+    fn pool(&self) -> Option<otto_state::SqlitePool> {
+        None
+    }
 
     /// Audit hook fired when a guarded (production / read-only) connection runs
     /// a write the caller explicitly confirmed (`confirm_write`). Default no-op
@@ -242,7 +251,15 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/db/widgets/{id}/run", post(run_widget::<S>))
 }
 
-/// Editor in the connection's workspace; for global connections: root only.
+/// `min` in the connection's workspace; for **global** (workspace-less)
+/// connections the caller's `Database` feature grant answers instead — the
+/// workspace axis has nothing to check for a row with no workspace, and every
+/// connection the UI creates is global. Mirrors `otto-connections`; the
+/// mapping lives in [`otto_state::capability_for_role`].
+///
+/// A context that can't reach the grants table ([`DbViewerCtx::pool`] → `None`,
+/// only the crate's own check-only unit tests) keeps the old root-only
+/// behaviour: fail closed, never open.
 async fn check_conn_role<S: DbViewerCtx>(
     ctx: &S,
     user: &User,
@@ -251,15 +268,26 @@ async fn check_conn_role<S: DbViewerCtx>(
 ) -> Result<(), Error> {
     match &conn.workspace_id {
         Some(ws) => ctx.roles().check(user, ws, min).await,
-        None => {
-            if user.is_root {
-                Ok(())
-            } else {
-                Err(Error::Forbidden(
-                    "global connections are managed by root".into(),
-                ))
+        None => match ctx.pool() {
+            Some(pool) => {
+                let need = capability_for_role(min);
+                GrantsRepo::new(pool)
+                    .check_global(
+                        user,
+                        Feature::Database,
+                        need,
+                        &format!(
+                            "global connections need the Database '{}' grant",
+                            need.as_str()
+                        ),
+                    )
+                    .await
             }
-        }
+            None if user.is_root => Ok(()),
+            None => Err(Error::Forbidden(
+                "global connections are managed by root".into(),
+            )),
+        },
     }
 }
 
@@ -1299,10 +1327,18 @@ mod tests {
     }
 
     /// A `DbViewerCtx` carrying only the roles stub — `db()` is never touched by
-    /// `check_conn_role`, so a check-only test needs no live service.
+    /// `check_conn_role`, so a check-only test needs no live service. `pool` is
+    /// `None` unless a test seeds a real grants table.
     #[derive(Clone)]
     struct TestCtx {
         roles: Arc<dyn RoleChecker>,
+        pool: Option<otto_state::SqlitePool>,
+    }
+
+    impl TestCtx {
+        fn new(roles: Arc<dyn RoleChecker>) -> Self {
+            Self { roles, pool: None }
+        }
     }
 
     impl super::DbViewerCtx for TestCtx {
@@ -1311,6 +1347,56 @@ mod tests {
         }
         fn roles(&self) -> &Arc<dyn RoleChecker> {
             &self.roles
+        }
+        fn pool(&self) -> Option<otto_state::SqlitePool> {
+            self.pool.clone()
+        }
+    }
+
+    /// Migrated in-memory state DB, for the tests that exercise the global
+    /// branch's feature-grant lookup.
+    async fn mem_pool() -> otto_state::SqlitePool {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true).foreign_keys(true))
+            .await
+            .expect("in-memory pool");
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        pool
+    }
+
+    /// Insert `user` and grant them `cap` on the Database feature.
+    async fn seed_grant(pool: &otto_state::SqlitePool, u: &User, cap: &str) {
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.6fZ")
+            .to_string();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, disabled, created_at)
+             VALUES (?, ?, 'h', ?, ?, 0, ?)",
+        )
+        .bind(&u.id)
+        // `user()` hands every fixture the same username; the id keeps the
+        // UNIQUE(username) index happy when a test seeds several.
+        .bind(&u.id)
+        .bind(&u.display_name)
+        .bind(u.is_root as i64)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        if cap != "none" {
+            sqlx::query(
+                "INSERT INTO user_feature_grants (user_id, feature, capability) VALUES (?, 'database', ?)",
+            )
+            .bind(&u.id)
+            .bind(cap)
+            .execute(pool)
+            .await
+            .expect("seed grant");
         }
     }
 
@@ -1348,9 +1434,7 @@ mod tests {
     async fn viewer_is_rejected_from_widget_execution_gate() {
         // A workspace Viewer hitting the run_widget gate (Editor required) → 403.
         let stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
-        let ctx = TestCtx {
-            roles: stub.clone(),
-        };
+        let ctx = TestCtx::new(stub.clone());
         let ws = new_id();
         let c = conn(Some(ws));
         let err = check_conn_role(&ctx, &user(false), &c, WorkspaceRole::Editor)
@@ -1365,7 +1449,7 @@ mod tests {
     async fn editor_passes_widget_execution_gate() {
         // The legitimate dashboard editor still runs widgets.
         let stub = Arc::new(StubRoles::new(WorkspaceRole::Editor));
-        let ctx = TestCtx { roles: stub };
+        let ctx = TestCtx::new(stub);
         let c = conn(Some(new_id()));
         check_conn_role(&ctx, &user(false), &c, WorkspaceRole::Editor)
             .await
@@ -1373,14 +1457,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_connection_requires_root() {
-        // A global (workspace-less) connection: a non-root user is denied
-        // regardless of any workspace role, while root passes — matching every
-        // other execution path.
+    async fn global_connection_without_a_pool_is_root_only() {
+        // No grants table reachable (`pool() == None`) ⇒ fail closed: the old
+        // root-only rule stands rather than silently letting everyone through.
         let stub = Arc::new(StubRoles::new(WorkspaceRole::Admin));
-        let ctx = TestCtx {
-            roles: stub.clone(),
-        };
+        let ctx = TestCtx::new(stub.clone());
         let global = conn(None);
 
         let err = check_conn_role(&ctx, &user(false), &global, WorkspaceRole::Editor)
@@ -1396,10 +1477,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_connection_is_gated_on_the_database_grant() {
+        // Every connection the UI creates is global, so this is the gate that
+        // decides whether a shared (non-root) account can use the DB Explorer
+        // at all. The workspace role is deliberately Admin here to prove the
+        // decision comes from the feature grant, not the workspace axis.
+        let pool = mem_pool().await;
+        let stub = Arc::new(StubRoles::new(WorkspaceRole::Admin));
+        let ctx = TestCtx {
+            roles: stub.clone(),
+            pool: Some(pool.clone()),
+        };
+        let global = conn(None);
+
+        // `database: view` — may browse schema (Viewer bar), may not run
+        // queries (Editor bar).
+        let viewer = user(false);
+        seed_grant(&pool, &viewer, "view").await;
+        check_conn_role(&ctx, &viewer, &global, WorkspaceRole::Viewer)
+            .await
+            .expect("view grant browses schema on a global conn");
+        let err = check_conn_role(&ctx, &viewer, &global, WorkspaceRole::Editor)
+            .await
+            .expect_err("view grant must not reach the query gate");
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+
+        // `database: edit` — runs queries.
+        let editor = user(false);
+        seed_grant(&pool, &editor, "edit").await;
+        check_conn_role(&ctx, &editor, &global, WorkspaceRole::Editor)
+            .await
+            .expect("edit grant runs queries on a global conn");
+
+        // No grant at all — default-deny, even at the lowest bar.
+        let stranger = user(false);
+        seed_grant(&pool, &stranger, "none").await;
+        let err = check_conn_role(&ctx, &stranger, &global, WorkspaceRole::Viewer)
+            .await
+            .expect_err("ungranted user denied");
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+
+        // Root still passes without consulting any grant row.
+        check_conn_role(&ctx, &user(true), &global, WorkspaceRole::Editor)
+            .await
+            .expect("root passes on global conn");
+
+        // Throughout, the workspace checker was never consulted for a global
+        // connection — the grant is the whole decision.
+        assert_eq!(*stub.last_min.lock().unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn import_gate_requires_editor() {
         // File import is a write path — a Viewer is denied the Editor gate.
         let stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
-        let ctx = TestCtx { roles: stub.clone() };
+        let ctx = TestCtx::new(stub.clone());
         let c = conn(Some(new_id()));
         let err = check_conn_role(&ctx, &user(false), &c, WorkspaceRole::Editor)
             .await
@@ -1412,7 +1544,7 @@ mod tests {
     async fn nl_to_sql_gate_requires_editor() {
         // The NL→SQL route shares run_query's gate: a Viewer is denied Editor.
         let stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
-        let ctx = TestCtx { roles: stub.clone() };
+        let ctx = TestCtx::new(stub.clone());
         let c = conn(Some(new_id()));
         let err = check_conn_role(&ctx, &user(false), &c, WorkspaceRole::Editor)
             .await
@@ -1434,7 +1566,7 @@ mod tests {
         // The owner passes for their OWN resource even as a bare Viewer; the
         // gate short-circuits before consulting workspace roles.
         let stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
-        let ctx = TestCtx { roles: stub.clone() };
+        let ctx = TestCtx::new(stub.clone());
         let u = user(false);
         let ws = new_id();
         require_owner_or_ws_admin(&ctx, &u, &u.id, &ws)
@@ -1448,7 +1580,7 @@ mod tests {
         // A same-workspace Editor who is NOT the owner is denied: the gate
         // demands ws-Admin (the documented "sees all" tier), which Editor lacks.
         let stub = Arc::new(StubRoles::new(WorkspaceRole::Editor));
-        let ctx = TestCtx { roles: stub.clone() };
+        let ctx = TestCtx::new(stub.clone());
         let bob = user(false);
         let alice_id = new_id(); // a different owner
         let ws = new_id();
@@ -1463,7 +1595,7 @@ mod tests {
     async fn ws_admin_and_root_pass_ownership_gate() {
         // A workspace Admin passes for someone else's resource (sees-all tier).
         let admin_stub = Arc::new(StubRoles::new(WorkspaceRole::Admin));
-        let admin_ctx = TestCtx { roles: admin_stub };
+        let admin_ctx = TestCtx::new(admin_stub);
         let alice_id = new_id();
         let ws = new_id();
         require_owner_or_ws_admin(&admin_ctx, &user(false), &alice_id, &ws)
@@ -1472,7 +1604,7 @@ mod tests {
 
         // Root passes without consulting roles at all.
         let root_stub = Arc::new(StubRoles::new(WorkspaceRole::Viewer));
-        let root_ctx = TestCtx { roles: root_stub.clone() };
+        let root_ctx = TestCtx::new(root_stub.clone());
         require_owner_or_ws_admin(&root_ctx, &user(true), &alice_id, &ws)
             .await
             .expect("root allowed");

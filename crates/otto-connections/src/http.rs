@@ -13,10 +13,13 @@ use otto_core::api::{
     SftpUploadReq, TestConnectionResp, UpsertConnectionReq, UpsertSectionReq,
 };
 use otto_core::auth::{AuthUser, RoleChecker};
-use otto_core::domain::{Connection, ConnectionKind, ConnectionSection, Session, User, WorkspaceRole};
+use otto_core::domain::{
+    Capability, Connection, ConnectionKind, ConnectionSection, Feature, Session, User,
+    WorkspaceRole,
+};
 use otto_core::{Error, Id};
 use otto_ssh::{SftpParams, SftpSession};
-use otto_state::SqlitePool;
+use otto_state::{capability_for_role, GrantsRepo, SqlitePool};
 use serde::Deserialize;
 
 use crate::conn_import::{
@@ -162,23 +165,66 @@ pub fn api_router<S: ConnectionsCtx>() -> Router<S> {
         .route("/connection-sections/{id}/move", post(move_section::<S>))
 }
 
-/// Editor in the connection's workspace; for global connections: root only.
+/// `min` in the connection's workspace; for **global** (workspace-less)
+/// connections the caller's `Connections` feature grant answers instead.
+///
+/// Every connection the UI creates is global (`create_connection` passes
+/// `workspace_id: None` on purpose — "a global library"), so gating that branch
+/// on root alone made the whole library unusable for every other account. The
+/// feature axis is the right one for a row with no workspace; see
+/// [`otto_state::capability_for_role`] for the mapping.
 async fn check_conn_role<S: ConnectionsCtx>(
     ctx: &S,
     user: &User,
     conn: &Connection,
     min: WorkspaceRole,
 ) -> Result<(), Error> {
+    check_conn_access(ctx, user, conn, min, capability_for_role(min)).await
+}
+
+/// Managing the connection **record** (edit / delete) — the "manage all /
+/// global" tier of the feature model. A workspace connection stays at workspace
+/// `Editor`, but a global one is visible to everyone holding the feature, so
+/// rewriting or deleting it takes `Connections:Admin`: an `Edit`-level teammate
+/// can *use* the shared library without being able to break it for everyone.
+async fn check_conn_manage<S: ConnectionsCtx>(
+    ctx: &S,
+    user: &User,
+    conn: &Connection,
+) -> Result<(), Error> {
+    check_conn_access(
+        ctx,
+        user,
+        conn,
+        WorkspaceRole::Editor,
+        Capability::Admin,
+    )
+    .await
+}
+
+/// Shared body of the two gates above: workspace role when the connection has a
+/// workspace, feature grant when it doesn't.
+async fn check_conn_access<S: ConnectionsCtx>(
+    ctx: &S,
+    user: &User,
+    conn: &Connection,
+    min: WorkspaceRole,
+    global_cap: Capability,
+) -> Result<(), Error> {
     match &conn.workspace_id {
         Some(ws) => ctx.roles().check(user, ws, min).await,
         None => {
-            if user.is_root {
-                Ok(())
-            } else {
-                Err(Error::Forbidden(
-                    "global connections are managed by root".into(),
-                ))
-            }
+            GrantsRepo::new(ctx.pool())
+                .check_global(
+                    user,
+                    Feature::Connections,
+                    global_cap,
+                    &format!(
+                        "global connections need the Connections '{}' grant",
+                        global_cap.as_str()
+                    ),
+                )
+                .await
         }
     }
 }
@@ -310,7 +356,7 @@ async fn import_create<S: ConnectionsCtx>(
     Ok(Json(ImportCreateResult { created, failed }))
 }
 
-/// #27 PATCH /connections/{id} — ws editor (global: root)
+/// #27 PATCH /connections/{id} — ws editor (global: `Connections:Admin`)
 async fn update_connection<S: ConnectionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -318,21 +364,21 @@ async fn update_connection<S: ConnectionsCtx>(
     Json(req): Json<UpsertConnectionReq>,
 ) -> ApiResult<Json<Connection>> {
     let conn = ctx.connections().get(&id).await?;
-    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    check_conn_manage(&ctx, &user, &conn).await?;
     if owner_private_enabled(&ctx).await {
         require_conn_owner_or_root(&user, &conn)?;
     }
     Ok(Json(ctx.connections().update(&id, req).await?))
 }
 
-/// #28 DELETE /connections/{id} — ws editor (global: root)
+/// #28 DELETE /connections/{id} — ws editor (global: `Connections:Admin`)
 async fn delete_connection<S: ConnectionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     let conn = ctx.connections().get(&id).await?;
-    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
+    check_conn_manage(&ctx, &user, &conn).await?;
     if owner_private_enabled(&ctx).await {
         require_conn_owner_or_root(&user, &conn)?;
     }
