@@ -1089,6 +1089,16 @@
     col: number;       // which column this commit's node lands on
     lines: LaneLine[]; // segments to draw in the SVG gutter
     color: string;     // node color
+    // Whether the node's OWN column carries a line above / below it. Without
+    // these the gutter drew only the half below every node, so the lane you are
+    // actually following rendered as a dashed line while pass-through lanes
+    // (drawn full-height as 'vert') rendered solid — exactly backwards.
+    // above = some lane was already awaiting this sha (false at a branch tip,
+    // where a line upwards would point at nothing).
+    // below = the commit has a first parent (false at a root / end of history,
+    // where the old code still trailed a stub into empty space).
+    hasAbove: boolean;
+    hasBelow: boolean;
   }
 
   interface LaneLine {
@@ -1101,8 +1111,8 @@
     kind: 'vert' | 'merge-in' | 'branch-out' | 'converge';
   }
 
-  const LANE_W = 14; // pixels per lane column
-  const NODE_R = 4;  // node radius
+  const LANE_W = 18; // pixels per lane column
+  const NODE_R = 5;  // node radius
 
   // Hard cap on lane count. Past this we stop opening brand-new lanes for extra
   // (merge) parents and route them to the node's own column, so a pathological
@@ -1129,16 +1139,41 @@
       return PALETTE[(laneColors[i] ?? 0) % PALETTE.length];
     }
 
+    /** Pick a palette slot that no OTHER currently-active lane is using, so two
+     *  branches on screen at the same time never share a color. Walks forward
+     *  from `colorIdx` so consecutive branches still cycle through the palette
+     *  rather than clustering on one hue. Past PALETTE.length concurrent lanes
+     *  there is nothing free left to pick, so fall back to plain round-robin. */
+    function freshColor(exclude: number): number {
+      const inUse = new Set<number>();
+      for (let i = 0; i < lanes.length; i++) {
+        if (i === exclude || lanes[i] === null) continue;
+        const c = laneColors[i];
+        if (c !== undefined) inUse.add(c);
+      }
+      for (let step = 0; step < PALETTE.length; step++) {
+        const cand = (colorIdx + step) % PALETTE.length;
+        if (!inUse.has(cand)) {
+          colorIdx = cand + 1;
+          return cand;
+        }
+      }
+      return colorIdx++ % PALETTE.length;
+    }
+
     function allocateLane(sha: string | null): number {
       // prefer reusing a free slot
       const free = lanes.indexOf(null);
       if (free !== -1) {
         lanes[free] = sha;
-        if (laneColors[free] === undefined) laneColors[free] = colorIdx++ % PALETTE.length;
+        // ALWAYS re-pick the color. A recycled slot used to keep whatever color
+        // the previous (unrelated) branch had, so two different branches showed
+        // up in the same color within one view.
+        laneColors[free] = freshColor(free);
         return free;
       }
       lanes.push(sha);
-      laneColors.push(colorIdx++ % PALETTE.length);
+      laneColors.push(freshColor(lanes.length - 1));
       return lanes.length - 1;
     }
 
@@ -1147,6 +1182,10 @@
     for (const commit of commits) {
       // Find this commit's column (which lane is "expecting" this sha)
       let col = lanes.indexOf(commit.sha);
+      // A lane already awaiting this sha means the row above continues down into
+      // this node, so its own column needs the segment ABOVE the node drawn.
+      // A fresh allocation is a branch TIP — nothing above it to connect to.
+      const hasAbove = col !== -1;
       if (col === -1) {
         col = allocateLane(commit.sha);
       }
@@ -1211,7 +1250,10 @@
 
       if (lanes.length > widest) widest = lanes.length;
 
-      rows.push({ commit, col, lines, color });
+      // A root commit (or the end of loaded history with no parent recorded) has
+      // nothing below it — without this the gutter trailed a stub off the oldest
+      // commit into empty space.
+      rows.push({ commit, col, lines, color, hasAbove, hasBelow: !!firstParent });
     }
 
     return { rows, widest };
@@ -1227,7 +1269,7 @@
   // Gutter width shared by every row so lane dots line up vertically. Sized to
   // the widest lane count actually reached (plus a half-lane for the node
   // radius), and capped so a wide fan-out can't blow out the layout.
-  const MAX_GUTTER_W = 200;
+  const MAX_GUTTER_W = 260;
   const gutterWidth = $derived.by(() => {
     if (graph.rows.length === 0) return LANE_W;
     return Math.min(graph.widest * LANE_W + LANE_W / 2, MAX_GUTTER_W);
@@ -1752,11 +1794,12 @@
 
 <!-- One commit-row ref chip — shared by the inline (single ref) and collapsed
      (primary ref) renderings so they never drift apart. -->
-{#snippet chipView(chip: RefChip, label: string)}
+{#snippet chipView(chip: RefChip, label: string, laneColor: string)}
   <span
     class="ref-chip kind-{chip.kind}"
     class:current-chip={chip.current}
     class:is-worktree={chip.worktree && !chip.current}
+    style="--lane: {laneColor}"
     title={chip.kind === 'stash'
       ? `Stash · ${label}`
       : chip.current
@@ -2184,6 +2227,14 @@
       <div class="dim" style="padding: 18px; font-size: 12px">No commits found.</div>
     {:else}
       <div class="graph-list">
+        <!-- Column header — orients the three zones (which column holds refs,
+             which holds the graph) so the ref gutter isn't read as part of the
+             commit text. Sticky so it survives scrolling a long history. -->
+        <div class="graph-head" aria-hidden="true">
+          <span class="gh-branch">BRANCH / TAG</span>
+          <span class="gh-graph" style="width: {gutterWidth}px">GRAPH</span>
+          <span class="gh-msg">COMMIT MESSAGE</span>
+        </div>
         <!-- WIP row (GitKraken-style): uncommitted changes pinned above the
              graph; selecting it opens the staging/commit panel on the right. -->
         {#if status.changes.length > 0}
@@ -2273,7 +2324,7 @@
                      expander is a role=button SPAN (the row itself is a <button>,
                      so a nested real <button> would be invalid). -->
                 {@const primary = primaryChip(chips)}
-                {@render chipView(primary, primary.label)}
+                {@render chipView(primary, primary.label, row.color)}
                 <span
                   class="ref-expander"
                   role="button"
@@ -2289,7 +2340,7 @@
                   {@const label = chip.kind === 'stash'
                     ? (stashMsgBySha.get(row.commit.sha) ?? 'stash')
                     : chip.label}
-                  {@render chipView(chip, label)}
+                  {@render chipView(chip, label, row.color)}
                 {/each}
               {/if}
               <!-- HEAD marker ("you are here") — rightmost so it stays visible as
@@ -2330,8 +2381,33 @@
                   />
                 {/if}
               {/each}
-              <!-- vertical continuation for current lane -->
-              <line x1={cx} y1={cy + NODE_R} x2={cx} y2={totalH} stroke={row.color} stroke-width="1.5" />
+              <!-- Leader line tying this row's ref chip(s) to their node, so a
+                   `v1.2.31` / `feature/…` label visibly belongs to ONE lane
+                   instead of floating in the left column. Drawn faint so it
+                   reads as a connector, never as another lane. -->
+              {#if chips.length > 0 && cx > NODE_R}
+                <line
+                  x1={0}
+                  y1={cy}
+                  x2={cx - NODE_R}
+                  y2={cy}
+                  stroke={row.color}
+                  stroke-width="1"
+                  opacity="0.45"
+                />
+              {/if}
+              <!-- The node's OWN lane, split around the node: the half above
+                   (only when a lane above feeds into it — a tip has nothing
+                   above) and the half below (only when it has a parent — a root
+                   has nothing below). Drawing only the lower half is what made
+                   an active branch render as a dashed line while pass-through
+                   lanes rendered solid. -->
+              {#if row.hasAbove}
+                <line x1={cx} y1={0} x2={cx} y2={cy - NODE_R} stroke={row.color} stroke-width="1.5" />
+              {/if}
+              {#if row.hasBelow}
+                <line x1={cx} y1={cy + NODE_R} x2={cx} y2={totalH} stroke={row.color} stroke-width="1.5" />
+              {/if}
               <!-- node: dashed + muted for stash plumbing; a halo ring when selected -->
               {#if isStash}
                 <circle
@@ -2903,6 +2979,46 @@
     flex-direction: column;
     min-width: 0;
   }
+  /* Column header. Mirrors the row layout exactly (branch cell width, then the
+     gutter width, then the message column) so the labels sit over what they
+     name. Sticky against the scrolling history. */
+  .graph-head {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    height: 22px;
+    flex-shrink: 0;
+    padding-inline-end: 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    font-size: 8.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    user-select: none;
+  }
+  .graph-head .gh-branch {
+    width: var(--branch-col-w, 168px);
+    flex-shrink: 0;
+    text-align: end;
+    padding-inline: 6px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .graph-head .gh-graph {
+    flex-shrink: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .graph-head .gh-msg {
+    flex: 1;
+    min-width: 0;
+    padding: 0 8px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
   .graph-row {
     display: flex;
     align-items: center;
@@ -3022,6 +3138,10 @@
     background: var(--surface-2);
     color: var(--text-dim);
     border: 1px solid transparent;
+    /* Lane tint: a bar on the side facing the graph, in the SAME color as the
+       node this ref sits on, so a label is readable as belonging to one lane
+       (the SVG leader line completes the connection). */
+    border-inline-end: 3px solid var(--lane, transparent);
     white-space: nowrap;
     max-width: 160px;
     overflow: hidden;
