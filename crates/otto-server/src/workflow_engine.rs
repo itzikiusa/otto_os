@@ -100,6 +100,11 @@ enum ProgressItem {
     File { name: String, text: String },
 }
 
+/// Cap on the prior-step context handed to reviewers. Their prompt already
+/// carries the whole diff; the briefs are there to stop them re-deriving the
+/// system, not to become the bulk of the prompt.
+const REVIEW_CONTEXT_CAP: usize = 48_000;
+
 /// Cap on an attached step file — a runaway reply shouldn't turn into a
 /// multi-megabyte chat upload; the full file stays in the run's context dir.
 const PROGRESS_FILE_CAP: usize = 1024 * 1024;
@@ -3126,6 +3131,63 @@ async fn execute_node(
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
 
+            // What this run already established about the change, handed to the
+            // reviewers.
+            //
+            // Every OTHER node kind gets the run context directory named in its
+            // preamble and reads it; `review_run` is not an agent node, so its
+            // reviewers used to see the diff and nothing else — no ticket, no
+            // brief from the steps that ran before them. They then re-derive the
+            // system from raw hunks, and behavior that is documented, ticketed and
+            // intentional comes back as a defect of whichever change happened to
+            // touch its line. The engine already renders both blocks into every
+            // reviewer prompt (`run_review_core`); only this caller withheld them.
+            //
+            // `include_context: false` opts out.
+            let want_context = p
+                .get("include_context")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let (jira_context, run_context) = if want_context {
+                let jira = env.files.read_jira_md();
+                // The step handoffs, oldest first, capped — the reviewer prompt
+                // also carries the whole diff, so this must not grow unbounded.
+                let mut brief = String::new();
+                for name in env.files.list_step_mds() {
+                    let Some(body) = env.files.read_named(&name) else { continue };
+                    if brief.len() + body.len() > REVIEW_CONTEXT_CAP {
+                        brief.push_str(
+                            "\n\n[remaining step files omitted — context cap reached; \
+                             they are in the run context directory]\n",
+                        );
+                        break;
+                    }
+                    brief.push_str(&format!("\n\n### {name}\n\n{body}"));
+                }
+                let framed = (!brief.trim().is_empty()).then(|| {
+                    format!(
+                        "These steps ran BEFORE this review, in this workflow, over this same \
+                         change. Treat them as established fact about the system — not as claims \
+                         to re-verify from the diff. In particular: behavior they record as \
+                         existing, documented or intentional was NOT introduced by this change, \
+                         and impact they already assessed is not yours to re-litigate. Use them \
+                         so you do not reconstruct the system from hunks alone.{brief}"
+                    )
+                });
+                (jira, framed)
+            } else {
+                (None, None)
+            };
+            if jira_context.is_some() || run_context.is_some() {
+                logs_pre.push(format!(
+                    "review_run: reviewers given prior run context ({}{}{} chars)",
+                    if jira_context.is_some() { "ticket + " } else { "" },
+                    if run_context.is_some() { "step briefs, " } else { "" },
+                    jira_context.as_ref().map_or(0, |s| s.len())
+                        + run_context.as_ref().map_or(0, |s| s.len()),
+                ));
+            }
+
             // Review every target; a per-target failure in the multi-repo case
             // is logged and skipped (one bad repo never sinks the others), the
             // single-target case keeps its hard error.
@@ -3164,6 +3226,8 @@ async fn execute_node(
                     worktree,
                     want_base.as_deref(),
                     cfg_override.clone(),
+                    jira_context.clone(),
+                    run_context.clone(),
                 )
                 .await
                 {

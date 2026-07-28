@@ -2376,6 +2376,7 @@ async fn run_review_core(
         pr_number,
         &cfg.summarizer,
         &agent_findings,
+        &format!("{user_ctx}{jira_ctx}"),
     )
     .await
 }
@@ -2447,6 +2448,12 @@ async fn summarize_and_persist(
     pr_number: u64,
     summarizer_cfg: &ReviewAgentCfg,
     agent_findings: &[Vec<otto_core::domain::ReviewFinding>],
+    // What the caller already knew about the change (ticket + prior-step
+    // briefs), pre-rendered. The summarizer is the step that applies the scope
+    // gate and decides what survives, so it needs this MORE than the reviewers
+    // do: without it, "documented, intentional, already-ticketed behavior" is
+    // indistinguishable from a defect this change introduced, and it keeps it.
+    context: &str,
 ) -> Result<()> {
     // Reclaim the live states (updated by the reviewer tasks) and mark the
     // summarizer (always the LAST row) running.
@@ -2482,7 +2489,8 @@ async fn summarize_and_persist(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let summarizer_prompt = format!("{}\n\n{}", summarizer_cfg.prompt, batches);
+    // Context first: it frames how to judge every batch below it.
+    let summarizer_prompt = format!("{}{}\n\n{}", context, summarizer_cfg.prompt, batches);
 
     // The summarizer used to get a flat 120s regardless of how much it had to
     // consolidate. That was survivable while it was capped at 20 items; with the
@@ -3825,12 +3833,20 @@ pub(crate) async fn pr_draft_prompt(
 /// Callers MUST NOT read that as a clean review — zero findings there means
 /// nothing was looked at. Scoring it (100/PASS) is how a misconfigured base
 /// silently green-lights an unreviewed PR.
+///
+/// `jira_context` / `run_context` are what the caller already knows about the
+/// change — the ticket, and the briefs earlier steps produced. Both reach every
+/// reviewer's prompt. Passing `None` makes the reviewers re-derive the system
+/// from raw hunks, which is how documented, intentional behavior gets reported
+/// as a defect of the change that happened to touch its line.
 pub(crate) async fn run_review_for_branch(
     ctx: &ServerCtx,
     repo_id: &Id,
     worktree_path: &str,
     base: Option<&str>,
     cfg_override: Option<ReviewConfig>,
+    jira_context: Option<String>,
+    run_context: Option<String>,
 ) -> Result<(Id, otto_git::ResolvedBase, bool)> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
@@ -3883,7 +3899,16 @@ pub(crate) async fn run_review_for_branch(
             .map(|source| ReviewBranches { source, dest });
         tokio::spawn(async move {
             run_review(
-                ctx_bg, rid, wt, diff_text, None, None, workspace, repo_id_bg, 0, branches,
+                ctx_bg,
+                rid,
+                wt,
+                diff_text,
+                jira_context,
+                run_context,
+                workspace,
+                repo_id_bg,
+                0,
+                branches,
                 cfg_override,
             )
             .await;
@@ -4276,6 +4301,10 @@ async fn retry_summarizer(
             pr_number,
             &cfg.summarizer,
             &agent_findings,
+            // A retry re-runs ONLY this stage, from findings stored earlier; the
+            // run that produced them is long gone, so there is no context to
+            // re-render. The findings themselves are unchanged either way.
+            "",
         )
         .await;
         let status = match result {

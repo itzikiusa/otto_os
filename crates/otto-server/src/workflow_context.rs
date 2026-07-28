@@ -573,6 +573,28 @@ impl RunContextFiles {
 
     /// `step*.md` file names present in the dir (what an agent can read),
     /// sorted by step NUMBER (lexicographic would put step10 before step2).
+    /// Read a file from the run context dir. `None` when files are disabled or
+    /// the file doesn't exist — every caller treats missing context as "no
+    /// context", never as an error.
+    pub fn read_named(&self, name: &str) -> Option<String> {
+        let dir = self.dir.as_ref()?;
+        std::fs::read_to_string(dir.join(name)).ok()
+    }
+
+    /// The `jira-<KEY>.md` this run fetched, if any. The engine writes exactly
+    /// one per run (`prepare_context`), so the first match is the ticket.
+    pub fn read_jira_md(&self) -> Option<String> {
+        let dir = self.dir.as_ref()?;
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.starts_with("jira-") && n.ends_with(".md"))
+            .collect();
+        names.sort();
+        self.read_named(names.first()?)
+    }
+
     pub fn list_step_mds(&self) -> Vec<String> {
         let Some(dir) = &self.dir else { return vec![] };
         let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
@@ -1052,6 +1074,34 @@ mod tests {
         f.merge_published("B", Some("master"), Some("/w/b")); // unknown repo appends a discovered entry
         assert_eq!(f.repos().len(), 2);
         assert_eq!(f.repos()[1].base.as_deref(), Some("master"));
+    }
+
+    #[test]
+    fn ticket_and_step_briefs_are_readable_for_the_reviewers() {
+        // review_run is not an agent node, so it never gets the context-dir
+        // preamble the other kinds read. It builds the reviewers' context from
+        // these two accessors instead — without them the reviewers see the diff
+        // and nothing else, and re-report documented behavior as a new defect.
+        let td = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(td.path(), "r6");
+        assert_eq!(f.read_jira_md(), None, "no ticket fetched yet");
+        assert_eq!(f.read_named("nope.md"), None);
+
+        f.write_named("jira-ABC-1.md", "# ABC-1\nConfirmed with the provider.");
+        f.persist_step("step1-checkout", "agent_prompt", "x", &json!({}), &[], None, None);
+        f.persist_step("step2-gather", "agent_prompt", "y", &json!({}), &[], None, None);
+
+        assert!(f.read_jira_md().unwrap().contains("Confirmed with the provider"));
+        assert_eq!(
+            f.list_step_mds(),
+            vec!["step1-checkout.md".to_string(), "step2-gather.md".to_string()]
+        );
+        assert!(f.read_named("step2-gather.md").is_some());
+
+        // Disabled handle (files off): no context, never an error.
+        let d = RunContextFiles::disabled("rX");
+        assert_eq!(d.read_jira_md(), None);
+        assert_eq!(d.read_named("jira-ABC-1.md"), None);
     }
 
     #[test]
