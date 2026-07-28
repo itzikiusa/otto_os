@@ -495,7 +495,35 @@ impl RunContextFiles {
     }
 
     pub fn repos(&self) -> Vec<RepoEntry> {
+        self.reload_repos_json();
         self.repos.lock().unwrap().clone()
+    }
+
+    /// Re-read `repos.json` from disk into the in-memory registry.
+    ///
+    /// The file is not just an export: it is a STEP'S ONLY WAY TO CORRECT THE
+    /// RUN. A checkout step that discovers the PR's real destination branch
+    /// writes it back there, and the review step must then diff against it.
+    /// Without this reload the engine keeps serving whatever it seeded at run
+    /// start — the agent's edit is invisible, and the next `merge_published`
+    /// rewrites the file from stale memory, erasing it.
+    ///
+    /// Tolerant by design: unreadable, unparseable or empty content leaves the
+    /// current registry untouched. An agent caught mid-write must never blank
+    /// out the run's targets.
+    fn reload_repos_json(&self) {
+        let Some(dir) = &self.dir else { return };
+        let Ok(text) = std::fs::read_to_string(dir.join("repos.json")) else {
+            return;
+        };
+        match serde_json::from_str::<Vec<RepoEntry>>(&text) {
+            Ok(entries) if !entries.is_empty() => *self.repos.lock().unwrap() = entries,
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                "workflow-context({}): repos.json is not valid JSON ({e}) — keeping the in-memory registry",
+                self.run_id
+            ),
+        }
     }
 
     /// Merge a reference a node published (`repo_id` + optional base/worktree)
@@ -503,6 +531,9 @@ impl RunContextFiles {
     /// base — the user said what the destination is; a step can only fill
     /// blanks or add newly discovered repos.
     pub fn merge_published(&self, repo_id: &str, base: Option<&str>, worktree: Option<&str>) {
+        // Merge onto what the FILE says, not onto run-start memory — a step may
+        // have corrected an entry since, and this call rewrites the file.
+        self.reload_repos_json();
         {
             let mut repos = self.repos.lock().unwrap();
             if let Some(e) = repos.iter_mut().find(|e| e.repo_id.as_deref() == Some(repo_id)) {
@@ -1021,5 +1052,49 @@ mod tests {
         f.merge_published("B", Some("master"), Some("/w/b")); // unknown repo appends a discovered entry
         assert_eq!(f.repos().len(), 2);
         assert_eq!(f.repos()[1].base.as_deref(), Some("master"));
+    }
+
+    #[test]
+    fn a_steps_edit_to_repos_json_is_read_back_and_survives_merge() {
+        // The checkout step corrects the base on disk (the run was declared with
+        // the PR's own source branch); the engine must honor that edit and must
+        // not overwrite it from run-start memory on the next merge.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = RunContextFiles::create(tmp.path(), "r5");
+        f.set_repos(vec![RepoEntry {
+            repo: "~/svc".into(),
+            repo_id: Some("R1".into()),
+            repo_name: None,
+            kind: "worktree".into(),
+            name: "~/svc".into(),
+            source: None,
+            worktree: Some("/w/e".into()),
+            base: Some("feature/X-1".into()), // the bad base, as declared
+            error: None,
+        }]);
+        let path = tmp
+            .path()
+            .join("workflow-context")
+            .join("r5")
+            .join("repos.json");
+        let mut entries: Vec<RepoEntry> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        entries[0].source = Some("feature/X-1".into());
+        entries[0].base = Some("develop".into()); // what the step discovered
+        std::fs::write(&path, serde_json::to_string_pretty(&entries).unwrap()).unwrap();
+
+        assert_eq!(f.repos()[0].base.as_deref(), Some("develop"));
+        assert_eq!(f.repos()[0].source.as_deref(), Some("feature/X-1"));
+
+        // A later publish must not resurrect the declared value.
+        f.merge_published("R1", Some("feature/X-1"), Some("/w/e"));
+        assert_eq!(f.repos()[0].base.as_deref(), Some("develop"));
+        let on_disk: Vec<RepoEntry> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk[0].base.as_deref(), Some("develop"));
+
+        // Garbage on disk never blanks the registry.
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(f.repos()[0].base.as_deref(), Some("develop"));
     }
 }

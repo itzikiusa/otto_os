@@ -2916,6 +2916,9 @@ async fn execute_node(
             // the multi-entry paths.
             let params_explicit = p.get("repo_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some()
                 || p.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some();
+            // Notes emitted while resolving targets, before the per-target log
+            // buffer below exists; folded into it verbatim.
+            let mut logs_pre: Vec<String> = Vec::new();
             let input_repo_targets: Vec<(String, String, Option<String>, String)> = input
                 .get("repos")
                 .and_then(Value::as_array)
@@ -2934,7 +2937,39 @@ async fn execute_node(
                 || input.get("worktree_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).is_some();
             let mut targets: Vec<(String, String, Option<String>, String)> = Vec::new();
             if !params_explicit && !input_repo_targets.is_empty() {
-                targets = input_repo_targets;
+                // `repos[]` is threaded VERBATIM from node to node (every
+                // agent_prompt copies it into its output), so it is a snapshot of
+                // what the run started with. `repos.json` is the live registry —
+                // run-brief.md calls it "the authoritative list", and a checkout
+                // step that discovers the PR's real destination branch corrects it
+                // there. Let the registry win on `base` for an entry it also
+                // declares, or that correction is silently discarded and the
+                // review diffs against the stale branch anyway.
+                let declared = env.files.repos();
+                targets = input_repo_targets
+                    .into_iter()
+                    .map(|(rid, wt, base, label)| {
+                        let live = declared
+                            .iter()
+                            .find(|e| e.repo_id.as_deref() == Some(rid.as_str()))
+                            .or_else(|| {
+                                declared.iter().find(|e| e.worktree.as_deref() == Some(wt.as_str()))
+                            })
+                            .and_then(|e| e.base.clone())
+                            .filter(|b| !b.trim().is_empty());
+                        match live {
+                            Some(b) if Some(&b) != base.as_ref() => {
+                                logs_pre.push(format!(
+                                    "review_run: base for {rid} taken from repos.json ({b}), \
+                                     not the value threaded through the run input ({})",
+                                    base.as_deref().unwrap_or("unset")
+                                ));
+                                (rid, wt, Some(b), label)
+                            }
+                            _ => (rid, wt, base, label),
+                        }
+                    })
+                    .collect();
             } else if !params_explicit && !input_worktree_ref {
                 // Declarations: EVERY entry failed to resolve → fail with the
                 // reasons. Falling through to the run-cwd path would review
@@ -3094,7 +3129,7 @@ async fn execute_node(
             // Review every target; a per-target failure in the multi-repo case
             // is logged and skipped (one bad repo never sinks the others), the
             // single-target case keeps its hard error.
-            let mut logs: Vec<String> = Vec::new();
+            let mut logs: Vec<String> = std::mem::take(&mut logs_pre);
             let mut outs: Vec<serde_json::Map<String, Value>> = Vec::new();
             for (t_idx, (repo_id, worktree, want_base, label)) in targets.iter().enumerate() {
                 // Validate the repo exists (clear error if not); the review
@@ -3123,7 +3158,7 @@ async fn execute_node(
                         "🔍 *{iter_label}{tag}* started (pass ≥ {threshold}){lens_txt}{prov_txt}{chk_txt}"
                     ));
                 }
-                let (review_id, resolved_base) = match crate::modules::run_review_for_branch(
+                let (review_id, resolved_base, no_changes) = match crate::modules::run_review_for_branch(
                     ctx,
                     repo_id,
                     worktree,
@@ -3152,6 +3187,16 @@ async fn execute_node(
                 logs.push(format!(
                     "review_run{tag}: started review {review_id} ({worktree} vs {base})"
                 ));
+                if no_changes {
+                    // Nothing was reviewed. Say so where the run is read — the
+                    // step otherwise looks identical to a clean sweep (status
+                    // "done", 0 findings) and used to score 100/PASS.
+                    logs.push(format!(
+                        "review_run{tag}: EMPTY diff vs {base} — 0 reviewers ran; \
+                         this is NOT a clean review. Check the base branch: a run that \
+                         declares the PR's own source branch as the base diffs it against itself."
+                    ));
+                }
                 let mut status = "running".to_string();
                 // Surface each reviewer's live session so the run view shows ALL of
                 // them running (per-lens reviewers + the checks reviewer), not just
@@ -3220,12 +3265,22 @@ async fn execute_node(
                 let advisory = (open.saturating_sub(blocker)) as i64;
                 let (bugs, warns, infos) =
                     crate::modules::review_open_counts_by_severity(ctx, &review_id).await;
-                let review_score = (100
-                    - bugs as i64 * weight("bug", 20)
-                    - warns as i64 * weight("warn", 5)
-                    - infos as i64 * weight("info", 5))
-                .clamp(0, 100);
-                let (goals_score, goals_detail) = if goals.is_empty() {
+                // An EMPTY diff scores 0, not 100: the formula starts at a
+                // perfect 100 and subtracts findings, so "nothing was reviewed"
+                // and "reviewed, spotless" produce the same number. Only one of
+                // them earned it.
+                let review_score = if no_changes {
+                    0
+                } else {
+                    (100 - bugs as i64 * weight("bug", 20)
+                        - warns as i64 * weight("warn", 5)
+                        - infos as i64 * weight("info", 5))
+                    .clamp(0, 100)
+                };
+                // Goals are assessed against the worktree, so with an empty diff
+                // the agent grades code this run never reviewed and blends a
+                // passing number into the score. Skip it — there is nothing to grade.
+                let (goals_score, goals_detail) = if goals.is_empty() || no_changes {
                     (None, json!([]))
                 } else {
                     // Score goals with the configured summarizer provider (it's the
@@ -3269,17 +3324,20 @@ async fn execute_node(
                     Some(gs) => (review_score + gs) / 2,
                     None => review_score,
                 };
-                // A review must COMPLETE (status "done") AND clear the threshold to
-                // pass. Keep the two reasons distinct: an incomplete review (error /
-                // timeout / still running) produced no findings, so its score is a
-                // meaningless 100 — reporting that as "below threshold" is nonsense
-                // (the score wasn't the problem, completion was).
+                // A review must COMPLETE (status "done"), have had something to
+                // review, AND clear the threshold to pass. Keep the reasons
+                // distinct: an incomplete review (error / timeout / still
+                // running) and an empty diff BOTH produce zero findings, so
+                // reporting either as "below threshold" is nonsense — the score
+                // was never the problem.
                 let complete = status == "done";
-                let passed = complete && score >= threshold;
+                let passed = complete && !no_changes && score >= threshold;
                 let reason = if passed {
                     "passed".to_string()
                 } else if !complete {
                     format!("review did not complete (status: {status})")
+                } else if no_changes {
+                    format!("empty diff vs {base} — nothing was reviewed")
                 } else {
                     format!("below threshold ({score} < {threshold})")
                 };
@@ -3294,17 +3352,22 @@ async fn execute_node(
                         "✅ passed".to_string()
                     } else if !complete {
                         format!("⚠️ review did not complete (status: {status})")
+                    } else if no_changes {
+                        format!("⚠️ empty diff vs `{base}` — nothing was reviewed")
                     } else {
                         "⚠️ below threshold".to_string()
                     };
-                    // Only headline a score for a COMPLETED review — otherwise the
-                    // "100/100" is an artifact of a review that never finished.
-                    let mut msg = if complete {
+                    // Only headline a score for a COMPLETED review that had a
+                    // diff — otherwise the "100/100" is an artifact of a review
+                    // that never finished or never had anything to look at.
+                    let mut msg = if complete && !no_changes {
                         format!("🔍 *{iter_label}{tag}* done — score *{score}/100* (pass ≥ {threshold}) — {verdict}")
                     } else {
                         format!("🔍 *{iter_label}{tag}* — {verdict}")
                     };
-                    if finding_briefs.is_empty() {
+                    if no_changes {
+                        msg.push_str("\nNo reviewers ran. Check the base branch this run declared.");
+                    } else if finding_briefs.is_empty() {
                         msg.push_str("\nFindings: none 🎉");
                     } else {
                         msg.push_str(&format!("\nFindings ({open} open):"));
@@ -3328,6 +3391,11 @@ async fn execute_node(
                     // reports failures as findings — see the cfg injection above).
                     "checks_requested": check_specs.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
                     "score": score, "threshold": threshold, "passed": passed,
+                    // TRUE ⇒ the diff vs `base` was empty: no reviewer ran and
+                    // `total: 0` means "nothing looked at", not "nothing found".
+                    // A downstream step that posts or gates on this review must
+                    // branch on it rather than on the finding counts.
+                    "no_changes": no_changes, "reason": reason,
                     "findings": finding_briefs, "providers": providers, "lenses": lenses,
                 });
                 outs.push(out.as_object().cloned().unwrap_or_default());

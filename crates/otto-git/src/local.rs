@@ -297,6 +297,16 @@ impl LocalGit {
     /// every candidate tried — an actionable message instead of `git diff`
     /// exiting 128 on an unknown ref (the "fatal: ambiguous argument 'main'"
     /// failure this replaces).
+    ///
+    /// A candidate that resolves to the SAME commit as HEAD is only used as a
+    /// last resort: diffing a branch against itself yields an empty diff, which
+    /// every caller reads as "no changes" — a review then completes with zero
+    /// reviewers and scores a false 100/PASS. That happens whenever a run
+    /// declares the PR's own SOURCE branch as the base (`base:
+    /// feature/X-1` with `feature/X-1` checked out, detached or not).
+    /// Prefer the first verified candidate that is NOT HEAD; keep a HEAD-equal
+    /// one when nothing else resolves, so a branch genuinely identical to its
+    /// base still resolves exactly as before.
     pub async fn resolve_base(&self, want: Option<&str>) -> Result<ResolvedBase> {
         let mut cands: Vec<(String, String)> = Vec::new(); // (diff_ref, branch)
         if let Some(w) = want.map(str::trim).filter(|s| !s.is_empty()) {
@@ -310,15 +320,36 @@ impl LocalGit {
             cands.push((d.clone(), d.clone()));
             cands.push((format!("origin/{d}"), d));
         }
+        let head = self
+            .rev_parse("HEAD")
+            .await
+            .ok()
+            .filter(|s| !s.trim().is_empty());
         let mut tried: Vec<String> = Vec::new();
+        // First verified candidate that equals HEAD — the fallback used only
+        // when no other candidate resolves.
+        let mut head_equal: Option<ResolvedBase> = None;
         for (diff_ref, branch) in cands {
             if tried.contains(&diff_ref) {
                 continue;
             }
             if self.verify_commit_ref(&diff_ref).await {
-                return Ok(ResolvedBase { diff_ref, branch });
+                let same_as_head = match (&head, self.rev_parse(&diff_ref).await.ok()) {
+                    (Some(h), Some(c)) => !c.trim().is_empty() && c.trim() == h.trim(),
+                    _ => false,
+                };
+                if !same_as_head {
+                    return Ok(ResolvedBase { diff_ref, branch });
+                }
+                head_equal.get_or_insert_with(|| ResolvedBase {
+                    diff_ref: diff_ref.clone(),
+                    branch,
+                });
             }
             tried.push(diff_ref);
+        }
+        if let Some(rb) = head_equal {
+            return Ok(rb);
         }
         Err(Error::Invalid(format!(
             "no base branch resolved (tried: {})",
@@ -2689,6 +2720,41 @@ mod tests {
         let sha = git.rev_parse("HEAD").await.unwrap();
         let r = git.resolve_base(Some(&sha)).await.unwrap();
         assert_eq!(r.diff_ref, sha);
+    }
+
+    #[tokio::test]
+    async fn resolve_base_skips_a_base_that_is_head() {
+        // The PR-Reviewer failure: the run declares the PR's OWN branch as the
+        // base and that branch is what's checked out, so `git diff base HEAD`
+        // is empty and the review passes 100 without running a reviewer.
+        let (_tmp, dir) = fixture_on_branch("develop");
+        let git = LocalGit::new(&dir);
+        sh_git(&dir, &["checkout", "-b", "feature/X-1"]);
+        write(&dir, "b.txt", "change\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "work"]);
+
+        // Attached: base == the current branch → fall through to `develop`.
+        let r = git.resolve_base(Some("feature/X-1")).await.unwrap();
+        assert_eq!(r.branch, "develop", "base equal to HEAD must not win");
+        assert!(!git
+            .diff_text_against(&r.diff_ref)
+            .await
+            .unwrap()
+            .trim()
+            .is_empty());
+
+        // Detached at the same commit — how the PR-Reviewer checks a PR out.
+        let sha = git.rev_parse("HEAD").await.unwrap();
+        sh_git(&dir, &["checkout", "--detach", &sha]);
+        let r = git.resolve_base(Some("feature/X-1")).await.unwrap();
+        assert_eq!(r.branch, "develop");
+
+        // A branch genuinely identical to its base still resolves (nothing
+        // narrows): every candidate is HEAD, so the HEAD-equal one is kept.
+        sh_git(&dir, &["checkout", "develop"]);
+        let r = git.resolve_base(Some("develop")).await.unwrap();
+        assert_eq!(r.branch, "develop");
     }
 
     #[tokio::test]

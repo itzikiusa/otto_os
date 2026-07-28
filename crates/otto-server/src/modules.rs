@@ -3819,13 +3819,19 @@ pub(crate) async fn pr_draft_prompt(
 /// callers publish the RESOLVED branch (a downstream PR must target what was
 /// really reviewed); the caller polls `reviews_store.get_review` for
 /// `Done`/`Error` and reads counts via [`review_findings_counts`].
+///
+/// The third return value is `no_changes`: the diff vs the resolved base was
+/// EMPTY, so the review completed instantly with no reviewers and no findings.
+/// Callers MUST NOT read that as a clean review — zero findings there means
+/// nothing was looked at. Scoring it (100/PASS) is how a misconfigured base
+/// silently green-lights an unreviewed PR.
 pub(crate) async fn run_review_for_branch(
     ctx: &ServerCtx,
     repo_id: &Id,
     worktree_path: &str,
     base: Option<&str>,
     cfg_override: Option<ReviewConfig>,
-) -> Result<(Id, otto_git::ResolvedBase)> {
+) -> Result<(Id, otto_git::ResolvedBase, bool)> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
     let git = otto_git::LocalGit::new(worktree_path);
@@ -3836,9 +3842,16 @@ pub(crate) async fn run_review_for_branch(
         .create_review(repo_id, LOCAL_REVIEW_PR_NUMBER)
         .await?;
     let review_id = review.id.clone();
+    let no_changes = diff_text.trim().is_empty();
 
-    if diff_text.trim().is_empty() {
-        // No changes vs base — complete immediately with no findings.
+    if no_changes {
+        // No changes vs base — complete immediately with no findings. Loud,
+        // because "0 findings" here is indistinguishable from a clean review in
+        // every downstream count; the caller gets `no_changes` to tell them apart.
+        tracing::warn!(
+            review = %review_id, worktree = %worktree_path, base = %resolved.diff_ref,
+            "review: EMPTY diff vs base — no reviewers ran, no findings are possible"
+        );
         ctx.reviews_store
             .set_status(&review_id, ReviewStatus::Done, None)
             .await?;
@@ -3876,7 +3889,7 @@ pub(crate) async fn run_review_for_branch(
             .await;
         });
     }
-    Ok((review_id, resolved))
+    Ok((review_id, resolved, no_changes))
 }
 
 /// Tolerantly extract a commit message from an agent reply. The agent is asked
