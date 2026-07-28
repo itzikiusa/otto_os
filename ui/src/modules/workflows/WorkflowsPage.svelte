@@ -1739,7 +1739,8 @@
               <label for="mt-msg">Message / prompt</label>
               <textarea
                 id="mt-msg"
-                rows="3"
+                class="np-prompt"
+                rows="6"
                 placeholder="What you want done — instructions for the agents"
                 value={paramStr('msg')}
                 oninput={(e) => onParam('msg', e.currentTarget.value)}
@@ -1787,7 +1788,8 @@
               <label for="mt-goals">Goals (one per line)</label>
               <textarea
                 id="mt-goals"
-                rows="3"
+                class="np-prompt"
+                rows="6"
                 placeholder={'100% test coverage (services)\nunder 2 minutes runtime'}
                 value={paramLines('goals')}
                 oninput={(e) => onParamLines('goals', e.currentTarget.value)}
@@ -1804,7 +1806,8 @@
               <label for="np-prompt">Prompt</label>
               <textarea
                 id="np-prompt"
-                rows="4"
+                class="np-prompt np-prompt-lg"
+                rows="14"
                 value={paramStr('prompt')}
                 oninput={(e) => onParam('prompt', e.currentTarget.value)}
               ></textarea>
@@ -1826,7 +1829,8 @@
               <label for="np-pc-prompt">Prompt (optional — runs an agent when set)</label>
               <textarea
                 id="np-pc-prompt"
-                rows="4"
+                class="np-prompt np-prompt-lg"
+                rows="14"
                 placeholder="e.g. Read the ticket + repos and produce a consolidated brief…"
                 value={paramStr('prompt')}
                 oninput={(e) => onParam('prompt', e.currentTarget.value)}
@@ -2032,7 +2036,8 @@
               <label for="np-desc">Description (optional)</label>
               <textarea
                 id="np-desc"
-                rows="2"
+                class="np-prompt"
+                rows="6"
                 placeholder="Task details…"
                 value={paramStr('description')}
                 oninput={(e) => onParam('description', e.currentTarget.value)}
@@ -2095,7 +2100,7 @@
               <!-- Structured sub-step editor: the loop body runs these in order
                    each iteration. Agent sub-steps expose Provider + Model + Prompt
                    directly (no more raw-JSON editing to set a provider). -->
-              <div class="rv-h">
+              <div class="rv-h np-sec">
                 <span class="np-label">Steps — run in order each iteration</span>
                 <button class="btn small ghost" type="button" onclick={addLoopStep}>
                   <Icon name="plus" size={11} /> Add step
@@ -2128,8 +2133,8 @@
                   </div>
                   {#if LOOP_AGENT_KINDS.includes(step.kind)}
                     <textarea
-                      class="rv-instr"
-                      rows="2"
+                      class="rv-instr np-prompt"
+                      rows="6"
                       placeholder="prompt / instructions for this agent step"
                       value={loopStepParam(i, 'prompt')}
                       oninput={(e) => updateLoopStepParam(i, 'prompt', e.currentTarget.value)}
@@ -2221,7 +2226,7 @@
                 value={paramNum('threshold', 80)}
                 oninput={(e) => onParam('threshold', Number(e.currentTarget.value))}
               />
-              <div class="rv-h">
+              <div class="rv-h np-sec">
                 <span class="np-label">Reviewers — one per lens, each its own agents (like PR review)</span>
                 <button class="btn small ghost" type="button" onclick={addReviewer}>
                   <Icon name="plus" size={11} /> Add
@@ -2233,6 +2238,7 @@
                   (e.g. <code>correctness-review</code> on claude + codex).
                 </p>
               {/if}
+              <div class="rv-list">
               {#each reviewers() as r, i (i)}
                 <div class="rv-row">
                   <div class="rv-top">
@@ -2260,16 +2266,17 @@
                     {/each}
                   </div>
                   <textarea
-                    class="rv-instr"
-                    rows="2"
+                    class="rv-instr np-prompt"
+                    rows="5"
                     placeholder="custom instructions for this reviewer (optional)"
                     value={r.instructions ?? ''}
                     oninput={(e) => updateReviewer(i, { instructions: e.currentTarget.value })}
                   ></textarea>
                 </div>
               {/each}
+              </div>
 
-              <label for="np-sum-prov">Summarizer (consolidates + scores)</label>
+              <label class="np-sec" for="np-sum-prov">Summarizer (consolidates + scores)</label>
               <input
                 id="np-sum-prov"
                 type="text"
@@ -2278,13 +2285,14 @@
                 oninput={(e) => updateSummarizer('provider', e.currentTarget.value)}
               />
               <textarea
-                rows="2"
+                class="np-prompt np-prompt-lg"
+                rows="14"
                 placeholder="summarizer instructions (optional)"
                 value={summarizerField('instructions')}
                 oninput={(e) => updateSummarizer('instructions', e.currentTarget.value)}
               ></textarea>
 
-              <span class="np-label">Scoring guideline — % deducted per open finding</span>
+              <span class="np-label np-sec">Scoring guideline — % deducted per open finding</span>
               <div class="rv-score">
                 <label class="rv-sc">
                   Critical
@@ -2302,18 +2310,20 @@
                     oninput={(e) => updateScoring('info', Number(e.currentTarget.value))} />
                 </label>
               </div>
-              <label for="np-goals">Goals (one per line, optional)</label>
+              <label class="np-sec" for="np-goals">Goals (one per line, optional)</label>
               <textarea
                 id="np-goals"
-                rows="3"
+                class="np-prompt"
+                rows="7"
                 placeholder={'No N+1 queries\nAll inputs validated'}
                 value={paramLines('goals')}
                 oninput={(e) => onParamLines('goals', e.currentTarget.value)}
               ></textarea>
-              <label for="np-checks">Checks — commands the reviewer runs (one per line, optional)</label>
+              <label class="np-sec" for="np-checks">Checks — commands the reviewer runs (one per line, optional)</label>
               <textarea
                 id="np-checks"
-                rows="3"
+                class="np-prompt"
+                rows="7"
                 placeholder={'go test -tags=component ./...\ngo test -tags=integration ./...'}
                 value={paramLines('checks')}
                 oninput={(e) => onParamLines('checks', e.currentTarget.value)}
@@ -2445,7 +2455,8 @@
               <label for="np-cprompt">Prompt</label>
               <textarea
                 id="np-cprompt"
-                rows="3"
+                class="np-prompt"
+                rows="7"
                 placeholder="Diagram the request flow described in the input…"
                 value={paramStr('prompt')}
                 oninput={(e) => onParam('prompt', e.currentTarget.value)}
@@ -2764,9 +2775,37 @@
     background: var(--surface-2);
     color: var(--text);
   }
+  /* EVERY textarea in the inspector holds a prompt, an instruction list or a
+     JSON blob — the things you actually need to read. A `rows="2"` box showing
+     four lines of a 2,000-word prompt is not an editor. Give them all a
+     readable floor, cap them against the viewport, and scroll the CONTENT
+     inside the box; the panel itself scrolls for the rest. Node-kind agnostic
+     on purpose — this must hold for every agent and every step, not just the
+     reviewer. */
+  .inspector textarea {
+    min-height: 110px;
+    max-height: min(45vh, 460px);
+    overflow-y: auto;
+  }
   textarea:focus {
     outline: none;
     border-color: var(--accent);
+  }
+  /* Prompt-sized textareas (reviewer/summarizer instructions, goals, checks).
+     `rows` alone loses to the inspector's own scroll: a 3-row box holding a
+     2,000-word summarizer prompt shows four lines of it and the rest is
+     reachable only by dragging the resize corner. Give them real height, cap
+     it against the viewport, and let the text scroll INSIDE the box so the
+     panel around it doesn't have to grow. */
+  .inspector textarea.np-prompt {
+    min-height: 120px;
+    max-height: min(40vh, 380px);
+    overflow-y: auto;
+    resize: vertical;
+  }
+  .inspector textarea.np-prompt-lg {
+    min-height: 260px;
+    max-height: min(60vh, 620px);
   }
   .full {
     width: 100%;
@@ -3177,7 +3216,9 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    /* Breathing room between every control in every node's params — 6px read
+       as a solid block once a node had more than a handful of fields. */
+    gap: 10px;
     flex-shrink: 0;
   }
   /* Drag grip that sits just above the inspector (between the canvas and the
@@ -3273,6 +3314,26 @@
     font-size: 11px;
     font-weight: 600;
     color: var(--text-dim);
+    /* Each label opens a field group. With the panel's flat 10px gap alone, a
+       node with a dozen params reads as one wall of controls and the section
+       you want is impossible to find by eye. Applies to EVERY node kind. */
+    margin-top: 6px;
+  }
+  /* …except the first one, and labels that are part of a compact row
+     (checkbox rows, the per-reviewer score fields) — those set their own. */
+  .inspector label:first-child,
+  .inspector .np-chk,
+  .inspector .rv-sc,
+  .inspector .rv-chip {
+    margin-top: 0;
+  }
+  /* Opens a major section inside a node's params (Reviewers, Summarizer,
+     Scoring, Goals, Checks, loop Steps …). A rule, not a per-node style: any
+     node kind can mark a group with it and get the same separation. */
+  .inspector .np-sec {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
   }
   .np-label {
     display: block;
@@ -3696,7 +3757,10 @@
   .instructions-wrap {
     border-top: 1px solid var(--border);
     background: var(--surface);
-    max-height: 320px;
+    /* Standing instructions are prepended to EVERY agent in the workflow —
+       they are read far more often than they are edited, and 320px showed a
+       fraction of a real one. */
+    max-height: min(60vh, 560px);
     overflow-y: auto;
     padding: 10px 12px;
   }
@@ -3739,6 +3803,7 @@
   }
   .ri-text {
     width: 100%;
+    min-height: 120px;
     resize: vertical;
     padding: 8px 10px;
     border: 1px solid var(--border);
@@ -3797,14 +3862,23 @@
     gap: 8px;
     margin-top: 4px;
   }
+  /* A reviewer list is never capped or scrolled on its own: hiding agents to
+     make the sections below reachable just moves the invisibility. EVERY agent
+     renders at full size and the inspector panel scrolls. */
+  .rv-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
   .rv-row {
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 6px;
-    margin-bottom: 6px;
+    padding: 10px;
+    /* A tint so each agent reads as its own card in a long list. */
+    background: color-mix(in srgb, var(--surface-2) 55%, transparent);
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 8px;
   }
   .rv-top {
     display: flex;
