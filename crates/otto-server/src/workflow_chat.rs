@@ -242,6 +242,57 @@ pub struct WorkflowCommand {
     pub raw: String,
 }
 
+/// Resolve `Jira ticket:` to an issue KEY.
+///
+/// Slack rewrites a pasted link as `<url|title>`, and token-stripping keeps the
+/// human-readable label — so `Jira ticket: https://…/browse/GS-123` arrived as
+/// the page's TITLE. That was then used as the key: the fetch 404'd and the run
+/// continued with no ticket at all, silently. The key is still in the original
+/// message, so look for one in the stripped value first, then in the raw text
+/// (`/browse/KEY`, or a bare `KEY` token). Only when nothing looks like a key is
+/// the value passed through unchanged.
+fn resolve_jira_key(value: Option<String>, raw: &str) -> Option<String> {
+    let value = value?;
+    if let Some(k) = find_jira_key(&value) {
+        return Some(k);
+    }
+    // The label lost it; the raw message still has `<https://…/browse/KEY|…>`.
+    if let Some(rest) = raw.split("/browse/").nth(1) {
+        if let Some(k) = find_jira_key(rest) {
+            return Some(k);
+        }
+    }
+    Some(value)
+}
+
+/// First `ABC-123`-shaped token in `s`: uppercase letters, `-`, then digits.
+fn find_jira_key(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_uppercase() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && b[i].is_ascii_uppercase() {
+            i += 1;
+        }
+        if i < b.len() && b[i] == b'-' {
+            let mut j = i + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            // Reject `ABC-12X`: a key ends at the digits.
+            let ends_cleanly = j > i + 1 && b.get(j).is_none_or(|c| !c.is_ascii_alphanumeric());
+            if ends_cleanly {
+                return Some(s[start..j].to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Decide what a declared `Branch:` value actually is, given the run's Jira key.
 ///
 /// `Branch:` is documented as the BASE — the branch the PR merges INTO. Users
@@ -383,7 +434,7 @@ pub fn parse_workflow_command(text: &str) -> Option<WorkflowCommand> {
         })
         .unwrap_or_default();
 
-    let jira_ticket = pick(&["jira ticket", "jira", "jira_ticket", "ticket"]);
+    let jira_ticket = resolve_jira_key(pick(&["jira ticket", "jira", "jira_ticket", "ticket"]), text);
     // Only the branch name matters here — trailing guidance like
     // "…, create wt from it" is dropped (the run already creates a worktree);
     // we keep just the part before the first comma.
@@ -972,6 +1023,33 @@ mod tests {
         assert_eq!(no_key.branch.as_deref(), Some("feature/PROJ-5282"));
         assert_eq!(no_key.pr_branch, None);
         assert_eq!(no_key.branch_note, None);
+    }
+
+    #[test]
+    fn jira_ticket_survives_a_slack_link_unfurl() {
+        // What Slack actually delivered: the pasted Jira URL rewritten as
+        // `<url|title>`. Keeping the label made the "key" the page title, the
+        // fetch 404'd, and the run reviewed with no ticket.
+        let text = "Action: Workflow\nName: PR Reviewer\n\
+                    Jira ticket: <https://acme.atlassian.net/browse/GS-16578|TMX Update on ABC \
+                    (Imperial wins) - Org Separation, Affiliate ID, DOB Format>\n\
+                    Working Directory: /r\n";
+        let cmd = parse_workflow_command(text).expect("should parse");
+        assert_eq!(cmd.jira_ticket.as_deref(), Some("GS-16578"));
+
+        // A bare key, a bare URL, and a key with surrounding words all resolve.
+        for (input, want) in [
+            ("Jira ticket: GS-1", "GS-1"),
+            ("Jira ticket: https://acme.atlassian.net/browse/ABC-42", "ABC-42"),
+            ("Jira ticket: see PROJ-77 please", "PROJ-77"),
+        ] {
+            let c = parse_workflow_command(&format!("Action: Workflow\nName: X\n{input}\n")).unwrap();
+            assert_eq!(c.jira_ticket.as_deref(), Some(want), "{input}");
+        }
+
+        // Nothing key-shaped anywhere → passed through untouched, as before.
+        let free = parse_workflow_command("Action: Workflow\nName: X\nJira ticket: none yet\n").unwrap();
+        assert_eq!(free.jira_ticket.as_deref(), Some("none yet"));
     }
 
     #[test]
