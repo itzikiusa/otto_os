@@ -129,7 +129,8 @@ Name: <workflow name>\n\
 Msg: <what you want done — instructions for the agents>\n\
 Jira ticket: <optional, e.g. PROJ-123 — fetched IN FULL: description, fields and all comments>\n\
 Working Directory: /abs/path/to/repo, /abs/path/to/other-repo\n\
-Branch: <BASE branch the PR merges into, e.g. develop — the run diffs/reviews against it>\n\
+PR: <optional — 15, or repo-a#15, repo-b#340 when several repos>\n\
+Branch: <optional BASE branch the PR merges into, e.g. develop — NOT the feature branch>\n\
 Relevant Info: /abs/path/to/extra-repo, /abs/path/to/docs\n\
 Goals:\n\
   - <goal 1>\n\
@@ -142,11 +143,18 @@ const WF_TRIGGER_FIELD_NOTES: &str = "\
 • *Name* — must match a workflow from the list below exactly.\n\
 • *Working Directory* — absolute path(s) (no `~`); comma-separate SEVERAL repos to \
 review them as one run (cross-repo interactions included).\n\
-• *Branch* — the branch the PR merges INTO (e.g. `develop`); the run cuts an isolated \
-worktree from it and reviews the diff against it. Do NOT put the feature branch here — \
-it is discovered from the Jira ticket / open PR.\n\
+• *PR* — which pull request to work on. `PR: 15` for one repo, or `repo-a#15, repo-b#340` \
+to name one per repo. The ONLY unambiguous handle when a repo has several open PRs — \
+and it supplies both branches (source + destination) on its own, so `Branch:` can be \
+left out entirely. Omit it and the PR is matched by the Jira key; if that matches \
+two open PRs the run stops on that repo rather than guessing.\n\
+• *Branch* — OPTIONAL, and it means the branch the PR merges INTO (e.g. `develop`) — the \
+run cuts an isolated worktree from it and reviews the diff against it. The feature \
+branch does NOT go here: it is discovered from the PR. A value naming your ticket \
+(e.g. `feature/PROJ-123`) is taken as the PR's source branch instead, and you get a \
+note in the thread saying so.\n\
 • *Jira ticket* — fetched in full (description, fields, every comment) into the run \
-context for all agents.\n\
+context for all agents; also how the PR is found when `PR:` is omitted.\n\
 • *Msg / Goals* — free-text instructions and goal list; agents read them verbatim.";
 
 /// Parse a short chat message into a control command. Slack tokens are stripped,
@@ -213,9 +221,61 @@ pub struct WorkflowCommand {
     /// an explicit user instruction, never overridden by the repo's detected
     /// default branch.
     pub branch: Option<String>,
+    /// The PR(s) to work on (`PR:` / `Pull Request:`), verbatim. One repo:
+    /// `15`. Several: `repo-a#15, repo-b#340` — the comma shape
+    /// `Working Directory:` already uses. An explicit PR number is the only
+    /// UNAMBIGUOUS handle when a repo has more than one open PR, and it yields
+    /// both branches (source AND destination) from the provider API, so it also
+    /// makes `Branch:` unnecessary.
+    pub pr: Option<String>,
+    /// The PR's SOURCE (feature) branch, when the user named it. Never the diff
+    /// base. Filled either from an explicit `PR branch:`/`Source:` field, or by
+    /// rescuing a `Branch:` value that is plainly the feature branch — see
+    /// [`split_branch_fields`].
+    pub pr_branch: Option<String>,
+    /// Set when `Branch:` was reinterpreted as `pr_branch`. The caller echoes it
+    /// into the chat ack: a silent reinterpretation of an explicit user field is
+    /// worse than the mistake it fixes.
+    pub branch_note: Option<String>,
     pub relevant_info: Vec<String>,
     pub goals: Vec<String>,
     pub raw: String,
+}
+
+/// Decide what a declared `Branch:` value actually is, given the run's Jira key.
+///
+/// `Branch:` is documented as the BASE — the branch the PR merges INTO. Users
+/// reliably put the FEATURE branch there instead, and that used to be silently
+/// fatal: the run cut its worktree from the feature branch and reviewed it
+/// against itself, so `git diff` was empty, zero reviewer agents ran, and the
+/// review reported a perfect score on a PR nobody read.
+///
+/// A branch carrying the run's Jira key is the feature branch — no base branch
+/// is ever named after a ticket. Route it to `pr_branch` (where it usefully
+/// disambiguates WHICH open PR to review) and leave the base unset so it is
+/// detected from the PR / the repo default. Anything else is taken at face value.
+///
+/// Returns `(base, pr_branch, note)`.
+fn split_branch_fields(
+    branch: Option<String>,
+    jira_ticket: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(b) = branch else {
+        return (None, None, None);
+    };
+    let key = jira_ticket.map(str::trim).filter(|k| !k.is_empty());
+    let looks_like_feature_branch = key
+        .map(|k| b.to_lowercase().contains(&k.to_lowercase()))
+        .unwrap_or(false);
+    if !looks_like_feature_branch {
+        return (Some(b), None, None);
+    }
+    let note = format!(
+        "`Branch: {b}` names the ticket, so it is the PR's SOURCE branch, not the base it merges \
+         into — using it to pick the PR and detecting the base from the PR itself. \
+         Put the destination (e.g. `develop`) in `Branch:`, or name the PR with `PR: <number>`."
+    );
+    (None, Some(b), Some(note))
 }
 
 /// Strip Slack entity tokens so the structured parser sees clean text: `<@U…>`
@@ -323,17 +383,31 @@ pub fn parse_workflow_command(text: &str) -> Option<WorkflowCommand> {
         })
         .unwrap_or_default();
 
+    let jira_ticket = pick(&["jira ticket", "jira", "jira_ticket", "ticket"]);
+    // Only the branch name matters here — trailing guidance like
+    // "…, create wt from it" is dropped (the run already creates a worktree);
+    // we keep just the part before the first comma.
+    let declared_branch = pick(&["branch", "base", "base branch", "base_branch"])
+        .and_then(|s| s.split(',').next().map(|b| b.trim().to_string()))
+        .filter(|s| !s.is_empty());
+    let (branch, rescued_pr_branch, branch_note) =
+        split_branch_fields(declared_branch, jira_ticket.as_deref());
+    // An explicit source-branch field always wins over a rescued `Branch:`.
+    let pr_branch = pick(&["pr branch", "source", "source branch", "feature branch"])
+        .or(rescued_pr_branch);
+
     Some(WorkflowCommand {
         name,
         msg: pick(&["msg", "message"]).unwrap_or_default(),
-        jira_ticket: pick(&["jira ticket", "jira", "jira_ticket", "ticket"]),
+        jira_ticket,
         working_directory: pick(&["working directory", "working dir", "workdir", "cwd"]),
-        // Only the branch name matters here — trailing guidance like
-        // "…, create wt from it" is dropped (the run already creates a worktree);
-        // we keep just the part before the first comma.
-        branch: pick(&["branch", "base", "base branch", "base_branch"])
-            .and_then(|s| s.split(',').next().map(|b| b.trim().to_string()))
-            .filter(|s| !s.is_empty()),
+        branch,
+        // Kept verbatim (commas and all): the multi-repo form is
+        // `repo-a#15, repo-b#340`, and only the step that resolves repos knows
+        // which entry each `repo#number` belongs to.
+        pr: pick(&["pr", "prs", "pull request", "pull_request", "pr number"]),
+        pr_branch,
+        branch_note,
         relevant_info,
         goals,
         raw: text.to_string(),
@@ -622,6 +696,12 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                 // detected default branch. Honor the user's stated branch; never
                 // silently override it.
                 "base": cmd.branch,
+                // Which PR(s) to work on, and the PR's source branch when named.
+                // Both are HANDLES for the step that resolves the PR — never a
+                // diff base. `pr` is the only unambiguous one when a repo has
+                // several open PRs.
+                "pr": cmd.pr,
+                "pr_branch": cmd.pr_branch,
                 "relevant_info": cmd.relevant_info,
                 "goals": cmd.goals,
                 "raw": cmd.raw,
@@ -631,7 +711,11 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
             } else {
                 cmd.goals.join("; ")
             };
-            let detail = format!("Working through the steps now — goals: {goals_txt}.");
+            let mut detail = format!("Working through the steps now — goals: {goals_txt}.");
+            // Never reinterpret an explicit field in silence.
+            if let Some(note) = &cmd.branch_note {
+                detail.push_str(&format!("\n⚠️ {note}"));
+            }
             return self.start_named(wf, input, Some(detail), channel, chat).await;
         }
 
@@ -851,6 +935,65 @@ mod tests {
         assert_eq!(cmd.branch.as_deref(), Some("release/base-branch"));
         assert_eq!(cmd.relevant_info, vec!["~/a", "~/b"]);
         assert_eq!(cmd.goals, vec!["100% test coverage", "under 2 minutes runtime"]);
+        // A real base branch is left alone, and names nothing else.
+        assert_eq!(cmd.pr, None);
+        assert_eq!(cmd.pr_branch, None);
+        assert_eq!(cmd.branch_note, None);
+    }
+
+    #[test]
+    fn feature_branch_in_the_base_field_becomes_a_pr_hint() {
+        // The failure this prevents: `Branch:` holding the PR's own branch made
+        // the run diff that branch against itself — empty diff, no reviewers, a
+        // perfect score on an unreviewed PR.
+        let text = "Action: Workflow\n\
+                    Name: PR Reviewer\n\
+                    Jira ticket: PROJ-5282\n\
+                    Working Directory: /r\n\
+                    Branch: feature/PROJ-5282\n";
+        let cmd = parse_workflow_command(text).expect("should parse");
+        assert_eq!(cmd.branch, None, "a ticket-named branch must not become the base");
+        assert_eq!(cmd.pr_branch.as_deref(), Some("feature/PROJ-5282"));
+        let note = cmd.branch_note.expect("the reinterpretation must be announced");
+        assert!(note.contains("feature/PROJ-5282") && note.contains("SOURCE"), "{note}");
+
+        // Case-insensitive on the key, and a lone `Base:` alias behaves the same.
+        let lower = parse_workflow_command(
+            "Action: Workflow\nName: X\nJira ticket: PROJ-5282\nBase: FEATURE/proj-5282\n",
+        )
+        .unwrap();
+        assert_eq!(lower.branch, None);
+        assert_eq!(lower.pr_branch.as_deref(), Some("FEATURE/proj-5282"));
+
+        // No ticket to match against ⇒ take the field at face value (the
+        // resolve_base HEAD guard is the backstop there).
+        let no_key =
+            parse_workflow_command("Action: Workflow\nName: X\nBranch: feature/PROJ-5282\n").unwrap();
+        assert_eq!(no_key.branch.as_deref(), Some("feature/PROJ-5282"));
+        assert_eq!(no_key.pr_branch, None);
+        assert_eq!(no_key.branch_note, None);
+    }
+
+    #[test]
+    fn parses_pr_field_single_and_multi_repo() {
+        let one = parse_workflow_command("Action: Workflow\nName: X\nPR: 15\n").unwrap();
+        assert_eq!(one.pr.as_deref(), Some("15"));
+
+        // Multi-repo keeps the whole `repo#number` list verbatim — only the step
+        // that resolves repos can map each entry.
+        let many = parse_workflow_command(
+            "Action: Workflow\nName: X\nPull Request: repo-a#15, repo-b#340\n",
+        )
+        .unwrap();
+        assert_eq!(many.pr.as_deref(), Some("repo-a#15, repo-b#340"));
+
+        // An explicit source-branch field beats a rescued `Branch:`.
+        let both = parse_workflow_command(
+            "Action: Workflow\nName: X\nJira ticket: PROJ-1\nBranch: feature/PROJ-1\nSource: feature/PROJ-1-real\n",
+        )
+        .unwrap();
+        assert_eq!(both.pr_branch.as_deref(), Some("feature/PROJ-1-real"));
+        assert_eq!(both.branch, None);
     }
 
     #[test]
@@ -896,6 +1039,13 @@ mod tests {
         }
         assert!(h.contains("Action: Workflow"), "help missing trigger template");
         assert!(h.contains("Branch:"), "help template missing Branch field");
+        assert!(h.contains("PR:"), "help template missing PR field");
+        // The two semantics users get wrong must be stated, not implied.
+        assert!(h.contains("merges INTO"), "help must define Branch as the destination");
+        assert!(
+            h.contains("several open PRs"),
+            "help must say why PR: exists"
+        );
     }
 
     #[test]

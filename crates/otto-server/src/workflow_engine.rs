@@ -1852,7 +1852,7 @@ async fn execute_node(
             // `repos`/`worktree` forward too so data-flow inspection still
             // shows them — though the run-level registry (RunEnv.files), not
             // input threading, is what downstream git steps rely on.
-            for k in ["repo_id", "base", "repos", "worktree"] {
+            for k in ["repo_id", "base", "repos", "worktree", "pr", "pr_branch"] {
                 if let Some(v) = input.get(k) {
                     if !v.is_null() {
                         out.insert(k.into(), v.clone());
@@ -1924,7 +1924,7 @@ async fn execute_node(
                 out.insert("reply".into(), json!(reply));
                 out.insert("session_id".into(), json!(sid));
                 out.insert("working_directory".into(), json!(acwd));
-                for k in ["repo_id", "base", "repos", "worktree"] {
+                for k in ["repo_id", "base", "repos", "worktree", "pr", "pr_branch"] {
                     if let Some(v) = input.get(k) { if !v.is_null() { out.insert(k.into(), v.clone()); } }
                 }
                 logs.push("agent phase complete".into());
