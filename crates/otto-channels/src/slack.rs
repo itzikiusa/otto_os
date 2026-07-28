@@ -99,6 +99,25 @@ fn is_membership_subtype(subtype: Option<&str>) -> bool {
     )
 }
 
+/// True when a `message_changed` payload's inner message was edited BY A HUMAN.
+/// Slack stamps `edited: {user, ts}` only then; the same event fires with no
+/// stamp when Slack rewrites the message on its own — attaching a link unfurl,
+/// a file preview, or reaction metadata.
+fn is_human_edit(message: &serde_json::Value) -> bool {
+    message["edited"].is_object()
+}
+
+/// The ts that identifies the underlying MESSAGE, for dedup. A `message_changed`
+/// event carries its own (edit) `ts` at the top level while the message it
+/// concerns keeps the original under `message.ts` — keying on the outer one
+/// makes every rewrite of a message look like a brand-new message.
+fn dedup_ts(event: &serde_json::Value) -> &str {
+    event["message"]["ts"]
+        .as_str()
+        .or_else(|| event["ts"].as_str())
+        .unwrap_or("")
+}
+
 // ---------------------------------------------------------------------------
 // Adapter implementation
 // ---------------------------------------------------------------------------
@@ -477,8 +496,7 @@ pub async fn run(
                     let event = &val["payload"]["event"];
                     let dedup_key = {
                         let ch = event["channel"].as_str().unwrap_or("");
-                        let ts = event["ts"].as_str().unwrap_or("");
-                        format!("{ch}:{ts}")
+                        format!("{ch}:{}", dedup_ts(event))
                     };
                     {
                         let mut guard = seen.lock().await;
@@ -600,6 +618,19 @@ async fn handle_event(
     }
     if is_membership_subtype(subtype) {
         info!(event_type, subtype, "slack: membership notice skipped (no user content)");
+        return;
+    }
+    // A `message_changed` with no `edited` stamp is Slack rewriting the message
+    // itself, not the user changing it — overwhelmingly a link UNFURL landing a
+    // few seconds after the post. The text is identical, so a message that
+    // happened to contain a URL got processed twice: two agent sessions, or two
+    // runs of the same workflow, from one human message. Only a human edit
+    // carries `message.edited`.
+    if subtype == Some("message_changed") && !is_human_edit(&event["message"]) {
+        info!(
+            event_type,
+            "slack: message rewrite skipped (unfurl/attachment, no user edit)"
+        );
         return;
     }
     let content = if subtype == Some("message_changed") {
@@ -755,6 +786,47 @@ async fn download_slack_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unfurl_is_not_a_user_edit_and_dedups_onto_the_original() {
+        // Slack attaches a link preview a few seconds after the post and emits
+        // `message_changed` with the SAME text and a NEW top-level ts. Keying
+        // dedup on that ts made one human message start two workflow runs —
+        // observed on three consecutive messages, all of which contained a URL.
+        let unfurl = serde_json::json!({
+            "channel": "C1",
+            "ts": "1785255516.000100",              // the rewrite's own ts
+            "subtype": "message_changed",
+            "message": {
+                "ts": "1785255511.983239",          // the message it concerns
+                "user": "U1",
+                "text": "Action: Workflow\nName: PR Reviewer",
+                "attachments": [{"title": "some link"}]
+            }
+        });
+        assert!(!is_human_edit(&unfurl["message"]), "an unfurl is not an edit");
+        assert_eq!(dedup_ts(&unfurl), "1785255511.983239", "dedup on the original");
+
+        // A real human edit keeps the `edited` stamp — still forwarded, but it
+        // dedups onto the original message so it cannot re-trigger either.
+        let edited = serde_json::json!({
+            "channel": "C1",
+            "ts": "1785255520.000200",
+            "subtype": "message_changed",
+            "message": {
+                "ts": "1785255511.983239",
+                "user": "U1",
+                "text": "fixed typo",
+                "edited": {"user": "U1", "ts": "1785255520.000000"}
+            }
+        });
+        assert!(is_human_edit(&edited["message"]));
+        assert_eq!(dedup_ts(&edited), "1785255511.983239");
+
+        // A plain new message keys on its own ts, exactly as before.
+        let plain = serde_json::json!({"channel": "C1", "ts": "1785255600.5", "text": "hi"});
+        assert_eq!(dedup_ts(&plain), "1785255600.5");
+    }
 
     #[test]
     fn membership_subtypes_are_skipped() {
