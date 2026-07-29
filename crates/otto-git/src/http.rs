@@ -1174,7 +1174,13 @@ async fn repo_pull<S: GitCtx>(
     // ahead/behind. (Previously returned `{output}`, which the UI consumed as a
     // RepoStatusResp — so the behind count never updated and pull looked like a
     // no-op even when it fast-forwarded.)
-    git.pull(token).await?;
+    //
+    // A pull whose merge CONFLICTS is not a failure: the fetch landed and a
+    // merge is now in progress. Return 200 with the conflicted status (the
+    // unmerged paths are in `changes` as kind="conflicted") so the UI can route
+    // the user into the conflict resolver instead of showing "Pull failed" and
+    // leaving the incoming files looking like mystery WIP changes.
+    git.pull_outcome(token).await?;
     Ok(Json(git.status().await?))
 }
 

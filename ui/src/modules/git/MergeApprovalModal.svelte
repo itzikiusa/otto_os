@@ -77,8 +77,13 @@
 
   const dirty = $derived((status?.changes.length ?? 0) > 0);
   const willConflict = $derived(preview?.conflicts === true);
-  // Blocked when the dry-run predicts conflicts — resolve first.
-  const canMerge = $derived(!merging && !statusLoading && !previewLoading && !willConflict);
+  // A predicted conflict WARNS, it never blocks: the merge is how you get into
+  // the conflict resolver (the daemon leaves the merge in progress and returns
+  // status:"conflicts", which the parent turns into the resolver view). Blocking
+  // here used to make conflicting merges impossible to perform OR resolve in
+  // Otto — the modal told you to "resolve on the source branch first", which
+  // there was no in-app way to do.
+  const canMerge = $derived(!merging && !statusLoading && !previewLoading);
 
   async function doMerge(): Promise<void> {
     if (!canMerge) return;
@@ -158,12 +163,13 @@
     {:else if willConflict}
       <div class="block">
         <div class="block-head">
-          <Icon name="x" size={14} />
+          <Icon name="merge" size={14} />
           <span>
             Merging <span class="mono">{source}</span> into <span class="mono">{target}</span>
-            would conflict in {preview?.conflicted_files.length}
-            file{preview && preview.conflicted_files.length === 1 ? '' : 's'}. Resolve these on
-            <span class="mono">{source}</span> (or merge the other direction) first.
+            will conflict in {preview?.conflicted_files.length}
+            file{preview && preview.conflicted_files.length === 1 ? '' : 's'}. Otto will start the
+            merge and open the conflict resolver so you can fix them here — or abort and leave
+            <span class="mono">{target}</span> untouched.
           </span>
         </div>
         {#if preview && preview.conflicted_files.length > 0}
@@ -201,6 +207,8 @@
     <button class="btn primary" onclick={doMerge} disabled={!canMerge}>
       {#if merging}
         {dirty ? 'Stashing & merging…' : 'Merging…'}
+      {:else if willConflict}
+        Merge &amp; resolve conflicts
       {:else if dirty}
         Stash, merge &amp; restore
       {:else}
@@ -323,16 +331,17 @@
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);
   }
-  /* Blocking conflict notice — merge is disabled until resolved. */
+  /* Predicted-conflict notice — a heads-up, NOT a blocker: the merge proceeds
+     into the conflict resolver. */
   .block {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 9px 11px;
     border-radius: var(--radius-m);
-    background: color-mix(in srgb, var(--status-exited) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--status-exited) 35%, transparent);
-    color: var(--status-exited);
+    background: color-mix(in srgb, #febc2e 12%, transparent);
+    border: 1px solid color-mix(in srgb, #febc2e 35%, transparent);
+    color: #b8860b;
     font-size: 11.5px;
     line-height: 1.5;
   }

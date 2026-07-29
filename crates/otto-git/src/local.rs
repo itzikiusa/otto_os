@@ -14,6 +14,17 @@ use otto_core::{Error, Result};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+/// Result of a pull that may have merged with conflicts. `conflicted_files` is
+/// empty on a clean pull; when it isn't, the fetch+merge ran and left a merge in
+/// progress that the caller must surface for resolution.
+#[derive(Debug, Clone, Default)]
+pub struct PullOutcome {
+    /// git's combined stdout/stderr (progress + summary), noise stripped.
+    pub output: String,
+    /// Paths left unmerged by the pull's merge. Empty on a clean pull.
+    pub conflicted_files: Vec<String>,
+}
+
 /// What to diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffTarget {
@@ -1128,8 +1139,62 @@ impl LocalGit {
         Err(upstream_err(&stderr, &stdout, code))
     }
 
+    /// `git pull --no-rebase`, treating a CONFLICTING merge as a normal outcome
+    /// rather than a failure: git exits non-zero, but the pull itself succeeded
+    /// — the fetch landed and a merge is now in progress with unmerged paths.
+    /// Reporting that as an error (what `run_remote` does) left the repo mid-
+    /// merge while the UI only said "Pull failed", so the conflicted files
+    /// surfaced as unexplained WIP changes with no way to resolve them.
+    ///
+    /// Genuine failures (auth, network, no upstream, dirty-tree refusal) still
+    /// come back as `Err`.
+    pub async fn pull_outcome(&self, token: Option<String>) -> Result<PullOutcome> {
+        let (ok, stdout, stderr, code) =
+            self.run_remote_raw(&["pull", "--no-rebase"], token).await?;
+        let mut output = strip_noise(&stdout);
+        let err = strip_noise(&stderr);
+        if !err.is_empty() {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&err);
+        }
+        if ok {
+            return Ok(PullOutcome {
+                output,
+                conflicted_files: Vec::new(),
+            });
+        }
+        // Non-zero: a conflicted merge (unmerged paths present) is an expected
+        // outcome; anything else is a real failure.
+        let conflicted = self.conflicted_paths().await.unwrap_or_default();
+        let combined = format!("{stdout}\n{stderr}");
+        let is_conflict = !conflicted.is_empty()
+            && (combined.contains("CONFLICT")
+                || combined.contains("Automatic merge failed")
+                || self.is_merging().await);
+        if is_conflict {
+            return Ok(PullOutcome {
+                output,
+                conflicted_files: conflicted,
+            });
+        }
+        Err(upstream_err(&stderr, &stdout, code))
+    }
+
+    /// `git pull --no-rebase` where a conflict IS a failure — callers that
+    /// continue mutating the tree afterwards (e.g. [`checkout_update`], which
+    /// pops a stash) must not proceed onto a half-merged working tree.
     pub async fn pull(&self, token: Option<String>) -> Result<String> {
-        self.run_remote(&["pull", "--no-rebase"], token).await
+        let out = self.pull_outcome(token).await?;
+        if !out.conflicted_files.is_empty() {
+            return Err(Error::Conflict(format!(
+                "pull merged with conflicts in {} file(s): {}",
+                out.conflicted_files.len(),
+                out.conflicted_files.join(", ")
+            )));
+        }
+        Ok(out.output)
     }
 
     pub async fn fetch(&self, token: Option<String>) -> Result<String> {
@@ -2693,6 +2758,78 @@ mod tests {
         sh_git(&dir, &["add", "."]);
         sh_git(&dir, &["commit", "-m", "init"]);
         (tmp, dir)
+    }
+
+    /// A pull whose merge conflicts is an OUTCOME, not a failure: `pull_outcome`
+    /// returns Ok with the unmerged paths (so the UI can open the resolver),
+    /// while the strict `pull` still errors — callers that keep mutating the
+    /// tree afterwards (checkout_update's stash pop) must not run on a
+    /// half-merged tree.
+    #[tokio::test]
+    async fn conflicting_pull_reports_conflicts_instead_of_failing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Bare "origin" + a clone that publishes the first commit.
+        let origin = tmp.path().join("origin.git");
+        std::fs::create_dir(&origin).unwrap();
+        sh_git(&origin, &["init", "--bare", "-b", "main"]);
+
+        let seed = tmp.path().join("seed");
+        std::fs::create_dir(&seed).unwrap();
+        sh_git(&seed, &["init", "-b", "main"]);
+        sh_git(&seed, &["config", "user.email", "otto@test.local"]);
+        sh_git(&seed, &["config", "user.name", "Otto Test"]);
+        sh_git(&seed, &["config", "commit.gpgsign", "false"]);
+        write(&seed, "shared.txt", "line1\nline2\nline3\n");
+        sh_git(&seed, &["add", "."]);
+        sh_git(&seed, &["commit", "-m", "init"]);
+        sh_git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        sh_git(&seed, &["push", "-u", "origin", "main"]);
+
+        // The user's clone.
+        let dir = tmp.path().join("work");
+        sh_git(
+            tmp.path(),
+            &["clone", origin.to_str().unwrap(), dir.to_str().unwrap()],
+        );
+        sh_git(&dir, &["config", "user.email", "otto@test.local"]);
+        sh_git(&dir, &["config", "user.name", "Otto Test"]);
+        sh_git(&dir, &["config", "commit.gpgsign", "false"]);
+
+        // Upstream moves (adds a file + edits the shared line)…
+        write(&seed, "shared.txt", "line1\nUPSTREAM\nline3\n");
+        write(&seed, "pulled_only.txt", "from upstream\n");
+        sh_git(&seed, &["add", "-A"]);
+        sh_git(&seed, &["commit", "-m", "upstream work"]);
+        sh_git(&seed, &["push", "origin", "main"]);
+
+        // …and the user edits the SAME line locally → the pull's merge conflicts.
+        write(&dir, "shared.txt", "line1\nLOCAL\nline3\n");
+        sh_git(&dir, &["commit", "-am", "local work"]);
+
+        let git = LocalGit::new(&dir);
+        let outcome = git
+            .pull_outcome(None)
+            .await
+            .expect("a conflicting pull is an outcome, not an error");
+        assert_eq!(outcome.conflicted_files, vec!["shared.txt".to_string()]);
+        assert!(git.is_merging().await, "the merge is left in progress");
+
+        // The status the endpoint returns carries the conflict, so the UI can
+        // route to the resolver: the unmerged path is kind="conflicted" and the
+        // cleanly-merged incoming file shows up staged (this is what looked like
+        // mystery WIP).
+        let st = git.status().await.unwrap();
+        assert!(st
+            .changes
+            .iter()
+            .any(|c| c.path == "shared.txt" && c.kind == "conflicted"));
+        assert!(st.changes.iter().any(|c| c.path == "pulled_only.txt"));
+
+        // The strict wrapper still fails so stash-popping callers stay safe.
+        assert!(git.pull(None).await.is_err());
     }
 
     #[tokio::test]

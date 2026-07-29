@@ -70,7 +70,7 @@ connection library unusable for every non-root account.)
 | 42 | POST /api/v1/repos/{id}/unstage | ws editor | StagePathsReq | RepoStatusResp |
 | 43 | POST /api/v1/repos/{id}/commit | ws editor | CommitReq | `{"sha":"..."}` |
 | 44 | POST /api/v1/repos/{id}/push | ws editor | `{branch?}` (optional; pushes THAT branch explicitly — Create-PR passes its source branch; absent = current branch) | RepoStatusResp |
-| 45 | POST /api/v1/repos/{id}/pull | ws editor | — | RepoStatusResp |
+| 45 | POST /api/v1/repos/{id}/pull | ws editor | — | RepoStatusResp — a pull whose merge CONFLICTS is a normal 200: the fetch landed and a merge is left in progress, with the unmerged paths returned as `changes[].kind="conflicted"` (clients route to the conflict resolver). Only real failures (auth, network, no upstream, dirty-tree refusal) are errors. |
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | CheckoutReq | RepoStatusResp |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
 | 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all | ws viewer | — | `PrSummary[]` |

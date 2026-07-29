@@ -45,7 +45,19 @@
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/pull`);
       onstatus(s);
       onrefresh?.();
-      toasts.success('Pulled');
+      // A pull whose merge conflicted comes back 200 with unmerged paths in the
+      // status (the daemon leaves the merge in progress). Say so — otherwise the
+      // incoming files just appear as WIP changes with no explanation. RepoView
+      // watches the same status and raises the "Resolve conflicts" banner.
+      const conflicts = s.changes.filter((c) => c.kind === 'conflicted').length;
+      if (conflicts > 0) {
+        toasts.warn(
+          'Pulled with conflicts',
+          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts"`,
+        );
+      } else {
+        toasts.success('Pulled');
+      }
     } catch (e) {
       toasts.error('Pull failed', e instanceof Error ? e.message : String(e));
     } finally {

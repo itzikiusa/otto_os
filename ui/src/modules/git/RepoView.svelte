@@ -53,16 +53,42 @@
     // Status lives in the store; (re)load it for this repo. The auto-fetch loop
     // keeps it fresh thereafter, and the tab strip shares the same value.
     void git.refreshStatus(id);
-    // Detect an in-progress merge (e.g. left mid-resolution) so we can offer to
-    // resume it via a banner.
+  });
+
+  // Unmerged paths as the status reports them. A merge in progress ALWAYS shows
+  // up here (kind="conflicted"), whoever started it — the merge modal, a pull
+  // whose merge conflicted, an agent session, or git on the command line.
+  const conflictedPaths = $derived(
+    (status?.changes ?? []).filter((c) => c.kind === 'conflicted').map((c) => c.path),
+  );
+  // Primitive key so the effect below re-runs when the conflict SET changes —
+  // not on every status poll (each poll hands back a fresh array reference).
+  const conflictKey = $derived(conflictedPaths.join(' '));
+  // Re-checked whenever that set changes, so the banner + "Resolve conflicts"
+  // tab appear as soon as the repo enters a merge — not only on mount. (This
+  // used to be a mount-only effect keyed on repo.id: a mid-session conflict left
+  // the incoming files sitting in WIP with no way into the resolver until you
+  // navigated away and back.)
+  $effect(() => {
+    const id = repo.id;
+    const seen = conflictKey;
     void git
       .getMergeStatus(id)
       .then((m) => {
         merging = m.merging;
-        if (m.merging) conflictSeed = { files: m.conflicted_files, source: m.source };
+        if (m.merging) {
+          conflictSeed = {
+            files: m.conflicted_files.length > 0 ? m.conflicted_files : conflictedPaths,
+            source: m.source ?? conflictSeed.source,
+          };
+        } else if (!seen) {
+          conflictSeed = { files: [], source: null };
+        }
       })
       .catch(() => {
-        merging = false;
+        // Fall back to what the status already told us rather than hiding a
+        // merge the user is standing in.
+        merging = conflictedPaths.length > 0;
       });
   });
 
