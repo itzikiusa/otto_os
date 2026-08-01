@@ -32,8 +32,9 @@ use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
-    DbQueryPlan, Engine, NodeKind, NodePath, ObjectDetail, QueryHandle, QueryRequest, QueryResult,
-    QueryStats, ResolvedConfig, SchemaNode, TestResult,
+    DbQueryPlan, Engine, NodeKind, NodePath, ObjectDetail, ObjectHit, ObjectSearchReq,
+    ObjectSearchResult, QueryHandle, QueryRequest, QueryResult, QueryStats, ResolvedConfig,
+    SchemaNode, TestResult,
 };
 
 /// ClickHouse driver. Caches one transport handle per [`ResolvedConfig::cache_key`]:
@@ -1243,6 +1244,55 @@ impl Driver for ClickhouseDriver {
         // User databases first, system databases last; preserve name order within.
         nodes.sort_by_key(|a| a.0);
         Ok(nodes.into_iter().map(|(_, n)| n).collect())
+    }
+
+    async fn search_objects(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &ObjectSearchReq,
+    ) -> Result<ObjectSearchResult> {
+        // `system.tables` is a single cheap catalog read covering every database.
+        let limit = req.capped();
+        let mut sql = format!(
+            "SELECT database, name, engine FROM system.tables \
+             WHERE positionCaseInsensitive(name, '{}') > 0 \
+             AND database NOT IN ('system','INFORMATION_SCHEMA','information_schema')",
+            esc(&req.q)
+        );
+        if !req.all_schemas() {
+            sql.push_str(&format!(" AND database = '{}'", esc(req.schema.as_deref().unwrap_or(""))));
+        }
+        sql.push_str(&format!(" ORDER BY database, name LIMIT {}", limit + 1));
+        let rows = self.query_rows(cfg, &sql).await?;
+
+        let truncated = rows.data.len() > limit;
+        let mut schemas: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut hits = Vec::new();
+        for row in rows.data.iter().take(limit) {
+            let db = row.first().and_then(Value::as_str).unwrap_or("");
+            let name = row.get(1).and_then(Value::as_str).unwrap_or("");
+            let engine = row.get(2).and_then(Value::as_str).unwrap_or("");
+            if db.is_empty() || name.is_empty() {
+                continue;
+            }
+            // ClickHouse has no TABLE_TYPE; the *View engines are the views.
+            let (kind, seg, label) = if engine.ends_with("View") {
+                (NodeKind::View, "table", "view")
+            } else {
+                (NodeKind::Table, "table", "table")
+            };
+            if !req.wants(label) {
+                continue;
+            }
+            schemas.insert(db.to_string());
+            hits.push(ObjectHit {
+                schema: db.to_string(),
+                name: name.to_string(),
+                kind,
+                path: format!("db:{db}/{seg}:{name}"),
+            });
+        }
+        Ok(ObjectSearchResult { hits, truncated, scanned: schemas.len(), supported: true })
     }
 
     async fn schema_children(

@@ -36,8 +36,8 @@ use otto_ssh::SshTunnel;
 use crate::types::{
     statement_is_write, Capabilities, CancelToken, CompletionContext, CompletionResponse,
     DbQueryPlan, Engine, GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail,
-    QueryHandle, QueryRequest, QueryResult, QueryStatus, ResolvedConfig, SchemaGraph, SchemaNode,
-    TestResult,
+    ObjectSearchReq, ObjectSearchResult, QueryHandle, QueryRequest, QueryResult, QueryStatus,
+    ResolvedConfig, SchemaGraph, SchemaNode, TestResult,
 };
 
 /// Stable marker prefixed to the write-gate rejection message so the UI can
@@ -503,11 +503,38 @@ impl DbViewerService {
         path: &str,
         filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
+        self.schema_children_with_counts(conn_id, path, filter, false).await
+    }
+
+    /// As above, but `counts` asks the driver to fill each node's `detail` with
+    /// an engine-native ROW ESTIMATE. Opt-in: gathering that statistic is the
+    /// slow part of expanding a database on a large server.
+    pub async fn schema_children_with_counts(
+        &self,
+        conn_id: &Id,
+        path: &str,
+        filter: Option<&str>,
+        counts: bool,
+    ) -> Result<Vec<SchemaNode>> {
         let r = self.resolve(conn_id).await?;
         let node = NodePath::parse(path);
         // An empty/whitespace filter is treated as "no filter".
         let filter = filter.map(str::trim).filter(|s| !s.is_empty());
-        r.driver.schema_children(&r.config, &node, filter).await
+        r.driver.schema_children_with_counts(&r.config, &node, filter, counts).await
+    }
+
+    /// Find objects by name without expanding the tree. A blank needle returns
+    /// nothing rather than the entire catalog.
+    pub async fn search_objects(
+        &self,
+        conn_id: &Id,
+        req: &ObjectSearchReq,
+    ) -> Result<ObjectSearchResult> {
+        if req.q.trim().is_empty() {
+            return Ok(ObjectSearchResult { supported: true, ..Default::default() });
+        }
+        let r = self.resolve(conn_id).await?;
+        r.driver.search_objects(&r.config, req).await
     }
 
     /// Return the full detail for a schema object. When `approx_row_count` is

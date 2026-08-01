@@ -31,8 +31,9 @@ use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
-    DbQueryPlan, Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle,
-    QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
+    DbQueryPlan, Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, ObjectHit,
+    ObjectSearchReq, ObjectSearchResult, QueryHandle, QueryRequest, QueryResult, ResolvedConfig,
+    SchemaNode, TestResult,
 };
 
 const DEFAULT_MAX_ROWS: usize = 1000;
@@ -124,6 +125,57 @@ impl Driver for PostgresDriver {
                 SchemaNode::new(format!("db:{name}"), name, NodeKind::Schema).expandable()
             })
             .collect())
+    }
+
+    async fn search_objects(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &ObjectSearchReq,
+    ) -> Result<ObjectSearchResult> {
+        // One catalog query covers every schema IN THE CONNECTED DATABASE — a
+        // Postgres connection cannot cross databases, so "all schemas" means
+        // exactly that, and the UI says so rather than implying a server sweep.
+        let pool = self.pool(cfg).await?;
+        let limit = req.capped();
+        let mut sql = String::from(
+            "SELECT n.nspname, c.relname, c.relkind::text FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('r','p','v','m','f') AND c.relname ILIKE $1 \
+             AND n.nspname NOT IN ('pg_catalog','information_schema') \
+             AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'",
+        );
+        if !req.all_schemas() {
+            sql.push_str(" AND n.nspname = $3");
+        }
+        sql.push_str(" ORDER BY n.nspname, c.relname LIMIT $2");
+        let pattern = format!("%{}%", req.q);
+        let q = sqlx::query_as::<_, (String, String, String)>(&sql)
+            .bind(&pattern)
+            .bind((limit + 1) as i64);
+        let q = if req.all_schemas() {
+            q
+        } else {
+            q.bind(req.schema.clone().unwrap_or_default())
+        };
+        let rows = q.fetch_all(&pool).await.map_err(types::upstream)?;
+
+        let truncated = rows.len() > limit;
+        let mut schemas: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut hits = Vec::new();
+        for (schema, name, relkind) in rows.into_iter().take(limit) {
+            // r/p = table & partitioned table, f = foreign table; v/m = views.
+            let (kind, seg, label) = match relkind.as_str() {
+                "v" | "m" => (NodeKind::View, "view", "view"),
+                _ => (NodeKind::Table, "table", "table"),
+            };
+            if !req.wants(label) {
+                continue;
+            }
+            let path = NodePath::parse(&format!("db:{schema}")).child(seg, &name).to_id();
+            schemas.insert(schema.clone());
+            hits.push(ObjectHit { schema, name, kind, path });
+        }
+        Ok(ObjectSearchResult { hits, truncated, scanned: schemas.len(), supported: true })
     }
 
     async fn schema_children(

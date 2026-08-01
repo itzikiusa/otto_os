@@ -8,7 +8,8 @@ use otto_core::Result;
 use crate::export::{ExportCounts, ExportFormat};
 use crate::types::{
     Capabilities, CancelToken, CompletionContext, CompletionResponse, Engine, NodePath,
-    ObjectDetail, QueryHandle, QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
+    ObjectDetail, ObjectSearchReq, ObjectSearchResult, QueryHandle, QueryRequest, QueryResult,
+    ResolvedConfig, SchemaNode, TestResult,
 };
 
 /// Hard row ceiling for the buffered `export_to_writer` fallback (engines with no
@@ -41,6 +42,34 @@ pub trait Driver: Send + Sync {
         parent: &NodePath,
         filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>>;
+
+    /// Like `schema_children` but may fill `SchemaNode.detail` with an
+    /// engine-native ROW-COUNT ESTIMATE when `counts` is true. Opt-in on
+    /// purpose: collecting the statistic for every object is the slow part of
+    /// expanding a database on a big server, which is why the plain listing
+    /// deliberately skips it. Default: ignore the flag.
+    async fn schema_children_with_counts(
+        &self,
+        cfg: &ResolvedConfig,
+        parent: &NodePath,
+        filter: Option<&str>,
+        counts: bool,
+    ) -> Result<Vec<SchemaNode>> {
+        let _ = counts;
+        self.schema_children(cfg, parent, filter).await
+    }
+
+    /// Find objects by NAME across a schema (or every schema) without expanding
+    /// the tree. Default: the engine has no object namespace to search, so the
+    /// caller is told `supported: false` rather than handed an error.
+    async fn search_objects(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &ObjectSearchReq,
+    ) -> Result<ObjectSearchResult> {
+        let _ = (cfg, req);
+        Ok(ObjectSearchResult::default())
+    }
 
     /// Full structure of a selected object (columns, keys, indexes, DDL).
     async fn object_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail>;

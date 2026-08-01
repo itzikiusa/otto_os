@@ -25,9 +25,10 @@ use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
-    DbQueryPlan, Engine, ForeignKey, IndexDef, NodeKind, NodePath, ObjectDetail, QueryHandle,
-    QueryRequest, QueryResult, ResolvedConfig, SchemaNode, TestResult,
+    self, compact_count, Capabilities, CancelToken, Column, ColumnDef, CompletionContext,
+    CompletionResponse, DbQueryPlan, Engine, ForeignKey, IndexDef, NodeKind, NodePath,
+    ObjectDetail, ObjectHit, ObjectSearchReq, ObjectSearchResult, QueryHandle, QueryRequest,
+    QueryResult, ResolvedConfig, SchemaNode, TestResult,
 };
 
 const DEFAULT_MAX_ROWS: usize = 1000;
@@ -140,6 +141,70 @@ impl Driver for MysqlDriver {
         parent: &NodePath,
         filter: Option<&str>,
     ) -> Result<Vec<SchemaNode>> {
+        self.schema_children_with_counts(cfg, parent, filter, false).await
+    }
+
+    async fn search_objects(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &ObjectSearchReq,
+    ) -> Result<ObjectSearchResult> {
+        let pool = self.pool(cfg).await?;
+        let limit = req.capped();
+        // ONE catalog query covers every schema — the whole reason this is cheap
+        // on MySQL. Ask for limit+1 so a full page tells us more exist.
+        let mut sql = String::from(
+            "SELECT CAST(table_schema AS CHAR), CAST(table_name AS CHAR), CAST(table_type AS CHAR) \
+             FROM information_schema.tables \
+             WHERE LOWER(CAST(table_name AS CHAR)) LIKE LOWER(?) \
+             AND table_schema NOT IN ('information_schema','performance_schema','mysql','sys')",
+        );
+        if !req.all_schemas() {
+            sql.push_str(" AND table_schema = ?");
+        }
+        sql.push_str(" ORDER BY table_schema, table_name LIMIT ?");
+        let pattern = format!("%{}%", req.q);
+        let q = sqlx::query_as::<_, (String, String, String)>(&sql).bind(&pattern);
+        let q = if req.all_schemas() {
+            q
+        } else {
+            q.bind(req.schema.clone().unwrap_or_default())
+        };
+        let rows = q
+            .bind((limit + 1) as i64)
+            .fetch_all(&pool)
+            .await
+            .map_err(types::upstream)?;
+
+        let truncated = rows.len() > limit;
+        let mut schemas: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let hits = rows
+            .into_iter()
+            .take(limit)
+            .filter_map(|(schema, name, ttype)| {
+                let (kind, seg, label) = if ttype.eq_ignore_ascii_case("VIEW") {
+                    (NodeKind::View, "view", "view")
+                } else {
+                    (NodeKind::Table, "table", "table")
+                };
+                if !req.wants(label) {
+                    return None;
+                }
+                schemas.insert(schema.clone());
+                let path = NodePath::parse(&format!("db:{schema}")).child(seg, &name).to_id();
+                Some(ObjectHit { schema, name, kind, path })
+            })
+            .collect();
+        Ok(ObjectSearchResult { hits, truncated, scanned: schemas.len(), supported: true })
+    }
+
+    async fn schema_children_with_counts(
+        &self,
+        cfg: &ResolvedConfig,
+        parent: &NodePath,
+        filter: Option<&str>,
+        counts: bool,
+    ) -> Result<Vec<SchemaNode>> {
         let db = parent
             .get("db")
             .ok_or_else(|| types::invalid("schema_children: parent has no database segment"))?
@@ -152,7 +217,7 @@ impl Driver for MysqlDriver {
 
         // db:<n>/folder:tables | folder:views -> the objects in that folder (filter by name).
         if let Some(folder) = parent.get("folder") {
-            return self.objects_in_folder(cfg, &db, folder, filter).await;
+            return self.objects_in_folder(cfg, &db, folder, filter, counts).await;
         }
 
         // db:<n> -> the object folders; no per-folder filter at this level.
@@ -647,6 +712,7 @@ impl MysqlDriver {
         db: &str,
         folder: &str,
         filter: Option<&str>,
+        counts: bool,
     ) -> Result<Vec<SchemaNode>> {
         // Routine folders live in information_schema.routines (not .tables) and
         // their leaves have no children — clicking one opens its DDL in Structure.
@@ -694,10 +760,35 @@ impl MysqlDriver {
         // The db node only carries `db:<n>`, not the folder; build children off
         // a clean db path so ids are `db:<n>/<seg>:<name>`.
         let db_path = NodePath::parse(&format!("db:{db}"));
+        // Opt-in row counts: ONE extra catalog query for the whole folder (never
+        // per table, never COUNT(*)). `table_rows` is InnoDB's ESTIMATE — good
+        // enough to spot which tables hold data, and the reason this is a toggle
+        // rather than the default is that collecting it is what makes expanding
+        // a big server slow. Best-effort: a failure just omits the detail.
+        let mut est: HashMap<String, i64> = HashMap::new();
+        if counts {
+            let rows: Vec<(String, Option<i64>)> = sqlx::query_as(
+                "SELECT CAST(table_name AS CHAR), CAST(table_rows AS SIGNED) \
+                 FROM information_schema.tables WHERE table_schema = ? AND table_type = ?",
+            )
+            .bind(db)
+            .bind(table_type)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+            for (name, n) in rows {
+                est.insert(name, n.unwrap_or(0));
+            }
+        }
         Ok(rows
             .into_iter()
             .map(|(name,)| {
-                SchemaNode::new(db_path.child(seg, &name).to_id(), name, kind).expandable()
+                let node =
+                    SchemaNode::new(db_path.child(seg, &name).to_id(), &name, kind).expandable();
+                match est.get(&name) {
+                    Some(n) => node.with_detail(compact_count(*n)),
+                    None => node,
+                }
             })
             .collect())
     }

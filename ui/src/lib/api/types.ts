@@ -4311,8 +4311,37 @@ export interface SchemaNode {
   id: string;
   label: string;
   kind: DbNodeKind;
+  /** Dimmed suffix — a type, or an opt-in row ESTIMATE like `1.3K`. */
   detail?: string;
   has_children: boolean;
+}
+
+/** POST /connections/{id}/db/search-objects */
+export interface ObjectSearchReq {
+  q: string;
+  schema?: string;
+  /** `schema` (default, cheap) | `all` (sweeps everything reachable). */
+  scope?: 'schema' | 'all';
+  /** Reserved for column search; empty = browsable objects. */
+  kinds?: string[];
+  limit?: number;
+}
+
+export interface ObjectHit {
+  schema: string;
+  name: string;
+  kind: DbNodeKind;
+  /** Node-path id — revealing a hit uses the same navigation as a browsed node. */
+  path: string;
+}
+
+export interface ObjectSearchResult {
+  hits: ObjectHit[];
+  truncated: boolean;
+  /** Schemas actually inspected — the real cost of an `all` sweep on MongoDB. */
+  scanned: number;
+  /** `false` when the engine has no object namespace (Redis). */
+  supported: boolean;
 }
 
 export interface DbColumnDef {

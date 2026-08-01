@@ -298,6 +298,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // Export (`db/export`) executes a full-result query — Edit tier.
         let read = get
             || p.ends_with("/db/schema/children")
+            || p.ends_with("/db/search-objects") // catalog name lookup — read-only
             || p.ends_with("/db/object")
             || p.ends_with("/db/schema-graph")
             || p.ends_with("/db/query-plan") // EXPLAIN-wrapped, never executes the raw statement

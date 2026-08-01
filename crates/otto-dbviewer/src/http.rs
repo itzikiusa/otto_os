@@ -20,7 +20,9 @@ use serde_json::Value;
 
 use crate::export::ExportFormat as PathFormat;
 use crate::service::DbViewerService;
-use crate::types::{statement_is_write, CompletionContext, Engine, QueryRequest};
+use crate::types::{
+    statement_is_write, CompletionContext, Engine, ObjectSearchReq, QueryRequest,
+};
 
 /// Server-side context required by the DB Explorer routes.
 pub trait DbViewerCtx: Clone + Send + Sync + 'static {
@@ -96,6 +98,11 @@ struct PathReq {
     /// opt-in because it adds a second query on every `object_detail` call).
     #[serde(default)]
     approx_row_count: bool,
+    /// When `true`, tree children carry an engine-native ROW ESTIMATE in
+    /// `detail`. Opt-in: collecting it is the slow part of expanding a database
+    /// on a big server, so the plain listing deliberately skips it.
+    #[serde(default)]
+    counts: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +206,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/capabilities", get(capabilities::<S>))
         .route("/connections/{id}/db/schema", get(schema_root::<S>))
         .route("/connections/{id}/db/schema/children", post(schema_children::<S>))
+        .route("/connections/{id}/db/search-objects", post(search_objects::<S>))
         .route("/connections/{id}/db/object", post(object_detail::<S>))
         .route("/connections/{id}/db/schema-graph", post(schema_graph::<S>))
         .route("/connections/{id}/db/query", post(run_query::<S>))
@@ -378,7 +386,25 @@ async fn schema_children<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().schema_children(&id, &req.path, req.filter.as_deref()).await?).into_response())
+    Ok(Json(
+        ctx.db()
+            .schema_children_with_counts(&id, &req.path, req.filter.as_deref(), req.counts)
+            .await?,
+    )
+    .into_response())
+}
+
+/// Find tables/views/collections by NAME across one schema or every schema the
+/// connection can reach. Read-only introspection, so `Viewer` like its siblings.
+async fn search_objects<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<ObjectSearchReq>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
+    Ok(Json(ctx.db().search_objects(&id, &req).await?).into_response())
 }
 
 async fn object_detail<S: DbViewerCtx>(

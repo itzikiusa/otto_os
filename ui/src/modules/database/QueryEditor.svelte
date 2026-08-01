@@ -229,15 +229,57 @@
     execBase(tab.statement);
   }
 
-  // Draggable split between the editor and the results (persisted px height).
-  let editorH = $state(loadEditorH());
+  // Draggable split between the editor and the results.
+  //
+  // The height is remembered PER TAB, not once for the whole view: a tab holding
+  // a 40-line query and a tab holding `SELECT 1` want very different splits, and
+  // one shared pixel value made every tab fight over it. Until a tab has
+  // produced a result there is nothing to show below, so the editor takes the
+  // pane and that large dead grey area simply doesn't exist.
+  const perTabH = new Map<number, number>();
+  let editorH = $state(240);
   let resizing = $state(false);
-  // Height to restore when collapsing the double-click "expand" toggle.
+  // Height to restore when collapsing the maximize toggle.
   let prevEditorH = $state(0);
-  function loadEditorH(): number {
-    if (typeof localStorage === 'undefined') return 240;
+
+  /** Fraction of the pane the editor gets before a tab has any result. */
+  const UNRUN_FRACTION = 0.85;
+
+  function defaultEditorH(hasResult: boolean): number {
+    const max = maxEditorH();
+    if (!hasResult) return max;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 1000;
+    return Math.max(180, Math.min(max, Math.round(vh * 0.42)));
+  }
+
+  // Adopt this tab's remembered height whenever the active tab changes, and
+  // shrink the editor off its "nothing to show yet" size the first time the tab
+  // produces a result.
+  let lastTabId = -1;
+  let lastHadResult = false;
+  $effect(() => {
+    const id = tab?.id ?? -1;
+    const hasResult = !!tab?.result;
+    if (id !== lastTabId) {
+      lastTabId = id;
+      lastHadResult = hasResult;
+      editorH = perTabH.get(id) ?? loadEditorH(hasResult);
+      return;
+    }
+    if (hasResult && !lastHadResult) {
+      lastHadResult = true;
+      // Only auto-shrink a tab the user has never sized by hand.
+      if (!perTabH.has(id)) editorH = defaultEditorH(true);
+    } else if (!hasResult && lastHadResult) {
+      lastHadResult = false;
+    }
+  });
+
+  function loadEditorH(hasResult: boolean): number {
+    if (typeof localStorage === 'undefined') return defaultEditorH(hasResult);
     const v = Number(localStorage.getItem('db.editorH'));
-    return Number.isFinite(v) && v > 80 ? v : 240;
+    if (!hasResult) return defaultEditorH(false);
+    return Number.isFinite(v) && v > 80 ? Math.min(v, maxEditorH()) : defaultEditorH(true);
   }
   // Tallest the editor may grow to — viewport-relative so it can take most of the
   // pane on big screens, while always reserving room for the results grid so it
@@ -247,6 +289,9 @@
     return Math.max(180, vh - 260);
   }
   function persistEditorH(): void {
+    // Per-tab in memory (the tab itself is session state), plus one global
+    // fallback on disk so a fresh tab opens at a size you already liked.
+    if (tab) perTabH.set(tab.id, editorH);
     try {
       localStorage.setItem('db.editorH', String(Math.round(editorH)));
     } catch {
@@ -278,9 +323,13 @@
       prevEditorH = editorH;
       editorH = max;
     } else {
-      editorH = prevEditorH > 80 ? prevEditorH : 240;
+      editorH = prevEditorH > 80 ? prevEditorH : defaultEditorH(!!tab?.result);
     }
     persistEditorH();
+  }
+  /** ⇧⌘E — same toggle, reachable from the keyboard. */
+  function toggleMaxEditor(): void {
+    toggleExpand();
   }
 
   // ── Save query ──────────────────────────────────────────────────────────
@@ -395,6 +444,19 @@
         database.formatStatement();
         editorSel = { text: '', cursor: 0 };
       }
+      return;
+    }
+    // ⌘B — collapse/restore the schema sidebar (the biggest single win in
+    // width when you are actually writing SQL).
+    if (cmd && !e.shiftKey && !e.altKey && e.code === 'KeyB') {
+      e.preventDefault();
+      database.toggleSidebar();
+      return;
+    }
+    // ⇧⌘E — maximize the editor over the results pane (and back).
+    if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyE') {
+      e.preventDefault();
+      toggleMaxEditor();
       return;
     }
     // ⌥⌘T new query tab / ⌥⌘W close query tab (⌘T/⌘W stay session actions).
@@ -548,7 +610,7 @@
         disabled={!tab.statement.trim() || tab.running}
         title="Show the query plan (EXPLAIN) — a normalized tree with cost warnings"
       >
-        <Icon name="zap" size={11} />Explain
+        <Icon name="zap" size={11} /><span class="btn-label">Explain</span>
       </button>
     {/if}
     <button
@@ -558,7 +620,7 @@
       disabled={!database.selectedConnId}
       title="Ask an agent anything about this database — opens the DB Assistant beside the editor"
     >
-      <Icon name="comment" size={11} />Ask AI
+      <Icon name="comment" size={11} /><span class="btn-label">Ask AI</span>
     </button>
     <button
       class="btn small ghost"
@@ -567,7 +629,7 @@
       disabled={!database.selectedConnId}
       title="Describe what you want in plain English — the DB Assistant agent drafts a query you can insert or run"
     >
-      <Icon name="comment" size={11} />Ask in English
+      <Icon name="comment" size={11} /><span class="btn-label">Ask in English</span>
     </button>
     {#if database.queryLanguage !== 'redis'}
       <button
@@ -579,7 +641,7 @@
         disabled={!tab.statement.trim() || tab.running}
         title="Format / beautify the SQL"
       >
-        <Icon name="command" size={11} />Format
+        <Icon name="command" size={11} /><span class="btn-label">Format</span>
       </button>
     {/if}
     <div class="qe-kbd" bind:this={kbdWrapEl}>
@@ -937,11 +999,18 @@
     border-color: var(--border);
     color: var(--accent);
   }
+  /* Secondary actions shed their labels when the pane is tight, so the row never
+     wraps into a second bar; `title` still names each one. */
+  @media (max-width: 1500px) {
+    .btn-label {
+      display: none;
+    }
+  }
   .qe-toolbar {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 0 0 8px;
+    padding: 0 0 6px;
   }
   /* Query-level variables bar — shown only when the statement references
      :name / {name}. One labelled input per variable, values remembered per tab. */
@@ -1144,14 +1213,18 @@
   .qe-edit {
     flex: 0 0 auto;
     min-height: 100px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
+    /* Edge-to-edge: only a hairline separating it from the results below. The
+       inset rounded box cost ~20px of writing space and made the editor read as
+       a floating widget rather than the surface it is. */
+    border: none;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
     overflow: hidden;
   }
   /* Draggable divider between editor and results. */
   .qe-splitter {
     flex: 0 0 auto;
-    height: 11px;
+    height: 7px;
     display: flex;
     align-items: center;
     justify-content: center;

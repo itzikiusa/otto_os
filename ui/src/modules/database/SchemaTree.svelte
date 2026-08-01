@@ -9,10 +9,53 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { DbNodeKind, SchemaNode } from '../../lib/api/types';
 
-  // Top-level schema search / filter. Only filters the root nodes (databases,
-  // schemas, keyspaces, collections). When non-empty, child matches are shown
-  // by recursively checking cached subtrees.
+  // Top-level schema search / filter. Client-side, this only filters ROOT nodes
+  // and already-cached subtrees — it can never find a table inside a schema you
+  // have not opened. `searchObjects` (server-side, catalog-backed) is what makes
+  // that possible; the scope picker chooses between them.
   let schemaFilter = $state('');
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Redis has no object namespace to search — its key filter already covers it.
+  const searchable = $derived(database.queryLanguage !== 'redis');
+  const hits = $derived(database.objectSearchHits);
+
+  /** Debounced server-side lookup — one request per pause, not per keystroke. */
+  function onSearchInput(): void {
+    if (searchTimer) clearTimeout(searchTimer);
+    const q = schemaFilter;
+    if (!q.trim()) {
+      database.clearObjectSearch();
+      return;
+    }
+    if (!searchable) return; // Redis: the client-side key filter already covers it
+    searchTimer = setTimeout(() => {
+      void database.searchObjects(q, database.activeDb ?? undefined);
+    }, 220);
+  }
+
+  function setScope(scope: 'schema' | 'all'): void {
+    database.objectSearchScope = scope;
+    if (schemaFilter.trim() && searchable) {
+      void database.searchObjects(schemaFilter, database.activeDb ?? undefined);
+    }
+  }
+
+  function clearSearch(): void {
+    schemaFilter = '';
+    if (searchTimer) clearTimeout(searchTimer);
+    database.clearObjectSearch();
+  }
+
+  /** Open a search hit exactly as a browsed node would open. */
+  function openHit(hit: { path: string; name: string; kind: DbNodeKind }): void {
+    void database.openObject({
+      id: hit.path,
+      label: hit.name,
+      kind: hit.kind,
+      has_children: true,
+    });
+  }
 
   // Node kinds that, when clicked, open the Structure view (vs. just expanding).
   const OBJECT_KINDS = new Set<DbNodeKind>([
@@ -256,15 +299,40 @@
         class="tree-search-input"
         type="text"
         bind:value={schemaFilter}
-        placeholder="Filter schema…"
+        oninput={onSearchInput}
+        placeholder={searchable ? 'Find a table…' : 'Filter schema…'}
         spellcheck="false"
-        aria-label="Filter schema tree"
+        aria-label="Find an object"
       />
       {#if schemaFilter}
-        <button class="tree-search-clear" onclick={() => (schemaFilter = '')} aria-label="Clear filter">
+        <button class="tree-search-clear" onclick={clearSearch} aria-label="Clear filter">
           <Icon name="x" size={10} />
         </button>
       {/if}
+    </div>
+    <div class="tree-opts">
+      {#if searchable}
+        <select
+          class="scope-pick"
+          value={database.objectSearchScope}
+          onchange={(e) => setScope(e.currentTarget.value as 'schema' | 'all')}
+          aria-label="Search scope"
+          title={database.selectedConn?.kind === 'postgres'
+            ? 'Postgres cannot cross databases — “All schemas” covers every schema in the connected database'
+            : 'Where to look for the object'}
+        >
+          <option value="schema">This schema</option>
+          <option value="all">All schemas</option>
+        </select>
+      {/if}
+      <label class="counts-toggle" title="Show approximate row counts. Off by default — collecting the estimate is what makes expanding a large server slow.">
+        <input
+          type="checkbox"
+          checked={database.showCounts}
+          onchange={(e) => database.setShowCounts(e.currentTarget.checked)}
+        />
+        Counts
+      </label>
     </div>
   {/if}
   {#if database.schemaLoading || database.activeConnStatus?.phase === 'connecting'}
@@ -282,6 +350,35 @@
     </div>
   {:else if database.schemaRoot.length === 0}
     <div class="tree-empty">No objects. Test the connection or refresh.</div>
+  {:else if hits !== null}
+    <!-- Server-side results: a flat list, each hit labelled with its schema so
+         you can tell two same-named tables apart. -->
+    {#if database.objectSearching && hits.length === 0}
+      <div class="tree-loading"><Icon name="refresh" size={13} /><span>Searching…</span></div>
+    {:else if hits.length === 0}
+      <div class="tree-empty">
+        No object matching "{schemaFilter}"{database.objectSearchScope === 'schema'
+          ? ' in this schema — try All schemas.'
+          : '.'}
+      </div>
+    {:else}
+      <div class="hit-head">
+        {hits.length}{database.objectSearchTruncated ? '+' : ''} match{hits.length === 1 ? '' : 'es'}
+        {#if database.objectSearchScope === 'all' && database.objectSearchScanned > 0}
+          <span class="hit-scan">· {database.objectSearchScanned} schemas scanned</span>
+        {/if}
+      </div>
+      {#each hits as hit (hit.path)}
+        <button class="hit" onclick={() => openHit(hit)} title={hit.path}>
+          <span class="node-icon {hit.kind}"><Icon name={iconFor(hit.kind)} size={12} /></span>
+          <span class="hit-name">{hit.name}</span>
+          <span class="hit-schema">{hit.schema}</span>
+        </button>
+      {/each}
+      {#if database.objectSearchTruncated}
+        <div class="tree-empty">More matches exist — narrow the search.</div>
+      {/if}
+    {/if}
   {:else if filteredRoot.length === 0}
     <div class="tree-empty">No match for "{schemaFilter}".</div>
   {:else}
@@ -499,6 +596,79 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .tree-opts {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 8px 5px;
+    font-size: 10.5px;
+    color: var(--text-dim, #98989f);
+  }
+  .scope-pick {
+    flex: 1;
+    min-width: 0;
+    font-size: 10.5px;
+    padding: 1px 4px;
+    background: var(--surface-2, #323238);
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-radius: var(--radius-s, 5px);
+    color: var(--text, #f2f2f5);
+  }
+  .counts-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .counts-toggle input {
+    margin: 0;
+  }
+
+  .hit-head {
+    padding: 4px 8px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim, #98989f);
+  }
+  .hit-scan {
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .hit {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 3px 8px;
+    background: none;
+    border: none;
+    color: var(--text, #f2f2f5);
+    font-size: 11.5px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .hit:hover {
+    background: color-mix(in srgb, var(--accent, #0a84ff) 16%, transparent);
+  }
+  .hit-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hit-schema {
+    flex: 0 0 auto;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-dim, #98989f);
+    font-size: 10px;
+  }
+
   /* Schema-tree filter bar */
   .tree-search {
     display: flex;

@@ -27,6 +27,8 @@ import type {
   DbWidgetMapping,
   Id,
   ObjectDetail,
+  ObjectHit,
+  ObjectSearchResult,
   QueryResult,
   SchemaNode,
   Session,
@@ -76,6 +78,22 @@ function loadRowLimit(): number {
   if (typeof localStorage === 'undefined') return DEFAULT_ROW_LIMIT;
   const v = Number(localStorage.getItem(ROW_LIMIT_KEY));
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_ROW_LIMIT;
+}
+
+/** Read a sticky boolean preference; missing/unreadable falls back to `def`. */
+function loadFlag(key: string, def: boolean): boolean {
+  if (typeof localStorage === 'undefined') return def;
+  const v = localStorage.getItem(key);
+  return v === null ? def : v === '1';
+}
+
+/** Persist a sticky boolean. Quota/private-mode failures are never fatal. */
+function saveFlag(key: string, on: boolean): void {
+  try {
+    localStorage.setItem(key, on ? '1' : '0');
+  } catch {
+    /* preference-only — losing it must not break the view */
+  }
 }
 
 /**
@@ -535,6 +553,23 @@ class DatabaseStore {
   /** Nodes whose children are currently loading. */
   loadingNodes: Set<string> = $state(new Set());
   schemaLoading = $state(false);
+  /**
+   * Show engine-native row ESTIMATES next to tree objects. Off by default and
+   * persisted: gathering the statistic is what makes expanding a database slow
+   * on a big server, so this stays the user's explicit choice.
+   */
+  showCounts = $state(loadFlag('db.showCounts', false));
+  /** Collapse the schema sidebar to its rail (⌘B). Persisted. */
+  sidebarCollapsed = $state(loadFlag('db.sidebarCollapsed', false));
+
+  // ── Object search (server-side; the tree's own filter is client-side and
+  // can only ever match nodes that are already loaded) ─────────────────────
+  objectSearchScope: 'schema' | 'all' = $state('schema');
+  objectSearchHits: ObjectHit[] | null = $state(null);
+  objectSearching = $state(false);
+  objectSearchTruncated = $state(false);
+  objectSearchScanned = $state(0);
+  objectSearchSupported = $state(true);
 
   // ── Selected object (Structure view) ────────────────────────────────────
   selectedObjectPath: string | null = $state(null);
@@ -1537,6 +1572,65 @@ class DatabaseStore {
   }
 
   /** Fetch a node's children (honouring any stored filter) into the cache. */
+  /** Toggle sticky row estimates and drop the cache so the tree refetches. */
+  setShowCounts(on: boolean): void {
+    this.showCounts = on;
+    saveFlag('db.showCounts', on);
+    // Cached children were fetched without (or with) counts — re-expand cleanly.
+    this.childrenCache = new Map();
+  }
+
+  toggleSidebar(): void {
+    this.sidebarCollapsed = !this.sidebarCollapsed;
+    saveFlag('db.sidebarCollapsed', this.sidebarCollapsed);
+  }
+
+  /**
+   * Server-side object lookup. The tree's own filter only ever sees nodes that
+   * are already loaded, so finding a table inside a never-opened schema has to
+   * go to the catalog. A blank needle clears the hits instead of searching.
+   */
+  async searchObjects(q: string, schema?: string): Promise<void> {
+    const connId = this.selectedConnId;
+    if (!connId || !q.trim()) {
+      this.objectSearchHits = null;
+      this.objectSearchTruncated = false;
+      this.objectSearchScanned = 0;
+      return;
+    }
+    const seq = ++this.objectSearchSeq;
+    this.objectSearching = true;
+    try {
+      const r = await api.post<ObjectSearchResult>(`${this.connBase(connId)}/search-objects`, {
+        q: q.trim(),
+        schema: this.objectSearchScope === 'schema' ? schema : undefined,
+        scope: this.objectSearchScope,
+      });
+      if (seq !== this.objectSearchSeq) return; // a newer keystroke won
+      this.objectSearchHits = r.hits;
+      this.objectSearchTruncated = r.truncated;
+      this.objectSearchScanned = r.scanned;
+      this.objectSearchSupported = r.supported;
+    } catch (e) {
+      if (seq === this.objectSearchSeq) {
+        this.objectSearchHits = [];
+        toasts.error('Object search failed', errMsg(e));
+      }
+    } finally {
+      if (seq === this.objectSearchSeq) this.objectSearching = false;
+    }
+  }
+
+  clearObjectSearch(): void {
+    this.objectSearchSeq++;
+    this.objectSearchHits = null;
+    this.objectSearching = false;
+    this.objectSearchTruncated = false;
+    this.objectSearchScanned = 0;
+  }
+
+  private objectSearchSeq = 0;
+
   private async loadChildren(connId: string, nodeId: string): Promise<void> {
     this.loadingNodes.add(nodeId);
     this.loadingNodes = new Set(this.loadingNodes);
@@ -1545,6 +1639,7 @@ class DatabaseStore {
       const children = await api.post<SchemaNode[]>(`${this.connBase(connId)}/schema/children`, {
         path: nodeId,
         filter: filter || undefined,
+        counts: this.showCounts || undefined,
       });
       this.childrenCache.set(nodeId, children);
       this.childrenCache = new Map(this.childrenCache);

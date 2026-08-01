@@ -26,9 +26,10 @@ use crate::drivers::{mongo_parse, mongo_sql};
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, Column, CompletionContext, CompletionResponse, DbQueryPlan, Engine,
-    IndexDef, NodePath, NodeKind, ObjectDetail, QueryRequest, QueryResult, QueryStats,
-    ResolvedConfig, SchemaNode, TestResult,
+    self, compact_count, Capabilities, Column, CompletionContext, CompletionResponse, DbQueryPlan,
+    Engine, IndexDef, NodeKind, NodePath, ObjectDetail, ObjectHit, ObjectSearchReq,
+    ObjectSearchResult, QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode,
+    TestResult,
 };
 
 /// How many documents to sample when inferring fields/types.
@@ -189,6 +190,92 @@ impl Driver for MongoDriver {
                 Ok(nodes)
             }
         }
+    }
+
+    async fn schema_children_with_counts(
+        &self,
+        cfg: &ResolvedConfig,
+        parent: &NodePath,
+        filter: Option<&str>,
+        counts: bool,
+    ) -> Result<Vec<SchemaNode>> {
+        let nodes = self.schema_children(cfg, parent, filter).await?;
+        // Only collection listings carry a count, and only when asked: this is
+        // one `estimatedDocumentCount` round trip PER collection, which is why
+        // it is a toggle and not the default.
+        if !counts || parent.get("coll").is_some() {
+            return Ok(nodes);
+        }
+        let Some(db_name) = parent.get("db") else { return Ok(nodes) };
+        let client = self.connect(cfg).await?;
+        let db = client.database(db_name);
+        let mut out = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let coll: Collection<Document> = db.collection(&node.label);
+            // Metadata estimate, never a full scan; a failure just omits it.
+            match coll.estimated_document_count().await {
+                Ok(n) => out.push(node.with_detail(compact_count(n as i64))),
+                Err(_) => out.push(node),
+            }
+        }
+        Ok(out)
+    }
+
+    async fn search_objects(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &ObjectSearchReq,
+    ) -> Result<ObjectSearchResult> {
+        if !req.wants("collection") {
+            return Ok(ObjectSearchResult { supported: true, ..Default::default() });
+        }
+        let client = self.connect(cfg).await?;
+        let limit = req.capped();
+        // MongoDB has no cross-database catalog: an all-scope search is one
+        // `listCollections` round trip per database. `scanned` reports the real
+        // cost back to the caller so the UI can be honest about it.
+        let dbs: Vec<String> = if req.all_schemas() {
+            let mut names = client.list_database_names().await.map_err(types::upstream)?;
+            names.sort();
+            names
+        } else {
+            req.schema.clone().into_iter().collect()
+        };
+        let needle = req.q.to_lowercase();
+        let mut hits = Vec::new();
+        let mut truncated = false;
+        let mut scanned = 0usize;
+        for db_name in dbs {
+            if truncated {
+                break;
+            }
+            scanned += 1;
+            let names = match client.database(&db_name).list_collection_names().await {
+                Ok(mut n) => {
+                    n.sort();
+                    n
+                }
+                // A database we cannot list (permissions) must not sink the
+                // whole search — skip it and keep going.
+                Err(_) => continue,
+            };
+            for name in names {
+                if !name.to_lowercase().contains(&needle) {
+                    continue;
+                }
+                if hits.len() == limit {
+                    truncated = true;
+                    break;
+                }
+                hits.push(ObjectHit {
+                    schema: db_name.clone(),
+                    name: name.clone(),
+                    kind: NodeKind::Collection,
+                    path: format!("db:{db_name}/coll:{name}"),
+                });
+            }
+        }
+        Ok(ObjectSearchResult { hits, truncated, scanned, supported: true })
     }
 
     async fn object_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail> {

@@ -250,6 +250,80 @@ impl SchemaNode {
     }
 }
 
+/// Find an object by NAME without expanding the tree. The tree's own filter is
+/// client-side over already-loaded nodes, which cannot find a table inside a
+/// schema you have never opened — this is the server-side answer.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ObjectSearchReq {
+    /// Case-insensitive substring to match against the object name.
+    pub q: String,
+    /// Restrict to one database/schema. Required in practice for `scope=schema`.
+    pub schema: Option<String>,
+    /// `schema` (default — only `schema`) | `all` (everything reachable).
+    pub scope: String,
+    /// Object kinds to match. Empty = the browsable objects (table/view/
+    /// collection). Present from day one so column search can land later
+    /// without a contract change.
+    pub kinds: Vec<String>,
+    /// Hit cap; 0 = the driver's default.
+    pub limit: usize,
+}
+
+impl ObjectSearchReq {
+    /// `true` when the caller asked to sweep every schema (the expensive mode
+    /// on engines without a catalog table).
+    pub fn all_schemas(&self) -> bool {
+        self.scope.eq_ignore_ascii_case("all")
+    }
+    /// Hit cap, clamped so a wide search can never stream an unbounded list.
+    pub fn capped(&self) -> usize {
+        if self.limit == 0 { DEFAULT_SEARCH_LIMIT } else { self.limit.min(MAX_SEARCH_LIMIT) }
+    }
+    /// `true` when this kind should be returned (empty `kinds` = all objects).
+    pub fn wants(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k.eq_ignore_ascii_case(kind))
+    }
+}
+
+pub const DEFAULT_SEARCH_LIMIT: usize = 200;
+pub const MAX_SEARCH_LIMIT: usize = 1000;
+
+/// Human-short row count for a tree node's dimmed detail (`1.3K`, `20.7K`,
+/// `1.2M`) — the NoSQL-Booster idiom. These are ESTIMATES; the compact form
+/// keeps that honest, since a spuriously exact `1,302` would read as a fact.
+pub fn compact_count(n: i64) -> String {
+    match n {
+        n if n < 0 => "0".into(),
+        n if n < 1_000 => n.to_string(),
+        n if n < 1_000_000 => format!("{:.1}K", n as f64 / 1_000.0),
+        n if n < 1_000_000_000 => format!("{:.1}M", n as f64 / 1_000_000.0),
+        n => format!("{:.1}B", n as f64 / 1_000_000_000.0),
+    }
+}
+
+/// One object-search match. `path` is a real [`NodePath`] id, so revealing a hit
+/// in the tree is the same navigation a browsed node uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectHit {
+    pub schema: String,
+    pub name: String,
+    pub kind: NodeKind,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObjectSearchResult {
+    pub hits: Vec<ObjectHit>,
+    /// The cap was reached — more matches exist.
+    pub truncated: bool,
+    /// How many schemas/databases were actually inspected. Meaningful on
+    /// MongoDB, where an all-schemas sweep is one round trip PER database.
+    pub scanned: usize,
+    /// `false` when the engine has no object namespace to search (Redis).
+    pub supported: bool,
+}
+
 /// A parsed node id. Segments are `kind:value` joined by `/`, e.g.
 /// `db:shopdb/table:orders`. Drivers build/parse these freely.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1204,6 +1278,62 @@ pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_req_defaults_scope_to_this_schema() {
+        // An unset scope must NEVER mean "sweep the whole server": on MongoDB
+        // that is one round trip per database.
+        let req = ObjectSearchReq::default();
+        assert!(!req.all_schemas());
+        assert!(ObjectSearchReq { scope: "all".into(), ..Default::default() }.all_schemas());
+        assert!(ObjectSearchReq { scope: "ALL".into(), ..Default::default() }.all_schemas());
+        assert!(!ObjectSearchReq { scope: "schema".into(), ..Default::default() }.all_schemas());
+    }
+
+    #[test]
+    fn search_limit_is_defaulted_and_capped() {
+        assert_eq!(ObjectSearchReq::default().capped(), DEFAULT_SEARCH_LIMIT);
+        assert_eq!(ObjectSearchReq { limit: 25, ..Default::default() }.capped(), 25);
+        // A caller asking for a million hits gets the ceiling, not a firehose.
+        assert_eq!(
+            ObjectSearchReq { limit: 1_000_000, ..Default::default() }.capped(),
+            MAX_SEARCH_LIMIT
+        );
+    }
+
+    #[test]
+    fn empty_kinds_matches_every_object_kind() {
+        let any = ObjectSearchReq::default();
+        assert!(any.wants("table"));
+        assert!(any.wants("view"));
+        assert!(any.wants("collection"));
+        let only_views = ObjectSearchReq { kinds: vec!["view".into()], ..Default::default() };
+        assert!(only_views.wants("view"));
+        assert!(only_views.wants("VIEW")); // kind matching is case-insensitive
+        assert!(!only_views.wants("table"));
+    }
+
+    #[test]
+    fn compact_count_reads_as_an_estimate() {
+        assert_eq!(compact_count(0), "0");
+        assert_eq!(compact_count(999), "999");
+        assert_eq!(compact_count(1_302), "1.3K");
+        assert_eq!(compact_count(20_700), "20.7K");
+        assert_eq!(compact_count(1_200_000), "1.2M");
+        assert_eq!(compact_count(3_400_000_000), "3.4B");
+        // A negative estimate (some engines report -1 for "unknown") is not a
+        // count — it must not render as one.
+        assert_eq!(compact_count(-1), "0");
+    }
+
+    #[test]
+    fn unsupported_search_result_is_empty_not_an_error() {
+        let r = ObjectSearchResult::default();
+        assert!(!r.supported);
+        assert!(r.hits.is_empty());
+        assert!(!r.truncated);
+        assert_eq!(r.scanned, 0);
+    }
 
     #[test]
     fn cap_cell_truncates_only_oversized_strings() {

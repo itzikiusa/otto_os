@@ -718,7 +718,25 @@
 </script>
 
 <div class="db-page">
-  <aside class="db-side" style={viewport.isPhone ? '' : `width:${sideW}px`}>
+  {#if !viewport.isPhone && database.sidebarCollapsed}
+    <!-- Collapsed rail: never zero-width — an invisible sidebar is unrecoverable. -->
+    <div class="side-rail">
+      <button
+        class="rail-btn"
+        onclick={() => database.toggleSidebar()}
+        title="Show schema (⌘B)"
+        aria-label="Show schema sidebar"
+      >
+        <Icon name="chevronRight" size={13} />
+      </button>
+      <span class="rail-label">SCHEMA</span>
+    </div>
+  {/if}
+  <aside
+    class="db-side"
+    class:collapsed={!viewport.isPhone && database.sidebarCollapsed}
+    style={viewport.isPhone || database.sidebarCollapsed ? '' : `width:${sideW}px`}
+  >
     {#if viewport.isPhone}
       <!-- PHONE: collapsible accordions (one section at a time), unchanged layout
            except the connection list now carries a filter box. -->
@@ -768,10 +786,18 @@
         <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} onclick={() => database.setSideTab('schema')}>Schema</button>
         <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
         <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
+        <span class="grow"></span>
         {#if database.sideTab === 'schema' && database.selectedConnId}
-          <span class="grow"></span>
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
         {/if}
+        <button
+          class="icon-btn"
+          onclick={() => database.toggleSidebar()}
+          title="Hide sidebar (⌘B)"
+          aria-label="Hide sidebar"
+        >
+          <Icon name="chevronLeft" size={12} />
+        </button>
       </div>
       <div class="side-body">
         {#if database.sideTab === 'connections'}
@@ -785,7 +811,7 @@
     {/if}
   </aside>
 
-  {#if !viewport.isPhone}
+  {#if !viewport.isPhone && !database.sidebarCollapsed}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="side-resizer"
@@ -2098,6 +2124,43 @@
   /* Draggable divider between the connections sidebar and the main area. Sits flush
      against the sidebar's inline-end border; a hit-area wider than its visible line
      makes it easy to grab. */
+  /* Collapsed schema sidebar: a 28px rail that can always bring itself back. */
+  .side-rail {
+    flex: 0 0 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-right: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    background: var(--surface, #1c1c1e);
+  }
+  .rail-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-radius: var(--radius-s, 5px);
+    background: var(--surface-2, #323238);
+    color: var(--text, #f2f2f5);
+    cursor: pointer;
+  }
+  .rail-btn:hover {
+    border-color: var(--accent, #0a84ff);
+  }
+  .rail-label {
+    writing-mode: vertical-rl;
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--text-dim, #98989f);
+    user-select: none;
+  }
+  .db-side.collapsed {
+    display: none;
+  }
+
   .side-resizer {
     flex: none;
     width: 5px;
