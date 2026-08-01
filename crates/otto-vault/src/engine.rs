@@ -1079,28 +1079,33 @@ impl VaultEngine {
         let edges_raw = self.store.all_edges(id).await?;
         let include_reserved = o.reserved;
         let orphans_ok = o.orphans.unwrap_or(true);
-        let group_by_type = o.group_by == "type";
+
+        // Per-note tags. Loaded unconditionally: they are a filterable node
+        // ATTRIBUTE regardless of whether `tags` also draws them as nodes.
+        let mut note_tags: HashMap<&str, Vec<String>> = HashMap::new();
+        let tag_rows = self.store.all_note_tags(id).await?;
+        for (p, tag) in &tag_rows {
+            note_tags.entry(p.as_str()).or_default().push(tag.clone());
+        }
 
         // Node table: notes first.
         let mut index: HashMap<String, u32> = HashMap::new();
-        let mut paths: Vec<String> = Vec::new();
-        let mut titles: Vec<String> = Vec::new();
-        let mut flags: Vec<u8> = Vec::new();
-        let mut group_key: Vec<String> = Vec::new();
+        let mut nodes = NodeTable::default();
         for (p, t, ty, reserved) in &notes {
             if *reserved && !include_reserved {
                 continue;
             }
-            let gk = if group_by_type {
-                ty.clone().unwrap_or_else(|| "—".to_string())
-            } else {
-                p.split_once('/').map(|(d, _)| d.to_string()).unwrap_or_else(|| "/".to_string())
-            };
-            index.insert(p.clone(), paths.len() as u32);
-            paths.push(p.clone());
-            titles.push(t.clone());
-            flags.push(if *reserved { NODE_RESERVED } else { 0 });
-            group_key.push(gk);
+            let service =
+                p.split_once('/').map(|(d, _)| d.to_string()).unwrap_or_else(|| SERVICE_ROOT.into());
+            let i = nodes.push(
+                p.clone(),
+                t.clone(),
+                if *reserved { NODE_RESERVED } else { 0 },
+                ty.clone().unwrap_or_default(),
+                service,
+                note_tags.remove(p.as_str()).unwrap_or_default(),
+            );
+            index.insert(p.clone(), i);
         }
 
         let mut edge_list: Vec<(u32, u32)> = Vec::new();
@@ -1119,12 +1124,14 @@ impl VaultEngine {
                 let Some(&si) = index.get(&src) else { continue };
                 let key = raw.trim().to_lowercase();
                 let gi = *ghost_ix.entry(key).or_insert_with(|| {
-                    let i = paths.len() as u32;
-                    paths.push(format!("ghost:{raw}"));
-                    titles.push(raw.clone());
-                    flags.push(NODE_GHOST);
-                    group_key.push("unresolved".to_string());
-                    i
+                    nodes.push(
+                        format!("ghost:{raw}"),
+                        raw.clone(),
+                        NODE_GHOST,
+                        TYPE_GHOST.into(),
+                        SERVICE_GHOST.into(),
+                        Vec::new(),
+                    )
                 });
                 edge_list.push((si, gi));
             }
@@ -1133,15 +1140,17 @@ impl VaultEngine {
         // Tag nodes.
         if o.tags {
             let mut tag_ix: HashMap<String, u32> = HashMap::new();
-            for (p, tag) in self.store.all_note_tags(id).await? {
-                let Some(&si) = index.get(&p) else { continue };
+            for (p, tag) in &tag_rows {
+                let Some(&si) = index.get(p) else { continue };
                 let ti = *tag_ix.entry(tag.clone()).or_insert_with(|| {
-                    let i = paths.len() as u32;
-                    paths.push(format!("tag:{tag}"));
-                    titles.push(format!("#{tag}"));
-                    flags.push(NODE_TAG);
-                    group_key.push("tags".to_string());
-                    i
+                    nodes.push(
+                        format!("tag:{tag}"),
+                        format!("#{tag}"),
+                        NODE_TAG,
+                        TYPE_TAG.into(),
+                        SERVICE_TAGS.into(),
+                        Vec::new(),
+                    )
                 });
                 edge_list.push((si, ti));
             }
@@ -1176,26 +1185,13 @@ impl VaultEngine {
                 }
                 frontier = next;
             }
-            let mut remap: HashMap<u32, u32> = HashMap::new();
-            let mut np = Vec::new();
-            let mut nt = Vec::new();
-            let mut nf = Vec::new();
-            let mut ng = Vec::new();
-            for i in 0..paths.len() as u32 {
-                if keep.contains(&i) {
-                    remap.insert(i, np.len() as u32);
-                    np.push(paths[i as usize].clone());
-                    nt.push(titles[i as usize].clone());
-                    nf.push(flags[i as usize]);
-                    ng.push(group_key[i as usize].clone());
-                }
-            }
+            let remap = nodes.retain(&keep);
             edge_list.retain(|(a, b)| keep.contains(a) && keep.contains(b));
             let edges: Vec<u32> = edge_list
                 .iter()
                 .flat_map(|(a, b)| [remap[a], remap[b]])
                 .collect();
-            return Ok(finish_graph(np, nt, nf, ng, edges, false, orphans_ok));
+            return Ok(finish_graph(nodes, edges, false, orphans_ok));
         }
 
         // Full mode: edge budget (degree-prioritized, deterministic).
@@ -1203,7 +1199,7 @@ impl VaultEngine {
         let mut truncated = false;
         if edge_list.len() > budget {
             truncated = true;
-            let mut deg: Vec<u32> = vec![0; paths.len()];
+            let mut deg: Vec<u32> = vec![0; nodes.len()];
             for (a, b) in &edge_list {
                 deg[*a as usize] += 1;
                 deg[*b as usize] += 1;
@@ -1214,56 +1210,175 @@ impl VaultEngine {
             edge_list.truncate(budget);
         }
         let edges: Vec<u32> = edge_list.iter().flat_map(|(a, b)| [*a, *b]).collect();
-        Ok(finish_graph(paths, titles, flags, group_key, edges, truncated, orphans_ok))
+        Ok(finish_graph(nodes, edges, truncated, orphans_ok))
     }
 }
 
-/// Compact group keys into u16 ids + drop orphans when asked.
-fn finish_graph(
+/// The node table under construction — parallel arrays kept in lockstep so a
+/// single `retain` can prune every attribute at once.
+#[derive(Default)]
+struct NodeTable {
     paths: Vec<String>,
     titles: Vec<String>,
     flags: Vec<u8>,
-    group_key: Vec<String>,
+    /// Raw frontmatter `type` (`""` = untyped); normalized at wire time.
+    type_raw: Vec<String>,
+    service: Vec<String>,
+    tags: Vec<Vec<String>>,
+}
+
+impl NodeTable {
+    fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    fn push(
+        &mut self,
+        path: String,
+        title: String,
+        flags: u8,
+        type_raw: String,
+        service: String,
+        tags: Vec<String>,
+    ) -> u32 {
+        let i = self.paths.len() as u32;
+        self.paths.push(path);
+        self.titles.push(title);
+        self.flags.push(flags);
+        self.type_raw.push(type_raw);
+        self.service.push(service);
+        self.tags.push(tags);
+        i
+    }
+
+    /// Keep only `keep` (order-preserving); returns the old → new index map.
+    fn retain(&mut self, keep: &HashSet<u32>) -> HashMap<u32, u32> {
+        let mut remap = HashMap::with_capacity(keep.len());
+        let mut next = 0u32;
+        let mut i = 0u32;
+        self.paths.retain(|_| {
+            let k = keep.contains(&i);
+            if k {
+                remap.insert(i, next);
+                next += 1;
+            }
+            i += 1;
+            k
+        });
+        self.titles = take_kept(std::mem::take(&mut self.titles), &remap);
+        self.flags = take_kept(std::mem::take(&mut self.flags), &remap);
+        self.type_raw = take_kept(std::mem::take(&mut self.type_raw), &remap);
+        self.service = take_kept(std::mem::take(&mut self.service), &remap);
+        self.tags = take_kept(std::mem::take(&mut self.tags), &remap);
+        remap
+    }
+}
+
+/// Keep the entries whose original index survived into `remap`.
+fn take_kept<T>(v: Vec<T>, remap: &HashMap<u32, u32>) -> Vec<T> {
+    v.into_iter()
+        .enumerate()
+        .filter(|(i, _)| remap.contains_key(&(*i as u32)))
+        .map(|(_, x)| x)
+        .collect()
+}
+
+/// Intern a per-node string attribute into ids + a label table.
+fn intern(values: &[String]) -> (Vec<u16>, Vec<String>) {
+    let mut ids: HashMap<&str, u16> = HashMap::new();
+    let mut labels: Vec<String> = Vec::new();
+    let out = values
+        .iter()
+        .map(|v| {
+            *ids.entry(v.as_str()).or_insert_with(|| {
+                labels.push(v.clone());
+                (labels.len() - 1) as u16
+            })
+        })
+        .collect();
+    (out, labels)
+}
+
+/// Intern OKF types case-insensitively, so `Flow` and `flow` land in ONE bucket.
+/// The label is the most frequent original casing (ties → lexicographically
+/// smallest, keeping the payload deterministic across scans).
+fn intern_types(values: &[String]) -> (Vec<u16>, Vec<String>) {
+    let mut ids: HashMap<String, u16> = HashMap::new();
+    let mut casings: Vec<HashMap<String, usize>> = Vec::new();
+    let mut out = Vec::with_capacity(values.len());
+    for v in values {
+        let display = if v.trim().is_empty() { TYPE_UNTYPED } else { v.trim() };
+        let id = *ids.entry(display.to_lowercase()).or_insert_with(|| {
+            casings.push(HashMap::new());
+            (casings.len() - 1) as u16
+        });
+        *casings[id as usize].entry(display.to_string()).or_default() += 1;
+        out.push(id);
+    }
+    let labels = casings
+        .iter()
+        .map(|c| {
+            c.iter()
+                .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+                .map(|(s, _)| s.clone())
+                .unwrap_or_default()
+        })
+        .collect();
+    (out, labels)
+}
+
+/// Flatten per-node tag lists into CSR: node `i` owns `ids[off[i]..off[i+1]]`.
+fn intern_tags(per_node: &[Vec<String>]) -> (Vec<u32>, Vec<u16>, Vec<String>) {
+    let mut ix: HashMap<&str, u16> = HashMap::new();
+    let mut labels: Vec<String> = Vec::new();
+    let mut off: Vec<u32> = Vec::with_capacity(per_node.len() + 1);
+    let mut ids: Vec<u16> = Vec::new();
+    off.push(0);
+    for tags in per_node {
+        for t in tags {
+            let id = *ix.entry(t.as_str()).or_insert_with(|| {
+                labels.push(t.clone());
+                (labels.len() - 1) as u16
+            });
+            ids.push(id);
+        }
+        off.push(ids.len() as u32);
+    }
+    (off, ids, labels)
+}
+
+/// Drop orphans when asked, then compact the node attributes into id + label
+/// tables for the wire.
+fn finish_graph(
+    mut nodes: NodeTable,
     edges: Vec<u32>,
     truncated: bool,
     orphans_ok: bool,
 ) -> GraphPayload {
-    let (paths, titles, flags, group_key, edges) = if orphans_ok {
-        (paths, titles, flags, group_key, edges)
+    let edges = if orphans_ok {
+        edges
     } else {
-        let mut connected: HashSet<u32> = HashSet::new();
-        for e in &edges {
-            connected.insert(*e);
-        }
-        let mut remap: HashMap<u32, u32> = HashMap::new();
-        let mut np = Vec::new();
-        let mut nt = Vec::new();
-        let mut nf = Vec::new();
-        let mut ng = Vec::new();
-        for i in 0..paths.len() as u32 {
-            if connected.contains(&i) {
-                remap.insert(i, np.len() as u32);
-                np.push(paths[i as usize].clone());
-                nt.push(titles[i as usize].clone());
-                nf.push(flags[i as usize]);
-                ng.push(group_key[i as usize].clone());
-            }
-        }
-        let edges = edges.iter().map(|e| remap[e]).collect();
-        (np, nt, nf, ng, edges)
+        let connected: HashSet<u32> = edges.iter().copied().collect();
+        let remap = nodes.retain(&connected);
+        edges.iter().map(|e| remap[e]).collect()
     };
-    let mut label_ix: HashMap<String, u16> = HashMap::new();
-    let mut group_labels: Vec<String> = Vec::new();
-    let groups: Vec<u16> = group_key
-        .into_iter()
-        .map(|g| {
-            *label_ix.entry(g.clone()).or_insert_with(|| {
-                group_labels.push(g);
-                (group_labels.len() - 1) as u16
-            })
-        })
-        .collect();
-    GraphPayload { paths, titles, groups, group_labels, flags, edges, truncated }
+    let (types, type_labels) = intern_types(&nodes.type_raw);
+    let (services, service_labels) = intern(&nodes.service);
+    let (tag_off, tag_ids, tag_labels) = intern_tags(&nodes.tags);
+    GraphPayload {
+        paths: nodes.paths,
+        titles: nodes.titles,
+        types,
+        type_labels,
+        services,
+        service_labels,
+        tag_off,
+        tag_ids,
+        tag_labels,
+        flags: nodes.flags,
+        edges,
+        truncated,
+    }
 }
 
 /// New raw target for a link whose destination moved. Preserves the author's

@@ -181,23 +181,42 @@ pub struct GraphOpts {
     pub ghosts: bool,
     /// Server-side edge budget for `full` mode (default 2_000_000).
     pub edge_budget: usize,
-    /// Group nodes by `folder` (default) or `type` (OKF frontmatter type).
-    pub group_by: String,
 }
 
 /// Compact wire format: parallel arrays for nodes, a flat `[src,dst,...]`
 /// index-pair array for edges. `flags` bit 0 = ghost (unresolved), bit 1 =
 /// tag node, bit 2 = reserved, bit 3 = attachment.
+///
+/// `types`/`services`/`tag_*` are the per-node attributes the client filters and
+/// groups on — they are indices into the parallel `*_labels` tables, so the wire
+/// stays compact on a 9k-note vault. Tags are CSR-encoded: node `i` owns
+/// `tag_ids[tag_off[i]..tag_off[i + 1]]`, and `tag_off` has `n + 1` entries.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphPayload {
     pub paths: Vec<String>,
     pub titles: Vec<String>,
-    pub groups: Vec<u16>,
-    pub group_labels: Vec<String>,
+    /// Normalized OKF frontmatter type per node (case-folded into one bucket).
+    pub types: Vec<u16>,
+    pub type_labels: Vec<String>,
+    /// Top-level folder per node — the repo/service bundle in an OKF vault.
+    pub services: Vec<u16>,
+    pub service_labels: Vec<String>,
+    pub tag_off: Vec<u32>,
+    pub tag_ids: Vec<u16>,
+    pub tag_labels: Vec<String>,
     pub flags: Vec<u8>,
     pub edges: Vec<u32>,
     pub truncated: bool,
 }
+
+/// Synthetic attribute buckets for nodes that are not notes, and for notes
+/// whose frontmatter carries no `type`.
+pub const TYPE_UNTYPED: &str = "untyped";
+pub const TYPE_GHOST: &str = "unresolved";
+pub const TYPE_TAG: &str = "tag";
+pub const SERVICE_ROOT: &str = "/";
+pub const SERVICE_GHOST: &str = "unresolved";
+pub const SERVICE_TAGS: &str = "tags";
 
 pub const NODE_GHOST: u8 = 1;
 pub const NODE_TAG: u8 = 2;

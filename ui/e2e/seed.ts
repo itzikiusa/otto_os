@@ -60,7 +60,7 @@ export async function seedVaultDir(
   ctx: APIRequestContext,
   base: string,
   workspaceId: string,
-  opts: { notes?: number } = {},
+  opts: { notes?: number; services?: number } = {},
 ): Promise<{ vaultId: number; dir: string }> {
   const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-vault-'));
   const fs = await import('node:fs');
@@ -131,6 +131,22 @@ export async function seedVaultDir(
       );
     }
   }
+  // Optional synthetic service bundles: one top-level dir per "service", each
+  // with a Service note and a Flow note. Gives the graph's focus filters enough
+  // distinct services/types/tags to overflow their lists.
+  const svcCount = opts.services ?? 0;
+  for (let s = 0; s < svcCount; s++) {
+    const name = `svc-${String(s).padStart(2, '0')}`;
+    fs.mkdirSync(join(dir, name, 'flows'), { recursive: true });
+    writeFileSync(
+      join(dir, name, `${name}.md`),
+      `---\ntype: Service\ntitle: ${name}\ndescription: Synthetic service ${s}.\ntags: [svc, ${name}]\n---\n\nCalls [[auth-api]].\n`,
+    );
+    writeFileSync(
+      join(dir, name, 'flows', 'begin.md'),
+      `---\ntype: Flow\ntitle: ${name} begin\ndescription: Synthetic flow ${s}.\ntags: [flow, ${name}]\n---\n\nStarts at [[${name}]] then [[orders-api]].\n`,
+    );
+  }
   const v = await postJson(ctx, `${base}/api/v1/workspaces/${workspaceId}/vault/vaults`, {
     name: 'E2E Vault',
     root_path: dir,
@@ -142,7 +158,7 @@ export async function seedVaultDir(
     const st = await (
       await ctx.get(`${base}/api/v1/workspaces/${workspaceId}/vault/vaults/${vaultId}/status`)
     ).json();
-    if (st.scan_state === 'idle' && st.notes >= 4 + extra) break;
+    if (st.scan_state === 'idle' && st.notes >= 4 + extra + svcCount * 2) break;
     await new Promise((r) => setTimeout(r, 250));
   }
   return { vaultId, dir };

@@ -100,7 +100,6 @@ export interface VaultGraphQuery {
   reserved?: boolean;
   ghosts?: boolean;
   edge_budget?: number;
-  group_by?: 'folder' | 'type';
 }
 
 export function vaultGraph(ws: string, id: number, q: VaultGraphQuery = {}) {

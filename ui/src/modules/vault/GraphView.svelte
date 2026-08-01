@@ -9,8 +9,14 @@
   // culling on nodes AND edges, a uniform spatial grid for hover/click/drag
   // hit tests (never O(n) per mousemove), degree-capped label budget, and a
   // single dirty-flag rAF loop that only repaints when something changed.
-  import { vaultGraph, type VaultGraphQuery } from '../../lib/api/vault';
-  import type { VaultGraphPayload } from '../../lib/api/types';
+  //
+  // The payload the server sends is the RAW graph; it is never rendered
+  // directly. `project()` sits in between — it applies the focus filters
+  // (service / type / tag / anchor+hops) and the optional service rollup, and
+  // only its output reaches the renderer and the worker. That keeps every
+  // filter toggle a pure in-browser index walk: no refetch, no relayout stall.
+  import { vaultGraph, vaultSwitcher, type VaultGraphQuery } from '../../lib/api/vault';
+  import type { VaultGraphPayload, VaultSwitchHit } from '../../lib/api/types';
   import { vault } from './vault.svelte';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
 
@@ -27,13 +33,35 @@
   const F_GHOST = 1; // unresolved wikilink target
   const F_TAG = 2; // tag node
   const F_RESERVED = 4; // reserved file (openable, non-markdown)
+  const F_GROUP = 128; // client-only: a rolled-up service/type node
 
-  // ── Payload data (plain lets — big arrays must NOT become $state proxies) ──
+  // ── Raw payload (plain lets — big arrays must NOT become $state proxies) ──
+  let rawPaths: string[] = [];
+  let rawTitles: string[] = [];
+  let rawFlags = new Uint8Array(0);
+  let rawTypes = new Uint16Array(0);
+  let rawServices = new Uint16Array(0);
+  let rawTagOff = new Uint32Array(0);
+  let rawTagIds = new Uint16Array(0);
+  let rawEdges = new Uint32Array(0);
+  let typeLabels: string[] = [];
+  let serviceLabels: string[] = [];
+  let tagLabels: string[] = [];
+  let rawIndex = new Map<string, number>(); // path → raw node index (anchors)
+  let rawN = 0;
+  let rawE = 0;
+  // Raw adjacency (CSR) — rebuilt per payload, walked by the anchor BFS.
+  let rawAdjOff = new Int32Array(1);
+  let rawAdjList = new Int32Array(0);
+
+  // ── Projected data (what actually renders) ──────────────────────────────
   let paths: string[] = [];
   let titles: string[] = [];
+  let metas: string[] = []; // extra tooltip line (rolled nodes: member counts)
   let flagsArr = new Uint8Array(0);
   let groupsArr = new Uint16Array(0);
   let groupLabels: string[] = [];
+  let edgeW: Float32Array | null = null; // per-edge weight (rollup only)
   let edges = new Uint32Array(0); // flat [a,b,…] kept for rendering
   let n = 0;
   let E = 0;
@@ -55,12 +83,14 @@
   let alphaLive = $state(0); // last tick's alpha (drives "simulating…")
   let stopped = $state(false);
   let hoverIdx = $state(-1);
-  let hoverTip = $state({ x: 0, y: 0, title: '' });
+  let hoverTip = $state({ x: 0, y: 0, title: '', meta: '' });
   let draggingNode = $state(false); // suppresses the tooltip while dragging
   let dataRev = $state(0); // bumped per adopted payload (re-runs dependent effects)
   let panelOpen = $state(true);
+  let rawNodeCount = $state(0); // pre-filter totals, for the "312 / 9,179" readout
+  let rawEdgeCount = $state(0);
 
-  // Filters (all re-fetch — the server prunes, not the client).
+  // Server-side filters (these DO re-fetch — the server prunes them).
   let filter = $state('');
   let showTags = $state(true);
   let showOrphans = $state(true);
@@ -68,8 +98,48 @@
   // Reserved scaffolding (index.md / log.md) is navigation, not knowledge —
   // off by default so the graph shows real notes; the toggle brings them back.
   let showReserved = $state(false);
-  let groupBy = $state<'folder' | 'type'>('folder');
   let depth = $state(2); // local mode only
+
+  // ── Focus filters (client-side — every toggle re-projects, never refetches).
+  // AND across axes, OR within an axis; an empty axis means "no constraint".
+  let selServices = $state<string[]>([]);
+  let selTypes = $state<string[]>([]);
+  let selTags = $state<string[]>([]);
+  let anchorPaths = $state<string[]>([]); // BFS seeds; survive the axes above
+  let hops = $state(1);
+  let rollup = $state<'none' | 'service' | 'type'>('none');
+  let expandedGroups = $state<string[]>([]); // rolled groups drilled open
+  let colorBy = $state<'service' | 'type'>('service');
+
+  // Facet lists for the rail (label + how many raw nodes carry it).
+  type Facet = { label: string; count: number };
+  let serviceFacets = $state<Facet[]>([]);
+  let typeFacets = $state<Facet[]>([]);
+  let tagFacets = $state<Facet[]>([]);
+  let svcQuery = $state('');
+  let tagQuery = $state('');
+
+  // Anchor typeahead.
+  let anchorQuery = $state('');
+  let anchorHits = $state<VaultSwitchHit[]>([]);
+
+  const hasFocus = $derived(
+    selServices.length > 0 ||
+      selTypes.length > 0 ||
+      selTags.length > 0 ||
+      anchorPaths.length > 0 ||
+      rollup !== 'none',
+  );
+  const svcShown = $derived(matchFacets(serviceFacets, svcQuery));
+  const tagShown = $derived(matchFacets(tagFacets, tagQuery));
+
+  /** Facet list narrowed by its search box; selected entries always stay
+   *  visible so a filtered search box can never hide what you turned on. */
+  function matchFacets(all: Facet[], q: string): Facet[] {
+    const t = q.trim().toLowerCase();
+    if (!t) return all;
+    return all.filter((f) => f.label.toLowerCase().includes(t));
+  }
 
   // Forces (posted live to the worker).
   let fCenter = $state(0.1);
@@ -157,19 +227,272 @@
     };
   }
 
-  // ── Data adoption ───────────────────────────────────────────────────────
-  function adopt(p: VaultGraphPayload): void {
-    paths = p.paths;
-    titles = p.titles;
-    flagsArr = Uint8Array.from(p.flags);
-    groupsArr = Uint16Array.from(p.groups);
-    groupLabels = p.group_labels;
-    edges = Uint32Array.from(p.edges);
+  // ── Raw payload ingestion ───────────────────────────────────────────────
+  /** Adopt a server payload: keep it whole, build the facets, then project. */
+  function ingest(p: VaultGraphPayload): void {
+    rawPaths = p.paths;
+    rawTitles = p.titles;
+    rawFlags = Uint8Array.from(p.flags);
+    rawTypes = Uint16Array.from(p.types);
+    rawServices = Uint16Array.from(p.services);
+    rawTagOff = Uint32Array.from(p.tag_off);
+    rawTagIds = Uint16Array.from(p.tag_ids);
+    rawEdges = Uint32Array.from(p.edges);
+    typeLabels = p.type_labels;
+    serviceLabels = p.service_labels;
+    tagLabels = p.tag_labels;
+    rawN = rawPaths.length;
+    rawE = rawEdges.length >> 1;
+    rawNodeCount = rawN;
+    rawEdgeCount = rawE;
+    truncated = p.truncated;
+
+    rawIndex = new Map();
+    for (let i = 0; i < rawN; i++) rawIndex.set(rawPaths[i], i);
+
+    // Raw CSR adjacency — the anchor BFS walks this, never the edge list.
+    const d = new Uint32Array(rawN);
+    for (let e = 0; e < rawE; e++) {
+      d[rawEdges[e * 2]]++;
+      d[rawEdges[e * 2 + 1]]++;
+    }
+    rawAdjOff = new Int32Array(rawN + 1);
+    for (let i = 0; i < rawN; i++) rawAdjOff[i + 1] = rawAdjOff[i] + d[i];
+    rawAdjList = new Int32Array(rawE * 2);
+    {
+      const cur = Int32Array.from(rawAdjOff.subarray(0, rawN));
+      for (let e = 0; e < rawE; e++) {
+        const a = rawEdges[e * 2], b = rawEdges[e * 2 + 1];
+        rawAdjList[cur[a]++] = b;
+        rawAdjList[cur[b]++] = a;
+      }
+    }
+
+    buildFacets();
+    // Drop selections and anchors the new payload no longer contains, so a
+    // rescan (or a server-side toggle) can't leave the graph filtered to
+    // nothing by an invisible ghost selection.
+    const svc = new Set(serviceLabels), ty = new Set(typeLabels), tg = new Set(tagLabels);
+    selServices = selServices.filter((s) => svc.has(s));
+    selTypes = selTypes.filter((s) => ty.has(s));
+    selTags = selTags.filter((s) => tg.has(s));
+    anchorPaths = anchorPaths.filter((p2) => rawIndex.has(p2));
+    project();
+  }
+
+  /** Facet label + count over the raw nodes (drives the rail's lists). */
+  function buildFacets(): void {
+    const count = (ids: Uint16Array, labels: string[]): Facet[] => {
+      const c = new Uint32Array(labels.length);
+      for (let i = 0; i < ids.length; i++) c[ids[i]]++;
+      return labels
+        .map((label, i) => ({ label, count: c[i] }))
+        .filter((f) => f.count > 0)
+        .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    };
+    serviceFacets = count(rawServices, serviceLabels);
+    typeFacets = count(rawTypes, typeLabels);
+    const tc = new Uint32Array(tagLabels.length);
+    for (let i = 0; i < rawTagIds.length; i++) tc[rawTagIds[i]]++;
+    tagFacets = tagLabels
+      .map((label, i) => ({ label, count: tc[i] }))
+      .filter((f) => f.count > 0)
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  }
+
+  // ── Projection: focus filters + rollup → the rendered graph ─────────────
+  function project(): void {
+    if (rawN === 0) {
+      applyProjection([], [], [], new Uint8Array(0), new Uint32Array(0), null);
+      return;
+    }
+    const svcSel = new Set(selServices);
+    const typeSel = new Set(selTypes);
+    const tagSel = new Set(selTags);
+
+    // 1. Attribute filters — AND across axes, OR within one.
+    let keep = new Uint8Array(rawN);
+    for (let i = 0; i < rawN; i++) {
+      if (svcSel.size && !svcSel.has(serviceLabels[rawServices[i]])) continue;
+      if (typeSel.size && !typeSel.has(typeLabels[rawTypes[i]])) continue;
+      if (tagSel.size) {
+        let hit = false;
+        for (let t = rawTagOff[i]; t < rawTagOff[i + 1] && !hit; t++) {
+          if (tagSel.has(tagLabels[rawTagIds[t]])) hit = true;
+        }
+        if (!hit) continue;
+      }
+      keep[i] = 1;
+    }
+
+    // 2. Anchors + hops — BFS over the ALREADY-FILTERED subgraph, so every
+    // edge you can see is a hop you could have walked. Anchors themselves
+    // survive the axes above unconditionally.
+    if (anchorPaths.length) {
+      const seeds: number[] = [];
+      for (const p of anchorPaths) {
+        const i = rawIndex.get(p);
+        if (i !== undefined) seeds.push(i);
+      }
+      if (seeds.length) {
+        const reach = new Uint8Array(rawN);
+        let frontier: number[] = [];
+        for (const s of seeds) {
+          if (!reach[s]) {
+            reach[s] = 1;
+            frontier.push(s);
+          }
+        }
+        for (let d = 0; d < hops; d++) {
+          const next: number[] = [];
+          for (const u of frontier) {
+            for (let s = rawAdjOff[u]; s < rawAdjOff[u + 1]; s++) {
+              const nb = rawAdjList[s];
+              if (keep[nb] && !reach[nb]) {
+                reach[nb] = 1;
+                next.push(nb);
+              }
+            }
+          }
+          frontier = next;
+          if (!frontier.length) break;
+        }
+        keep = reach;
+      }
+    }
+
+    // 3. Node projection. Without rollup every kept node maps 1:1; with it,
+    // nodes collapse into one node per service/type unless that group has
+    // been drilled open.
+    const rolled = rollup !== 'none';
+    const open = new Set(expandedGroups);
+    const groupOf = (i: number) =>
+      rollup === 'type' ? typeLabels[rawTypes[i]] : serviceLabels[rawServices[i]];
+
+    const pPaths: string[] = [];
+    const pTitles: string[] = [];
+    const pMetas: string[] = [];
+    const pFlags: number[] = [];
+    const pKeys: string[] = []; // color-group key per projected node
+    const pWeight: number[] = []; // members behind a node (1 = a real note)
+    const projOf = new Int32Array(rawN).fill(-1);
+    const groupNode = new Map<string, number>();
+    const internal = new Map<string, number>();
+
+    for (let i = 0; i < rawN; i++) {
+      if (!keep[i]) continue;
+      const g = rolled ? groupOf(i) : '';
+      if (rolled && !open.has(g)) {
+        let gi = groupNode.get(g);
+        if (gi === undefined) {
+          gi = pPaths.length;
+          groupNode.set(g, gi);
+          pPaths.push(`group:${g}`);
+          pTitles.push(g);
+          pMetas.push('');
+          pFlags.push(F_GROUP);
+          pKeys.push(g);
+          pWeight.push(0);
+        }
+        pWeight[gi]++;
+        projOf[i] = gi;
+        continue;
+      }
+      projOf[i] = pPaths.length;
+      pPaths.push(rawPaths[i]);
+      pTitles.push(rawTitles[i]);
+      pMetas.push('');
+      pFlags.push(rawFlags[i]);
+      pKeys.push(colorBy === 'type' ? typeLabels[rawTypes[i]] : serviceLabels[rawServices[i]]);
+      pWeight.push(1);
+    }
+
+    // 4. Edges. The plain path stays allocation-light (map + emit); rollup
+    // aggregates parallel links into one weighted edge per pair.
+    let pEdges: Uint32Array<ArrayBuffer>;
+    let pWeights: Float32Array | null = null;
+    if (!rolled) {
+      const out: number[] = [];
+      for (let e = 0; e < rawE; e++) {
+        const a = projOf[rawEdges[e * 2]], b = projOf[rawEdges[e * 2 + 1]];
+        if (a < 0 || b < 0 || a === b) continue;
+        out.push(a, b);
+      }
+      pEdges = Uint32Array.from(out);
+    } else {
+      const agg = new Map<number, number>();
+      const P = pPaths.length;
+      for (let e = 0; e < rawE; e++) {
+        const ra = rawEdges[e * 2], rb = rawEdges[e * 2 + 1];
+        const a = projOf[ra], b = projOf[rb];
+        if (a < 0 || b < 0) continue;
+        if (a === b) {
+          // Intra-group link: off the canvas, onto the node's tooltip.
+          if (pFlags[a] & F_GROUP) internal.set(pPaths[a], (internal.get(pPaths[a]) ?? 0) + 1);
+          continue;
+        }
+        const key = a < b ? a * P + b : b * P + a;
+        agg.set(key, (agg.get(key) ?? 0) + 1);
+      }
+      pEdges = new Uint32Array(agg.size * 2);
+      pWeights = new Float32Array(agg.size);
+      let w = 0;
+      for (const [key, weight] of agg) {
+        pEdges[w * 2] = Math.floor(key / P);
+        pEdges[w * 2 + 1] = key % P;
+        pWeights[w] = weight;
+        w++;
+      }
+      for (let i = 0; i < pPaths.length; i++) {
+        if (!(pFlags[i] & F_GROUP)) continue;
+        const inner = internal.get(pPaths[i]) ?? 0;
+        pMetas[i] =
+          `${pWeight[i].toLocaleString()} notes` +
+          (inner ? ` · ${inner.toLocaleString()} internal links` : '');
+      }
+    }
+
+    applyProjection(pPaths, pTitles, pMetas, Uint8Array.from(pFlags), pEdges, pWeights, pKeys, pWeight);
+  }
+
+  /** Hand a projected graph to the renderer + layout worker. */
+  function applyProjection(
+    pPaths: string[],
+    pTitles: string[],
+    pMetas: string[],
+    pFlags: Uint8Array<ArrayBuffer>,
+    pEdges: Uint32Array<ArrayBuffer>,
+    pWeights: Float32Array | null,
+    pKeys: string[] = [],
+    pWeight: number[] = [],
+  ): void {
+    paths = pPaths;
+    titles = pTitles;
+    metas = pMetas;
+    flagsArr = pFlags;
+    edges = pEdges;
+    edgeW = pWeights;
+    // Color groups are a client-side derivation now (colorBy), interned here.
+    {
+      const ix = new Map<string, number>();
+      const labels: string[] = [];
+      const g = new Uint16Array(pKeys.length);
+      for (let i = 0; i < pKeys.length; i++) {
+        let id = ix.get(pKeys[i]);
+        if (id === undefined) {
+          id = labels.length;
+          ix.set(pKeys[i], id);
+          labels.push(pKeys[i]);
+        }
+        g[i] = id;
+      }
+      groupsArr = g;
+      groupLabels = labels;
+    }
     n = paths.length;
     E = edges.length >> 1;
     nodeCount = n;
     edgeCount = E;
-    truncated = p.truncated;
 
     // Degrees → world radii (clamped sqrt curve) + CSR adjacency for hover
     // highlighting (neighbors of one node without scanning 2M edges).
@@ -180,7 +503,12 @@
     }
     radii = new Float32Array(n);
     for (let i = 0; i < n; i++) {
-      radii[i] = Math.min(12, Math.max(1.5, 1.5 + Math.sqrt(deg[i]) * 0.6));
+      // A rolled node sizes by the notes BEHIND it, not by its own degree —
+      // otherwise a 400-note service reads the same as a 3-note one.
+      radii[i] =
+        pFlags[i] & F_GROUP
+          ? Math.min(30, Math.max(5, 4 + Math.sqrt(pWeight[i] ?? 1) * 1.4))
+          : Math.min(12, Math.max(1.5, 1.5 + Math.sqrt(deg[i]) * 0.6));
     }
     adjOff = new Int32Array(n + 1);
     for (let i = 0; i < n; i++) adjOff[i + 1] = adjOff[i] + deg[i];
@@ -228,7 +556,11 @@
     dirty = true;
   }
 
-  // ── Fetch (own data via vaultGraph; every filter toggle re-fetches) ──────
+  // ── Fetch (own data via vaultGraph; only the SERVER-side toggles refetch) ─
+  const EMPTY_PAYLOAD: VaultGraphPayload = {
+    paths: [], titles: [], types: [], type_labels: [], services: [], service_labels: [],
+    tag_off: [0], tag_ids: [], tag_labels: [], flags: [], edges: [], truncated: false,
+  };
   let reqSeq = 0;
   $effect(() => {
     const v = vault.current;
@@ -239,7 +571,6 @@
       orphans: showOrphans,
       ghosts: showGhosts,
       reserved: showReserved,
-      group_by: groupBy,
     };
     if (local) {
       q.mode = 'local';
@@ -250,7 +581,7 @@
     }
     if (!v || !wsId || (local && !path)) {
       reqSeq++;
-      adopt({ paths: [], titles: [], groups: [], group_labels: [], flags: [], edges: [], truncated: false });
+      ingest(EMPTY_PAYLOAD);
       return;
     }
     const seq = ++reqSeq;
@@ -258,7 +589,7 @@
     errorMsg = '';
     vaultGraph(wsId, v.id, q)
       .then((p) => {
-        if (seq === reqSeq) adopt(p);
+        if (seq === reqSeq) ingest(p);
       })
       .catch((e: unknown) => {
         if (seq === reqSeq) errorMsg = e instanceof Error ? e.message : String(e);
@@ -266,6 +597,24 @@
       .finally(() => {
         if (seq === reqSeq) loading = false;
       });
+  });
+
+  // Focus filters → re-project in place. No refetch: the raw payload already
+  // carries every attribute these read.
+  // The signature compare stops `ingest`'s own project() from being repeated
+  // when it prunes a selection the fresh payload no longer contains.
+  let lastSig = '';
+  function sigChanged(): boolean {
+    const sig = JSON.stringify([
+      selServices, selTypes, selTags, anchorPaths, hops, rollup, expandedGroups, colorBy,
+    ]);
+    if (sig === lastSig) return false;
+    lastSig = sig;
+    return true;
+  }
+  $effect(() => {
+    // sigChanged() reads every filter — that read is what registers the deps.
+    if (sigChanged()) project();
   });
 
   // Live force params → worker (dataRev keeps a fresh worker in sync too).
@@ -295,6 +644,93 @@
       matched = m;
     }
     dirty = true;
+  });
+
+  // ── Filter actions ──────────────────────────────────────────────────────
+  function toggleIn(list: string[], label: string): string[] {
+    return list.includes(label) ? list.filter((x) => x !== label) : [...list, label];
+  }
+  function toggleGroup(label: string): void {
+    expandedGroups = toggleIn(expandedGroups, label);
+  }
+  function resetFocus(): void {
+    selServices = [];
+    selTypes = [];
+    selTags = [];
+    anchorPaths = [];
+    expandedGroups = [];
+    rollup = 'none';
+    hops = 1;
+    svcQuery = '';
+    tagQuery = '';
+    anchorQuery = '';
+    anchorHits = [];
+  }
+  function addAnchor(path: string): void {
+    if (!anchorPaths.includes(path)) anchorPaths = [...anchorPaths, path];
+    anchorQuery = '';
+    anchorHits = [];
+  }
+
+  // Anchor typeahead — server-side fuzzy over title/aliases/path.
+  let anchorSeq = 0;
+  $effect(() => {
+    const q = anchorQuery.trim();
+    const v = vault.current;
+    const wsId = vault.wsId;
+    if (!q || !v || !wsId) {
+      anchorHits = [];
+      return;
+    }
+    const seq = ++anchorSeq;
+    vaultSwitcher(wsId, v.id, q)
+      .then((hits) => {
+        if (seq === anchorSeq) anchorHits = hits.slice(0, 8);
+      })
+      .catch(() => {
+        if (seq === anchorSeq) anchorHits = [];
+      });
+  });
+
+  // ── Sticky focus, per vault. Labels (never ids) are stored, so a rescan
+  // that renumbers the payload's label tables can't scramble a saved filter.
+  const FILTER_KEY = 'otto.vault.graph.filter.v1';
+  let restoredFor = -1;
+  $effect(() => {
+    const v = vault.current;
+    if (!v || v.id === restoredFor) return;
+    restoredFor = v.id;
+    resetFocus();
+    try {
+      const raw = localStorage.getItem(`${FILTER_KEY}.${v.id}`);
+      if (!raw) return;
+      const s = JSON.parse(raw) as Partial<{
+        services: string[]; types: string[]; tags: string[]; anchors: string[];
+        hops: number; rollup: 'none' | 'service' | 'type'; colorBy: 'service' | 'type';
+      }>;
+      selServices = s.services ?? [];
+      selTypes = s.types ?? [];
+      selTags = s.tags ?? [];
+      anchorPaths = s.anchors ?? [];
+      hops = Math.min(3, Math.max(0, s.hops ?? 1));
+      rollup = s.rollup ?? 'none';
+      colorBy = s.colorBy ?? 'service';
+    } catch {
+      /* unreadable or older shape — the reset above already left it clean */
+    }
+  });
+  $effect(() => {
+    const v = vault.current;
+    const body = JSON.stringify({
+      services: selServices, types: selTypes, tags: selTags,
+      anchors: anchorPaths, hops, rollup, colorBy,
+    });
+    if (!v || v.id !== restoredFor) return; // don't persist over a pending restore
+    try {
+      localStorage.setItem(`${FILTER_KEY}.${v.id}`, body);
+    } catch {
+      /* quota / private mode — sticky filters are a nicety, never a hard fail */
+    }
   });
 
   function toggleSim(): void {
@@ -395,7 +831,7 @@
     if (i >= 0) {
       hoverSet.add(i);
       for (let s = adjOff[i]; s < adjOff[i + 1]; s++) hoverSet.add(adjList[s]);
-      hoverTip = { ...hoverTip, title: titles[i] ?? '' };
+      hoverTip = { ...hoverTip, title: titles[i] ?? '', meta: metas[i] ?? '' };
     }
     dirty = true;
   }
@@ -444,21 +880,42 @@
     const stride = Math.max(1, Math.ceil(E / EDGE_DRAW_BUDGET));
     let eAlpha = Math.min(0.3, 0.3 / Math.sqrt(stride)) + 0.06;
     if (dimming) eAlpha = 0.05;
-    ctx.lineWidth = Math.max(0.4, linkWidth * Math.min(1.5, k));
     ctx.strokeStyle = theme.dim;
     ctx.globalAlpha = eAlpha;
-    ctx.beginPath();
-    for (let e = 0; e < E; e += stride) {
-      const a = edges[e * 2], b = edges[e * 2 + 1];
-      const xa = pos[a * 2], ya = pos[a * 2 + 1];
-      const xb = pos[b * 2], yb = pos[b * 2 + 1];
-      // Cull: both endpoints beyond the same viewport side can't cross it.
-      if ((xa < wx0 && xb < wx0) || (xa > wx1 && xb > wx1)) continue;
-      if ((ya < wy0 && yb < wy0) || (ya > wy1 && yb > wy1)) continue;
-      ctx.moveTo(xa * k + ox, ya * k + oy);
-      ctx.lineTo(xb * k + ox, yb * k + oy);
+    if (edgeW) {
+      // Rolled up: a few hundred edges, each carrying a link count — worth one
+      // stroke apiece so weight reads as thickness. Batching would flatten it.
+      let maxW = 1;
+      for (let e = 0; e < E; e++) if (edgeW[e] > maxW) maxW = edgeW[e];
+      ctx.globalAlpha = Math.max(eAlpha, dimming ? 0.05 : 0.22);
+      for (let e = 0; e < E; e++) {
+        const a = edges[e * 2], b = edges[e * 2 + 1];
+        const xa = pos[a * 2], ya = pos[a * 2 + 1];
+        const xb = pos[b * 2], yb = pos[b * 2 + 1];
+        if ((xa < wx0 && xb < wx0) || (xa > wx1 && xb > wx1)) continue;
+        if ((ya < wy0 && yb < wy0) || (ya > wy1 && yb > wy1)) continue;
+        const t = Math.sqrt(edgeW[e] / maxW); // sqrt: one hub link can't drown the rest
+        ctx.lineWidth = Math.max(0.5, linkWidth * (0.5 + t * 3.5) * Math.min(1.5, k));
+        ctx.beginPath();
+        ctx.moveTo(xa * k + ox, ya * k + oy);
+        ctx.lineTo(xb * k + ox, yb * k + oy);
+        ctx.stroke();
+      }
+    } else {
+      ctx.lineWidth = Math.max(0.4, linkWidth * Math.min(1.5, k));
+      ctx.beginPath();
+      for (let e = 0; e < E; e += stride) {
+        const a = edges[e * 2], b = edges[e * 2 + 1];
+        const xa = pos[a * 2], ya = pos[a * 2 + 1];
+        const xb = pos[b * 2], yb = pos[b * 2 + 1];
+        // Cull: both endpoints beyond the same viewport side can't cross it.
+        if ((xa < wx0 && xb < wx0) || (xa > wx1 && xb > wx1)) continue;
+        if ((ya < wy0 && yb < wy0) || (ya > wy1 && yb > wy1)) continue;
+        ctx.moveTo(xa * k + ox, ya * k + oy);
+        ctx.lineTo(xb * k + ox, yb * k + oy);
+      }
+      ctx.stroke();
     }
-    ctx.stroke();
 
     // Hovered node's edges: second batched path, accent, full strength
     // (drawn from adjacency — no edge scan).
@@ -513,6 +970,16 @@
         ctx.beginPath();
         ctx.arc(sx, sy, sr, 0, Math.PI * 2);
         ctx.fill();
+        if (f & F_GROUP) {
+          // Rolled node: a ring marks it as a container you can click open.
+          ctx.strokeStyle = theme.text;
+          ctx.globalAlpha = a * 0.55;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sx, sy, sr + 2, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.globalAlpha = a;
+        }
         if (f & F_GHOST && sr > 3) {
           // Ghost: dashed ring marks the unresolved target.
           ctx.strokeStyle = theme.dim;
@@ -625,16 +1092,26 @@
     // Idle move: hover pick (grid — never O(n)) + tooltip anchor.
     const w = toWorld(p.x, p.y);
     setHover(pick(w.x, w.y));
-    if (hoverIdx >= 0) hoverTip = { x: p.x + 14, y: p.y + 10, title: titles[hoverIdx] ?? '' };
+    if (hoverIdx >= 0) {
+      hoverTip = {
+        x: p.x + 14, y: p.y + 10,
+        title: titles[hoverIdx] ?? '', meta: metas[hoverIdx] ?? '',
+      };
+    }
   }
 
   function onPointerUp(e: PointerEvent): void {
     if (dragMode === 'none') return; // capture-less up (e.g. re-entry) — ignore
     if (dragMode === 'node' && !movedFar) {
-      // A stationary press on a node is a click: open real notes (plain notes
-      // and reserved files); ghost/tag nodes have nothing to open.
+      // A stationary press on a node is a click: a rolled-up node drills open
+      // (that group alone expands into its notes); real notes open; ghost/tag
+      // nodes have nothing to open.
       const f = flagsArr[dragI];
-      if (!(f & F_GHOST) && !(f & F_TAG)) void vault.open(paths[dragI]);
+      if (f & F_GROUP) {
+        toggleGroup(titles[dragI]);
+      } else if (!(f & F_GHOST) && !(f & F_TAG)) {
+        void vault.open(paths[dragI]);
+      }
     }
     if (dragMode === 'node') rebuildGrid(); // dropped node moved — grid must know
     dragMode = 'none';
@@ -735,13 +1212,25 @@
     <div class="empty">
       {#if errorMsg}Graph failed: {errorMsg}
       {:else if local && !vault.notePath}Open a note to see its local graph
+      {:else if hasFocus && rawNodeCount > 0}
+        <span>
+          Nothing matches this focus — {rawNodeCount.toLocaleString()} nodes filtered out.
+          <button class="mini" onclick={resetFocus}>Reset focus</button>
+        </span>
       {:else}Nothing to graph — the vault has no notes yet{/if}
     </div>
   {/if}
 
   <!-- Status strip: counts, truncation warning, sim state, stop/resume. -->
   <div class="statusbar">
-    <span class="counts">{nodeCount.toLocaleString()} nodes · {edgeCount.toLocaleString()} links</span>
+    <span class="counts">
+      {#if hasFocus}
+        {nodeCount.toLocaleString()} / {rawNodeCount.toLocaleString()} nodes ·
+        {edgeCount.toLocaleString()} / {rawEdgeCount.toLocaleString()} links
+      {:else}
+        {nodeCount.toLocaleString()} nodes · {edgeCount.toLocaleString()} links
+      {/if}
+    </span>
     {#if truncated}
       <span class="chip warn" title="Edge budget hit — some links were omitted by the server">truncated</span>
     {/if}
@@ -765,21 +1254,166 @@
       <div class="panel-body">
         <input class="filter" type="text" placeholder="Filter titles…" bind:value={filter} />
 
-        <div class="sec">Filters</div>
-        <label class="chk"><input type="checkbox" bind:checked={showTags} /> Tags</label>
-        <label class="chk"><input type="checkbox" bind:checked={showOrphans} /> Orphans</label>
-        <label class="chk"><input type="checkbox" bind:checked={showGhosts} /> Unresolved</label>
-        <label class="chk"><input type="checkbox" bind:checked={showReserved} /> Reserved files</label>
+        <div class="sec">
+          Focus
+          {#if hasFocus}
+            <button class="link" onclick={resetFocus}>reset</button>
+          {/if}
+        </div>
+
+        <!-- Anchors: keep only what's within N hops of these notes. -->
+        {#if anchorPaths.length}
+          <div class="chips">
+            {#each anchorPaths as a (a)}
+              <button
+                class="pill"
+                title={a}
+                onclick={() => (anchorPaths = anchorPaths.filter((x) => x !== a))}
+              >
+                {a.split('/').pop()?.replace(/\.md$/, '')} ×
+              </button>
+            {/each}
+          </div>
+          <label class="row">
+            <span>Hops</span>
+            <input type="range" min="0" max="3" step="1" bind:value={hops} />
+            <span class="val">{hops}</span>
+          </label>
+        {/if}
+        <div class="typeahead">
+          <input
+            class="filter"
+            type="text"
+            placeholder="Anchor on a note…"
+            bind:value={anchorQuery}
+          />
+          {#if anchorHits.length}
+            <ul class="hits">
+              {#each anchorHits as h (h.path)}
+                <li>
+                  <button onclick={() => addAnchor(h.path)} title={h.path}>{h.title}</button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+
+        <!-- Services (top-level bundles). -->
+        {#if serviceFacets.length > 1}
+          <div class="sec sub">
+            Services
+            {#if selServices.length}
+              <button class="link" onclick={() => (selServices = [])}>all</button>
+            {/if}
+          </div>
+          {#if serviceFacets.length > 8}
+            <input class="filter" type="text" placeholder="Find service…" bind:value={svcQuery} />
+          {/if}
+          <div class="facets">
+            {#each svcShown as f (f.label)}
+              <label class="chk">
+                <input
+                  type="checkbox"
+                  checked={selServices.includes(f.label)}
+                  onchange={() => (selServices = toggleIn(selServices, f.label))}
+                />
+                <span class="fl" title={f.label}>{f.label}</span>
+                <span class="fc">{f.count.toLocaleString()}</span>
+              </label>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- Types (OKF frontmatter `type`, case-folded server-side). -->
+        {#if typeFacets.length > 1}
+          <div class="sec sub">
+            Types
+            {#if selTypes.length}
+              <button class="link" onclick={() => (selTypes = [])}>all</button>
+            {/if}
+          </div>
+          <div class="facets">
+            {#each typeFacets as f (f.label)}
+              <label class="chk">
+                <input
+                  type="checkbox"
+                  checked={selTypes.includes(f.label)}
+                  onchange={() => (selTypes = toggleIn(selTypes, f.label))}
+                />
+                <span class="fl" title={f.label}>{f.label}</span>
+                <span class="fc">{f.count.toLocaleString()}</span>
+              </label>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- Tags (cut across services). -->
+        {#if tagFacets.length}
+          <div class="sec sub">
+            Tags
+            {#if selTags.length}
+              <button class="link" onclick={() => (selTags = [])}>all</button>
+            {/if}
+          </div>
+          {#if tagFacets.length > 8}
+            <input class="filter" type="text" placeholder="Find tag…" bind:value={tagQuery} />
+          {/if}
+          <div class="facets">
+            {#each tagShown as f (f.label)}
+              <label class="chk">
+                <input
+                  type="checkbox"
+                  checked={selTags.includes(f.label)}
+                  onchange={() => (selTags = toggleIn(selTags, f.label))}
+                />
+                <span class="fl" title={f.label}>#{f.label}</span>
+                <span class="fc">{f.count.toLocaleString()}</span>
+              </label>
+            {/each}
+          </div>
+        {/if}
+
+        <div class="sec">View</div>
         <label class="row">
-          <span>Group by</span>
+          <span>Roll up</span>
           <select
-            value={groupBy}
-            onchange={(e) => (groupBy = e.currentTarget.value as 'folder' | 'type')}
+            value={rollup}
+            onchange={(e) => {
+              rollup = e.currentTarget.value as 'none' | 'service' | 'type';
+              expandedGroups = [];
+            }}
           >
-            <option value="folder">folder</option>
+            <option value="none">off — notes</option>
+            <option value="service">by service</option>
+            <option value="type">by type</option>
+          </select>
+        </label>
+        {#if rollup !== 'none'}
+          <div class="hint">Click a node to expand that group into its notes.</div>
+          {#if expandedGroups.length}
+            <div class="chips">
+              {#each expandedGroups as g (g)}
+                <button class="pill" onclick={() => toggleGroup(g)}>{g} ×</button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+        <label class="row">
+          <span>Color by</span>
+          <select
+            value={colorBy}
+            onchange={(e) => (colorBy = e.currentTarget.value as 'service' | 'type')}
+          >
+            <option value="service">service</option>
             <option value="type">type</option>
           </select>
         </label>
+
+        <div class="sec">Include</div>
+        <label class="chk"><input type="checkbox" bind:checked={showTags} /> Tag nodes</label>
+        <label class="chk"><input type="checkbox" bind:checked={showOrphans} /> Orphans</label>
+        <label class="chk"><input type="checkbox" bind:checked={showGhosts} /> Unresolved</label>
+        <label class="chk"><input type="checkbox" bind:checked={showReserved} /> Reserved files</label>
         {#if local}
           <label class="row">
             <span>Depth</span>
@@ -832,7 +1466,9 @@
 
   <!-- Hover tooltip (title). -->
   {#if hoverIdx >= 0 && !draggingNode && hoverTip.title}
-    <div class="tooltip" style="left:{hoverTip.x}px; top:{hoverTip.y}px">{hoverTip.title}</div>
+    <div class="tooltip" style="left:{hoverTip.x}px; top:{hoverTip.y}px">
+      {hoverTip.title}{#if hoverTip.meta}<span class="tmeta">{hoverTip.meta}</span>{/if}
+    </div>
   {/if}
 </div>
 
@@ -867,6 +1503,10 @@
     pointer-events: none;
     padding: 20px;
     text-align: center;
+  }
+  .empty button {
+    pointer-events: auto; /* the overlay is inert; its escape hatch must not be */
+    margin-left: 6px;
   }
 
   .statusbar {
@@ -960,12 +1600,112 @@
     color: var(--text, #f2f2f5);
   }
   .sec {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px;
     margin-top: 6px;
     font-size: 9px;
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-dim, #98989f);
+  }
+  .sec.sub {
+    margin-top: 8px;
+    opacity: 0.85;
+  }
+  .link {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent, #0a84ff);
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .hint {
+    color: var(--text-dim, #98989f);
+    font-size: 10px;
+    line-height: 1.35;
+  }
+
+  /* Facet lists are data-driven and long (40 services, 1k+ tags): cap the
+     height and scroll rather than growing the panel past the viewport. */
+  .facets {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 148px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  .fl {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fc {
+    flex: 0 0 auto;
+    color: var(--text-dim, #98989f);
+    font-variant-numeric: tabular-nums;
+    font-size: 10px;
+  }
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+  }
+  .pill {
+    max-width: 100%;
+    padding: 1px 6px;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-radius: 999px;
+    background: var(--surface-2, #323238);
+    color: var(--text, #f2f2f5);
+    font-size: 10px;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pill:hover {
+    border-color: var(--accent, #0a84ff);
+  }
+
+  .typeahead {
+    position: relative;
+  }
+  .hits {
+    list-style: none;
+    margin: 2px 0 0;
+    padding: 0;
+    max-height: 150px;
+    overflow-y: auto;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-radius: var(--radius-s, 5px);
+    background: var(--surface-2, #323238);
+  }
+  .hits button {
+    display: block;
+    width: 100%;
+    padding: 3px 6px;
+    border: none;
+    background: none;
+    color: var(--text, #f2f2f5);
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hits button:hover {
+    background: color-mix(in srgb, var(--accent, #0a84ff) 22%, transparent);
   }
   .chk {
     display: flex;
@@ -1020,5 +1760,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
     z-index: 2;
+  }
+  .tmeta {
+    margin-left: 6px;
+    color: var(--text-dim, #98989f);
   }
 </style>

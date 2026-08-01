@@ -454,9 +454,49 @@ async fn graph_full_local_and_flags() {
     // Edges are valid index pairs.
     assert_eq!(g.edges.len() % 2, 0);
     assert!(g.edges.iter().all(|e| (*e as usize) < g.paths.len()));
-    // Groups map into labels.
-    assert_eq!(g.groups.len(), g.paths.len());
-    assert!(g.groups.iter().all(|gi| (*gi as usize) < g.group_labels.len()));
+    // Every node attribute is parallel to `paths` and indexes its label table.
+    assert_eq!(g.types.len(), g.paths.len());
+    assert_eq!(g.services.len(), g.paths.len());
+    assert!(g.types.iter().all(|t| (*t as usize) < g.type_labels.len()));
+    assert!(g.services.iter().all(|s| (*s as usize) < g.service_labels.len()));
+    // Tags are CSR: n + 1 offsets, the last one closing the id list.
+    assert_eq!(g.tag_off.len(), g.paths.len() + 1);
+    assert_eq!(g.tag_off[g.paths.len()] as usize, g.tag_ids.len());
+    assert!(g.tag_off.windows(2).all(|w| w[0] <= w[1]));
+    assert!(g.tag_ids.iter().all(|t| (*t as usize) < g.tag_labels.len()));
+
+    // Attributes carry real values: notes take their top-level folder as the
+    // service, and the ghost/tag nodes land in their synthetic buckets.
+    let svc_of = |path: &str| {
+        let i = g.paths.iter().position(|p| p == path).expect(path);
+        g.service_labels[g.services[i] as usize].as_str()
+    };
+    assert_eq!(svc_of("services/auth-api.md"), "services");
+    assert_eq!(svc_of("runbooks/deploy.md"), "runbooks");
+    let type_of = |path: &str| {
+        let i = g.paths.iter().position(|p| p == path).expect(path);
+        g.type_labels[g.types[i] as usize].as_str()
+    };
+    assert_eq!(type_of("services/auth-api.md"), "Service");
+    assert!(g
+        .paths
+        .iter()
+        .zip(&g.services)
+        .any(|(p, s)| p.starts_with("tag:") && g.service_labels[*s as usize] == SERVICE_TAGS));
+    assert!(g
+        .paths
+        .iter()
+        .zip(&g.types)
+        .any(|(p, t)| p.starts_with("ghost:") && g.type_labels[*t as usize] == TYPE_GHOST));
+
+    // The auth-api note's own tags ride along as an attribute, independent of
+    // the tag NODES the `tags` flag draws.
+    let ai = g.paths.iter().position(|p| p == "services/auth-api.md").unwrap();
+    let auth_tags: Vec<&str> = (g.tag_off[ai]..g.tag_off[ai + 1])
+        .map(|t| g.tag_labels[g.tag_ids[t as usize] as usize].as_str())
+        .collect();
+    assert!(auth_tags.contains(&"auth"), "{auth_tags:?}");
+    assert!(auth_tags.contains(&"security"), "{auth_tags:?}");
 
     // Local graph around auth-api at depth 1: itself + direct neighbors.
     let lg = eng
@@ -483,6 +523,70 @@ async fn graph_full_local_and_flags() {
         .unwrap();
     assert!(tg.truncated);
     assert_eq!(tg.edges.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_attributes_survive_pruning_and_fold_type_case() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+
+    // Two notes whose `type` differs only in casing must share ONE bucket, and
+    // a note with no frontmatter type must land in `untyped`.
+    std::fs::write(
+        td.path().join("services/legacy-api.md"),
+        "---\ntype: service\ntitle: Legacy API\ndescription: Old one.\n---\n\nSee [[auth-api]].\n",
+    )
+    .unwrap();
+    std::fs::write(td.path().join("stray.md"), "# Stray\n\nNo frontmatter here.\n").unwrap();
+    eng.scan(id).await.unwrap();
+
+    let g = eng.graph(WS, id, &GraphOpts { tags: true, ..Default::default() }).await.unwrap();
+    let label_count = |want: &str| {
+        g.type_labels.iter().filter(|l| l.eq_ignore_ascii_case(want)).count()
+    };
+    assert_eq!(label_count("service"), 1, "{:?}", g.type_labels);
+    assert!(g.type_labels.iter().any(|l| l == TYPE_UNTYPED), "{:?}", g.type_labels);
+    // Root-level notes group under the root service bucket.
+    let si = g.paths.iter().position(|p| p == "stray.md").unwrap();
+    assert_eq!(g.service_labels[g.services[si] as usize], SERVICE_ROOT);
+
+    // Orphan pruning remaps every parallel array in lockstep, not just paths.
+    let pruned = eng
+        .graph(WS, id, &GraphOpts { orphans: Some(false), tags: true, ..Default::default() })
+        .await
+        .unwrap();
+    assert!(pruned.paths.len() < g.paths.len());
+    assert!(!pruned.paths.contains(&"stray.md".to_string()));
+    assert_eq!(pruned.types.len(), pruned.paths.len());
+    assert_eq!(pruned.services.len(), pruned.paths.len());
+    assert_eq!(pruned.tag_off.len(), pruned.paths.len() + 1);
+    assert_eq!(pruned.tag_off[pruned.paths.len()] as usize, pruned.tag_ids.len());
+    let ai = pruned.paths.iter().position(|p| p == "services/auth-api.md").unwrap();
+    let auth_tags: Vec<&str> = (pruned.tag_off[ai]..pruned.tag_off[ai + 1])
+        .map(|t| pruned.tag_labels[pruned.tag_ids[t as usize] as usize].as_str())
+        .collect();
+    assert!(auth_tags.contains(&"auth"), "{auth_tags:?}");
+
+    // Local mode remaps the same way.
+    let lg = eng
+        .graph(
+            WS,
+            id,
+            &GraphOpts {
+                mode: "local".into(),
+                path: Some("services/auth-api.md".into()),
+                depth: 1,
+                tags: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(lg.types.len(), lg.paths.len());
+    assert_eq!(lg.services.len(), lg.paths.len());
+    assert_eq!(lg.tag_off.len(), lg.paths.len() + 1);
+    assert_eq!(lg.tag_off[lg.paths.len()] as usize, lg.tag_ids.len());
+    assert!(lg.tag_ids.iter().all(|t| (*t as usize) < lg.tag_labels.len()));
 }
 
 #[tokio::test(flavor = "multi_thread")]

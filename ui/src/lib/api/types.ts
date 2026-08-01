@@ -5202,11 +5202,23 @@ export interface VaultTagCount {
 
 /** Compact graph wire format: parallel node arrays + flat [src,dst,…] pairs.
  * flags bits: 1=ghost (unresolved target), 2=tag node, 4=reserved file. */
+/**
+ * Per-node attributes are indices into the parallel `*_labels` tables, so the
+ * wire stays compact on a 9k-note vault. Tags are CSR-encoded: node `i` owns
+ * `tag_ids[tag_off[i]..tag_off[i + 1]]`, and `tag_off` has `n + 1` entries.
+ */
 export interface VaultGraphPayload {
   paths: string[];
   titles: string[];
-  groups: number[];
-  group_labels: string[];
+  /** Normalized OKF type per node (`Flow`/`flow` fold into one bucket). */
+  types: number[];
+  type_labels: string[];
+  /** Top-level folder per node — the repo/service bundle in an OKF vault. */
+  services: number[];
+  service_labels: string[];
+  tag_off: number[];
+  tag_ids: number[];
+  tag_labels: string[];
   flags: number[];
   edges: number[];
   truncated: boolean;
