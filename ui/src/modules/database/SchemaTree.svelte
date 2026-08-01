@@ -7,13 +7,12 @@
   import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
-  import type { DbNodeKind, SchemaNode } from '../../lib/api/types';
+  import type { DbNodeKind, ObjectHit, SchemaNode } from '../../lib/api/types';
 
   // Top-level schema search / filter. Client-side, this only filters ROOT nodes
   // and already-cached subtrees — it can never find a table inside a schema you
   // have not opened. `searchObjects` (server-side, catalog-backed) is what makes
   // that possible; the scope picker chooses between them.
-  let schemaFilter = $state('');
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Redis has no object namespace to search — its key filter already covers it.
@@ -21,11 +20,12 @@
   const hits = $derived(database.objectSearchHits);
 
   /** Debounced server-side lookup — one request per pause, not per keystroke. */
-  function onSearchInput(): void {
+  function onSearchInput(e: Event): void {
+    database.objectSearchQuery = (e.currentTarget as HTMLInputElement).value;
     if (searchTimer) clearTimeout(searchTimer);
-    const q = schemaFilter;
+    const q = database.objectSearchQuery;
     if (!q.trim()) {
-      database.clearObjectSearch();
+      database.objectSearchHits = null;
       return;
     }
     if (!searchable) return; // Redis: the client-side key filter already covers it
@@ -36,15 +36,20 @@
 
   function setScope(scope: 'schema' | 'all'): void {
     database.objectSearchScope = scope;
-    if (schemaFilter.trim() && searchable) {
-      void database.searchObjects(schemaFilter, database.activeDb ?? undefined);
+    if (database.objectSearchQuery.trim() && searchable) {
+      void database.searchObjects(database.objectSearchQuery, database.activeDb ?? undefined);
     }
   }
 
   function clearSearch(): void {
-    schemaFilter = '';
     if (searchTimer) clearTimeout(searchTimer);
     database.clearObjectSearch();
+  }
+
+  /** Build the SchemaNode a hit stands for, so hits get the SAME context menu
+   *  as a browsed node instead of silently swallowing right-click. */
+  function hitNode(hit: ObjectHit): SchemaNode {
+    return { id: hit.path, label: hit.name, kind: hit.kind, has_children: true };
   }
 
   /** Open a search hit exactly as a browsed node would open. */
@@ -149,7 +154,7 @@
   }
 
   const filteredRoot = $derived.by(() => {
-    const q = schemaFilter.trim().toLowerCase();
+    const q = database.objectSearchQuery.trim().toLowerCase();
     if (!q) return database.schemaRoot;
     return database.schemaRoot.filter((n) => nodeMatchesFilter(n, q));
   });
@@ -298,13 +303,19 @@
       <input
         class="tree-search-input"
         type="text"
-        bind:value={schemaFilter}
+        value={database.objectSearchQuery}
         oninput={onSearchInput}
         placeholder={searchable ? 'Find a table…' : 'Filter schema…'}
+        onkeydown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            clearSearch();
+          }
+        }}
         spellcheck="false"
         aria-label="Find an object"
       />
-      {#if schemaFilter}
+      {#if database.objectSearchQuery || hits !== null}
         <button class="tree-search-clear" onclick={clearSearch} aria-label="Clear filter">
           <Icon name="x" size={10} />
         </button>
@@ -357,19 +368,34 @@
       <div class="tree-loading"><Icon name="refresh" size={13} /><span>Searching…</span></div>
     {:else if hits.length === 0}
       <div class="tree-empty">
-        No object matching "{schemaFilter}"{database.objectSearchScope === 'schema'
+        No object matching "{database.objectSearchQuery}"{database.objectSearchScope === 'schema'
           ? ' in this schema — try All schemas.'
           : '.'}
       </div>
     {:else}
       <div class="hit-head">
-        {hits.length}{database.objectSearchTruncated ? '+' : ''} match{hits.length === 1 ? '' : 'es'}
-        {#if database.objectSearchScope === 'all' && database.objectSearchScanned > 0}
-          <span class="hit-scan">· {database.objectSearchScanned} schemas scanned</span>
-        {/if}
+        <button class="back-btn" onclick={clearSearch} title="Back to the schema tree (Esc)">
+          <Icon name="chevronLeft" size={11} />Tree
+        </button>
+        <span>
+          {hits.length}{database.objectSearchTruncated ? '+' : ''} match{hits.length === 1
+            ? ''
+            : 'es'}
+          {#if database.objectSearchScope === 'all' && database.objectSearchScanned > 0}
+            <span class="hit-scan"
+              >· {database.objectSearchScanned}
+              {database.objectSearchScanned === 1 ? 'schema' : 'schemas'} scanned</span
+            >
+          {/if}
+        </span>
       </div>
       {#each hits as hit (hit.path)}
-        <button class="hit" onclick={() => openHit(hit)} title={hit.path}>
+        <button
+          class="hit"
+          onclick={() => openHit(hit)}
+          oncontextmenu={(e) => showMenu(e, hitNode(hit))}
+          title={hit.path}
+        >
           <span class="node-icon {hit.kind}"><Icon name={iconFor(hit.kind)} size={12} /></span>
           <span class="hit-name">{hit.name}</span>
           <span class="hit-schema">{hit.schema}</span>
@@ -380,7 +406,7 @@
       {/if}
     {/if}
   {:else if filteredRoot.length === 0}
-    <div class="tree-empty">No match for "{schemaFilter}".</div>
+    <div class="tree-empty">No match for "{database.objectSearchQuery}".</div>
   {:else}
     {#each filteredRoot as node (node.id)}
       {@render treeNode(node, 0)}
@@ -625,7 +651,27 @@
     margin: 0;
   }
 
+  .back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 1px 5px;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-radius: var(--radius-s, 5px);
+    background: var(--surface-2, #323238);
+    color: var(--text, #f2f2f5);
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+  }
+  .back-btn:hover {
+    border-color: var(--accent, #0a84ff);
+  }
   .hit-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     padding: 4px 8px;
     font-size: 10px;
     text-transform: uppercase;

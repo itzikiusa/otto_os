@@ -565,6 +565,13 @@ class DatabaseStore {
   // ── Object search (server-side; the tree's own filter is client-side and
   // can only ever match nodes that are already loaded) ─────────────────────
   objectSearchScope: 'schema' | 'all' = $state('schema');
+  /**
+   * The live query. Lives HERE, not in SchemaTree: the component remounts when
+   * you open an object or switch side tabs, and a component-local query would
+   * reset to '' while these hits survived — leaving the tree stuck on stale
+   * results with no visible way back.
+   */
+  objectSearchQuery = $state('');
   objectSearchHits: ObjectHit[] | null = $state(null);
   objectSearching = $state(false);
   objectSearchTruncated = $state(false);
@@ -1623,6 +1630,7 @@ class DatabaseStore {
 
   clearObjectSearch(): void {
     this.objectSearchSeq++;
+    this.objectSearchQuery = '';
     this.objectSearchHits = null;
     this.objectSearching = false;
     this.objectSearchTruncated = false;
