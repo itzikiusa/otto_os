@@ -1390,7 +1390,70 @@ pub fn markdown_to_storage(md: &str) -> String {
             continue;
         }
 
-        // ATX headings.
+        // Horizontal rule: `---`, `***`, `___` alone on a line. Must be tested
+        // BEFORE the heading/paragraph branches, and after the table branch (a
+        // `|---|` delimiter belongs to its table).
+        {
+            let t = line.trim();
+            if t.len() >= 3
+                && (t.chars().all(|c| c == '-')
+                    || t.chars().all(|c| c == '*')
+                    || t.chars().all(|c| c == '_'))
+            {
+                close_lists(&mut out, &mut in_ul, &mut in_ol);
+                out.push_str("<hr />");
+                i += 1;
+                continue;
+            }
+        }
+
+        // Blockquote: consecutive `> ` lines become ONE <blockquote>. Callouts
+        // (the NOT-READY banner) are written this way, and without this each
+        // line reached the wiki with a literal leading '>'.
+        if line.trim_start().starts_with('>') {
+            close_lists(&mut out, &mut in_ul, &mut in_ol);
+            out.push_str("<blockquote>");
+            let mut para = String::new();
+            while i < lines.len() {
+                let l = lines[i].trim_start();
+                let Some(rest) = l.strip_prefix('>') else { break };
+                let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                if rest.trim().is_empty() {
+                    // Blank quoted line separates paragraphs inside the quote.
+                    if !para.trim().is_empty() {
+                        out.push_str(&format!("<p>{}</p>", inline_to_storage(para.trim())));
+                        para.clear();
+                    }
+                } else {
+                    if !para.is_empty() {
+                        para.push(' ');
+                    }
+                    para.push_str(rest);
+                }
+                i += 1;
+            }
+            if !para.trim().is_empty() {
+                out.push_str(&format!("<p>{}</p>", inline_to_storage(para.trim())));
+            }
+            out.push_str("</blockquote>");
+            continue;
+        }
+
+        // ATX headings. h4-h6 matter: test cases are written as `#### TC-x`,
+        // and an unhandled level reaches the wiki as literal '####'.
+        let mut deep_heading = false;
+        for (marker, tag) in [("###### ", "h6"), ("##### ", "h5"), ("#### ", "h4")] {
+            if let Some(rest) = line.strip_prefix(marker) {
+                close_lists(&mut out, &mut in_ul, &mut in_ol);
+                out.push_str(&format!("<{tag}>{}</{tag}>", inline_to_storage(rest)));
+                i += 1;
+                deep_heading = true;
+                break;
+            }
+        }
+        if deep_heading {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("### ") {
             close_lists(&mut out, &mut in_ul, &mut in_ol);
             out.push_str(&format!("<h3>{}</h3>", inline_to_storage(rest)));
@@ -1942,5 +2005,34 @@ mod tests {
         // A lone pipe line with no delimiter row stays a paragraph.
         let not_table = markdown_to_storage("| not a table");
         assert!(!not_table.contains("<table"), "false positive: {not_table}");
+    }
+
+    /// The published document used 82 horizontal rules, 28 blockquotes and h4
+    /// case headings; none were handled, so all of it reached the wiki as
+    /// literal `---`, `>` and `####` text.
+    #[test]
+    fn markdown_to_storage_renders_rules_quotes_and_deep_headings() {
+        let out = markdown_to_storage("a\n\n---\n\nb");
+        assert!(out.contains("<hr />"), "hr: {out}");
+        assert!(!out.contains("<p>---</p>"), "literal rule: {out}");
+
+        let out = markdown_to_storage("#### TC-AU03 - title\n##### deeper\n###### deepest");
+        assert!(out.contains("<h4>TC-AU03 - title</h4>"), "h4: {out}");
+        assert!(out.contains("<h5>deeper</h5>"), "h5: {out}");
+        assert!(out.contains("<h6>deepest</h6>"), "h6: {out}");
+        assert!(!out.contains("####"), "literal hashes: {out}");
+
+        // Consecutive quoted lines collapse into ONE blockquote paragraph.
+        let out = markdown_to_storage("> **NOT READY.** line one\n> line two\n\nafter");
+        assert!(out.contains("<blockquote>"), "blockquote: {out}");
+        assert!(out.contains("line one line two"), "joined: {out}");
+        assert!(out.contains("<strong>NOT READY.</strong>"), "inline in quote: {out}");
+        assert!(out.contains("</blockquote>"), "closed: {out}");
+        assert!(out.contains("<p>after</p>"), "text after: {out}");
+        assert!(!out.contains("&gt; line two"), "literal marker: {out}");
+
+        // A table delimiter must still belong to its table, not become an <hr>.
+        let out = markdown_to_storage("| a |\n|---|\n| v |");
+        assert!(out.contains("<th>a</th>") && !out.contains("<hr />"), "delimiter: {out}");
     }
 }
