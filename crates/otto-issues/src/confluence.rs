@@ -1279,23 +1279,41 @@ pub fn markdown_to_storage(md: &str) -> String {
                 .replace('>', "&gt;")
         }
 
+        // `j` indexes CHARS, so every search and slice below must also be in
+        // char space. Searching the &str instead (`text[j..].find(..)`) mixes a
+        // char index with byte offsets: they agree only for pure ASCII, and one
+        // multi-byte char ('—', '→', '×', an emoji) before an inline span makes
+        // the slice land mid-character and PANIC — a 500 on the publish endpoint
+        // for any document with a dash next to a bold span.
+        let find_ch = |from: usize, needle: char| -> Option<usize> {
+            chars.get(from..)?.iter().position(|&c| c == needle)
+        };
+        let find_pair = |from: usize, a: char, b: char| -> Option<usize> {
+            let s = chars.get(from..)?;
+            if s.len() < 2 {
+                return None;
+            }
+            s.windows(2).position(|w| w[0] == a && w[1] == b)
+        };
+        let span = |from: usize, to: usize| -> String { chars[from..to].iter().collect() };
+
         while j < n {
             // Inline code: `...`
             if chars[j] == '`' {
-                if let Some(end) = text[j + 1..].find('`') {
-                    let code_text = &text[j + 1..j + 1 + end];
-                    out.push_str(&format!("<code>{}</code>", escape_xml_char_str(code_text)));
+                if let Some(end) = find_ch(j + 1, '`') {
+                    let code_text = span(j + 1, j + 1 + end);
+                    out.push_str(&format!("<code>{}</code>", escape_xml_char_str(&code_text)));
                     j += end + 2;
                     continue;
                 }
             }
             // Bold: **...**
             if j + 1 < n && chars[j] == '*' && chars[j + 1] == '*' {
-                if let Some(end) = text[j + 2..].find("**") {
-                    let bold_text = &text[j + 2..j + 2 + end];
+                if let Some(end) = find_pair(j + 2, '*', '*') {
+                    let bold_text = span(j + 2, j + 2 + end);
                     out.push_str(&format!(
                         "<strong>{}</strong>",
-                        escape_xml_char_str(bold_text)
+                        escape_xml_char_str(&bold_text)
                     ));
                     j += end + 4;
                     continue;
@@ -1303,24 +1321,24 @@ pub fn markdown_to_storage(md: &str) -> String {
             }
             // Italic: *...*  (single asterisk)
             if chars[j] == '*' && (j + 1 >= n || chars[j + 1] != '*') {
-                if let Some(end) = text[j + 1..].find('*') {
-                    let italic_text = &text[j + 1..j + 1 + end];
-                    out.push_str(&format!("<em>{}</em>", escape_xml_char_str(italic_text)));
+                if let Some(end) = find_ch(j + 1, '*') {
+                    let italic_text = span(j + 1, j + 1 + end);
+                    out.push_str(&format!("<em>{}</em>", escape_xml_char_str(&italic_text)));
                     j += end + 2;
                     continue;
                 }
             }
             // Link: [text](url)
             if chars[j] == '[' {
-                if let Some(close_bracket) = text[j..].find("](") {
-                    let text_part = &text[j + 1..j + close_bracket];
-                    let after = &text[j + close_bracket + 2..];
-                    if let Some(close_paren) = after.find(')') {
-                        let url_part = &after[..close_paren];
+                if let Some(close_bracket) = find_pair(j, ']', '(') {
+                    let text_part = span(j + 1, j + close_bracket);
+                    let after_start = j + close_bracket + 2;
+                    if let Some(close_paren) = find_ch(after_start, ')') {
+                        let url_part = span(after_start, after_start + close_paren);
                         out.push_str(&format!(
                             "<a href=\"{}\">{}</a>",
-                            escape_xml_char_str(url_part),
-                            escape_xml_char_str(text_part)
+                            escape_xml_char_str(&url_part),
+                            escape_xml_char_str(&text_part)
                         ));
                         j += close_bracket + 2 + close_paren + 1;
                         continue;
@@ -1392,6 +1410,45 @@ pub fn markdown_to_storage(md: &str) -> String {
             continue;
         }
 
+        // GFM pipe table: a `| a | b |` header, a `|:---|---:|` delimiter row,
+        // then body rows. Without this every table falls through to the
+        // paragraph branch below and renders on the wiki as literal pipe text —
+        // which is how a document built around summary/coverage matrices ends up
+        // looking like a dump instead of a page.
+        if line.trim_start().starts_with('|')
+            && lines
+                .get(i + 1)
+                .map(|l| is_table_delimiter(l))
+                .unwrap_or(false)
+        {
+            close_lists(&mut out, &mut in_ul, &mut in_ol);
+            let header = split_table_row(line);
+            out.push_str("<table><tbody><tr>");
+            for cell in &header {
+                out.push_str(&format!("<th>{}</th>", inline_to_storage(cell)));
+            }
+            out.push_str("</tr>");
+            i += 2; // header + delimiter
+            while i < lines.len() {
+                let row = lines[i];
+                if !row.trim_start().starts_with('|') {
+                    break;
+                }
+                out.push_str("<tr>");
+                let cells = split_table_row(row);
+                // Pad/truncate to the header width so a malformed row can't
+                // shear the rest of the table.
+                for k in 0..header.len() {
+                    let cell = cells.get(k).map(String::as_str).unwrap_or("");
+                    out.push_str(&format!("<td>{}</td>", inline_to_storage(cell)));
+                }
+                out.push_str("</tr>");
+                i += 1;
+            }
+            out.push_str("</tbody></table>");
+            continue;
+        }
+
         // Unordered list items: `- ` or `* `.
         if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
             if in_ol {
@@ -1454,6 +1511,47 @@ pub fn markdown_to_storage(md: &str) -> String {
     }
 
     out
+}
+
+/// True for a GFM table delimiter row: `|---|---|`, `|:---|---:|`, `| :-: |`.
+fn is_table_delimiter(line: &str) -> bool {
+    let t = line.trim();
+    if !t.starts_with('|') {
+        return false;
+    }
+    let cells: Vec<&str> = t.trim_matches('|').split('|').collect();
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            let c = c.trim();
+            !c.is_empty()
+                && c.chars().all(|ch| ch == '-' || ch == ':')
+                && c.contains('-')
+        })
+}
+
+/// Split a `| a | b |` row into trimmed cell texts. A `\|` escapes a literal pipe.
+fn split_table_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let mut esc = false;
+    for ch in t.chars() {
+        if esc {
+            cur.push(ch);
+            esc = false;
+        } else if ch == '\\' {
+            esc = true;
+        } else if ch == '|' {
+            cells.push(cur.trim().to_string());
+            cur = String::new();
+        } else {
+            cur.push(ch);
+        }
+    }
+    cells.push(cur.trim().to_string());
+    cells
 }
 
 /// Close open list tags, updating the flags in place.
@@ -1791,5 +1889,58 @@ mod tests {
         let md = storage_to_markdown(storage);
         // Even without the nested tag the output should be a Markdown image.
         assert!(md.contains("!["), "image syntax; got: {md:?}");
+    }
+
+    /// Regression: `inline_to_storage` indexed CHARS but sliced BYTES, so any
+    /// multi-byte character before an inline span sliced mid-character and
+    /// panicked — a 500 from the publish endpoint on ordinary prose. These are
+    /// the exact constructs that crashed a real test-case document.
+    #[test]
+    fn markdown_to_storage_survives_multibyte_next_to_inline_spans() {
+        for md in [
+            "\u{23f3} \u{2014} **pending**",                 // emoji + em-dash + bold
+            "a \u{2014} **b**",                            // em-dash then bold
+            "`deducted = amount \u{d7} count` \u{2192} **ok**",  // multiplication sign + code + bold
+            "\u{2022} outbox \u{2192} `MoveBonusToCash` \u{2192} **WAGERING_COMPLETE**",
+            "\u{26a0}\u{fe0f} **NOT READY** \u{2014} see \u{a7}9",
+            "\u{2500}\u{2500} *italic* \u{2500}\u{2500}",
+            "[\u{2192} link](https://example.com/a\u{2014}b) \u{2014} **after**",
+            "\u{2265} 5 \u{2248} `x` \u{2264} **y**",
+        ] {
+            let out = markdown_to_storage(md);   // must not panic
+            assert!(!out.is_empty(), "empty output for {md:?}");
+        }
+
+        // The span content must still be correct, not merely non-panicking.
+        let out = markdown_to_storage("a \u{2014} **bold** tail");
+        assert!(out.contains("<strong>bold</strong>"), "got: {out}");
+        let out = markdown_to_storage("\u{2192} `code` \u{2192}");
+        assert!(out.contains("<code>code</code>"), "got: {out}");
+        let out = markdown_to_storage("[\u{2192}t](http://u/\u{2014}) x");
+        assert!(out.contains("<a href=\"http://u/\u{2014}\">\u{2192}t</a>"), "got: {out}");
+    }
+
+    /// Tables are the backbone of a test-case document (summary + coverage
+    /// matrices). Without table support every row rendered as literal pipe text
+    /// on the wiki.
+    #[test]
+    fn markdown_to_storage_renders_pipe_tables() {
+        let md = "| TC ID | Expected | Verdict |\n|:---|:---|---:|\n| TC-1 | `qual_expired` | ok |\n| TC-2 | **bold** | no |\n\nafter";
+        let out = markdown_to_storage(md);
+        assert!(out.contains("<table><tbody>"), "no table: {out}");
+        assert!(out.contains("<th>TC ID</th>"), "no header cell: {out}");
+        assert!(out.contains("<td><code>qual_expired</code></td>"), "inline in cell: {out}");
+        assert!(out.contains("<td><strong>bold</strong></td>"), "bold in cell: {out}");
+        assert!(out.contains("</tbody></table>"), "unclosed: {out}");
+        assert!(out.contains("<p>after</p>"), "text after table: {out}");
+        assert!(!out.contains("<p>| TC-1"), "row leaked as paragraph: {out}");
+
+        // A short row must not shear the table.
+        let ragged = markdown_to_storage("| a | b |\n|---|---|\n| only |");
+        assert!(ragged.contains("<td>only</td><td></td>"), "padding: {ragged}");
+
+        // A lone pipe line with no delimiter row stays a paragraph.
+        let not_table = markdown_to_storage("| not a table");
+        assert!(!not_table.contains("<table"), "false positive: {not_table}");
     }
 }
