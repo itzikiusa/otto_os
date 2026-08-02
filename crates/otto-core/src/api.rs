@@ -997,12 +997,22 @@ pub struct ConfluencePageResp {
 }
 
 /// `POST /api/v1/issue/confluence/pages?account_id=`
+///
+/// Supply EITHER `body_md` (Markdown, converted server-side) or `body_html`
+/// (Confluence storage XHTML, passed through untouched). `body_html` is the
+/// escape hatch for anything Markdown cannot express — panel/expand/status
+/// macros, layouts, nested tables.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateConfluencePageReq {
     pub space_key: String,
     pub title: String,
     /// Page body in Markdown; converted to storage format server-side.
-    pub body_md: String,
+    #[serde(default)]
+    pub body_md: Option<String>,
+    /// Page body already in Confluence storage format (XHTML). Wins over
+    /// `body_md` when both are present.
+    #[serde(default)]
+    pub body_html: Option<String>,
     /// Create as a child of this page when present.
     #[serde(default)]
     pub parent_id: Option<String>,
@@ -1018,14 +1028,23 @@ pub struct UpdateConfluencePageReq {
     #[serde(default)]
     pub title: Option<String>,
     /// Replacement page body in Markdown.
-    pub body_md: String,
+    #[serde(default)]
+    pub body_md: Option<String>,
+    /// Replacement body already in Confluence storage format (XHTML). Wins over
+    /// `body_md` when both are present.
+    #[serde(default)]
+    pub body_html: Option<String>,
 }
 
 /// `POST /api/v1/issue/confluence/pages/{page_id}/comments?account_id=`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddConfluenceCommentReq {
     /// Comment body in Markdown.
-    pub body_md: String,
+    #[serde(default)]
+    pub body_md: Option<String>,
+    /// Comment body already in Confluence storage format (XHTML).
+    #[serde(default)]
+    pub body_html: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

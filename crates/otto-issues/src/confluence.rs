@@ -1412,7 +1412,23 @@ pub fn markdown_to_storage(md: &str) -> String {
         // line reached the wiki with a literal leading '>'.
         if line.trim_start().starts_with('>') {
             close_lists(&mut out, &mut in_ul, &mut in_ol);
-            out.push_str("<blockquote>");
+            // GitHub-style alert (`> [!WARNING]`) becomes a real Confluence
+            // panel macro rather than a grey quote — a NOT-READY banner has to
+            // be impossible to skim past.
+            let alert = lines
+                .get(i)
+                .and_then(|l| alert_kind(l.trim_start().trim_start_matches('>').trim()));
+            let (open_tag, close_tag) = match alert.as_deref() {
+                Some(k) => {
+                    i += 1; // consume the `[!KIND]` marker line
+                    (
+                        format!("<ac:structured-macro ac:name=\"{k}\"><ac:rich-text-body>"),
+                        "</ac:rich-text-body></ac:structured-macro>".to_string(),
+                    )
+                }
+                None => ("<blockquote>".to_string(), "</blockquote>".to_string()),
+            };
+            out.push_str(&open_tag);
             let mut para = String::new();
             while i < lines.len() {
                 let l = lines[i].trim_start();
@@ -1435,7 +1451,7 @@ pub fn markdown_to_storage(md: &str) -> String {
             if !para.trim().is_empty() {
                 out.push_str(&format!("<p>{}</p>", inline_to_storage(para.trim())));
             }
-            out.push_str("</blockquote>");
+            out.push_str(&close_tag);
             continue;
         }
 
@@ -1509,6 +1525,28 @@ pub fn markdown_to_storage(md: &str) -> String {
                 i += 1;
             }
             out.push_str("</tbody></table>");
+            continue;
+        }
+
+        // Task list: `- [ ] ` / `- [x] ` become a NATIVE Confluence task list —
+        // real tickable checkboxes, not a bullet with literal "[ ]" in it. This
+        // is what makes a test case's prerequisites and steps usable as a
+        // checklist on the page.
+        if is_task_item(line).is_some() {
+            close_lists(&mut out, &mut in_ul, &mut in_ol);
+            out.push_str("<ac:task-list>");
+            while i < lines.len() {
+                let Some((done, body)) = is_task_item(lines[i]) else {
+                    break;
+                };
+                out.push_str(&format!(
+                    "<ac:task><ac:task-status>{}</ac:task-status><ac:task-body>{}</ac:task-body></ac:task>",
+                    if done { "complete" } else { "incomplete" },
+                    inline_to_storage(body)
+                ));
+                i += 1;
+            }
+            out.push_str("</ac:task-list>");
             continue;
         }
 
@@ -1615,6 +1653,35 @@ fn split_table_row(line: &str) -> Vec<String> {
     }
     cells.push(cur.trim().to_string());
     cells
+}
+
+/// `- [ ] body` / `- [x] body` → (checked, body). Also accepts `* `.
+fn is_task_item(line: &str) -> Option<(bool, &str)> {
+    let t = line.trim_start();
+    let rest = t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))?;
+    if let Some(b) = rest.strip_prefix("[ ] ") {
+        return Some((false, b));
+    }
+    if let Some(b) = rest.strip_prefix("[x] ").or_else(|| rest.strip_prefix("[X] ")) {
+        return Some((true, b));
+    }
+    None
+}
+
+/// A GitHub-style alert marker (`[!WARNING]`) mapped to the Confluence panel
+/// macro name. Returns None for an ordinary quote.
+fn alert_kind(s: &str) -> Option<String> {
+    let t = s.trim();
+    let inner = t.strip_prefix("[!")?.strip_suffix(']')?;
+    Some(
+        match inner.to_ascii_uppercase().as_str() {
+            "WARNING" | "CAUTION" => "warning",
+            "NOTE" | "INFO" | "IMPORTANT" => "info",
+            "TIP" => "tip",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 /// Close open list tags, updating the flags in place.
@@ -2034,5 +2101,31 @@ mod tests {
         // A table delimiter must still belong to its table, not become an <hr>.
         let out = markdown_to_storage("| a |\n|---|\n| v |");
         assert!(out.contains("<th>a</th>") && !out.contains("<hr />"), "delimiter: {out}");
+    }
+
+    /// Native Confluence macros beat plain XHTML: real tickable checkboxes for
+    /// prerequisites/steps, and a real panel for the NOT-READY banner.
+    #[test]
+    fn markdown_to_storage_emits_task_lists_and_alert_panels() {
+        let out = markdown_to_storage("- [ ] seed player `42`\n- [x] done step\n\nafter");
+        assert!(out.contains("<ac:task-list>"), "task list: {out}");
+        assert!(out.contains("<ac:task-status>incomplete</ac:task-status>"), "unchecked: {out}");
+        assert!(out.contains("<ac:task-status>complete</ac:task-status>"), "checked: {out}");
+        assert!(out.contains("<code>42</code>"), "inline in task: {out}");
+        assert!(!out.contains("[ ]"), "literal checkbox: {out}");
+        assert!(out.contains("<p>after</p>"), "text after: {out}");
+
+        let out = markdown_to_storage("> [!WARNING]\n> **NOT READY** - 3 items\n\nx");
+        assert!(out.contains("ac:name=\"warning\""), "warning panel: {out}");
+        assert!(out.contains("<strong>NOT READY</strong>"), "inline in panel: {out}");
+        assert!(!out.contains("[!WARNING]"), "marker leaked: {out}");
+
+        // A plain quote stays a blockquote.
+        let out = markdown_to_storage("> just a quote");
+        assert!(out.contains("<blockquote>") && !out.contains("ac:structured-macro"), "{out}");
+
+        // A normal bullet is still a bullet, not a task.
+        let out = markdown_to_storage("- plain bullet");
+        assert!(out.contains("<ul><li>") && !out.contains("ac:task"), "{out}");
     }
 }

@@ -1957,8 +1957,14 @@ export interface ConfluencePageResp {
 export interface CreateConfluencePageReq {
   space_key: string;
   title: string;
-  /** Page body in Markdown. */
-  body_md: string;
+  /** Page body in Markdown; converted server-side. Supply this or body_html. */
+  body_md?: string | null;
+  /**
+   * Page body already in Confluence storage format (XHTML), passed through
+   * untouched — the escape hatch for panel/expand/status macros, layouts and
+   * anything Markdown cannot express. Wins over body_md when both are present.
+   */
+  body_html?: string | null;
   /** Create as a child of this page when present. */
   parent_id?: string | null;
 }
@@ -1967,14 +1973,18 @@ export interface CreateConfluencePageReq {
 export interface UpdateConfluencePageReq {
   /** Absent keeps the page's current title. */
   title?: string | null;
-  /** Replacement page body in Markdown. */
-  body_md: string;
+  /** Replacement body in Markdown. Supply this or body_html. */
+  body_md?: string | null;
+  /** Replacement body in Confluence storage XHTML. Wins over body_md. */
+  body_html?: string | null;
 }
 
 /** POST /issue/confluence/pages/{page_id}/comments?account_id= */
 export interface AddConfluenceCommentReq {
-  /** Comment body in Markdown. */
-  body_md: string;
+  /** Comment body in Markdown. Supply this or body_html. */
+  body_md?: string | null;
+  /** Comment body in Confluence storage XHTML. */
+  body_html?: string | null;
 }
 
 /** One footer comment on a Confluence page, body already converted to Markdown. */

@@ -424,6 +424,25 @@ async fn confluence_client_for<S: IssuesCtx>(
     ))
 }
 
+/// Resolve a request body that may arrive as Markdown or as Confluence storage
+/// XHTML. `body_html` wins: it is the escape hatch for macros/layouts Markdown
+/// cannot express, so a caller that sends both means the richer one.
+fn resolve_body(
+    body_md: Option<&str>,
+    body_html: Option<&str>,
+    field: &str,
+) -> Result<String, Error> {
+    if let Some(h) = body_html.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(h.to_string());
+    }
+    match body_md.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(m) => Ok(markdown_to_storage(m)),
+        None => Err(Error::Invalid(format!(
+            "{field}: supply body_md (Markdown) or body_html (Confluence storage XHTML)"
+        ))),
+    }
+}
+
 impl From<crate::confluence::ConfluencePage> for ConfluencePageResp {
     fn from(p: crate::confluence::ConfluencePage) -> Self {
         Self {
@@ -462,11 +481,12 @@ async fn create_page_cf<S: IssuesCtx>(
         return Err(Error::Invalid("title must not be empty".into()).into());
     }
     let client = confluence_client_for(&s, &params, &user).await?;
+    let storage = resolve_body(req.body_md.as_deref(), req.body_html.as_deref(), "create page")?;
     let page = client
         .create_page(
             req.space_key.trim(),
             req.title.trim(),
-            &markdown_to_storage(&req.body_md),
+            &storage,
             req.parent_id.as_deref().filter(|p| !p.trim().is_empty()),
         )
         .await?;
@@ -493,13 +513,9 @@ async fn update_page_cf<S: IssuesCtx>(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .unwrap_or(&current.title);
+    let storage = resolve_body(req.body_md.as_deref(), req.body_html.as_deref(), "update page")?;
     let page = client
-        .update_page(
-            &page_id,
-            title,
-            &markdown_to_storage(&req.body_md),
-            current.version,
-        )
+        .update_page(&page_id, title, &storage, current.version)
         .await?;
     Ok(Json(page.into()))
 }
@@ -523,15 +539,9 @@ async fn add_page_comment_cf<S: IssuesCtx>(
     Query(params): Query<HashMap<String, String>>,
     Json(req): Json<AddConfluenceCommentReq>,
 ) -> ApiResult<Json<CommentRef>> {
-    if req.body_md.trim().is_empty() {
-        return Err(Error::Invalid("body_md must not be empty".into()).into());
-    }
+    let storage = resolve_body(req.body_md.as_deref(), req.body_html.as_deref(), "comment")?;
     let client = confluence_client_for(&s, &params, &user).await?;
-    Ok(Json(
-        client
-            .add_comment(&page_id, &markdown_to_storage(&req.body_md))
-            .await?,
-    ))
+    Ok(Json(client.add_comment(&page_id, &storage).await?))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

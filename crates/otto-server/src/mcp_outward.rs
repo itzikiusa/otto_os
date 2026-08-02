@@ -294,19 +294,20 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
                 "account_id":{"type":"string"},"page_id":{"type":"string"}}}}),
         json!({"name":"otto.create_confluence_page","mutating":true,"category":"Issues",
-            "description":"Create a Confluence page. `body_md` is MARKDOWN (converted server-side). Optional `parent_id` nests it under an existing page. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["account_id","space_key","title","body_md"],"properties":{
+            "description":"Create a Confluence page. Supply `body_md` (MARKDOWN, converted server-side) OR `body_html` (Confluence storage XHTML, passed through — use it for panel/expand/status macros, layouts and anything Markdown cannot express). Optional `parent_id` nests it under an existing page. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","space_key","title"],"properties":{
                 "account_id":{"type":"string"},"space_key":{"type":"string"},"title":{"type":"string"},
-                "body_md":{"type":"string"},"parent_id":{"type":"string"}}}}),
+                "body_md":{"type":"string"},"body_html":{"type":"string"},"parent_id":{"type":"string"}}}}),
         json!({"name":"otto.update_confluence_page","mutating":true,"category":"Issues",
-            "description":"Replace a Confluence page's body with `body_md` (MARKDOWN). The current version is resolved server-side, so no version is passed. Omit `title` to keep the existing one. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["account_id","page_id","body_md"],"properties":{
+            "description":"Replace a Confluence page's body with `body_md` (MARKDOWN) or `body_html` (Confluence storage XHTML, passed through). The current version is resolved server-side, so no version is passed. Omit `title` to keep the existing one. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
                 "account_id":{"type":"string"},"page_id":{"type":"string"},"body_md":{"type":"string"},
-                "title":{"type":"string"}}}}),
+                "body_html":{"type":"string"},"title":{"type":"string"}}}}),
         json!({"name":"otto.comment_confluence_page","mutating":true,"category":"Issues",
-            "description":"Add a footer comment to a Confluence page. `body_md` is MARKDOWN. DANGEROUS: outward-facing — approval-gated.",
-            "inputSchema":{"type":"object","required":["account_id","page_id","body_md"],"properties":{
-                "account_id":{"type":"string"},"page_id":{"type":"string"},"body_md":{"type":"string"}}}}),
+            "description":"Add a footer comment to a Confluence page. Supply `body_md` (MARKDOWN) or `body_html` (storage XHTML). DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
+                "account_id":{"type":"string"},"page_id":{"type":"string"},"body_md":{"type":"string"},
+                "body_html":{"type":"string"}}}}),
         json!({"name":"otto.comment_issue","mutating":true,"category":"Issues",
             "description":"Add a comment to a Jira issue. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["account_id","key","body"],"properties":{
@@ -1354,8 +1355,12 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let mut body = json!({
                 "space_key": arg_str(args, "space_key")?,
                 "title": arg_str(args, "title")?,
-                "body_md": arg_str(args, "body_md")?,
             });
+            for k in ["body_md", "body_html"] {
+                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    body[k] = json!(v);
+                }
+            }
             if let Some(p) = args
                 .get("parent_id")
                 .and_then(Value::as_str)
@@ -1371,7 +1376,12 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "update_confluence_page" => {
             let acc = arg_str(args, "account_id")?;
             let pid = arg_str(args, "page_id")?;
-            let mut body = json!({ "body_md": arg_str(args, "body_md")? });
+            let mut body = json!({});
+            for k in ["body_md", "body_html"] {
+                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    body[k] = json!(v);
+                }
+            }
             if let Some(t) = args
                 .get("title")
                 .and_then(Value::as_str)
@@ -1391,7 +1401,12 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "comment_confluence_page" => {
             let acc = arg_str(args, "account_id")?;
             let pid = arg_str(args, "page_id")?;
-            let body = json!({ "body_md": arg_str(args, "body_md")? });
+            let mut body = json!({});
+            for k in ["body_md", "body_html"] {
+                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    body[k] = json!(v);
+                }
+            }
             SelfCall::post(
                 format!(
                     "/api/v1/issue/confluence/pages/{}/comments?account_id={}",

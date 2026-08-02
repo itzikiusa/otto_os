@@ -1053,10 +1053,10 @@ configured Jira/Confluence account.
 | GET /issue/confluence/spaces | member | — | Confluence spaces |
 | GET /issue/confluence/search | member | — | Confluence page search |
 | GET /issue/confluence/pages/{page_id}?account_id= | member | — | `ConfluencePageResp` |
-| POST /issue/confluence/pages?account_id= | member | CreateConfluencePageReq | `ConfluencePageResp` (created) |
-| PUT /issue/confluence/pages/{page_id}?account_id= | member | UpdateConfluencePageReq | `ConfluencePageResp` (updated) |
+| POST /issue/confluence/pages?account_id= | member | CreateConfluencePageReq (`body_md` Markdown **or** `body_html` storage XHTML) | `ConfluencePageResp` (created) |
+| PUT /issue/confluence/pages/{page_id}?account_id= | member | UpdateConfluencePageReq (`body_md` **or** `body_html`; version resolved server-side) | `ConfluencePageResp` (updated) |
 | GET /issue/confluence/pages/{page_id}/comments?account_id= | member | — | `PageComment[]` |
-| POST /issue/confluence/pages/{page_id}/comments?account_id= | member | AddConfluenceCommentReq | `CommentRef` |
+| POST /issue/confluence/pages/{page_id}/comments?account_id= | member | AddConfluenceCommentReq (`body_md` **or** `body_html`) | `CommentRef` |
 | GET /issue/{account_id}/{key} | member | — | issue summary |
 | GET /issue/{account_id}/{key}/full | member | — | full issue detail |
 | GET /issue/{account_id}/{key}/devstatus?issueId=<id> | member | — | `DevStatus` (branches/commits/PRs; best-effort, empty if no dev tool connected); `issueId` optional — when present skips a round-trip to resolve the numeric id |
