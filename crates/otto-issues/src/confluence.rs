@@ -206,7 +206,31 @@ impl ConfluenceClient {
             .await
             .map_err(|e| Error::Upstream(format!("confluence create_page parse: {e}")))?;
 
-        parse_page(&self.site_base, &body)
+        let page = parse_page(&self.site_base, &body)?;
+        // Confluence defaults new pages to the NARROW fixed-width column, which
+        // makes a table-heavy page (test-case matrices, coverage grids) close to
+        // unreadable. Width is a content PROPERTY, invisible to the storage body,
+        // so nothing in the page content can set it — do it here, once, for every
+        // page Otto creates. Best-effort: a page that renders narrow is a nuisance,
+        // not a reason to fail a publish that already succeeded.
+        self.set_full_width(&page.id).await;
+        Ok(page)
+    }
+
+    /// Mark a page full-width (`content-appearance-published`/`-draft`).
+    /// Best-effort and silent: never fails the caller's publish.
+    async fn set_full_width(&self, page_id: &str) {
+        for key in ["content-appearance-published", "content-appearance-draft"] {
+            let url = self.api(&format!("/content/{page_id}/property"));
+            let _ = self
+                .http
+                .post(&url)
+                .header("Authorization", &self.auth_header)
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({ "key": key, "value": "full-width" }))
+                .send()
+                .await;
+        }
     }
 
     /// Update an existing page. `version` must be the *current* version number;
