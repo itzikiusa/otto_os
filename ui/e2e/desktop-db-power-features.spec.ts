@@ -12,18 +12,25 @@ import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 //   • Schema-tree "Copy create statement" (MySQL DDL → clipboard)
 //   • Table Designer can ADD indexes + foreign keys (ALTER preview)
 //   • Mongo index builder offers NESTED field paths (players.playerId)
+//   • Index rows can EDIT (drop + recreate) / DROP — prepared, never applied
+//   • Index CONDITIONS (partial indexes): Mongo partialFilterExpression,
+//     Postgres WHERE, MySQL's CASE functional-key-part emulation
 //
 // Desktop-browser project only; each test.skips when its container is down.
 // ─────────────────────────────────────────────────────────────────────────────
 
 let workspaceId = '';
-const conn: Record<'mysql' | 'mongodb', string | null> = { mysql: null, mongodb: null };
+const conn: Record<'mysql' | 'mongodb' | 'postgres', string | null> = {
+  mysql: null,
+  mongodb: null,
+  postgres: null,
+};
 
 test.beforeAll(async () => {
   test.setTimeout(120_000);
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
-  for (const k of ['mysql', 'mongodb'] as const) {
+  for (const k of ['mysql', 'mongodb', 'postgres'] as const) {
     try {
       conn[k] = await seedDockerConnection(ctx, base, workspaceId, k);
     } catch {
@@ -196,15 +203,186 @@ test('Mongo: Cmd+Z undoes an external statement rewrite (Format)', async ({ page
   );
 });
 
-test('Mongo: index builder offers NESTED field paths', async ({ page }) => {
+test('Mongo: index builder offers NESTED field paths, and filters the list', async ({ page }) => {
   test.skip(!conn.mongodb, 'mongodb docker not reachable');
   await openConn(page, 'e2e-mongodb');
   const lbl = await objectLabel(page, 'profiles');
   await lbl.click(); // open structure
   await page.getByRole('button', { name: /New index/ }).click();
   // profiles documents have an embedded `address.city` — it must be offered as a
-  // chip, not just the top-level `address`.
-  await expect(page.locator('.ib-chip', { hasText: 'address.city' }).first()).toBeVisible({
+  // row, not just the top-level `address`.
+  await expect(page.locator('.ib-row', { hasText: 'address.city' }).first()).toBeVisible({
     timeout: 15_000,
   });
+  // The field picker is a searchable LIST (60+ sampled paths make chips
+  // unscannable) — typing narrows it.
+  await page.locator('.ib-search').fill('city');
+  await expect(page.locator('.ib-row', { hasText: 'address.city' })).toHaveCount(1);
+  await expect(page.locator('.ib-row', { hasText: 'userId' })).toHaveCount(0);
+});
+
+// ── Index edit / drop ───────────────────────────────────────────────────────
+// Both actions PREPARE a statement in a query tab; nothing is applied until the
+// user presses Run — so these assert the generated text, and the seeded indexes
+// survive the run.
+
+/** Open `object`'s structure and return the row for index `name`. */
+async function indexRow(page: Page, object: string, name: string): Promise<Locator> {
+  const lbl = await objectLabel(page, object);
+  await lbl.click();
+  const row = page.locator('.idx-row').filter({ hasText: name }).first();
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await row.hover(); // actions are hover-revealed
+  return row;
+}
+
+test('Mongo: Drop index prepares a dropIndex for review', async ({ page }) => {
+  test.skip(!conn.mongodb, 'mongodb docker not reachable');
+  await openConn(page, 'e2e-mongodb');
+  const row = await indexRow(page, 'profiles', 'address.city_1');
+  await row.getByRole('button', { name: 'Drop index address.city_1' }).click();
+  await expect
+    .poll(() => editorText(page), { timeout: 15_000 })
+    .toContain('db.profiles.dropIndex("address.city_1")');
+});
+
+test('Mongo: Edit index prepares a drop + recreate that keeps unique', async ({ page }) => {
+  test.skip(!conn.mongodb, 'mongodb docker not reachable');
+  await openConn(page, 'e2e-mongodb');
+  // `userId_1` is seeded UNIQUE — editing must carry that (and the name) over.
+  const row = await indexRow(page, 'profiles', 'userId_1');
+  await row.getByRole('button', { name: 'Edit index userId_1' }).click();
+  await expect(page.locator('.ib-editing')).toContainText('userId_1');
+  await expect(page.locator('.ib-name input')).toHaveValue('userId_1');
+  await expect(page.locator('.ib-unique input')).toBeChecked();
+  await expect(page.locator('.ib-row.on', { hasText: 'userId' }).first()).toBeVisible();
+
+  await page.getByRole('button', { name: /Prepare drop \+ recreate/ }).click();
+  await expect
+    .poll(() => editorText(page), { timeout: 15_000 })
+    .toContain('dropIndex("userId_1")');
+  const stmt = await editorText(page);
+  expect(stmt).toContain('db.profiles.createIndex');
+  expect(stmt.replace(/\s+/g, '')).toContain('"unique":true');
+  expect(stmt.replace(/\s+/g, '')).toContain('"name":"userId_1"');
+});
+
+test("Mongo: the _id_ index can't be edited or dropped", async ({ page }) => {
+  test.skip(!conn.mongodb, 'mongodb docker not reachable');
+  await openConn(page, 'e2e-mongodb');
+  const row = await indexRow(page, 'profiles', '_id_');
+  await expect(row.getByRole('button', { name: 'Edit index _id_' })).toBeDisabled();
+  await expect(row.getByRole('button', { name: 'Drop index _id_' })).toBeDisabled();
+});
+
+test('MySQL: Drop index prepares ALTER TABLE … DROP INDEX (and DROP PRIMARY KEY)', async ({
+  page,
+}) => {
+  test.skip(!conn.mysql, 'mysql docker not reachable');
+  await openConn(page, 'e2e-mysql');
+  const row = await indexRow(page, 'orders', 'idx_orders_status');
+  await row.getByRole('button', { name: 'Drop index idx_orders_status' }).click();
+  await expect
+    .poll(() => editorText(page), { timeout: 15_000 })
+    .toContain('ALTER TABLE `orders` DROP INDEX `idx_orders_status`;');
+
+  // MySQL names the PK index PRIMARY, which DROP INDEX can't take.
+  const pk = await indexRow(page, 'orders', 'PRIMARY');
+  await pk.getByRole('button', { name: 'Drop index PRIMARY' }).click();
+  await expect
+    .poll(() => editorText(page), { timeout: 15_000 })
+    .toContain('ALTER TABLE `orders` DROP PRIMARY KEY;');
+});
+
+// ── Index conditions (partial indexes) ──────────────────────────────────────
+// One operator pair (`exists` / `in`) mapped onto three very different engines.
+
+/** Open the New-index builder on `object`, select `field` as the key. */
+async function newIndexOn(page: Page, object: string, field: string): Promise<void> {
+  const lbl = await objectLabel(page, object);
+  await lbl.click();
+  await page.getByRole('button', { name: /New index/ }).click();
+  await page.locator('.ib-search').fill(field);
+  await page.locator('.ib-row', { hasText: field }).first().click();
+  await expect(page.locator('.ib-row.on', { hasText: field }).first()).toBeVisible();
+}
+
+/** Add a condition row: pick field + operator (+ values for `in`). */
+async function addCondition(
+  page: Page,
+  field: string,
+  op: 'exists' | 'in',
+  values?: string,
+): Promise<void> {
+  await page.getByRole('button', { name: /Add condition/ }).click();
+  const row = page.locator('.ib-cond').last();
+  await row.locator('select').first().selectOption(field);
+  await row.locator('select').nth(1).selectOption(op);
+  if (op === 'in' && values !== undefined) await row.locator('input').fill(values);
+}
+
+test('Mongo: an `exists` condition becomes a partialFilterExpression', async ({ page }) => {
+  test.skip(!conn.mongodb, 'mongodb docker not reachable');
+  await openConn(page, 'e2e-mongodb');
+  await newIndexOn(page, 'profiles', 'userId');
+  await addCondition(page, 'userId', 'exists');
+  await page.getByRole('button', { name: /Prepare createIndex/ }).click();
+  const stmt = (await editorText(page)).replace(/\s+/g, '');
+  expect(stmt).toContain('db.profiles.createIndex');
+  expect(stmt).toContain('"partialFilterExpression"');
+  expect(stmt).toContain('"userId":{"$exists":true}');
+});
+
+test('Mongo: an `in` condition types its values ($in with a number)', async ({ page }) => {
+  test.skip(!conn.mongodb, 'mongodb docker not reachable');
+  await openConn(page, 'e2e-mongodb');
+  await newIndexOn(page, 'profiles', 'userId');
+  await addCondition(page, 'userId', 'in', 'a, 3, true');
+  await page.getByRole('button', { name: /Prepare createIndex/ }).click();
+  // Bare numbers/bools must NOT be quoted — a stringified 3 would never match.
+  expect((await editorText(page)).replace(/\s+/g, '')).toContain('"userId":{"$in":["a",3,true]}');
+});
+
+test('MySQL: a condition emulates a partial index with a CASE key part', async ({ page }) => {
+  test.skip(!conn.mysql, 'mysql docker not reachable');
+  await openConn(page, 'e2e-mysql');
+  await newIndexOn(page, 'orders', 'status');
+  await addCondition(page, 'status', 'in', 'paid, shipped');
+  await expect(page.locator('.ib-warn')).toContainText('no partial index');
+  await page.getByRole('button', { name: /Prepare CREATE INDEX/ }).click();
+  const stmt = await editorText(page);
+  expect(stmt).toContain('MySQL has no partial indexes');
+  // Expression key parts need their OWN parens inside the key list.
+  expect(stmt).toContain(
+    "((CASE WHEN `status` IN ('paid', 'shipped') THEN `status` END))",
+  );
+});
+
+test('Postgres: a condition becomes a native WHERE clause', async ({ page }) => {
+  test.skip(!conn.postgres, 'postgres docker not reachable');
+  await openConn(page, 'e2e-postgres');
+  await newIndexOn(page, 'orders', 'status');
+  await addCondition(page, 'status', 'exists');
+  await page.getByRole('button', { name: /Prepare CREATE INDEX/ }).click();
+  const stmt = await editorText(page);
+  expect(stmt).toContain('ON "orders" ("status") WHERE "status" IS NOT NULL;');
+  expect(stmt).not.toContain('CASE'); // native support — no emulation
+});
+
+test('Postgres: Drop index uses DROP INDEX, but DROP CONSTRAINT for the PK', async ({ page }) => {
+  test.skip(!conn.postgres, 'postgres docker not reachable');
+  await openConn(page, 'e2e-postgres');
+  const row = await indexRow(page, 'orders', 'idx_orders_status');
+  await row.getByRole('button', { name: 'Drop index idx_orders_status' }).click();
+  await expect
+    .poll(() => editorText(page), { timeout: 15_000 })
+    .toContain('DROP INDEX "idx_orders_status";');
+
+  // `orders_pkey` BACKS the primary-key constraint — Postgres rejects DROP INDEX
+  // on it and points at the constraint, so we must emit the constraint form.
+  const pk = await indexRow(page, 'orders', 'orders_pkey');
+  await pk.getByRole('button', { name: 'Drop index orders_pkey' }).click();
+  await expect
+    .poll(() => editorText(page), { timeout: 15_000 })
+    .toContain('ALTER TABLE "orders" DROP CONSTRAINT "orders_pkey";');
 });

@@ -265,6 +265,84 @@ For Redis, the keyspace expander has an inline **filter by prefix…** box
 (`RedisKeyFilter.svelte`): typing a prefix and pressing Enter re-scans the
 keyspace server-side with `SCAN … MATCH <prefix>*`.
 
+### Structure view: indexes (new / edit / drop)
+
+The **Indexes** block of a table's or collection's Structure view
+(`StructureView.svelte`) lists every index; clicking a row expands its full
+engine-native definition (Mongo's `listIndexes` doc, Postgres' `pg_get_indexdef`
+string). Each row also carries **Edit** and **Drop** actions, and the block header
+a **New index** button.
+
+Like every other mutating action in the explorer, these **prepare** a statement in
+a new query tab — nothing is applied until you press **Run** (and, on a guarded
+connection, confirm — see §13).
+
+- **New index** — pick the fields from a **searchable list** (selected fields pin
+  to the top in key order — the order is what makes a compound index useful;
+  Mongo offers nested paths like `address.city`, and a collection routinely
+  samples 60+ of them), optionally name it, add a **Condition** (below) and mark
+  it **Unique**, and get a `CREATE INDEX` / `db.coll.createIndex(…)`.
+- **Edit** — no engine alters an index in place, so this prepares a **drop +
+  recreate**: the builder opens pre-filled from the existing index and emits the
+  DROP followed by the CREATE. What the columns-and-unique summary can't carry is
+  taken from the stored definition — Mongo key **directions** (`-1`, `"text"`,
+  `"2dsphere"`) and options (`sparse`, `expireAfterSeconds`,
+  `partialFilterExpression`, `collation`), and the SQL access method (Postgres
+  `USING gin`, MySQL `FULLTEXT`/`SPATIAL`). The table is unindexed on that key
+  between the two statements.
+- **Drop** — one statement, spelled per engine:
+  `db.coll.dropIndex("name")` (Mongo), ``ALTER TABLE `t` DROP INDEX `name` ``
+  (MySQL/ClickHouse), `DROP INDEX "name"` (Postgres). The primary key gets its own
+  form — MySQL exposes it as an index literally named `PRIMARY`
+  (`ALTER TABLE … DROP PRIMARY KEY`), and a Postgres index that *backs* the PK
+  constraint can only be dropped via `ALTER TABLE … DROP CONSTRAINT`.
+- MongoDB's **`_id_`** index can't be changed or dropped, so both actions are
+  disabled on that row.
+
+#### Conditions (partial indexes)
+
+A **Condition** narrows *which* rows or documents an index covers — the classic
+case being a UNIQUE index that should only apply where a field is actually set.
+Add one or more rows (ANDed together), each a field plus one of two operators:
+**exists** and **in**. Values for `in` are comma-separated and typed, so
+`a, 3, true` becomes `["a", 3, true]` — a stringified `3` would never match.
+
+The three engines that can express this differ sharply, and the generated
+statement says which you got:
+
+| Engine | Emitted |
+|--------|---------|
+| **MongoDB** | native `partialFilterExpression: { f: { $exists: true } }` / `{ $in: […] }` |
+| **PostgreSQL** | native `CREATE INDEX … WHERE "f" IS NOT NULL` |
+| **MySQL** | **emulated** — see below |
+| **ClickHouse** | no equivalent; the section is hidden |
+
+**MySQL has no partial index** — there is no `CREATE INDEX … WHERE`. The
+condition is emulated with a **functional key part**: the leading column is
+wrapped in a `CASE` that yields `NULL` outside the condition, so those rows never
+enter the b-tree (and, for a UNIQUE index, don't collide — MySQL permits many
+NULLs). The statement carries a comment saying so, and the builder warns inline,
+because the optimizer only uses such an index for queries written with the *same*
+expression:
+
+```sql
+-- MySQL has no partial indexes; this emulates one with a functional key
+-- part. The optimizer uses it ONLY for queries written with the same CASE
+-- expression.
+CREATE UNIQUE INDEX `idx_orders_status`
+  ON `orders` ((CASE WHEN `status` IN ('paid', 'shipped') THEN `status` END));
+```
+
+Two round-trip guarantees when **editing** an index that already has a condition:
+
+- **MongoDB** — filter terms this builder doesn't model (`$gt`, `$type`, …) are
+  **preserved verbatim** and called out, so an edit never silently widens what the
+  index covers. Adding a condition also drops `sparse`, because MongoDB rejects an
+  index that sets both it and `partialFilterExpression` (the builder warns).
+- **PostgreSQL** — the catalog normalizes predicates (`= ANY (ARRAY[…])`, `::text`
+  casts), so an existing `WHERE` is kept as **text** rather than parsed back into
+  rows; it is shown, and replaced only if you add conditions of your own.
+
 ### Per-engine autocomplete (smart & context-aware)
 
 The editor requests suggestions from `POST …/db/completion` (debounced ~120 ms;

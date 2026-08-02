@@ -33,6 +33,8 @@
     const d = detail;
     ddlOpen = !!d?.ddl && (d.kind === 'procedure' || d.kind === 'function' || d.columns.length === 0);
     openIdxDef = null;
+    // A half-filled index builder belongs to the object it was opened on.
+    resetIdxBuilder();
   });
 
   function prettyExtra(extra: unknown): string {
@@ -134,9 +136,17 @@
 
   // ── Index builder (per-engine) ──────────────────────────────────────────────
   const isSql = $derived(database.capabilities?.sql === true);
+  const engine = $derived(database.capabilities?.engine ?? null);
   const canIndex = $derived(
     !!detail && (isSql ? detail.kind === 'table' : detail.kind === 'collection'),
   );
+  /** Engine-correct identifier quoting for the statements this panel prepares —
+   *  Postgres uses double quotes, MySQL/ClickHouse backticks. */
+  function q(name: string): string {
+    return engine === 'postgres'
+      ? `"${name.replace(/"/g, '""')}"`
+      : '`' + name.replace(/`/g, '``') + '`';
+  }
   const indexFields = $derived.by(() => {
     if (!detail) return [] as string[];
     if (isSql) return detail.columns.map((c) => c.name);
@@ -155,22 +165,328 @@
   let idxOpen = $state(false);
   let idxCols = $state<string[]>([]);
   let idxUnique = $state(false);
+  let idxName = $state('');
+  // The index being edited, when the builder was opened from a row's Edit
+  // button. No engine here can alter an index in place, so "edit" means
+  // "prepare a drop + recreate" — this also carries the engine-native options
+  // (Mongo sparse/TTL/partialFilter, the SQL access method) we must not lose.
+  let idxEditing = $state<DbIndexDef | null>(null);
+
+  // Every field the picker can offer: the object's indexable fields, plus any
+  // already-selected field the sampler didn't surface (a Mongo index can name a
+  // path absent from the sampled documents — without this the user would edit
+  // it blind).
+  const idxAllFields = $derived([
+    ...indexFields,
+    ...idxCols.filter((c) => !indexFields.includes(c)),
+  ]);
+  // The picker is a real list, not a tag cloud: a collection with 60+ sampled
+  // paths turns chips into an unscannable wall. Selected fields pin to the top
+  // in KEY ORDER (which is what actually makes an index useful), the rest are
+  // filtered by the search box.
+  let idxFieldQuery = $state('');
+  const idxRestFields = $derived.by(() => {
+    const qy = idxFieldQuery.trim().toLowerCase();
+    return idxAllFields.filter(
+      (f) => !idxCols.includes(f) && (qy === '' || f.toLowerCase().includes(qy)),
+    );
+  });
+  const suggestedIdxName = $derived(
+    detail && idxCols.length > 0
+      ? `idx_${detail.name}_${idxCols.join('_')}`.replace(/[^A-Za-z0-9_]/g, '_')
+      : '',
+  );
+  const effectiveIdxName = $derived(idxName.trim() || suggestedIdxName);
 
   function toggleIdxCol(c: string): void {
     idxCols = idxCols.includes(c) ? idxCols.filter((x) => x !== c) : [...idxCols, c];
   }
-  // Prepare a CREATE INDEX / createIndex statement and open it in a query tab
-  // for the user to review and run (never auto-applied).
-  function buildIndex(): void {
-    if (!detail || idxCols.length === 0) return;
-    const name = `idx_${detail.name}_${idxCols.join('_')}`.replace(/[^A-Za-z0-9_]/g, '_');
-    const stmt = isSql
-      ? `CREATE ${idxUnique ? 'UNIQUE ' : ''}INDEX ${name} ON ${detail.name} (${idxCols.join(', ')});`
-      : `db.${detail.name}.createIndex({ ${idxCols.map((c) => `"${c}": 1`).join(', ')} }${idxUnique ? ', { "unique": true }' : ''})`;
-    void database.openInNewTab(stmt);
+
+  // ── Index conditions (partial indexes) ──────────────────────────────────────
+  // A condition narrows WHICH rows/documents the index covers. Two operators —
+  // `exists` (Mongo `$exists: true` / SQL `IS NOT NULL`) and `in` — ANDed
+  // together. Engine reality differs sharply and the generator says so:
+  //   • MongoDB  — native `partialFilterExpression`.
+  //   • Postgres — native `CREATE INDEX … WHERE`.
+  //   • MySQL    — has NO partial index; emulated with a functional key part
+  //                over a CASE expression (see mysqlPartialNote).
+  //   • ClickHouse — no equivalent at all, so the section is hidden.
+  type IdxCondOp = 'exists' | 'in';
+  interface IdxCond {
+    field: string;
+    op: IdxCondOp;
+    /** Comma-separated literals, for `in` only. */
+    values: string;
+  }
+  let idxConds = $state<IdxCond[]>([]);
+  // Parts of an EXISTING partial filter this UI can't represent as rows, kept
+  // verbatim so editing an index never silently widens what it covers.
+  let idxCondExtraMongo = $state<Record<string, unknown> | null>(null);
+  // Postgres stores its predicate as catalog-normalized SQL (`= ANY (ARRAY[…])`,
+  // `::character varying` casts); round-tripping that through rows would mangle
+  // it, so an existing predicate is preserved as text and only REPLACED when the
+  // user adds rows of their own.
+  let idxCondRawSql = $state<string | null>(null);
+
+  const canCondition = $derived(!isSql || engine === 'mysql' || engine === 'postgres');
+  const idxCondFields = $derived(idxAllFields);
+
+  function addIdxCond(): void {
+    idxConds = [...idxConds, { field: idxCondFields[0] ?? '', op: 'exists', values: '' }];
+  }
+  function removeIdxCond(i: number): void {
+    idxConds = idxConds.filter((_, n) => n !== i);
+  }
+  /** Split the comma-separated `in` input into typed literals (numbers, bools,
+   *  null and strings) so Mongo gets real JSON and SQL gets correct quoting. */
+  function parseCondValues(raw: string): unknown[] {
+    return raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .map((s) => {
+        if (s === 'null') return null;
+        if (s === 'true') return true;
+        if (s === 'false') return false;
+        if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+        return s.replace(/^(['"])(.*)\1$/s, '$2');
+      });
+  }
+  /** Rows that will actually contribute (a field, and values when `in`). */
+  const usableIdxConds = $derived(
+    idxConds.filter(
+      (c) => c.field !== '' && (c.op === 'exists' || parseCondValues(c.values).length > 0),
+    ),
+  );
+  /** Mongo `partialFilterExpression`, merged over anything we preserved. */
+  function mongoPartialFilter(): Record<string, unknown> | null {
+    const out: Record<string, unknown> = { ...(idxCondExtraMongo ?? {}) };
+    for (const c of usableIdxConds) {
+      out[c.field] =
+        c.op === 'exists' ? { $exists: true } : { $in: parseCondValues(c.values) };
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  }
+  function sqlLiteral(v: unknown): string {
+    if (v === null) return 'NULL';
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    return `'${String(v).replace(/'/g, "''")}'`;
+  }
+  /** The SQL predicate for the condition rows, or the preserved one untouched. */
+  function sqlPredicate(): string | null {
+    const parts = usableIdxConds.map((c) =>
+      c.op === 'exists'
+        ? `${q(c.field)} IS NOT NULL`
+        : `${q(c.field)} IN (${parseCondValues(c.values).map(sqlLiteral).join(', ')})`,
+    );
+    return parts.length > 0 ? parts.join(' AND ') : idxCondRawSql;
+  }
+  const mysqlPartialNote =
+    '-- MySQL has no partial indexes; this emulates one with a functional key\n' +
+    '-- part. The optimizer uses it ONLY for queries written with the same CASE\n' +
+    '-- expression.';
+
+  function resetIdxBuilder(): void {
     idxOpen = false;
+    idxEditing = null;
     idxCols = [];
     idxUnique = false;
+    idxName = '';
+    idxFieldQuery = '';
+    idxConds = [];
+    idxCondExtraMongo = null;
+    idxCondRawSql = null;
+  }
+
+  // ── Index edit / drop ───────────────────────────────────────────────────────
+  // Mongo refuses to drop `_id_` — offering the action would only produce a
+  // statement the server rejects.
+  function isProtectedIdx(idx: DbIndexDef): boolean {
+    return !isSql && idx.name === '_id_';
+  }
+  /** True when this index is the one BACKING the table's primary key (its
+   *  columns are exactly the PK). Postgres refuses `DROP INDEX` on those. */
+  function backsPrimaryKey(idx: DbIndexDef): boolean {
+    const pk = detail?.primary_key ?? [];
+    if (!idx.unique || pk.length === 0 || pk.length !== idx.columns.length) return false;
+    const cols = new Set(idx.columns);
+    return pk.every((c) => cols.has(c));
+  }
+  function dropIndexStmt(idx: DbIndexDef): string {
+    const obj = detail!.name;
+    if (!isSql) return `db.${obj}.dropIndex(${JSON.stringify(idx.name)})`;
+    if (engine === 'mysql') {
+      // MySQL exposes the PK as an index literally named PRIMARY; it has its
+      // own verb and can't be named in DROP INDEX.
+      return idx.name === 'PRIMARY'
+        ? `ALTER TABLE ${q(obj)} DROP PRIMARY KEY;`
+        : `ALTER TABLE ${q(obj)} DROP INDEX ${q(idx.name)};`;
+    }
+    if (engine === 'postgres') {
+      return backsPrimaryKey(idx)
+        ? `ALTER TABLE ${q(obj)} DROP CONSTRAINT ${q(idx.name)};`
+        : `DROP INDEX ${q(idx.name)};`;
+    }
+    return `ALTER TABLE ${q(obj)} DROP INDEX ${q(idx.name)};`;
+  }
+  /**
+   * Rebuild a CREATE INDEX / createIndex for the given shape. `base` (set when
+   * editing) supplies what the columns+unique summary can't carry: Mongo's key
+   * DIRECTIONS (-1, "text", "2dsphere") and extra options (sparse, expireAfter‐
+   * Seconds, partialFilterExpression, collation), and the SQL access method.
+   */
+  function createIndexStmt(
+    name: string,
+    cols: string[],
+    unique: boolean,
+    base: DbIndexDef | null,
+  ): string {
+    const obj = detail!.name;
+    const def = base?.definition;
+    const rec = def && typeof def === 'object' ? (def as Record<string, unknown>) : null;
+    if (!isSql) {
+      const baseKey = (rec?.key ?? null) as Record<string, unknown> | null;
+      const key = cols
+        .map((c) => `${JSON.stringify(c)}: ${JSON.stringify(baseKey?.[c] ?? 1)}`)
+        .join(', ');
+      const opts: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(rec ?? {})) {
+        // `partialFilterExpression` is rebuilt from the condition rows below —
+        // carrying the old one over too would merge two filters.
+        if (!['key', 'v', 'ns', 'name', 'unique', 'partialFilterExpression'].includes(k)) {
+          opts[k] = v;
+        }
+      }
+      if (unique) opts.unique = true;
+      const partial = mongoPartialFilter();
+      if (partial) {
+        opts.partialFilterExpression = partial;
+        // MongoDB rejects an index that specifies both ("Cannot specify both
+        // partialFilterExpression and sparse") — the filter supersedes sparse.
+        delete opts.sparse;
+      }
+      opts.name = name;
+      return `db.${obj}.createIndex({ ${key} }, ${JSON.stringify(opts, null, 2)})`;
+    }
+    const method = (base?.method ?? '').toUpperCase();
+    // MySQL spells FULLTEXT / SPATIAL as the index KIND (and neither can be
+    // unique); everywhere else UNIQUE is the only kind we emit.
+    const kind =
+      engine === 'mysql' && (method === 'FULLTEXT' || method === 'SPATIAL')
+        ? `${method} `
+        : unique
+          ? 'UNIQUE '
+          : '';
+    // Postgres carries the access method in USING; btree is the default and
+    // stays implicit.
+    const using =
+      engine === 'postgres' && method && method !== 'BTREE' ? ` USING ${method.toLowerCase()}` : '';
+    const pred = sqlPredicate();
+    // MySQL has no partial index. Its documented stand-in is a FUNCTIONAL key
+    // part: wrap the leading column in a CASE that yields NULL for rows outside
+    // the condition, so they never enter the b-tree (and, for a UNIQUE index,
+    // don't collide — MySQL allows many NULLs). The extra parens are required
+    // syntax for an expression key part.
+    if (pred && engine === 'mysql') {
+      const parts = cols.map(q);
+      parts[0] = `(CASE WHEN ${pred} THEN ${q(cols[0])} END)`;
+      return `${mysqlPartialNote}\nCREATE ${kind}INDEX ${q(name)} ON ${q(obj)} (${parts.join(', ')});`;
+    }
+    const where = pred && engine === 'postgres' ? ` WHERE ${pred}` : '';
+    return `CREATE ${kind}INDEX ${q(name)} ON ${q(obj)}${using} (${cols.map(q).join(', ')})${where};`;
+  }
+
+  /** Split an existing Mongo `partialFilterExpression` into editable rows; keys
+   *  whose shape we don't model are handed back to be preserved verbatim. */
+  function parseMongoPartial(pf: unknown): {
+    rows: IdxCond[];
+    extra: Record<string, unknown> | null;
+  } {
+    const rows: IdxCond[] = [];
+    const extra: Record<string, unknown> = {};
+    if (pf && typeof pf === 'object') {
+      for (const [field, v] of Object.entries(pf as Record<string, unknown>)) {
+        const o = v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+        const keys = o ? Object.keys(o) : [];
+        if (keys.length === 1 && o!.$exists === true) {
+          rows.push({ field, op: 'exists', values: '' });
+        } else if (keys.length === 1 && Array.isArray(o!.$in)) {
+          rows.push({
+            field,
+            op: 'in',
+            values: (o!.$in as unknown[])
+              .map((x) => (typeof x === 'string' ? x : JSON.stringify(x)))
+              .join(', '),
+          });
+        } else {
+          extra[field] = v;
+        }
+      }
+    }
+    return { rows, extra: Object.keys(extra).length > 0 ? extra : null };
+  }
+
+  /** Toggle the builder open for a BRAND-NEW index (never inherits edit state). */
+  function startNewIndex(): void {
+    if (idxOpen && !idxEditing) {
+      resetIdxBuilder();
+      return;
+    }
+    resetIdxBuilder();
+    idxOpen = true;
+  }
+  /** Open the builder pre-filled from an existing index (edit = drop + recreate). */
+  function editIndex(idx: DbIndexDef): void {
+    idxEditing = idx;
+    // A MySQL functional key part reports an EMPTY column name (the expression
+    // lives in SHOW INDEX's `Expression`, which the summary doesn't carry) —
+    // keeping it would emit an empty identifier.
+    idxCols = idx.columns.filter((c) => c !== '');
+    idxUnique = idx.unique;
+    idxName = idx.name;
+    idxFieldQuery = '';
+    idxConds = [];
+    idxCondExtraMongo = null;
+    idxCondRawSql = null;
+    const def = idx.definition;
+    if (!isSql && def && typeof def === 'object') {
+      const parsed = parseMongoPartial((def as Record<string, unknown>).partialFilterExpression);
+      idxConds = parsed.rows;
+      idxCondExtraMongo = parsed.extra;
+    } else if (engine === 'postgres' && typeof def === 'string') {
+      // `pg_get_indexdef` ends with the predicate when the index is partial.
+      const m = /\sWHERE\s+(.+?)\s*;?\s*$/is.exec(def);
+      idxCondRawSql = m ? m[1] : null;
+    }
+    idxOpen = true;
+    openIdxDef = null;
+  }
+  /** Prepare a DROP for review in a query tab — never auto-applied. */
+  function dropIndex(idx: DbIndexDef): void {
+    if (!detail) return;
+    void database.openInNewTab(dropIndexStmt(idx), { name: `DROP ${idx.name}` });
+    toasts.warn(
+      'Review before running',
+      `This will drop the index ${idx.name}. Press Run to apply.`,
+    );
+  }
+  // Prepare a CREATE INDEX / createIndex statement (preceded by the DROP when
+  // editing) and open it in a query tab for the user to review and run.
+  function buildIndex(): void {
+    if (!detail || idxCols.length === 0) return;
+    const editing = idxEditing;
+    const create = createIndexStmt(effectiveIdxName, idxCols, idxUnique, editing);
+    const stmt = editing ? `${dropIndexStmt(editing)}\n${create}` : create;
+    void database.openInNewTab(stmt, {
+      name: editing ? `EDIT ${editing.name}` : effectiveIdxName,
+    });
+    if (editing) {
+      toasts.warn(
+        'Review before running',
+        `No engine edits an index in place — this drops ${editing.name} and recreates it. The table is unindexed on that key in between.`,
+      );
+    }
+    resetIdxBuilder();
   }
 
   // ── Stats (Mongo collStats) ─────────────────────────────────────────────────
@@ -269,7 +585,7 @@
           Indexes <span class="count">{detail.indexes.length}</span>
           <span class="grow"></span>
           {#if canIndex}
-            <button class="mini-btn" onclick={() => (idxOpen = !idxOpen)}>
+            <button class="mini-btn" onclick={startNewIndex}>
               <Icon name="plus" size={11} />New index
             </button>
           {/if}
@@ -279,23 +595,52 @@
             {#each detail.indexes as idx, i (i)}
               {@const defText = idxDefText(idx)}
               <li class="idx-item">
-                <button
-                  class="idx"
-                  class:expandable={defText != null}
-                  disabled={defText == null}
-                  title={defText != null ? 'View full definition' : undefined}
-                  onclick={() => (openIdxDef = openIdxDef === i ? null : i)}
-                >
-                  <Icon name="key" size={11} />
-                  <span class="idx-name mono" title={idx.name}>{idx.name}</span>
-                  {#if idx.unique}<span class="tag unique">unique</span>{/if}
-                  {#if idx.method}<span class="tag">{idx.method}</span>{/if}
-                  <span class="idx-cols mono">({idx.columns.join(', ')})</span>
-                  {#if defText != null}
-                    <span class="grow"></span>
-                    <Icon name={openIdxDef === i ? 'chevronDown' : 'chevronRight'} size={10} />
+                <div class="idx-row">
+                  <button
+                    class="idx"
+                    class:expandable={defText != null}
+                    disabled={defText == null}
+                    title={defText != null ? 'View full definition' : undefined}
+                    onclick={() => (openIdxDef = openIdxDef === i ? null : i)}
+                  >
+                    <Icon name="key" size={11} />
+                    <span class="idx-name mono" title={idx.name}>{idx.name}</span>
+                    {#if idx.unique}<span class="tag unique">unique</span>{/if}
+                    {#if idx.method}<span class="tag">{idx.method}</span>{/if}
+                    <span class="idx-cols mono">({idx.columns.join(', ')})</span>
+                    {#if defText != null}
+                      <span class="grow"></span>
+                      <Icon name={openIdxDef === i ? 'chevronDown' : 'chevronRight'} size={10} />
+                    {/if}
+                  </button>
+                  {#if canIndex}
+                    {@const locked = isProtectedIdx(idx)}
+                    <div class="idx-acts">
+                      <button
+                        class="idx-act"
+                        aria-label="Edit index {idx.name}"
+                        disabled={locked}
+                        title={locked
+                          ? "MongoDB's _id_ index can't be changed"
+                          : 'Edit — prepares a drop + recreate for you to review and run'}
+                        onclick={() => editIndex(idx)}
+                      >
+                        <Icon name="edit" size={11} />
+                      </button>
+                      <button
+                        class="idx-act danger"
+                        aria-label="Drop index {idx.name}"
+                        disabled={locked}
+                        title={locked
+                          ? "MongoDB's _id_ index can't be dropped"
+                          : 'Drop — prepares the statement for you to review and run'}
+                        onclick={() => dropIndex(idx)}
+                      >
+                        <Icon name="trash" size={11} />
+                      </button>
+                    </div>
                   {/if}
-                </button>
+                </div>
                 {#if openIdxDef === i && defText != null}
                   {@const snippet = idxCreateSnippet(idx)}
                   <div class="idx-def">
@@ -318,20 +663,142 @@
         {/if}
         {#if idxOpen}
           <div class="idx-builder">
-            <div class="ib-fields">
-              {#each indexFields as f (f)}
-                <button
-                  class="ib-chip mono"
-                  class:on={idxCols.includes(f)}
-                  onclick={() => toggleIdxCol(f)}
-                >{idxCols.includes(f) ? `${idxCols.indexOf(f) + 1}· ` : ''}{f}</button>
-              {/each}
+            {#if idxEditing}
+              <div class="ib-editing">
+                Editing <span class="mono">{idxEditing.name}</span> — no engine alters an index in
+                place, so this prepares a <strong>drop + recreate</strong>.
+              </div>
+            {/if}
+            <div class="ib-section">
+              <div class="ib-label">
+                Fields
+                <span class="ib-count">{idxCols.length} selected</span>
+                <span class="grow"></span>
+                <input
+                  class="ib-search"
+                  type="search"
+                  bind:value={idxFieldQuery}
+                  placeholder="Filter fields…"
+                  spellcheck="false"
+                />
+              </div>
+              <div class="ib-list">
+                {#each idxCols as f, i (f)}
+                  <button class="ib-row on" onclick={() => toggleIdxCol(f)}>
+                    <span class="ib-ord">{i + 1}</span>
+                    <span class="ib-fname mono">{f}</span>
+                    <span class="grow"></span>
+                    <Icon name="x" size={10} />
+                  </button>
+                {/each}
+                {#if idxCols.length > 0 && idxRestFields.length > 0}
+                  <div class="ib-sep"></div>
+                {/if}
+                {#each idxRestFields as f (f)}
+                  <button class="ib-row" onclick={() => toggleIdxCol(f)}>
+                    <span class="ib-ord"></span>
+                    <span class="ib-fname mono">{f}</span>
+                  </button>
+                {/each}
+                {#if idxCols.length === 0 && idxRestFields.length === 0}
+                  <div class="ib-empty dim">No field matches “{idxFieldQuery}”.</div>
+                {/if}
+              </div>
             </div>
+
+            {#if canCondition}
+              <div class="ib-section">
+                <div class="ib-label">
+                  Condition
+                  <span class="ib-count">
+                    {engine === 'mongodb' ? 'partial filter' : 'partial index'}
+                  </span>
+                  <span class="grow"></span>
+                  <button class="mini-btn" onclick={addIdxCond}>
+                    <Icon name="plus" size={10} />Add condition
+                  </button>
+                </div>
+                {#each idxConds as cond, ci (ci)}
+                  <div class="ib-cond">
+                    <select class="mono" bind:value={cond.field}>
+                      {#each idxCondFields as f (f)}<option value={f}>{f}</option>{/each}
+                    </select>
+                    <select bind:value={cond.op}>
+                      <option value="exists">exists</option>
+                      <option value="in">in</option>
+                    </select>
+                    {#if cond.op === 'in'}
+                      <input
+                        class="mono"
+                        type="text"
+                        bind:value={cond.values}
+                        placeholder="a, b, 3, true"
+                        spellcheck="false"
+                      />
+                    {:else}
+                      <span class="ib-cond-hint dim">
+                        {engine === 'mongodb' ? '$exists: true' : 'IS NOT NULL'}
+                      </span>
+                    {/if}
+                    <button
+                      class="idx-act danger"
+                      aria-label="Remove condition {ci + 1}"
+                      onclick={() => removeIdxCond(ci)}
+                    >
+                      <Icon name="trash" size={11} />
+                    </button>
+                  </div>
+                {/each}
+                {#if engine === 'mysql' && usableIdxConds.length > 0}
+                  <div class="ib-warn">
+                    MySQL has no partial index — this is emulated with a <strong>functional key
+                    part</strong> over a <code>CASE</code>. The optimizer uses it only for queries
+                    written with the same expression.
+                  </div>
+                {/if}
+                {#if engine === 'mongodb' && usableIdxConds.length > 0 && idxEditing?.definition && typeof idxEditing.definition === 'object' && (idxEditing.definition as Record<string, unknown>).sparse === true}
+                  <div class="ib-warn">
+                    <code>sparse</code> will be dropped — MongoDB rejects an index that sets both
+                    <code>sparse</code> and <code>partialFilterExpression</code>.
+                  </div>
+                {/if}
+                {#if idxCondExtraMongo}
+                  <div class="ib-warn">
+                    This index has filter terms this builder can't edit
+                    (<span class="mono">{Object.keys(idxCondExtraMongo).join(', ')}</span>) — they're
+                    preserved as-is.
+                  </div>
+                {/if}
+                {#if idxCondRawSql}
+                  <div class="ib-warn">
+                    Existing predicate kept as-is:
+                    <span class="mono">{idxCondRawSql}</span>{usableIdxConds.length > 0
+                      ? ' — replaced by the condition(s) above.'
+                      : ''}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+
+            <label class="ib-name">
+              Name
+              <input
+                class="mono"
+                type="text"
+                bind:value={idxName}
+                placeholder={suggestedIdxName || 'idx_…'}
+                spellcheck="false"
+              />
+            </label>
             <label class="ib-unique"><input type="checkbox" bind:checked={idxUnique} /> Unique</label>
             <div class="ib-actions">
-              <button class="btn small" onclick={() => (idxOpen = false)}>Cancel</button>
+              <button class="btn small" onclick={resetIdxBuilder}>Cancel</button>
               <button class="btn small primary" disabled={idxCols.length === 0} onclick={buildIndex}>
-                Prepare {isSql ? 'CREATE INDEX' : 'createIndex'} →
+                {#if idxEditing}
+                  Prepare drop + recreate →
+                {:else}
+                  Prepare {isSql ? 'CREATE INDEX' : 'createIndex'} →
+                {/if}
               </button>
             </div>
             <div class="ib-hint dim">Opens the statement in a query tab for you to review and run.</div>
@@ -520,31 +987,174 @@
     flex-direction: column;
     gap: 8px;
   }
-  .ib-fields {
+  .ib-section {
     display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
+    flex-direction: column;
+    gap: 6px;
   }
-  .ib-chip {
-    padding: 3px 8px;
+  .ib-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+  }
+  .ib-count {
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .ib-search {
+    width: 180px;
+    height: 22px;
+    padding: 0 8px;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
     font-size: 11.5px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .ib-search:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  /* A real list, not a tag cloud: a Mongo collection routinely samples 60+ dotted
+     paths, and wrapped chips make those unscannable. Selected fields pin to the
+     top IN KEY ORDER, which is the part of an index that actually matters. */
+  .ib-list {
+    display: flex;
+    flex-direction: column;
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+  }
+  .ib-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 11.5px;
+    text-align: start;
     cursor: pointer;
   }
-  .ib-chip.on {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  .ib-row:hover {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .ib-row.on {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent);
   }
-  .ib-unique {
+  .ib-fname {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Fixed-width gutter so the selected rows' key positions line up with the
+     unselected names below them. */
+  .ib-ord {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: end;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .ib-sep {
+    height: 1px;
+    margin: 3px 0;
+    background: var(--border);
+  }
+  .ib-empty {
+    padding: 8px;
+    font-size: 11.5px;
+  }
+  .ib-cond {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .ib-cond select,
+  .ib-cond input {
+    height: 24px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 11.5px;
+  }
+  .ib-cond select:first-child {
+    max-width: 260px;
+  }
+  .ib-cond input {
+    flex: 1;
+    min-width: 120px;
+    max-width: 320px;
+  }
+  .ib-cond select:focus,
+  .ib-cond input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .ib-cond-hint {
+    font-size: 11px;
+    font-family: var(--font-mono, monospace);
+  }
+  .ib-warn {
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    border-inline-start: 2px solid var(--danger, #e5534b);
+    padding-inline-start: 8px;
+  }
+  .ib-warn code {
+    font-size: 10.5px;
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    padding: 0 3px;
+    border-radius: 3px;
+  }
+  .ib-unique,
+  .ib-name {
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: 12px;
     color: var(--text);
+  }
+  .ib-name input {
+    flex: 1;
+    min-width: 0;
+    max-width: 320px;
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 11.5px;
+  }
+  .ib-name input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .ib-editing {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    border-inline-start: 2px solid var(--accent);
+    padding-inline-start: 8px;
   }
   .ib-actions {
     display: flex;
@@ -687,7 +1297,9 @@
     border-radius: 999px;
     color: var(--text);
   }
-  .idx,
+  /* The row carries the chrome; the expand button and the Edit/Drop actions are
+     siblings inside it (a button can't nest buttons). */
+  .idx-row,
   .fk {
     display: flex;
     align-items: center;
@@ -697,6 +1309,61 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     font-size: 11.5px;
+    min-width: 0;
+  }
+  .idx-row:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .idx {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    background: transparent;
+    border: none;
+    padding: 0;
+  }
+  .idx-acts {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+    /* Revealed on row hover/focus so the list stays scannable; always visible on
+       touch, where there is no hover. */
+    opacity: 0;
+  }
+  .idx-row:hover .idx-acts,
+  .idx-acts:focus-within {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .idx-acts {
+      opacity: 1;
+    }
+  }
+  .idx-act {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 20px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .idx-act:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  .idx-act.danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger, #e5534b) 18%, transparent);
+    color: var(--danger, #e5534b);
+  }
+  .idx-act:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
   .idx-item {
     display: flex;
@@ -705,10 +1372,9 @@
        long auto-generated index name blows the whole section (and page) wide. */
     min-width: 0;
   }
-  /* The index row is a button so the full definition can expand under it.
+  /* The index summary is a button so the full definition can expand under it.
      Indexes without a definition render identically but aren't clickable. */
   button.idx {
-    width: 100%;
     min-width: 0;
     font: inherit;
     font-size: 11.5px;
@@ -718,9 +1384,6 @@
   }
   button.idx.expandable {
     cursor: pointer;
-  }
-  button.idx.expandable:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .idx-def {
     display: flex;
