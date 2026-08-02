@@ -974,6 +974,61 @@ pub struct UpdateIssueAccountReq {
 }
 
 // ---------------------------------------------------------------------------
+// Confluence pages
+//
+// Callers speak Markdown, never Confluence storage XHTML: every body crosses
+// this boundary as `body_md` and the server converts (`markdown_to_storage` on
+// the way in, `storage_to_markdown` on the way out). Agents and skills author
+// Markdown; the storage format is an implementation detail of the wire.
+// ---------------------------------------------------------------------------
+
+/// A Confluence page as returned by the page endpoints, body rendered to Markdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfluencePageResp {
+    pub id: String,
+    pub title: String,
+    pub space_key: String,
+    /// Human-friendly browser URL.
+    pub url: String,
+    /// Current version number. Updates are applied against this automatically.
+    pub version: i64,
+    /// Page body converted from storage XHTML to Markdown.
+    pub body_md: String,
+}
+
+/// `POST /api/v1/issue/confluence/pages?account_id=`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateConfluencePageReq {
+    pub space_key: String,
+    pub title: String,
+    /// Page body in Markdown; converted to storage format server-side.
+    pub body_md: String,
+    /// Create as a child of this page when present.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+}
+
+/// `PUT /api/v1/issue/confluence/pages/{page_id}?account_id=`
+///
+/// The current version is resolved server-side, so callers never track version
+/// numbers — a stale number is the classic source of lost Confluence edits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateConfluencePageReq {
+    /// Absent → keep the page's current title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Replacement page body in Markdown.
+    pub body_md: String,
+}
+
+/// `POST /api/v1/issue/confluence/pages/{page_id}/comments?account_id=`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddConfluenceCommentReq {
+    /// Comment body in Markdown.
+    pub body_md: String,
+}
+
+// ---------------------------------------------------------------------------
 // Notifications
 // ---------------------------------------------------------------------------
 

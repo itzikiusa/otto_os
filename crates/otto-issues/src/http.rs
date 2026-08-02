@@ -10,7 +10,10 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Extension, Json, Router};
-use otto_core::api::{CreateIssueAccountReq, Problem, UpdateIssueAccountReq};
+use otto_core::api::{
+    AddConfluenceCommentReq, ConfluencePageResp, CreateConfluencePageReq, CreateIssueAccountReq,
+    Problem, UpdateConfluencePageReq, UpdateIssueAccountReq,
+};
 use otto_core::auth::{authorize_owner, AuthUser};
 use otto_core::domain::{IssueAccount, IssueDetail, IssueProject, IssueSummary, MyWorkIssue};
 use otto_core::secrets::SecretStore;
@@ -18,7 +21,9 @@ use otto_core::{new_id, Error, Id};
 use otto_state::{IssuesRepo, NewIssueAccount};
 
 use crate::confluence::ConfluenceClient;
-use crate::confluence::{ConfluencePageSummary, ConfluenceSpace};
+use crate::confluence::{
+    markdown_to_storage, storage_to_markdown, ConfluencePageSummary, ConfluenceSpace, PageComment,
+};
 use crate::jira::{
     CommentRef, DevStatus, EditableField, IssueFull, JiraClient, JiraTransition, JiraUser,
 };
@@ -115,6 +120,17 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
         .route("/issue/my-work", get(my_work::<S>))
         .route("/issue/confluence/spaces", get(list_spaces_cf::<S>))
         .route("/issue/confluence/search", get(search_pages_cf::<S>))
+        // Page read/write. Static `confluence` outranks the `/issue/{account_id}/{key}`
+        // patterns below, exactly as the two routes above already rely on.
+        .route("/issue/confluence/pages", post(create_page_cf::<S>))
+        .route(
+            "/issue/confluence/pages/{page_id}",
+            get(get_page_cf::<S>).put(update_page_cf::<S>),
+        )
+        .route(
+            "/issue/confluence/pages/{page_id}/comments",
+            get(list_page_comments_cf::<S>).post(add_page_comment_cf::<S>),
+        )
         .route("/issue/{account_id}/{key}", get(get_issue::<S>))
         // Extended issue view + write operations
         .route("/issue/{account_id}/{key}/full", get(get_issue_full::<S>))
@@ -376,6 +392,146 @@ async fn search_pages_cf<S: IssuesCtx>(
     let client = ConfluenceClient::new(&account.base_url, &account.email, &token);
     let results = client.search_pages(space.as_deref(), &q).await?;
     Ok(Json(results))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Confluence page read/write
+//
+// Bodies cross this boundary as Markdown in both directions — callers (agents,
+// skills, the UI) never handle Confluence storage XHTML. `account_id` is a query
+// param here, matching the two Confluence endpoints above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resolve the caller's authorized Confluence client from an `account_id` query param.
+async fn confluence_client_for<S: IssuesCtx>(
+    s: &S,
+    params: &HashMap<String, String>,
+    user: &AuthUser,
+) -> Result<ConfluenceClient, Error> {
+    let account_id: Id = params
+        .get("account_id")
+        .ok_or_else(|| Error::Invalid("account_id query param required".into()))?
+        .clone();
+    let account = load_authorized_account(s, &account_id, user).await?;
+    let token = s
+        .secrets()
+        .get(&account.token_ref)?
+        .ok_or_else(|| Error::Invalid(format!("token missing for issue account {}", account.id)))?;
+    Ok(ConfluenceClient::new(
+        &account.base_url,
+        &account.email,
+        &token,
+    ))
+}
+
+impl From<crate::confluence::ConfluencePage> for ConfluencePageResp {
+    fn from(p: crate::confluence::ConfluencePage) -> Self {
+        Self {
+            body_md: storage_to_markdown(&p.body_storage),
+            id: p.id,
+            title: p.title,
+            space_key: p.space_key,
+            url: p.url,
+            version: p.version,
+        }
+    }
+}
+
+/// `GET /issue/confluence/pages/{page_id}?account_id=`
+async fn get_page_cf<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(page_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<ConfluencePageResp>> {
+    let client = confluence_client_for(&s, &params, &user).await?;
+    Ok(Json(client.get_page(&page_id).await?.into()))
+}
+
+/// `POST /issue/confluence/pages?account_id=`
+async fn create_page_cf<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Query(params): Query<HashMap<String, String>>,
+    Json(req): Json<CreateConfluencePageReq>,
+) -> ApiResult<Json<ConfluencePageResp>> {
+    if req.space_key.trim().is_empty() {
+        return Err(Error::Invalid("space_key must not be empty".into()).into());
+    }
+    if req.title.trim().is_empty() {
+        return Err(Error::Invalid("title must not be empty".into()).into());
+    }
+    let client = confluence_client_for(&s, &params, &user).await?;
+    let page = client
+        .create_page(
+            req.space_key.trim(),
+            req.title.trim(),
+            &markdown_to_storage(&req.body_md),
+            req.parent_id.as_deref().filter(|p| !p.trim().is_empty()),
+        )
+        .await?;
+    Ok(Json(page.into()))
+}
+
+/// `PUT /issue/confluence/pages/{page_id}?account_id=`
+///
+/// Reads the page first to resolve its current version and (when the request
+/// omits a title) preserve the existing one — callers never pass a version, so a
+/// stale number can't silently clobber someone else's edit.
+async fn update_page_cf<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(page_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    Json(req): Json<UpdateConfluencePageReq>,
+) -> ApiResult<Json<ConfluencePageResp>> {
+    let client = confluence_client_for(&s, &params, &user).await?;
+    let current = client.get_page(&page_id).await?;
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(&current.title);
+    let page = client
+        .update_page(
+            &page_id,
+            title,
+            &markdown_to_storage(&req.body_md),
+            current.version,
+        )
+        .await?;
+    Ok(Json(page.into()))
+}
+
+/// `GET /issue/confluence/pages/{page_id}/comments?account_id=`
+async fn list_page_comments_cf<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(page_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Vec<PageComment>>> {
+    let client = confluence_client_for(&s, &params, &user).await?;
+    Ok(Json(client.list_comments(&page_id).await?))
+}
+
+/// `POST /issue/confluence/pages/{page_id}/comments?account_id=`
+async fn add_page_comment_cf<S: IssuesCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(page_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    Json(req): Json<AddConfluenceCommentReq>,
+) -> ApiResult<Json<CommentRef>> {
+    if req.body_md.trim().is_empty() {
+        return Err(Error::Invalid("body_md must not be empty".into()).into());
+    }
+    let client = confluence_client_for(&s, &params, &user).await?;
+    Ok(Json(
+        client
+            .add_comment(&page_id, &markdown_to_storage(&req.body_md))
+            .await?,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1936,6 +1936,55 @@ export interface UpdateIssueAccountReq {
   token_expires_at?: string | null;
 }
 
+/**
+ * Confluence pages. Bodies cross the wire as Markdown in BOTH directions
+ * (`body_md`) — the server converts to/from Confluence storage XHTML, so no
+ * caller ever handles the storage format.
+ */
+export interface ConfluencePageResp {
+  id: string;
+  title: string;
+  space_key: string;
+  /** Human-friendly browser URL. */
+  url: string;
+  /** Current version. Updates resolve this server-side; callers never send it. */
+  version: number;
+  /** Page body converted from storage XHTML to Markdown. */
+  body_md: string;
+}
+
+/** POST /issue/confluence/pages?account_id= */
+export interface CreateConfluencePageReq {
+  space_key: string;
+  title: string;
+  /** Page body in Markdown. */
+  body_md: string;
+  /** Create as a child of this page when present. */
+  parent_id?: string | null;
+}
+
+/** PUT /issue/confluence/pages/{page_id}?account_id= */
+export interface UpdateConfluencePageReq {
+  /** Absent keeps the page's current title. */
+  title?: string | null;
+  /** Replacement page body in Markdown. */
+  body_md: string;
+}
+
+/** POST /issue/confluence/pages/{page_id}/comments?account_id= */
+export interface AddConfluenceCommentReq {
+  /** Comment body in Markdown. */
+  body_md: string;
+}
+
+/** One footer comment on a Confluence page, body already converted to Markdown. */
+export interface PageComment {
+  id: string;
+  author: string;
+  body_md: string;
+  created: string;
+}
+
 /** Daemon-side directory listing for the folder picker (GET /fs/browse). */
 export interface FsEntry {
   name: string;

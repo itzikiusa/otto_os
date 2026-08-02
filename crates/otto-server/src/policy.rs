@@ -503,8 +503,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // §3.2: read issues/search=View; comment/transition/assign/manage accounts=Edit.
     if p.starts_with("/issue/") || p == "/issue" {
         // accounts list/create/update/delete: list=View, mutate=Edit.
-        // reads (projects/search/confluence/get/full/transitions GET/assignable/
-        // issue-types/attachment)=View; comment/transition POST/assignee PUT=Edit.
+        // reads (projects/search/confluence spaces+search+page GET/page comments
+        // GET/get/full/transitions GET/assignable/issue-types/attachment)=View;
+        // comment/transition POST/assignee PUT=Edit, and likewise the Confluence
+        // page writes (create POST / update PUT / page-comment POST).
         return Require(Issues, if get { View } else { Edit });
     }
 
@@ -1644,6 +1646,34 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/issue/{account_id}/{key}/comment"),
+            Require(Issues, Edit)
+        );
+        // Confluence pages: reads are View, every write (create/update/comment)
+        // is Edit — these are outward-facing and must never fall to View.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/issue/confluence/pages/{page_id}"),
+            Require(Issues, View)
+        );
+        assert_eq!(
+            pol(
+                Method::GET,
+                "/api/v1/issue/confluence/pages/{page_id}/comments"
+            ),
+            Require(Issues, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/issue/confluence/pages"),
+            Require(Issues, Edit)
+        );
+        assert_eq!(
+            pol(Method::PUT, "/api/v1/issue/confluence/pages/{page_id}"),
+            Require(Issues, Edit)
+        );
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/issue/confluence/pages/{page_id}/comments"
+            ),
             Require(Issues, Edit)
         );
         assert_eq!(

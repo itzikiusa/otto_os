@@ -1052,6 +1052,11 @@ configured Jira/Confluence account.
 | GET /issue/my-work?account_id= | member | — | `MyWorkIssue[]` — the caller's open assigned issues (`assignee = currentUser()`, statusCategory != Done, newest first, one page of 100) with parent/project context for the Focus view hierarchy |
 | GET /issue/confluence/spaces | member | — | Confluence spaces |
 | GET /issue/confluence/search | member | — | Confluence page search |
+| GET /issue/confluence/pages/{page_id}?account_id= | member | — | `ConfluencePageResp` |
+| POST /issue/confluence/pages?account_id= | member | CreateConfluencePageReq | `ConfluencePageResp` (created) |
+| PUT /issue/confluence/pages/{page_id}?account_id= | member | UpdateConfluencePageReq | `ConfluencePageResp` (updated) |
+| GET /issue/confluence/pages/{page_id}/comments?account_id= | member | — | `PageComment[]` |
+| POST /issue/confluence/pages/{page_id}/comments?account_id= | member | AddConfluenceCommentReq | `CommentRef` |
 | GET /issue/{account_id}/{key} | member | — | issue summary |
 | GET /issue/{account_id}/{key}/full | member | — | full issue detail |
 | GET /issue/{account_id}/{key}/devstatus?issueId=<id> | member | — | `DevStatus` (branches/commits/PRs; best-effort, empty if no dev tool connected); `issueId` optional — when present skips a round-trip to resolve the numeric id |

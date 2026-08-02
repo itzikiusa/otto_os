@@ -58,6 +58,8 @@ const DEFAULT_ENABLED: &[&str] = &[
     "search_issues",
     "get_issue",
     "search_confluence",
+    "get_confluence_page",
+    "list_confluence_page_comments",
     // Swarm
     "list_swarms",
     "get_swarm",
@@ -110,6 +112,11 @@ const DANGEROUS: &[&str] = &[
     "start_pr_review",
     "comment_issue",
     "transition_issue",
+    // Confluence page writes publish to a real wiki everyone reads — same tier
+    // as commenting on an issue or opening a PR.
+    "create_confluence_page",
+    "update_confluence_page",
+    "comment_confluence_page",
     "post_swarm_board",
     "test_integration",
     "broadcast_message",
@@ -278,6 +285,28 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Search Confluence pages for an issue account. `query` is the search text; optional `space`. Read-only.",
             "inputSchema":{"type":"object","required":["account_id","query"],"properties":{
                 "account_id":{"type":"string"},"query":{"type":"string"},"space":{"type":"string"}}}}),
+        json!({"name":"otto.get_confluence_page","mutating":false,"category":"Issues",
+            "description":"Read one Confluence page by id. Returns id, title, space_key, url, version and the body as MARKDOWN (`body_md`) — never storage XHTML. Find the id first with otto.search_confluence. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
+                "account_id":{"type":"string"},"page_id":{"type":"string"}}}}),
+        json!({"name":"otto.list_confluence_page_comments","mutating":false,"category":"Issues",
+            "description":"List the footer comments on a Confluence page (author, body as markdown, created). Use it to collect answers people left on a page. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","page_id"],"properties":{
+                "account_id":{"type":"string"},"page_id":{"type":"string"}}}}),
+        json!({"name":"otto.create_confluence_page","mutating":true,"category":"Issues",
+            "description":"Create a Confluence page. `body_md` is MARKDOWN (converted server-side). Optional `parent_id` nests it under an existing page. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","space_key","title","body_md"],"properties":{
+                "account_id":{"type":"string"},"space_key":{"type":"string"},"title":{"type":"string"},
+                "body_md":{"type":"string"},"parent_id":{"type":"string"}}}}),
+        json!({"name":"otto.update_confluence_page","mutating":true,"category":"Issues",
+            "description":"Replace a Confluence page's body with `body_md` (MARKDOWN). The current version is resolved server-side, so no version is passed. Omit `title` to keep the existing one. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","page_id","body_md"],"properties":{
+                "account_id":{"type":"string"},"page_id":{"type":"string"},"body_md":{"type":"string"},
+                "title":{"type":"string"}}}}),
+        json!({"name":"otto.comment_confluence_page","mutating":true,"category":"Issues",
+            "description":"Add a footer comment to a Confluence page. `body_md` is MARKDOWN. DANGEROUS: outward-facing — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","page_id","body_md"],"properties":{
+                "account_id":{"type":"string"},"page_id":{"type":"string"},"body_md":{"type":"string"}}}}),
         json!({"name":"otto.comment_issue","mutating":true,"category":"Issues",
             "description":"Add a comment to a Jira issue. DANGEROUS: outward-facing — approval-gated.",
             "inputSchema":{"type":"object","required":["account_id","key","body"],"properties":{
@@ -1302,6 +1331,76 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             }
             SelfCall::get(path)
         }
+        "get_confluence_page" => {
+            let acc = arg_str(args, "account_id")?;
+            let pid = arg_str(args, "page_id")?;
+            SelfCall::get(format!(
+                "/api/v1/issue/confluence/pages/{}?account_id={}",
+                seg(&pid),
+                seg(&acc)
+            ))
+        }
+        "list_confluence_page_comments" => {
+            let acc = arg_str(args, "account_id")?;
+            let pid = arg_str(args, "page_id")?;
+            SelfCall::get(format!(
+                "/api/v1/issue/confluence/pages/{}/comments?account_id={}",
+                seg(&pid),
+                seg(&acc)
+            ))
+        }
+        "create_confluence_page" => {
+            let acc = arg_str(args, "account_id")?;
+            let mut body = json!({
+                "space_key": arg_str(args, "space_key")?,
+                "title": arg_str(args, "title")?,
+                "body_md": arg_str(args, "body_md")?,
+            });
+            if let Some(p) = args
+                .get("parent_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                body["parent_id"] = json!(p);
+            }
+            SelfCall::post(
+                format!("/api/v1/issue/confluence/pages?account_id={}", seg(&acc)),
+                body,
+            )
+        }
+        "update_confluence_page" => {
+            let acc = arg_str(args, "account_id")?;
+            let pid = arg_str(args, "page_id")?;
+            let mut body = json!({ "body_md": arg_str(args, "body_md")? });
+            if let Some(t) = args
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                body["title"] = json!(t);
+            }
+            SelfCall::put(
+                format!(
+                    "/api/v1/issue/confluence/pages/{}?account_id={}",
+                    seg(&pid),
+                    seg(&acc)
+                ),
+                body,
+            )
+        }
+        "comment_confluence_page" => {
+            let acc = arg_str(args, "account_id")?;
+            let pid = arg_str(args, "page_id")?;
+            let body = json!({ "body_md": arg_str(args, "body_md")? });
+            SelfCall::post(
+                format!(
+                    "/api/v1/issue/confluence/pages/{}/comments?account_id={}",
+                    seg(&pid),
+                    seg(&acc)
+                ),
+                body,
+            )
+        }
         "comment_issue" => {
             let acc = arg_str(args, "account_id")?;
             let key = arg_str(args, "key")?;
@@ -2280,6 +2379,91 @@ mod tests {
     }
 
     // ----- Vault: optional workspace_id ------------------------------------
+
+    #[test]
+    fn confluence_page_tools_route_and_are_tiered() {
+        // Reads are default-enabled like the other Confluence read; every write
+        // is outward-facing (it publishes to a real wiki) and must be DANGEROUS.
+        let names = spec_names();
+        for n in [
+            "otto.get_confluence_page",
+            "otto.list_confluence_page_comments",
+            "otto.create_confluence_page",
+            "otto.update_confluence_page",
+            "otto.comment_confluence_page",
+        ] {
+            assert!(names.contains(&n.to_string()), "missing spec {n}");
+        }
+        for r in ["get_confluence_page", "list_confluence_page_comments"] {
+            assert!(
+                mcp_tool_enabled_for_token(true, false, &[], r),
+                "{r} should be a default-enabled read"
+            );
+        }
+
+        let acc = "acc1";
+        let pid = "12345";
+        let read = route_for(
+            "get_confluence_page",
+            &json!({"account_id": acc, "page_id": pid}),
+        )
+        .unwrap();
+        assert_eq!(read.method, Method::Get);
+        assert_eq!(
+            read.path,
+            "/api/v1/issue/confluence/pages/12345?account_id=acc1"
+        );
+        assert!(read.body.is_none());
+
+        // Create sends Markdown, and omits parent_id entirely when not supplied
+        // (an empty string would make Confluence reject the call).
+        let create = route_for(
+            "create_confluence_page",
+            &json!({"account_id": acc, "space_key": "STOR", "title": "T", "body_md": "# hi"}),
+        )
+        .unwrap();
+        assert_eq!(create.method, Method::Post);
+        assert_eq!(create.path, "/api/v1/issue/confluence/pages?account_id=acc1");
+        let body = create.body.unwrap();
+        assert_eq!(body["space_key"], json!("STOR"));
+        assert_eq!(body["body_md"], json!("# hi"));
+        assert!(body.get("parent_id").is_none());
+
+        let nested = route_for(
+            "create_confluence_page",
+            &json!({"account_id": acc, "space_key": "STOR", "title": "T",
+                    "body_md": "x", "parent_id": "999"}),
+        )
+        .unwrap();
+        assert_eq!(nested.body.unwrap()["parent_id"], json!("999"));
+
+        // Update never carries a version — the server resolves it.
+        let upd = route_for(
+            "update_confluence_page",
+            &json!({"account_id": acc, "page_id": pid, "body_md": "b"}),
+        )
+        .unwrap();
+        assert_eq!(upd.method, Method::Put);
+        assert_eq!(
+            upd.path,
+            "/api/v1/issue/confluence/pages/12345?account_id=acc1"
+        );
+        let ub = upd.body.unwrap();
+        assert!(ub.get("version").is_none(), "callers must not send a version");
+        assert!(ub.get("title").is_none(), "absent title must stay absent");
+
+        let cmt = route_for(
+            "comment_confluence_page",
+            &json!({"account_id": acc, "page_id": pid, "body_md": "answer"}),
+        )
+        .unwrap();
+        assert_eq!(cmt.method, Method::Post);
+        assert_eq!(
+            cmt.path,
+            "/api/v1/issue/confluence/pages/12345/comments?account_id=acc1"
+        );
+        assert_eq!(cmt.body.unwrap()["body_md"], json!("answer"));
+    }
 
     #[test]
     fn vault_tools_do_not_require_workspace_id() {

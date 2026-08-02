@@ -75,7 +75,7 @@ pub struct ConfluencePage {
 }
 
 /// A single comment on a Confluence page, body converted to Markdown.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PageComment {
     pub id: String,
     pub author: String,
