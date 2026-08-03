@@ -87,13 +87,27 @@ const VALIDATION_TIMEOUT: Duration = Duration::from_secs(900); // 15 min
 const IMPROVER_TIMEOUT: Duration = Duration::from_secs(600); // 10 min
 
 /// Best-practice guidance handed to the improver so skill edits stay healthy.
-const SKILL_BEST_PRACTICES: &str = "Skill authoring best practices you MUST follow:\n\
+///
+/// Deliberately biased toward *positive* instruction. The improver runs once per
+/// iteration on top of the previous winner, so any nudge toward "add a hard rule"
+/// compounds: after a few rounds a skill degenerates into a wall of MUST/NEVER
+/// lines, and no validation dimension scores phrasing, so nothing pushes back.
+/// Stating the wanted behaviour (plus why, plus how to check it) generalises to
+/// situations the rule never anticipated; a prohibition only names one trap.
+/// Prohibitions still earn their place for destructive actions and for trigger
+/// scope ("when NOT to use this skill") — those are boundaries, not style.
+const SKILL_BEST_PRACTICES: &str = "Skill authoring best practices to follow:\n\
 - Keep valid YAML frontmatter with at least `name:` and a concise one-line `description:`.\n\
 - Preserve the skill's original intent and structure; change only what the findings justify.\n\
 - Prefer additive, surgical edits (tighten wording, add a missing rule, add a concrete example) \
 over rewrites.\n\
-- Be specific and actionable: state hard rules explicitly and show CORRECT vs WRONG examples \
-where useful.\n\
+- Be specific and actionable, and prefer stating the behaviour you WANT over listing what to \
+avoid: describe the correct action, give the reason it matters in one clause, and where possible \
+name the check that confirms it was done (a command to run, an output to look for). An agent that \
+knows the goal and can verify it handles cases a prohibition never anticipated.\n\
+- Reserve explicit prohibitions for two things: destructive or irreversible actions, and trigger \
+scope (when this skill should NOT be used). Elsewhere, replace a `NEVER do X` line with the \
+positive rule that makes X unnecessary — and do not restate a rule the skill already makes once.\n\
 - Do not introduce contradictions or remove instructions that are still correct.\n\
 - Do NOT game the validators: never add instructions that merely tell the agent to satisfy these \
 specific checks, hardcode outputs, or name the validation dimensions — the edits must improve how \
