@@ -2949,6 +2949,7 @@ dependencies = [
  "derive-where",
  "derive_more",
  "fast-socks5",
+ "flate2",
  "futures-core",
  "futures-io",
  "futures-util",
@@ -2971,6 +2972,7 @@ dependencies = [
  "serde_with",
  "sha1",
  "sha2",
+ "snap",
  "socket2 0.6.4",
  "stringprep",
  "strsim",
@@ -2982,6 +2984,7 @@ dependencies = [
  "typed-builder",
  "uuid",
  "webpki-roots 1.0.8",
+ "zstd",
 ]
 
 [[package]]
@@ -5184,6 +5187,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
+
+[[package]]
 name = "socket2"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7313,6 +7322,24 @@ dependencies = [
  "crc32fast",
  "log",
  "simd-adler32",
+]
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
 ]
 
 [[package]]

@@ -20,7 +20,15 @@ base64 = { workspace = true }
 reqwest = { workspace = true }
 sqlx = { workspace = true, features = ["mysql", "postgres", "tls-rustls", "bigdecimal", "time", "chrono", "uuid", "ipnetwork", "mac_address"] }
 redis = { version = "1.2.3", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"] }
-mongodb = { version = "3.7.0", features = ["socks5-proxy"] }
+# Wire compression is not a nice-to-have here: a fat-document collection read
+# over an SSH tunnel is bandwidth-bound (measured ~68 KB/s on a real bastion),
+# and this payload shape compresses ~39x with zstd — 54s → ~1.5s.
+mongodb = { version = "3.7.0", features = [
+    "socks5-proxy",
+    "zstd-compression",
+    "snappy-compression",
+    "zlib-compression",
+] }
 sqlparser = "0.62.0"
 clickhouse = { version = "0.15.1", features = ["rustls-tls"] }
 klickhouse = { version = "0.15.3", features = ["tls"] }
