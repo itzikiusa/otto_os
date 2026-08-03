@@ -156,7 +156,8 @@ impl Driver for MongoDriver {
             // Collection node → sampled top-level fields (filtered by name when set).
             Some(coll_name) => {
                 let coll: Collection<Document> = db.collection(coll_name);
-                let fields = sample_field_types(&coll).await?;
+                let size = adaptive_sample_size(&db, coll_name).await;
+                let fields = sample_field_types(&coll, size).await?;
                 let filter_lower = filter.map(|f| f.to_lowercase());
                 Ok(fields
                     .into_iter()
@@ -327,11 +328,58 @@ impl Driver for MongoDriver {
             detail.indexes = indexes;
         }
 
-        // Sampled field→type map and one sample document.
-        let field_types = sample_field_types(&coll).await.unwrap_or_default();
-        let sample = first_document(&coll).await;
-
         let mut extra = Map::new();
+
+        // Collection stats FIRST: `avgObjSize` is what sizes the structure sample
+        // below, so it has to be known before we sample.
+        let mut avg_obj_size: Option<i64> = None;
+        if let Ok(stats) = db
+            .run_command(doc! { "collStats": coll_name, "scale": 1 })
+            .await
+        {
+            let mut s = Map::new();
+            for k in [
+                "count",
+                "size",
+                "storageSize",
+                "avgObjSize",
+                "nindexes",
+                "totalIndexSize",
+                "totalSize",
+            ] {
+                if let Some(v) = stats.get(k) {
+                    s.insert(k.to_string(), bson_to_json(v));
+                }
+            }
+            avg_obj_size = match stats.get("avgObjSize") {
+                Some(Bson::Int64(n)) => Some(*n),
+                Some(Bson::Int32(n)) => Some(*n as i64),
+                Some(Bson::Double(n)) => Some(*n as i64),
+                _ => None,
+            };
+            // Surface the exact collStats document count as the row count.
+            match stats.get("count") {
+                Some(Bson::Int64(c)) => detail.row_count = Some(*c),
+                Some(Bson::Int32(c)) => detail.row_count = Some(*c as i64),
+                Some(Bson::Double(c)) => detail.row_count = Some(*c as i64),
+                _ => {}
+            }
+            if !s.is_empty() {
+                extra.insert("stats".into(), Value::Object(s));
+            }
+        }
+
+        // ONE byte-bounded sample serves all three things we used to fetch
+        // separately (top-level types, nested paths, the sample document).
+        let (paths, sample) = sample_structure(&coll, structure_sample_size(avg_obj_size))
+            .await
+            .unwrap_or_default();
+        // Top-level fields are exactly the dot-free paths — no second pass needed.
+        let field_types: Vec<(String, String)> = paths
+            .iter()
+            .filter(|(p, _)| !p.contains('.'))
+            .cloned()
+            .collect();
         extra.insert(
             "sampled_fields".into(),
             Value::Object(
@@ -344,7 +392,7 @@ impl Driver for MongoDriver {
         // Nested dotted field PATHS (e.g. `players.playerId`,
         // `templatesAwardedCollections.succeededAwarded.templateId`) so the index
         // builder can index embedded fields, not just the top-level ones.
-        if let Ok(paths) = sample_field_paths(&coll).await {
+        if !paths.is_empty() {
             // Types alongside the paths: a collection has no `columns`, so the
             // structure tab builds its Fields table from these. A path is far more
             // useful as `lobbyMetaData.brand_id → int32` than as a bare string —
@@ -1119,7 +1167,8 @@ impl MongoDriver {
 
         // Then sampled field paths (nested, depth-bounded); plain unless indexed.
         let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        if let Ok(sampled) = sample_field_paths(&collection).await {
+        let sample_size = adaptive_sample_size(&client.database(db), coll).await;
+        if let Ok(sampled) = sample_field_paths(&collection, sample_size).await {
             for (path, ty) in sampled {
                 types.entry(path.clone()).or_insert(ty);
                 add(path, Rank::Plain);
@@ -2002,10 +2051,52 @@ fn join_index_keys(keys: &Document) -> String {
 
 // --- sampling & result shaping ----------------------------------------------
 
-/// Sample up to [`SAMPLE_SIZE`] docs and infer a type per top-level key. The
+/// Byte budget for ONE structure-inference sample.
+///
+/// `$sample` is document-COUNT based, which is the wrong unit here: a flat size
+/// of 100 is nothing on 1KB documents and ~37MB on the 370KB documents of a
+/// `lobby_format_history`-shaped collection. The structure tab used to pay that
+/// TWICE (top-level types + nested paths) plus a whole `first_document` — ~74MB
+/// over the wire to produce a field list, which took 136s through a bastion.
+/// Bound the BYTES and let the document size decide the count.
+const STRUCTURE_SAMPLE_BYTES: i64 = 2 * 1024 * 1024;
+/// Never sample fewer than this — a couple of documents still has to be able to
+/// show a heterogeneous collection's shape.
+const STRUCTURE_SAMPLE_MIN: i64 = 5;
+
+/// How many documents to sample given the collection's average object size
+/// (`collStats.avgObjSize`). Unknown size ⇒ the old flat [`SAMPLE_SIZE`].
+fn structure_sample_size(avg_obj_size: Option<i64>) -> i64 {
+    match avg_obj_size.filter(|n| *n > 0) {
+        Some(avg) => (STRUCTURE_SAMPLE_BYTES / avg).clamp(STRUCTURE_SAMPLE_MIN, SAMPLE_SIZE),
+        None => SAMPLE_SIZE,
+    }
+}
+
+/// Ask the server for `avgObjSize` so a standalone caller can size its sample the
+/// same way [`Driver::object_detail`] does. Cheap (one `collStats`); falling back
+/// to the flat size on error only costs us the old behaviour.
+async fn adaptive_sample_size(db: &mongodb::Database, coll_name: &str) -> i64 {
+    let avg = db
+        .run_command(doc! { "collStats": coll_name, "scale": 1 })
+        .await
+        .ok()
+        .and_then(|stats| match stats.get("avgObjSize") {
+            Some(Bson::Int64(n)) => Some(*n),
+            Some(Bson::Int32(n)) => Some(*n as i64),
+            Some(Bson::Double(n)) => Some(*n as i64),
+            _ => None,
+        });
+    structure_sample_size(avg)
+}
+
+/// Sample up to `sample_size` docs and infer a type per top-level key. The
 /// first observed type wins; `_id` is always reported first.
-async fn sample_field_types(coll: &Collection<Document>) -> Result<Vec<(String, String)>> {
-    let pipeline = vec![doc! { "$sample": { "size": SAMPLE_SIZE } }];
+async fn sample_field_types(
+    coll: &Collection<Document>,
+    sample_size: i64,
+) -> Result<Vec<(String, String)>> {
+    let pipeline = vec![doc! { "$sample": { "size": sample_size } }];
     let mut cursor = coll.aggregate(pipeline).await.map_err(types::upstream)?;
     let mut order: Vec<String> = Vec::new();
     let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -2032,6 +2123,42 @@ async fn sample_field_types(coll: &Collection<Document>) -> Result<Vec<(String, 
         .collect())
 }
 
+/// ONE sample pass yielding everything the structure tab needs: the dotted field
+/// paths (top-level ones are simply the dot-free entries) and a representative
+/// document. Replaces the old three separate fetches of the same collection.
+async fn sample_structure(
+    coll: &Collection<Document>,
+    sample_size: i64,
+) -> Result<(Vec<(String, String)>, Option<Document>)> {
+    let pipeline = vec![doc! { "$sample": { "size": sample_size } }];
+    let mut cursor = coll.aggregate(pipeline).await.map_err(types::upstream)?;
+    let mut order: Vec<String> = Vec::new();
+    let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut first: Option<Document> = None;
+    while let Some(next) = cursor.next().await {
+        let doc = match next {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        walk_field_paths(&doc, "", 0, &mut order, &mut types);
+        if first.is_none() {
+            first = Some(doc);
+        }
+        if order.len() >= MAX_FIELD_PATHS {
+            break;
+        }
+    }
+    order.sort_by_key(|k| if k == "_id" { 0 } else { 1 });
+    let paths = order
+        .into_iter()
+        .map(|k| {
+            let ty = types.get(&k).cloned().unwrap_or_default();
+            (k, ty)
+        })
+        .collect();
+    Ok((paths, first))
+}
+
 /// Max nesting depth for sampled embedded field paths (`a.b.c` is depth 3).
 const MAX_FIELD_DEPTH: usize = 3;
 /// Cap on total sampled paths so a wide/deep collection can't bloat completion.
@@ -2040,8 +2167,11 @@ const MAX_FIELD_PATHS: usize = 400;
 /// Sample docs and infer dotted field PATHS (incl. embedded `addr.city` and the
 /// first element of document-arrays), depth- and count-bounded. Backs Mongo
 /// field completion's "indexes first, then sampled fields" with embedded support.
-async fn sample_field_paths(coll: &Collection<Document>) -> Result<Vec<(String, String)>> {
-    let pipeline = vec![doc! { "$sample": { "size": SAMPLE_SIZE } }];
+async fn sample_field_paths(
+    coll: &Collection<Document>,
+    sample_size: i64,
+) -> Result<Vec<(String, String)>> {
+    let pipeline = vec![doc! { "$sample": { "size": sample_size } }];
     let mut cursor = coll.aggregate(pipeline).await.map_err(types::upstream)?;
     let mut order: Vec<String> = Vec::new();
     let mut types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -2100,14 +2230,10 @@ fn walk_field_paths(
     }
 }
 
-/// Fetch a single document for the structure-tab sample (None if empty).
-async fn first_document(coll: &Collection<Document>) -> Option<Document> {
-    let mut cursor = coll.find(doc! {}).limit(1).await.ok()?;
-    match cursor.next().await {
-        Some(Ok(doc)) => Some(doc),
-        _ => None,
-    }
-}
+// NOTE: the former `first_document` (a separate `find().limit(1)` purely to
+// populate `extra.sample`) is gone — `sample_structure` keeps the first document
+// of the sample it already pulled, so the structure tab makes one fewer
+// round trip and, on a fat collection, transfers one fewer ~370KB document.
 
 /// Best-effort collection validator from `listCollections`.
 async fn collection_validator(db: &mongodb::Database, coll_name: &str) -> Option<Bson> {
@@ -2641,6 +2767,30 @@ mod tests {
         assert_eq!(obj.get("n").unwrap(), &json!(42));
         assert_eq!(obj.get("active").unwrap(), &Value::Bool(true));
         assert_eq!(obj.get("tags").unwrap(), &json!(["x", "y"]));
+    }
+
+    #[test]
+    fn structure_sample_is_bounded_by_bytes_not_document_count() {
+        // Small documents: the flat sample is already cheap, keep it.
+        assert_eq!(structure_sample_size(Some(1_024)), SAMPLE_SIZE);
+        assert_eq!(structure_sample_size(Some(20_480)), SAMPLE_SIZE);
+        // Fat documents (the `lobby_format_history` case, ~370KB): a flat 100
+        // would pull ~37MB per pass. Bound it by the byte budget instead.
+        let n = structure_sample_size(Some(370_000));
+        assert!(n < SAMPLE_SIZE, "expected a reduced sample, got {n}");
+        assert!(
+            n * 370_000 <= STRUCTURE_SAMPLE_BYTES,
+            "over budget: {n} docs"
+        );
+        // Never collapse to nothing — a heterogeneous collection still needs a
+        // few documents to show its shape, even when each one is enormous.
+        assert_eq!(
+            structure_sample_size(Some(50_000_000)),
+            STRUCTURE_SAMPLE_MIN
+        );
+        // Unknown / nonsense stats fall back to the old behaviour.
+        assert_eq!(structure_sample_size(None), SAMPLE_SIZE);
+        assert_eq!(structure_sample_size(Some(0)), SAMPLE_SIZE);
     }
 
     #[test]
