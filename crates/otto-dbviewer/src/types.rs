@@ -1231,6 +1231,11 @@ fn mongo_is_write(statement: &str) -> bool {
         ".estimateddocumentcount(",
         ".distinct(",
         ".aggregate(",
+        // Index INTROSPECTION — reads `listIndexes`, mutates nothing. Without
+        // these, `getIndexes()` fell through to "unrecognised ⇒ write" and was
+        // refused on a read-only/MCP connection.
+        ".getindexes(",
+        ".getindices(",
     ];
     let looks_like_read_method =
         lower.starts_with("db.") && read_methods.iter().any(|m| lower.contains(m));
@@ -1241,7 +1246,8 @@ fn mongo_is_write(statement: &str) -> bool {
         && (lower.contains("\"find\"")
             || lower.contains("\"aggregate\"")
             || lower.contains("\"count\"")
-            || lower.contains("\"distinct\""));
+            || lower.contains("\"distinct\"")
+            || lower.contains("\"listindexes\""));
     let is_read = (looks_like_read_method || looks_like_read_command) && !has_write_stage;
     !is_read
 }
@@ -1762,6 +1768,15 @@ mod tests {
         // Aggregation that writes via $out / $merge is a write.
         assert!(is_write("db.users.aggregate([{$out:\"copy\"}])"));
         assert!(is_write("anything unrecognised"));
+        // Index INTROSPECTION is a read — it used to fall through to
+        // "unrecognised ⇒ write" and get refused on a read-only/MCP connection,
+        // leaving the structure tab as the only way to see a collection's indexes.
+        assert!(!is_write("db.users.getIndexes()"));
+        assert!(!is_write("db.users.getIndices()"));
+        assert!(!is_write("{ \"listIndexes\": \"users\" }"));
+        // Mutating the indexes is still a write.
+        assert!(is_write("db.users.createIndex({a:1})"));
+        assert!(is_write("db.users.dropIndex(\"a_1\")"));
     }
 
     #[test]

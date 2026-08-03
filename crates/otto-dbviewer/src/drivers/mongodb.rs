@@ -15,7 +15,9 @@ use futures_util::StreamExt;
 use mongodb::bson::{
     doc, Bson, DateTime as BsonDateTime, Decimal128, Document, Regex as BsonRegex, Uuid as BsonUuid,
 };
-use mongodb::options::{ClientOptions, Credential, ServerAddress, Socks5Proxy, Tls, TlsOptions};
+use mongodb::options::{
+    ClientOptions, Compressor, Credential, ServerAddress, Socks5Proxy, Tls, TlsOptions,
+};
 use mongodb::{Client, Collection};
 use otto_core::Result;
 use serde_json::{json, Map, Value};
@@ -855,6 +857,28 @@ impl MongoDriver {
                     .map_err(types::upstream)?;
                 Ok(write_result(1, format!("dropped index {name}"), started))
             }
+            MongoOp::GetIndexes => {
+                // Raw `listIndexes` specs, one row per index — the same source the
+                // structure tab reads, so `key`/`unique`/`partialFilterExpression`
+                // survive verbatim instead of being flattened into a summary.
+                let reply = db
+                    .run_command(
+                        doc! { "listIndexes": &parsed.collection, "cursor": { "batchSize": 1000 } },
+                    )
+                    .await
+                    .map_err(types::upstream)?;
+                let batch = reply
+                    .get_document("cursor")
+                    .ok()
+                    .and_then(|c| c.get_array("firstBatch").ok())
+                    .cloned()
+                    .unwrap_or_default();
+                let docs: Vec<Document> = batch
+                    .iter()
+                    .filter_map(|b| b.as_document().cloned())
+                    .collect();
+                Ok(docs_to_result(docs, false, started))
+            }
         }?;
 
         // Show the user the Mongo command we ran on their behalf.
@@ -1167,6 +1191,28 @@ impl MongoDriver {
             );
         }
 
+        // Negotiate WIRE COMPRESSION unless the URI already stated a preference.
+        //
+        // This is the difference between usable and unusable on a fat collection
+        // reached through a bastion: such a link is bandwidth-bound (measured
+        // ~68 KB/s steady-state on a real SSH SOCKS tunnel — TCP-over-TCP with a
+        // high RTT), and document payloads of this shape (thousands of short,
+        // repeated field names and ids) compress ~39x with zstd. A 3.7MB read of
+        // 10 documents took 54s uncompressed; the same bytes compressed are ~95KB.
+        //
+        // Order is the client's PREFERENCE — the server picks the first it also
+        // supports, and if it supports none the connection simply stays
+        // uncompressed, so this can't break a server that lacks them. Small
+        // messages are left alone by the driver, so the CPU cost is confined to
+        // the payloads that actually benefit.
+        if opts.compressors.is_none() {
+            opts.compressors = Some(vec![
+                Compressor::Zstd { level: None },
+                Compressor::Snappy,
+                Compressor::Zlib { level: None },
+            ]);
+        }
+
         Ok(opts)
     }
 
@@ -1230,6 +1276,8 @@ enum MongoOp {
     DeleteMany,
     CreateIndex,
     DropIndex,
+    /// `db.coll.getIndexes()` — READ-only; returns the raw `listIndexes` specs.
+    GetIndexes,
 }
 
 #[derive(Debug, Default)]
@@ -1582,6 +1630,10 @@ fn parse_shorthand(raw: &str) -> Result<ParsedCommand> {
                 cmd.op_kind = Some(MongoOp::DropIndex);
                 cmd.index_name = Some(arg.trim().trim_matches('"').trim_matches('\'').to_string());
             }
+            // Takes no arguments; anything passed is ignored, as in mongosh.
+            "getIndexes" | "getIndices" => {
+                cmd.op_kind = Some(MongoOp::GetIndexes);
+            }
             "explain" => {
                 // A trailing `.explain()` modifies the preceding find/aggregate.
                 cmd.explain = true;
@@ -1700,6 +1752,7 @@ fn op_from_str(op: &str) -> Result<MongoOp> {
         "deleteMany" => Ok(MongoOp::DeleteMany),
         "createIndex" => Ok(MongoOp::CreateIndex),
         "dropIndex" => Ok(MongoOp::DropIndex),
+        "getIndexes" | "getIndices" | "listIndexes" => Ok(MongoOp::GetIndexes),
         other => Err(types::invalid(format!("unsupported op '{other}'"))),
     }
 }
@@ -2215,7 +2268,13 @@ async fn collect_docs(
         }
         docs.push(doc);
     }
+    Ok(docs_to_result(docs, truncated, started))
+}
 
+/// Shape already-materialized documents into a [`QueryResult`]. Split out of
+/// [`collect_docs`] so command replies that arrive as a `firstBatch` array
+/// (`listIndexes`) get the identical column-union treatment as a cursor.
+fn docs_to_result(docs: Vec<Document>, truncated: bool, started: Instant) -> QueryResult {
     // Union of top-level keys in stable first-seen order, `_id` pinned first.
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut columns: Vec<String> = Vec::new();
@@ -2242,7 +2301,7 @@ async fn collect_docs(
         .collect();
 
     let row_count = rows.len();
-    Ok(QueryResult {
+    QueryResult {
         columns: columns.into_iter().map(Column::new).collect(),
         rows,
         stats: QueryStats {
@@ -2252,7 +2311,7 @@ async fn collect_docs(
         },
         truncated,
         ..QueryResult::empty()
-    })
+    }
 }
 
 // --- aggregation operator/stage catalog for completion ----------------------
@@ -2850,11 +2909,29 @@ mod sql_e2e {
             1
         );
 
-        // 16. createIndex / dropIndex.
+        // 16. createIndex / getIndexes / dropIndex.
         let r = run_sql(&d, r#"db.players.createIndex({"country": 1})"#).await;
         assert!(r.message.as_deref().unwrap_or("").contains("created index"));
+        // getIndexes returns ROWS (one per index) with the raw listIndexes spec —
+        // `_id_` plus the one just created — not a write summary.
+        let r = run_sql(&d, "db.players.getIndexes()").await;
+        assert!(r.columns.iter().any(|c| c.name == "name"));
+        assert!(r.columns.iter().any(|c| c.name == "key"));
+        let names: Vec<String> = r
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let i = r.columns.iter().position(|c| c.name == "name")?;
+                row.get(i)?.as_str().map(str::to_string)
+            })
+            .collect();
+        assert!(names.iter().any(|n| n == "_id_"), "got {names:?}");
+        assert!(names.iter().any(|n| n == "country_1"), "got {names:?}");
         let r = run_sql(&d, r#"db.players.dropIndex("country_1")"#).await;
         assert!(r.message.as_deref().unwrap_or("").contains("dropped index"));
+        // …and the dropped index is gone from the listing.
+        let r = run_sql(&d, "db.players.getIndexes()").await;
+        assert_eq!(r.rows.len(), 1, "only _id_ should remain");
 
         // 17. explain returns a single query-plan row.
         let r = run_sql(&d, r#"db.players.find({"country": "US"}).explain()"#).await;
