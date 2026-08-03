@@ -343,6 +343,19 @@ impl Driver for MongoDriver {
         // `templatesAwardedCollections.succeededAwarded.templateId`) so the index
         // builder can index embedded fields, not just the top-level ones.
         if let Ok(paths) = sample_field_paths(&coll).await {
+            // Types alongside the paths: a collection has no `columns`, so the
+            // structure tab builds its Fields table from these. A path is far more
+            // useful as `lobbyMetaData.brand_id → int32` than as a bare string —
+            // that's what tells you the field is worth an index.
+            extra.insert(
+                "sampled_path_types".into(),
+                Value::Object(
+                    paths
+                        .iter()
+                        .map(|(p, t)| (p.clone(), Value::String(t.clone())))
+                        .collect(),
+                ),
+            );
             extra.insert(
                 "sampled_paths".into(),
                 Value::Array(paths.into_iter().map(|(p, _)| Value::String(p)).collect()),

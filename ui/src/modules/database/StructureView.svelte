@@ -5,6 +5,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import TableDesigner from './TableDesigner.svelte';
+  import JsonTree from './JsonTree.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { DbForeignKey, DbIndexDef, SchemaNode } from '../../lib/api/types';
@@ -202,6 +203,72 @@
     idxCols = idxCols.includes(c) ? idxCols.filter((x) => x !== c) : [...idxCols, c];
   }
 
+  // Per-key sort direction (Mongo). Only meaningful for a COMPOUND index whose
+  // sort mixes directions — but the builder previously hard-coded `1`, so there
+  // was no way to express `{ brand: 1, whenUpdated: -1 }` at all.
+  let idxDirs = $state<Record<string, 1 | -1>>({});
+  function idxDirOf(c: string): 1 | -1 {
+    return idxDirs[c] ?? 1;
+  }
+  function flipIdxDir(c: string): void {
+    idxDirs = { ...idxDirs, [c]: idxDirOf(c) === 1 ? -1 : 1 };
+  }
+
+  // A path the user TYPED that the picker doesn't list. Mongo indexes a path that
+  // no sampled document happened to contain (rare/sparse fields, or a collection
+  // whose sample missed it), so the builder must not be limited to what the
+  // sampler saw — without this there is no way to name such a field at all.
+  const customIdxPath = $derived.by<string | null>(() => {
+    const raw = idxFieldQuery.trim();
+    if (raw === '' || /\s/.test(raw)) return null;
+    return idxAllFields.includes(raw) ? null : raw;
+  });
+
+  // ── Mongo fields table ──────────────────────────────────────────────────────
+  // A collection has no `columns`, so the structure tab used to show NOTHING
+  // field-shaped — just a raw `extra` JSON dump. Embedded paths were therefore
+  // invisible unless you happened to open the index builder, which is exactly how
+  // `lobbyMetaData.brand_id` became "impossible to find".
+  /** Sampled BSON type per path (falls back to top-level types on older daemons). */
+  const fieldTypes = $derived.by<Record<string, string>>(() => {
+    const extra = detail?.extra as Record<string, unknown> | null | undefined;
+    const src = extra?.sampled_path_types ?? extra?.sampled_fields;
+    if (src && typeof src === 'object' && !Array.isArray(src)) {
+      return Object.fromEntries(
+        Object.entries(src as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
+      );
+    }
+    return {};
+  });
+  /** Paths already named by SOME index on this collection. */
+  const indexedPaths = $derived.by<Set<string>>(() => {
+    const s = new Set<string>();
+    for (const idx of detail?.indexes ?? []) for (const c of idx.columns) s.add(c);
+    return s;
+  });
+  const mongoFields = $derived(
+    !isSql && detail?.kind === 'collection'
+      ? indexFields.map((p) => ({
+          path: p,
+          type: fieldTypes[p] ?? '',
+          indexed: indexedPaths.has(p),
+          /** Depth 0 = top-level; deeper paths are embedded. */
+          nested: p.includes('.'),
+        }))
+      : [],
+  );
+  let fieldQuery = $state('');
+  const shownMongoFields = $derived.by(() => {
+    const qy = fieldQuery.trim().toLowerCase();
+    return qy === '' ? mongoFields : mongoFields.filter((f) => f.path.toLowerCase().includes(qy));
+  });
+  /** Open the index builder pre-seeded with one field (from the Fields table). */
+  function indexField(path: string): void {
+    resetIdxBuilder();
+    idxCols = [path];
+    idxOpen = true;
+  }
+
   // ── Index conditions (partial indexes) ──────────────────────────────────────
   // A condition narrows WHICH rows/documents the index covers. Two operators —
   // `exists` (Mongo `$exists: true` / SQL `IS NOT NULL`) and `in` — ANDed
@@ -290,6 +357,7 @@
     idxOpen = false;
     idxEditing = null;
     idxCols = [];
+    idxDirs = {};
     idxUnique = false;
     idxName = '';
     idxFieldQuery = '';
@@ -346,8 +414,13 @@
     const rec = def && typeof def === 'object' ? (def as Record<string, unknown>) : null;
     if (!isSql) {
       const baseKey = (rec?.key ?? null) as Record<string, unknown> | null;
+      // Direction precedence: what the user picked → what the edited index already
+      // used (so "edit" preserves -1/"text"/"2dsphere") → ascending.
       const key = cols
-        .map((c) => `${JSON.stringify(c)}: ${JSON.stringify(baseKey?.[c] ?? 1)}`)
+        .map(
+          (c) =>
+            `${JSON.stringify(c)}: ${JSON.stringify(idxDirs[c] ?? baseKey?.[c] ?? 1)}`,
+        )
         .join(', ');
       const opts: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(rec ?? {})) {
@@ -570,6 +643,57 @@
       </div>
     {/if}
 
+    {#if mongoFields.length > 0}
+      <!-- Mongo's stand-in for a Columns table: the sampled field paths, EMBEDDED
+           ones included, each indexable in one click. Without this the only way to
+           discover `a.b.c` was to open the index builder and guess. -->
+      <div class="block">
+        <div class="block-title">
+          Fields <span class="count">{mongoFields.length}</span>
+          <span class="hint dim">sampled</span>
+          <span class="grow"></span>
+          <input
+            class="ib-search"
+            type="search"
+            bind:value={fieldQuery}
+            placeholder="Filter fields…"
+            spellcheck="false"
+          />
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl mono">
+            <thead>
+              <tr><th>Path</th><th>Type</th><th>Indexed</th><th></th></tr>
+            </thead>
+            <tbody>
+              {#each shownMongoFields as f (f.path)}
+                <tr>
+                  <td class="cn">
+                    {f.path}
+                    {#if f.nested}<span class="nested-tag" title="Embedded field path">nested</span>{/if}
+                  </td>
+                  <td class="ty">{f.type}</td>
+                  <td>
+                    {#if f.indexed}<span class="pk" title="Named by an existing index">yes</span>{/if}
+                  </td>
+                  <td class="fld-act">
+                    {#if canIndex}
+                      <button class="mini-btn" onclick={() => indexField(f.path)}>
+                        <Icon name="plus" size={10} />Index
+                      </button>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+              {#if shownMongoFields.length === 0}
+                <tr><td colspan="4" class="dim">No field matches “{fieldQuery}”.</td></tr>
+              {/if}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {/if}
+
     {#if detail.primary_key.length > 0}
       <div class="block">
         <div class="block-title">Primary key</div>
@@ -684,15 +808,39 @@
               </div>
               <div class="ib-list">
                 {#each idxCols as f, i (f)}
-                  <button class="ib-row on" onclick={() => toggleIdxCol(f)}>
-                    <span class="ib-ord">{i + 1}</span>
-                    <span class="ib-fname mono">{f}</span>
+                  <!-- Row, not a single button: the direction toggle is its own
+                       control and a <button> can't nest inside a <button>. -->
+                  <div class="ib-row on">
+                    <button class="ib-pick" onclick={() => toggleIdxCol(f)}>
+                      <span class="ib-ord">{i + 1}</span>
+                      <span class="ib-fname mono">{f}</span>
+                    </button>
                     <span class="grow"></span>
-                    <Icon name="x" size={10} />
-                  </button>
+                    {#if !isSql}
+                      <button
+                        class="ib-dir"
+                        title="Key direction — ascending (1) or descending (-1)"
+                        onclick={() => flipIdxDir(f)}
+                      >
+                        {idxDirOf(f) === 1 ? '↑ 1' : '↓ -1'}
+                      </button>
+                    {/if}
+                    <button class="ib-x" aria-label="Remove {f}" onclick={() => toggleIdxCol(f)}>
+                      <Icon name="x" size={10} />
+                    </button>
+                  </div>
                 {/each}
-                {#if idxCols.length > 0 && idxRestFields.length > 0}
+                {#if idxCols.length > 0 && (idxRestFields.length > 0 || customIdxPath)}
                   <div class="ib-sep"></div>
+                {/if}
+                {#if customIdxPath}
+                  <!-- Escape hatch: index a path the sampler never saw. -->
+                  <button class="ib-row custom" onclick={() => toggleIdxCol(customIdxPath)}>
+                    <span class="ib-ord">+</span>
+                    <span class="ib-fname mono">{customIdxPath}</span>
+                    <span class="grow"></span>
+                    <span class="ib-custom-tag">use this path</span>
+                  </button>
                 {/if}
                 {#each idxRestFields as f (f)}
                   <button class="ib-row" onclick={() => toggleIdxCol(f)}>
@@ -700,7 +848,7 @@
                     <span class="ib-fname mono">{f}</span>
                   </button>
                 {/each}
-                {#if idxCols.length === 0 && idxRestFields.length === 0}
+                {#if idxCols.length === 0 && idxRestFields.length === 0 && !customIdxPath}
                   <div class="ib-empty dim">No field matches “{idxFieldQuery}”.</div>
                 {/if}
               </div>
@@ -842,8 +990,17 @@
 
     {#if detail.extra != null && detail.columns.length === 0}
       <div class="block">
-        <div class="block-title">Details</div>
-        <pre class="extra mono">{prettyExtra(detail.extra)}</pre>
+        <div class="block-title">
+          Details
+          <span class="grow"></span>
+          <button class="copy-ddl" onclick={() => copyText(prettyExtra(detail.extra), 'details')}>
+            <Icon name="file" size={11} />Copy
+          </button>
+        </div>
+        <!-- Collapsible: `extra.sample` carries a WHOLE document, which for a
+             fat collection is ~88KB — stringifying it into a <pre> made this
+             panel a wall of text and buried the sampled paths. -->
+        <div class="extra-tree mono"><JsonTree value={detail.extra} /></div>
       </div>
     {/if}
 
@@ -1070,10 +1227,78 @@
     font-weight: 700;
     color: var(--accent);
   }
+  /* The selected row is a flex CONTAINER now (name + direction + remove), so the
+     name itself is the clickable part rather than the whole row. */
+  .ib-pick {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  .ib-dir {
+    flex-shrink: 0;
+    padding: 1px 6px;
+    font-size: 10px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: var(--radius-s);
+    cursor: pointer;
+  }
+  .ib-dir:hover {
+    background: color-mix(in srgb, var(--accent) 26%, transparent);
+  }
+  .ib-x {
+    display: inline-flex;
+    flex-shrink: 0;
+    padding: 2px;
+    color: inherit;
+    background: none;
+    border: none;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+  }
+  .ib-x:hover {
+    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+  }
+  .ib-row.custom .ib-ord {
+    color: var(--ok, #3fb950);
+  }
+  .ib-custom-tag {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--ok, #3fb950);
+  }
   .ib-sep {
     height: 1px;
     margin: 3px 0;
     background: var(--border);
+  }
+  /* Mongo fields table */
+  .nested-tag {
+    margin-left: 6px;
+    padding: 0 4px;
+    font-size: 9.5px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    border-radius: var(--radius-s);
+  }
+  .fld-act {
+    text-align: end;
+    white-space: nowrap;
+  }
+  .hint {
+    font-size: 10px;
+    font-weight: 400;
   }
   .ib-empty {
     padding: 8px;
@@ -1430,8 +1655,7 @@
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
-  .ddl,
-  .extra {
+  .ddl {
     margin: 0;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -1444,9 +1668,15 @@
     user-select: text;
     white-space: pre;
   }
-  .extra {
-    white-space: pre-wrap;
-    word-break: break-word;
+  /* Same chrome as .ddl, but the tree wraps and owns its own indentation. */
+  .extra-tree {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    padding: 10px 12px;
+    overflow: auto;
+    max-height: 420px;
+    user-select: text;
   }
   .ddl-missing {
     font-size: 11.5px;
