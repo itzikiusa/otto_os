@@ -13,7 +13,8 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { buildFilteredQuery, type FilterMode } from './query-filter';
-  import { bsonScalar, highlightJsonHtml } from './bson';
+  import { bsonScalar } from './bson';
+  import JsonTree from './JsonTree.svelte';
   import type { QueryResult, DbExportFormat, ExportToPathResp, DbForeignKey } from '../../lib/api/types';
   import { api, postNdjsonStream } from '../../lib/api/client';
   import Modal from '../../lib/components/Modal.svelte';
@@ -155,7 +156,20 @@
   // row-per-record layout (like Postgres `\x` / ClickHouse FORMAT Vertical).
   type ViewMode = 'grid' | 'json' | 'vertical';
   let viewMode = $state<ViewMode>('grid');
-  const VIEW_CAP = 500; // non-grid views aren't virtualized — cap for responsiveness
+  // Non-grid views aren't virtualized, and one document can be enormous on its
+  // own (a `lobby_format_history` doc is ~88KB, so 100 rows ≈ 9MB). A flat 500-row
+  // cap is therefore no protection at all — rendering is BATCHED instead: draw
+  // ALT_BATCH records, grow on demand. VIEW_CAP stays the hard ceiling.
+  const VIEW_CAP = 500;
+  const ALT_BATCH = 25;
+  let altShown = $state(ALT_BATCH);
+  // Collapse the window back whenever the result or the view mode changes —
+  // otherwise a big window opened on one result silently applies to the next.
+  $effect(() => {
+    void result;
+    void viewMode;
+    altShown = ALT_BATCH;
+  });
   let scrollEl = $state<HTMLDivElement | null>(null);
   let scrollTop = $state(0);
   let viewportH = $state(0);
@@ -183,13 +197,31 @@
   const searchLc = $derived(search.trim().toLowerCase());
   const filtering = $derived(searchLc.length > 0);
 
-  function rowMatches(row: unknown[]): boolean {
-    for (const v of row) {
-      if (v === null || v === undefined) continue;
-      const s = (cellStr(v)).toLowerCase();
-      if (s.includes(searchLc)) return true;
-    }
-    return false;
+  // Per-row scan text, built ONCE per result rather than per keystroke. The old
+  // code re-serialized every cell on every character typed — with ~90KB Mongo
+  // documents that is megabytes of `JSON.stringify` + `toLowerCase` per keypress,
+  // which is what made the filter box lock up on fat collections.
+  //
+  // Reading `filtering` (a boolean) and not `searchLc` is deliberate: the cache is
+  // built when the box goes from empty→non-empty and then reused for every
+  // subsequent character.
+  /** Cap per row so one blob can't dominate memory; matches past it are not scanned. */
+  const SCAN_MAX = 65536;
+  const scanRows = $derived.by<string[]>(() => {
+    if (!filtering) return [];
+    return liveRows.map((row) => {
+      let s = '';
+      for (const v of row) {
+        if (v === null || v === undefined) continue;
+        s += cellStr(v) + ' ';
+        if (s.length >= SCAN_MAX) break;
+      }
+      return s.slice(0, SCAN_MAX).toLowerCase();
+    });
+  });
+
+  function rowMatches(idx: number): boolean {
+    return (scanRows[idx] ?? '').includes(searchLc);
   }
 
   // ── Quick-filter chips, applied CLIENT-SIDE over the loaded rows ─────────────
@@ -235,7 +267,7 @@
     for (let idx = 0; idx < liveRows.length; idx++) {
       const row = liveRows[idx];
       if (hasChips && !chipMatches(row)) continue;
-      if (filtering && !rowMatches(row)) continue;
+      if (filtering && !rowMatches(idx)) continue;
       out.push({ row, idx });
     }
     return out;
@@ -310,15 +342,21 @@
   // Filtered/sorted rows as plain objects (for the JSON / vertical views),
   // capped. `idx` is the ORIGINAL liveRows index so per-document edits can
   // target the row's key regardless of filter/sort order.
+  /** How many records the alt views may draw right now (batch ∩ hard cap). */
+  const altCap = $derived(Math.min(altShown, VIEW_CAP));
   const objRows = $derived.by<{ obj: Record<string, unknown>; idx: number }[]>(() => {
     if (!result || viewMode === 'grid') return [];
     const cols = result.columns;
-    return viewRows.slice(0, VIEW_CAP).map(({ row, idx }) => {
+    return viewRows.slice(0, altCap).map(({ row, idx }) => {
       const o: Record<string, unknown> = {};
       cols.forEach((c, i) => (o[c.name] = row[i]));
       return { obj: o, idx };
     });
   });
+  /** Records still drawable below the current batch (excludes the hard-capped tail). */
+  const altRemaining = $derived(
+    viewMode === 'grid' ? 0 : Math.max(0, Math.min(viewRows.length, VIEW_CAP) - altCap),
+  );
   const viewTruncated = $derived(viewMode !== 'grid' && viewRows.length > VIEW_CAP);
 
   // The visible window over viewRows, plus the spacer heights above/below it.
@@ -388,6 +426,23 @@
   function cellText(v: unknown): string {
     if (v === null || v === undefined) return '';
     return cellStr(v);
+  }
+  /** Hard cap on the text ONE grid cell puts in the DOM. Cells are width-clamped
+   *  anyway and the full value is one click away in the cell viewer, so pushing a
+   *  ~90KB blob into a 60ch box buys nothing and costs layout time on every
+   *  scroll. Copy / edit / export deliberately keep using the UNCLIPPED value. */
+  const CELL_MAX = 512;
+  function clip(s: string): string {
+    return s.length > CELL_MAX ? s.slice(0, CELL_MAX) + '…' : s;
+  }
+  function cellDisplay(v: unknown): string {
+    return clip(cellText(v));
+  }
+  /** Vertical view: render as a collapsible tree rather than raw text when the
+   *  value is structured, or a scalar too long to sit inline. */
+  function vvTree(v: unknown): boolean {
+    if (isComplex(v)) return true;
+    return typeof v === 'string' && v.length > 400;
   }
   function openCell(v: unknown, rowIdx = -1, colIdx = -1): void {
     const edit =
@@ -776,8 +831,13 @@
     for (let r = 0; r < n; r++) {
       const v = liveRows[r][colIndex];
       if (v === null || v === undefined) continue; // ∅ must not widen
-      const len = (cellStr(v)).length;
+      // Never serialize a complex value just to MEASURE it — a Mongo document can
+      // be ~90KB and the result is clamped to MAX_CH regardless. Sentinels measure
+      // by their rendered form; scalars measure exactly.
+      const b = bsonScalar(v);
+      const len = b !== null ? b.length : isComplex(v) ? MAX_CH : String(v).length;
       if (len > max) max = len;
+      if (max >= MAX_CH) break; // already clamped — nothing longer can change it
     }
     // +2 ch padding allowance; clamp.
     return Math.max(MIN_CH, Math.min(MAX_CH, max + 2));
@@ -1871,11 +1931,16 @@
               {/if}
               <button class="jrec-copy" title="Copy this row as JSON" aria-label="Copy row JSON" onclick={() => copyText(prettyJson(obj))}><Icon name="file" size={10} /></button>
             </div>
-            <!-- highlightJsonHtml HTML-escapes all text; only its own span markup is raw. -->
-            <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-            <pre class="alt-json mono">{@html highlightJsonHtml(obj)}</pre>
+            <!-- Collapsible tree, NOT a stringified blob: a closed branch renders
+                 one summary line, so a 90KB document costs a handful of nodes. -->
+            <div class="alt-json mono"><JsonTree value={obj} /></div>
           </div>
         {/each}
+        {#if altRemaining > 0}
+          <button class="alt-more" onclick={() => (altShown += ALT_BATCH)}>
+            Show {Math.min(ALT_BATCH, altRemaining)} more · {altRemaining} not rendered
+          </button>
+        {/if}
       </div>
     {:else if viewMode === 'vertical'}
       <div class="alt-view">
@@ -1891,11 +1956,26 @@
             {#each result.columns as c (c.name)}
               <div class="vrow">
                 <span class="vk mono">{c.name}</span>
-                <span class="vv mono">{obj[c.name] === null || obj[c.name] === undefined ? '∅' : cellStr(obj[c.name])}</span>
+                {#if obj[c.name] === null || obj[c.name] === undefined}
+                  <span class="vv mono">∅</span>
+                {:else if vvTree(obj[c.name])}
+                  <!-- Embedded documents/arrays (and very long text) render as a
+                       COLLAPSED tree. The old `cellStr` stringified them in full —
+                       one ~87KB text node per record was the other half of the
+                       freeze, and it made the record unreadable besides. -->
+                  <span class="vv mono tree"><JsonTree value={obj[c.name]} /></span>
+                {:else}
+                  <span class="vv mono">{cellStr(obj[c.name])}</span>
+                {/if}
               </div>
             {/each}
           </div>
         {/each}
+        {#if altRemaining > 0}
+          <button class="alt-more" onclick={() => (altShown += ALT_BATCH)}>
+            Show {Math.min(ALT_BATCH, altRemaining)} more · {altRemaining} not rendered
+          </button>
+        {/if}
       </div>
     {:else}
     <div class="grid-scroll" bind:this={scrollEl} onscroll={onScroll}>
@@ -2017,7 +2097,7 @@
                     onclick={() => openCell(v, idx, ci)}
                     ondblclick={() => { openCell(v, idx, ci); startViewerEdit(); }}
                     oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
-                  >{expandJson ? prettyJson(v) : compactJson(v)}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
+                  >{clip(expandJson ? prettyJson(v) : compactJson(v))}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
                 {:else}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                   <td
@@ -2026,7 +2106,7 @@
                     style="width:{w}ch; max-width:{w}ch;"
                     ondblclick={() => beginEdit(idx, ci)}
                     oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
-                  >{#if filtering}{#each highlightParts(cellText(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellText(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
+                  >{#if filtering}{#each highlightParts(cellDisplay(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellDisplay(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
                 {/if}
               {/each}
             </tr>
@@ -2736,32 +2816,29 @@
     font-size: 11px;
     padding: 4px 6px 8px;
   }
+  /* Container for the collapsible tree (JsonTree owns its own token colours). */
   .alt-json {
     margin: 0;
     font-size: 12px;
     line-height: 1.5;
-    white-space: pre-wrap;
     color: var(--text);
   }
-  /* JSON syntax highlighting (json view). Keys lead; BSON types (ObjectId/ISODate)
-     get the accent so they stand out as queryable typed values. */
-  .alt-json :global(.json-key) {
-    color: var(--accent);
-    font-weight: 600;
+  /* Batch pager for the non-virtualized alt views. */
+  .alt-more {
+    display: block;
+    width: 100%;
+    padding: 6px 10px;
+    margin: 2px 0 10px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    cursor: pointer;
   }
-  .alt-json :global(.json-str) {
-    color: var(--ok, #3fb950);
-  }
-  .alt-json :global(.json-num) {
-    color: var(--info, #58a6ff);
-  }
-  .alt-json :global(.json-bool),
-  .alt-json :global(.json-null) {
-    color: var(--warn, #d29922);
-  }
-  .alt-json :global(.json-bson) {
-    color: var(--accent);
-    font-style: italic;
+  .alt-more:hover {
+    color: var(--text);
+    border-color: var(--accent);
   }
   /* Per-row JSON card (json view): a bordered, numbered block per row so each
      row's start/end is obvious. Mirrors the vertical view's .vrec idiom. */
@@ -2830,6 +2907,12 @@
     color: var(--text);
     word-break: break-word;
     white-space: pre-wrap;
+  }
+  /* A tree child manages its own layout — pre-wrap here would turn the markup's
+     indentation into stray blank lines. */
+  .vv.tree {
+    white-space: normal;
+    min-width: 0;
   }
   .tb-btn {
     display: inline-flex;

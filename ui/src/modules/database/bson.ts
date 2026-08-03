@@ -32,42 +32,8 @@ export function bsonScalar(v: unknown): string | null {
   return null;
 }
 
-function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-/**
- * Render a value as syntax-highlighted, indented JSON **HTML** (for `{@html}` in
- * a `<pre>`): object keys, strings, numbers, booleans, null, and BSON sentinels
- * each get a `.json-*` span. All text is HTML-escaped. BSON sentinels render as
- * `ObjectId("…")` / `ISODate("…")` (unquoted, mongosh-style) rather than their
- * raw `{"$oid": …}` shape.
- */
-export function highlightJsonHtml(value: unknown, indent = 0): string {
-  const b = bsonScalar(value);
-  if (b !== null) return `<span class="json-bson">${esc(b)}</span>`;
-
-  if (value === null || value === undefined) return `<span class="json-null">null</span>`;
-  const t = typeof value;
-  if (t === 'string') return `<span class="json-str">${esc(JSON.stringify(value))}</span>`;
-  if (t === 'number' || t === 'bigint') return `<span class="json-num">${esc(String(value))}</span>`;
-  if (t === 'boolean') return `<span class="json-bool">${value}</span>`;
-
-  const pad = '  '.repeat(indent);
-  const padIn = '  '.repeat(indent + 1);
-  if (Array.isArray(value)) {
-    if (value.length === 0) return '[]';
-    const items = value.map((v) => padIn + highlightJsonHtml(v, indent + 1));
-    return `[\n${items.join(',\n')}\n${pad}]`;
-  }
-  if (t === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length === 0) return '{}';
-    const items = entries.map(
-      ([k, v]) =>
-        `${padIn}<span class="json-key">${esc(JSON.stringify(k))}</span>: ${highlightJsonHtml(v, indent + 1)}`,
-    );
-    return `{\n${items.join(',\n')}\n${pad}}`;
-  }
-  return esc(String(value));
-}
+// NOTE: the former `highlightJsonHtml` (whole-value → highlighted HTML string for
+// `{@html}`) was removed with its last caller. It forced every branch of a document
+// to be rendered up front, which is precisely what made fat Mongo results
+// unusable. `JsonTree.svelte` replaces it with a lazily-expanded tree — and
+// interpolates text instead of emitting markup, so it can't inject from data.
