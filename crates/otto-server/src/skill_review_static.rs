@@ -2,6 +2,11 @@
 // `scripts/skill_review.py`. Included into `skill_review.rs` (shares its imports:
 // SkillFinding, SkillScoreRow, SkillStaticReport, Path). Deterministic; produces
 // the same verdicts as the reference script on its bundled fixtures.
+//
+// Three checks go BEYOND the reference script (it has no equivalent):
+// `CITED_REFERENCE_MISSING`, `DEAD_PATH` and `PROHIBITION_HEAVY`. None of them
+// fire on the bundled fixtures, so the verdict parity asserted above still
+// holds; `scripts/skill_review.py` is simply the narrower of the two now.
 
 fn sev_order(s: &str) -> i32 {
     match s {
@@ -119,6 +124,123 @@ fn contains_near(text: &str, firsts: &[&str], seconds: &[&str], window: usize) -
     false
 }
 
+/// Drop fenced code blocks (``` … ```) from markdown. Paths and directives
+/// inside a fence are almost always *illustrations* — a sample command, a
+/// snippet of the output shape — so scanning them produces noise, not findings.
+fn strip_fences(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Characters that mark a path as a placeholder/template rather than a real
+/// location (`<skill-root>`, `${HOME}/x`, `path/to/*.md`, `…`).
+fn is_placeholder_path(p: &str) -> bool {
+    p.contains(['<', '>', '{', '}', '*', '$', '%'])
+        || p.contains("...")
+        || p.contains('…')
+        || p.contains("path/to")
+}
+
+/// Extract every `references/<file>` citation from the prose (fences stripped).
+/// Returns the cited relative paths, de-duplicated, in first-seen order.
+fn cited_references(prose: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let bytes = prose.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = prose[from..].find("references/") {
+        let start = from + pos;
+        // Must start at a token boundary, so `my-references/x` does not match.
+        let boundary = start == 0 || {
+            let b = bytes[start - 1];
+            !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'/')
+        };
+        let end = start
+            + prose[start..]
+                .find(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | ')' | ']' | ','))
+                .unwrap_or(prose.len() - start);
+        let raw = prose[start..end].trim_end_matches(['.', ':', ';']);
+        if boundary && raw.len() > "references/".len() && !is_placeholder_path(raw) {
+            let s = raw.to_string();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        from = start + "references/".len();
+    }
+    out
+}
+
+/// Extract absolute (`/…`) and home-relative (`~/…`) paths the skill points the
+/// agent at. Tuned for precision over recall — a noisy finding on every skill is
+/// worth less than no finding at all. Requires two segments, no URL, no
+/// placeholder, and **a real file extension on the last segment**.
+///
+/// That last rule is what makes this usable. Skills are full of API routes
+/// (`/api/v1`, `/games/1.0/view/detailed`, `/auth/me`) which are syntactically
+/// identical to absolute paths and never exist on disk; over the 59 skills on
+/// the development machine they were 8 of 10 hits before the extension rule and
+/// 0 of 1 after. The cost is that a dead *directory* pointer is not reported.
+///
+/// Expansion is pure string work — never `eval`/shell, because this text comes
+/// from a skill package we do not trust.
+fn cited_abs_paths(prose: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in prose.split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',')) {
+        let t = token.trim_end_matches(['.', ':', ';', '!', '?']);
+        let is_abs = t.starts_with('/') || t.starts_with("~/");
+        if !is_abs || t.len() < 6 || is_placeholder_path(t) || t.contains("://") {
+            continue;
+        }
+        let segs: Vec<&str> = t.trim_start_matches('~').split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() < 2 {
+            continue;
+        }
+        // A file extension: 1-5 chars, all alphabetic. `.go`/`.md` qualify;
+        // the `.0` of a `1.0.0` version segment does not.
+        let has_ext = segs
+            .last()
+            .and_then(|s| s.rsplit_once('.'))
+            .map(|(_, ext)| (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphabetic()))
+            .unwrap_or(false);
+        if !has_ext {
+            continue;
+        }
+        let s = t.to_string();
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Resolve a `~/…` prefix against the real home directory. Pure string work.
+fn expand_home(p: &str) -> Option<PathBuf> {
+    if let Some(rest) = p.strip_prefix("~/") {
+        dirs::home_dir().map(|h| h.join(rest))
+    } else if p.starts_with('/') {
+        Some(PathBuf::from(p))
+    } else {
+        None
+    }
+}
+
+/// Words that direct by prohibition, and words that supply a reason. The ratio
+/// between them is the signal — a skill that says "never X" ten times without
+/// once saying why is a list of traps; the same skill with reasons generalises.
+const DIRECTIVE_WORDS: &[&str] = &["never", "always", "must", "mandatory"];
+const RATIONALE_WORDS: &[&str] = &["because", "so that", "otherwise", "reason", "which is why"];
+
 const GENERIC_TERMS: &[&str] = &[
     "helps with", "help with", "useful for", "does things", "various tasks", "anything",
     "everything", "all tasks", "general purpose",
@@ -149,6 +271,9 @@ fn static_review(dir: &Path) -> SkillStaticReport {
     // Frontmatter.
     let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
     let (fm_name, description, body, fm_ok) = parse_frontmatter(&text);
+    // Instructions with code fences removed — what the agent is *told*, minus the
+    // illustrations. Path and directive scanning run over this, not `text`.
+    let prose = strip_fences(&text);
     // The effective name falls back to the directory (Otto skills omit `name:`),
     // so MISSING_NAME never fires; only an *explicit* invalid name is flagged below.
     let description = description.unwrap_or_default();
@@ -245,6 +370,15 @@ fn static_review(dir: &Path) -> SkillStaticReport {
         findings.push(finding("High", "NO_PROGRESSIVE_DISCLOSURE", "Large SKILL.md without references", &format!("SKILL.md lines={}", line_count(&text)), "Large main files waste context and hide the core workflow.", "Move detailed material into references/ and link to it."));
         references -= 2;
     }
+    // A citation that does not resolve is unreachable: the agent has no path to
+    // the content the skill told it to read. Deterministic — the file is either
+    // in the package or it is not — so this is a High.
+    for cite in cited_references(&prose) {
+        if !dir.join(&cite).exists() {
+            findings.push(finding("High", "CITED_REFERENCE_MISSING", "Cited reference file does not exist", &cite, "The agent is told to read a file that is not in the package, so the guidance is silently lost.", &format!("Add `{cite}` to the package, or drop the citation.")));
+            references -= 2;
+        }
+    }
     score("references", references, &format!("Reference files: {ref_files}, external links: {external_links}"));
 
     // --- scripts ---
@@ -323,7 +457,22 @@ fn static_review(dir: &Path) -> SkillStaticReport {
         findings.push(finding("Medium", "HIGH_WORD_COUNT", "High word count", &format!("SKILL.md words={words}"), "High word count increases context cost and hides critical steps.", "Compress instructions and use progressive disclosure."));
         bloat -= 1;
     }
-    score("bloat_control", bloat, &format!("SKILL.md lines={lines}, words={words}"));
+    // Prohibition density. A pile of NEVER/ALWAYS/MUST lines with no stated
+    // reason is instructions competing for attention: each one names a single
+    // trap, none of them describe the goal, and the agent cannot generalise past
+    // the listed cases. Heuristic and phrasing-level, so it is Low and does NOT
+    // move the score — it must never flip a promote gate on its own.
+    let directives: usize = DIRECTIVE_WORDS.iter().map(|w| count_whole_word(&prose, w)).sum();
+    let rationale: usize = RATIONALE_WORDS.iter().map(|w| count_word(&prose, w)).sum();
+    if directives >= 12 && rationale * 3 < directives {
+        findings.push(finding(
+            "Low", "PROHIBITION_HEAVY", "Directives outnumber the reasons for them",
+            &format!("{directives} NEVER/ALWAYS/MUST-style directives, {rationale} stated reasons"),
+            "Rules without a reason only cover the case they name; an agent that knows the goal handles the ones they do not.",
+            "Rewrite the weakest as the positive behaviour plus a one-clause why (and a check that confirms it). Keep prohibitions for destructive actions and for when NOT to use the skill.",
+        ));
+    }
+    score("bloat_control", bloat, &format!("SKILL.md lines={lines}, words={words}, directives={directives}/reasons={rationale}"));
 
     // --- conflict_control ---
     let mut conflict = 5i32;
@@ -356,7 +505,26 @@ fn static_review(dir: &Path) -> SkillStaticReport {
         findings.push(finding("Low", "NO_README", "No README found", "README.md", "A README helps install and run the skill outside one conversation.", "Add a brief README with install and usage instructions."));
         maintainability -= 1;
     }
-    score("maintainability", maintainability, "Versioning and package docs review");
+    // Absolute paths that no longer resolve. A better model follows a stale
+    // pointer faster and more confidently than a weak instruction, so this is a
+    // correctness problem, not tidiness. Medium rather than High because it is
+    // machine-dependent: a path can be real on the author's box and absent here.
+    let mut dead: Vec<String> = Vec::new();
+    for p in cited_abs_paths(&prose) {
+        if expand_home(&p).map(|full| !full.exists()).unwrap_or(false) {
+            dead.push(p);
+        }
+    }
+    if !dead.is_empty() {
+        findings.push(finding(
+            "Medium", "DEAD_PATH", "Cited path does not exist on this machine",
+            &dead.join(", "),
+            "An agent follows a cited path without hesitating; a stale one sends it to the wrong place or to nothing at all.",
+            "Update the path, make it relative to the package, or state how to locate the file instead of hardcoding a location.",
+        ));
+        maintainability -= 1;
+    }
+    score("maintainability", maintainability, &format!("Versioning and package docs review; dead paths: {}", dead.len()));
 
     assemble(findings, scorecard)
 }
@@ -552,5 +720,116 @@ mod static_tests {
         let r = static_review(tmp.path());
         assert_eq!(r.verdict, "Do not publish");
         assert!(codes(&r).contains(&"MISSING_SKILL_MD".to_string()));
+    }
+
+    /// Write a one-off package and review it.
+    fn review_pkg(files: &[(&str, &str)]) -> (tempfile::TempDir, SkillStaticReport) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("probe");
+        for (rel, body) in files {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        }
+        let r = static_review(&dir);
+        (tmp, r)
+    }
+
+    const HEAD: &str = "---\nname: probe\ndescription: Reviews probe packages for citation \
+        integrity when asked to audit a probe skill; do not use for generic review.\n---\n\n\
+        # Probe\n\n## Workflow\n\n1. Step one.\n\n## Output format\n\nA verdict.\n\n\
+        ## Example\n\nPositive example above; non-trigger: do not use for prose.\n";
+
+    #[test]
+    fn cited_reference_that_exists_is_not_flagged() {
+        let (_t, r) = review_pkg(&[
+            ("SKILL.md", &format!("{HEAD}\nSee `references/notes.md`.\n")),
+            ("references/notes.md", "notes"),
+        ]);
+        assert!(!codes(&r).contains(&"CITED_REFERENCE_MISSING".to_string()), "codes={:?}", codes(&r));
+    }
+
+    #[test]
+    fn cited_reference_that_is_absent_is_high() {
+        let (_t, r) = review_pkg(&[
+            ("SKILL.md", &format!("{HEAD}\nSee `references/gone.md`.\n")),
+            ("references/notes.md", "notes"),
+        ]);
+        let f = r.findings.iter().find(|f| f.code == "CITED_REFERENCE_MISSING").expect("finding");
+        assert_eq!(f.severity, "High");
+        assert_eq!(f.evidence, "references/gone.md");
+    }
+
+    /// A path inside a fenced block is an illustration, not a pointer.
+    #[test]
+    fn paths_inside_code_fences_are_ignored() {
+        let body = format!("{HEAD}\n```bash\ncat /nope/does-not-exist-xyz/file.md\n```\n");
+        let (_t, r) = review_pkg(&[("SKILL.md", &body)]);
+        assert!(!codes(&r).contains(&"DEAD_PATH".to_string()), "codes={:?}", codes(&r));
+    }
+
+    #[test]
+    fn dead_absolute_path_in_prose_is_flagged() {
+        let body = format!("{HEAD}\nRead /nope/does-not-exist-xyz/file.md before starting.\n");
+        let (_t, r) = review_pkg(&[("SKILL.md", &body)]);
+        let f = r.findings.iter().find(|f| f.code == "DEAD_PATH").expect("finding");
+        assert_eq!(f.severity, "Medium");
+        assert!(f.evidence.contains("/nope/does-not-exist-xyz/file.md"));
+    }
+
+    /// API routes look exactly like absolute paths and never exist on disk.
+    /// Before the extension rule these were most of what the check reported.
+    #[test]
+    fn api_route_fragments_are_not_paths() {
+        let body = format!(
+            "{HEAD}\nCall /api/v1 then /auth/me, and POST /invoices/generate/1.0.0 \
+             plus /games/1.0/view/detailed when done.\n"
+        );
+        let (_t, r) = review_pkg(&[("SKILL.md", &body)]);
+        assert!(!codes(&r).contains(&"DEAD_PATH".to_string()), "codes={:?}", codes(&r));
+    }
+
+    /// Placeholders and URLs are not machine paths and must not be resolved.
+    #[test]
+    fn placeholder_and_url_paths_are_ignored() {
+        let body = format!(
+            "{HEAD}\nRun it on <skill-root>/SKILL.md, see /path/to/thing.md and \
+             https://example.com/docs/guide.md for details.\n"
+        );
+        let (_t, r) = review_pkg(&[("SKILL.md", &body)]);
+        assert!(!codes(&r).contains(&"DEAD_PATH".to_string()), "codes={:?}", codes(&r));
+    }
+
+    #[test]
+    fn prohibition_heavy_fires_low_without_moving_the_score() {
+        let rules = "You MUST do it. NEVER skip. ALWAYS check. MUST verify. NEVER guess. \
+                     ALWAYS report. MUST log. NEVER cache. ALWAYS retry. MUST close. \
+                     NEVER inline. ALWAYS flush.\n";
+        let with = format!("{HEAD}\n{rules}");
+        let without = format!("{HEAD}\nDo it, and check the result.\n");
+        let (_a, heavy) = review_pkg(&[("SKILL.md", &with)]);
+        let (_b, light) = review_pkg(&[("SKILL.md", &without)]);
+        assert!(codes(&heavy).contains(&"PROHIBITION_HEAVY".to_string()), "codes={:?}", codes(&heavy));
+        assert!(!codes(&light).contains(&"PROHIBITION_HEAVY".to_string()));
+        // Low + no deduction: the finding must never be what flips a gate.
+        let bloat = |r: &SkillStaticReport| {
+            r.scorecard.iter().find(|s| s.area == "bloat_control").unwrap().score
+        };
+        assert_eq!(bloat(&heavy), bloat(&light));
+        assert_eq!(heavy.verdict, light.verdict);
+    }
+
+    /// Stating the reasons defuses it — the ratio is the signal, not the count.
+    #[test]
+    fn directives_with_reasons_do_not_fire() {
+        let rules = "You MUST do it because it breaks otherwise. NEVER skip, because the \
+                     reason is data loss. ALWAYS check so that state stays valid. MUST verify \
+                     because retries are unsafe otherwise. NEVER guess — the reason is silent \
+                     corruption. ALWAYS report so that operators see it. MUST log because \
+                     audits need it. NEVER cache, otherwise reads go stale. ALWAYS retry so \
+                     that flakes clear. MUST close because handles leak. NEVER inline, \
+                     otherwise diffs explode. ALWAYS flush because buffers drop.\n";
+        let (_t, r) = review_pkg(&[("SKILL.md", &format!("{HEAD}\n{rules}"))]);
+        assert!(!codes(&r).contains(&"PROHIBITION_HEAVY".to_string()), "codes={:?}", codes(&r));
     }
 }
