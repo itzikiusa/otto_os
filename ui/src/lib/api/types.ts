@@ -2034,6 +2034,12 @@ export interface AddRepoReq {
   git_account_id?: Id | null;
 }
 
+/** `PATCH /repos/{id}` — (re)bind the repo's hosting account. The field is
+ *  authoritative: an id binds, `null` unbinds. */
+export interface UpdateRepoReq {
+  git_account_id?: Id | null;
+}
+
 export interface FileChange {
   path: string;
   orig_path: string | null;

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{
     AddRepoReq, BranchInfo, CheckoutReq, CleanupBaseResp, Collaborator, CommitInfo, CommitReq,
@@ -17,7 +17,7 @@ use otto_core::api::{
     NewPrCommentReq, PrComment, PrCommit, PrDetail, PrState, PrSummary, Problem, RefsResp,
     RepoStatusResp, RequestChangesReq, ResolveConflictReq, ResolvePrThreadReq, SetCleanupBaseReq,
     StagePathsReq, StashInfo, SubmoduleInfo, TestGitAccountReq, UpdateGitAccountReq, UpdatePrReq,
-    WorktreeInfo,
+    UpdateRepoReq, WorktreeInfo,
 };
 use otto_core::auth::{authorize_owner, AuthUser, RoleChecker};
 use otto_core::domain::{GitAccount, GitProviderKind, Repo, WorkspaceRole};
@@ -89,7 +89,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
         )
         .route(
             "/git/accounts/{id}",
-            axum::routing::patch(update_account::<S>).delete(delete_account::<S>),
+            patch(update_account::<S>).delete(delete_account::<S>),
         )
         .route("/git/accounts/{id}/remote-repos", get(remote_repos::<S>))
         // connection test: stored-token (id) + draft-form variants
@@ -103,7 +103,10 @@ pub fn router<S: GitCtx>() -> Router<S> {
             get(list_repos::<S>).post(add_repo::<S>),
         )
         .route("/workspaces/{id}/repos/detect", post(detect_repo::<S>))
-        .route("/repos/{id}", delete(delete_repo::<S>))
+        .route(
+            "/repos/{id}",
+            patch(update_repo::<S>).delete(delete_repo::<S>),
+        )
         // local ops (#37–47)
         .route("/repos/{id}/status", get(repo_status::<S>))
         .route("/repos/{id}/branches", get(repo_branches::<S>))
@@ -180,6 +183,7 @@ pub fn router<S: GitCtx>() -> Router<S> {
 // ---------------------------------------------------------------------------
 
 /// Local error wrapper: `otto_core::Error` → Problem JSON with the right status.
+#[derive(Debug)]
 pub struct ApiError(pub Error);
 
 impl From<Error> for ApiError {
@@ -282,15 +286,26 @@ async fn provider_ctx<S: GitCtx>(
     user: &AuthUser,
     repo: &Repo,
 ) -> Result<(Arc<dyn GitProvider>, RemoteRef)> {
+    // The remote is read ONCE at registration, and `LocalGit::remote_url` folds
+    // any failure into `None` — so a repo registered before its `origin` existed
+    // (or during a bulk import where the `git` spawn failed) is permanently
+    // recorded as remote-less and dead-ends every provider call. Re-read from
+    // disk before giving up; nothing else ever revisits that snapshot.
+    let refreshed;
+    let repo = match repo.provider {
+        Some(_) => repo,
+        None => {
+            refreshed = refresh_remote(s, repo.clone()).await?;
+            &refreshed
+        }
+    };
     let kind = repo
         .provider
         .ok_or_else(|| Error::Invalid("repo has no git provider".into()))?;
-    if repo.git_account_id.is_none() {
-        return Err(Error::Invalid("repo has no git account".into()));
-    }
-    let account = authorized_repo_account(s, user, repo)
-        .await?
-        .ok_or_else(|| Error::Invalid("repo has no git account".into()))?;
+    let account = match authorized_repo_account(s, user, repo).await? {
+        Some(account) => account,
+        None => adopt_account(s, user, repo, kind).await?,
+    };
     if account.provider != kind {
         return Err(Error::Invalid(
             "git account provider does not match repo provider".into(),
@@ -304,6 +319,45 @@ async fn provider_ctx<S: GitCtx>(
         detect(remote).ok_or_else(|| Error::Invalid(format!("unsupported remote: {remote}")))?;
     let token = account_token(s, &account)?;
     Ok((make_provider(&account, token), remote_ref))
+}
+
+/// Bind an unbound repo to the caller's account for `kind` and persist it.
+///
+/// Registration already picks "the caller's first account for the detected
+/// provider" — but it only runs once, so a repo registered BEFORE its account
+/// existed stays unbound forever and every provider call dies with "repo has no
+/// git account". Applying the same rule lazily heals those repos; it is only
+/// ever the caller's OWN credential, so it opens no path S4 didn't already
+/// allow. Ambiguity (two accounts on one provider) is never guessed — the user
+/// picks via `PATCH /repos/{id}`.
+async fn adopt_account<S: GitCtx>(
+    s: &S,
+    user: &AuthUser,
+    repo: &Repo,
+    kind: GitProviderKind,
+) -> Result<GitAccount> {
+    let mut mine = s
+        .store()
+        .list_accounts(&user.0.id)
+        .await?
+        .into_iter()
+        .filter(|a| a.provider == kind);
+    let (Some(account), None) = (mine.next(), mine.next()) else {
+        return Err(Error::Invalid(format!(
+            "repo has no git account: link a {} account to this repo (Git → repo card → Account)",
+            kind.as_str()
+        )));
+    };
+    s.store()
+        .set_repo_account(&repo.id, Some(&account.id))
+        .await?;
+    tracing::info!(
+        repo = %repo.name,
+        account = %account.label,
+        "linked repo to the only {} account on file",
+        kind.as_str()
+    );
+    Ok(account)
 }
 
 fn notice(s: &impl GitCtx, level: &str, title: &str, body: &str) {
@@ -952,6 +1006,79 @@ fn expand_home(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// `PATCH /repos/{id}` — (re)bind the repo's hosting account. `git_account_id`
+/// is authoritative: an id binds, `null` unbinds. Registration is the only other
+/// place an account is resolved, so without this a repo added BEFORE its account
+/// existed (or one whose `origin` was added later) can never reach a provider.
+async fn update_repo<S: GitCtx>(
+    State(s): State<S>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Json(req): Json<UpdateRepoReq>,
+) -> ApiResult<Json<Repo>> {
+    let repo = s.store().get_repo(&id).await?;
+    s.roles()
+        .check(&user.0, &repo.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    // Re-read `origin` first: a repo can only be bound to a provider account
+    // once we know WHICH provider it points at, and the stored remote is a
+    // snapshot from registration time.
+    let repo = refresh_remote(&s, repo).await?;
+    let Some(account_id) = req.git_account_id.as_ref() else {
+        return Ok(Json(with_forge(
+            s.store().set_repo_account(&id, None).await?,
+        )));
+    };
+    let account = s.store().get_account(account_id).await?;
+    // S4: binding a repo to someone else's credential would let this caller
+    // push through it later — the same guard registration applies.
+    authorize_owner(&account, &user.0)?;
+    match repo.provider {
+        Some(kind) if kind != account.provider => {
+            return Err(Error::Invalid(format!(
+                "repo remote is {} but the account is {}",
+                kind.as_str(),
+                account.provider.as_str()
+            ))
+            .into())
+        }
+        // No detectable remote (or an unsupported host): binding an account
+        // would be a lie — provider calls resolve the remote, not the account.
+        None => {
+            return Err(Error::Invalid(
+                "repo has no supported remote — add an origin on a supported host first".into(),
+            )
+            .into())
+        }
+        Some(_) => {}
+    }
+    Ok(Json(with_forge(
+        s.store().set_repo_account(&id, Some(&account.id)).await?,
+    )))
+}
+
+/// Re-detect the repo's `origin` from disk and persist it when it differs from
+/// the stored snapshot. Returns the (possibly updated) repo; a working tree that
+/// has gone missing is left untouched rather than having its remote wiped.
+async fn refresh_remote<S: GitCtx>(s: &S, repo: Repo) -> Result<Repo> {
+    if tokio::fs::metadata(&repo.path).await.is_err() {
+        return Ok(repo);
+    }
+    let remote_url = LocalGit::new(&repo.path).remote_url().await;
+    let provider = remote_url.as_deref().and_then(detect).map(|(k, _)| k);
+    if remote_url == repo.remote_url && provider == repo.provider {
+        return Ok(repo);
+    }
+    s.store()
+        .set_repo_remote(&repo.id, remote_url.as_deref(), provider)
+        .await
+}
+
+fn with_forge(mut repo: Repo) -> Repo {
+    fill_forge(&mut repo);
+    repo
 }
 
 async fn delete_repo<S: GitCtx>(
@@ -2262,6 +2389,325 @@ mod tests {
         // Exactly one row persisted.
         let repos = store.list_repos(&ws).await.unwrap();
         assert_eq!(repos.len(), 1, "expected one repo row, got {}", repos.len());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Build a ctx over a fresh in-memory pool, plus a user and a workspace.
+    async fn fixture() -> (SqlitePool, TestCtx, Id, Id) {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool, "u").await;
+        let ws = seed_workspace(&pool).await;
+        let ctx = TestCtx {
+            store: GitStore::new(pool.clone()),
+            workspaces: WorkspacesRepo::new(pool.clone()),
+            secrets: Arc::new(FixedSecret),
+            roles: Arc::new(AllowAll),
+            events: tokio::sync::broadcast::channel(8).0,
+        };
+        (pool, ctx, user, ws)
+    }
+
+    async fn seed_account(
+        ctx: &TestCtx,
+        user: &Id,
+        provider: GitProviderKind,
+        label: &str,
+    ) -> GitAccount {
+        ctx.store
+            .create_account(NewGitAccount {
+                user_id: user.clone(),
+                provider,
+                label: label.into(),
+                username: "who".into(),
+                token_ref: format!("gitacct-{label}"),
+                api_base_url: None,
+                namespace: None,
+                token_expires_at: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn seed_repo(ctx: &TestCtx, ws: &Id, name: &str, remote: Option<&str>) -> Repo {
+        ctx.store
+            .create_repo(NewRepo {
+                workspace_id: ws.clone(),
+                name: name.into(),
+                path: format!("/tmp/{name}"),
+                remote_url: remote.map(str::to_string),
+                provider: remote.and_then(detect).map(|(k, _)| k),
+                git_account_id: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    /// `provider_ctx`'s Ok side holds a `dyn GitProvider` (not Debug), so error
+    /// cases can't use `unwrap_err`.
+    async fn expect_provider_err(ctx: &TestCtx, user: &Id, repo: &Repo) -> Error {
+        match provider_ctx(ctx, &auth(user, false), repo).await {
+            Ok(_) => panic!("expected provider_ctx to fail for an unbound repo"),
+            Err(e) => e,
+        }
+    }
+
+    /// The regression this whole path exists for: a repo registered BEFORE its
+    /// hosting account existed is unbound forever, and every provider call dies
+    /// with "repo has no git account". With exactly one candidate account the
+    /// repo adopts it on first use — and the binding is PERSISTED, so the other
+    /// call sites that read `git_account_id` directly (push tokens, run engine)
+    /// are healed too, not just this request.
+    #[tokio::test]
+    async fn unbound_repo_adopts_the_only_matching_account() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let repo = seed_repo(&ctx, &ws, "late", Some("https://github.com/o/late.git")).await;
+        let account = seed_account(&ctx, &user, GitProviderKind::Github, "gh").await;
+
+        provider_ctx(&ctx, &auth(&user, false), &repo)
+            .await
+            .unwrap();
+
+        let stored = ctx.store.get_repo(&repo.id).await.unwrap();
+        assert_eq!(
+            stored.git_account_id.as_ref(),
+            Some(&account.id),
+            "the adopted account must be written back to the repo row"
+        );
+    }
+
+    /// Two accounts on one provider is a real choice, not a coin flip: the call
+    /// fails with an actionable message and the repo stays unbound.
+    #[tokio::test]
+    async fn ambiguous_provider_accounts_are_never_guessed() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let repo = seed_repo(&ctx, &ws, "two", Some("https://github.com/o/two.git")).await;
+        seed_account(&ctx, &user, GitProviderKind::Github, "work").await;
+        seed_account(&ctx, &user, GitProviderKind::Github, "personal").await;
+
+        let err = expect_provider_err(&ctx, &user, &repo).await;
+        assert!(
+            matches!(&err, Error::Invalid(m) if m.contains("link a github account")),
+            "expected an actionable link hint, got {err:?}"
+        );
+        assert!(ctx
+            .store
+            .get_repo(&repo.id)
+            .await
+            .unwrap()
+            .git_account_id
+            .is_none());
+    }
+
+    /// Another user's account is not a candidate — adoption only ever reaches
+    /// for the caller's OWN credential (S4).
+    #[tokio::test]
+    async fn adoption_ignores_other_users_accounts() {
+        let (pool, ctx, user, ws) = fixture().await;
+        let stranger = seed_user(&pool, "stranger").await;
+        let repo = seed_repo(&ctx, &ws, "theirs", Some("https://github.com/o/theirs.git")).await;
+        seed_account(&ctx, &stranger, GitProviderKind::Github, "not-mine").await;
+
+        let err = expect_provider_err(&ctx, &user, &repo).await;
+        assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+        assert!(ctx
+            .store
+            .get_repo(&repo.id)
+            .await
+            .unwrap()
+            .git_account_id
+            .is_none());
+    }
+
+    /// `PATCH /repos/{id}` binds explicitly (the multi-account escape hatch) and
+    /// unbinds on `null`.
+    #[tokio::test]
+    async fn patch_repo_binds_and_unbinds_the_account() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let repo = seed_repo(&ctx, &ws, "pick", Some("https://github.com/o/pick.git")).await;
+        seed_account(&ctx, &user, GitProviderKind::Github, "work").await;
+        let chosen = seed_account(&ctx, &user, GitProviderKind::Github, "personal").await;
+
+        let bound = update_repo(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(UpdateRepoReq {
+                git_account_id: Some(chosen.id.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(bound.git_account_id.as_ref(), Some(&chosen.id));
+
+        let cleared = update_repo(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(UpdateRepoReq::default()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(cleared.git_account_id.is_none(), "null must unbind");
+    }
+
+    /// A bitbucket token can't drive a github remote — binding one is rejected
+    /// rather than stored to fail later at request time.
+    #[tokio::test]
+    async fn patch_repo_rejects_provider_mismatch() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let repo = seed_repo(&ctx, &ws, "gh", Some("https://github.com/o/gh.git")).await;
+        let bb = seed_account(&ctx, &user, GitProviderKind::Bitbucket, "bb").await;
+
+        let err = update_repo(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(UpdateRepoReq {
+                git_account_id: Some(bb.id),
+            }),
+        )
+        .await
+        .unwrap_err()
+        .0;
+        assert!(
+            matches!(&err, Error::Invalid(m) if m.contains("github") && m.contains("bitbucket")),
+            "got {err:?}"
+        );
+    }
+
+    /// Binding someone else's credential to a repo would let the caller push
+    /// through it later — Forbidden, even with AllowAll workspace roles (S4).
+    #[tokio::test]
+    async fn patch_repo_refuses_a_foreign_account() {
+        let (pool, ctx, user, ws) = fixture().await;
+        let stranger = seed_user(&pool, "stranger").await;
+        let repo = seed_repo(&ctx, &ws, "gh2", Some("https://github.com/o/gh2.git")).await;
+        let theirs = seed_account(&ctx, &stranger, GitProviderKind::Github, "theirs").await;
+
+        let err = update_repo(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(UpdateRepoReq {
+                git_account_id: Some(theirs.id),
+            }),
+        )
+        .await
+        .unwrap_err()
+        .0;
+        assert!(matches!(err, Error::Forbidden(_)), "got {err:?}");
+    }
+
+    /// A bulk import whose `git remote get-url` spawn failed records the repo as
+    /// remote-less (the helper folds errors into `None`), which used to dead-end
+    /// every provider call with "repo has no git provider" — and with no
+    /// provider the UI won't even offer an account picker. Provider calls
+    /// re-read the remote from disk, so the row heals itself on first use.
+    #[tokio::test]
+    async fn provider_ctx_recovers_a_remote_that_was_never_recorded() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let dir = init_git_repo().await;
+        let ok = std::process::Command::new("git")
+            .args(["remote", "add", "origin", "https://github.com/o/real.git"])
+            .current_dir(&dir)
+            .status()
+            .expect("spawn git remote add")
+            .success();
+        assert!(ok, "git remote add failed");
+
+        // The row as a failed bulk import left it: real checkout, no remote.
+        let repo = ctx
+            .store
+            .create_repo(NewRepo {
+                workspace_id: ws.clone(),
+                name: "bulk".into(),
+                path: dir.to_string_lossy().into_owned(),
+                remote_url: None,
+                provider: None,
+                git_account_id: None,
+            })
+            .await
+            .unwrap();
+        seed_account(&ctx, &user, GitProviderKind::Github, "gh").await;
+
+        provider_ctx(&ctx, &auth(&user, false), &repo)
+            .await
+            .unwrap();
+
+        let stored = ctx.store.get_repo(&repo.id).await.unwrap();
+        assert_eq!(stored.provider, Some(GitProviderKind::Github));
+        assert_eq!(
+            stored.remote_url.as_deref(),
+            Some("https://github.com/o/real.git")
+        );
+        assert!(
+            stored.git_account_id.is_some(),
+            "recovering the remote must also let the account adopt"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A repo registered before its `origin` existed has no provider to bind
+    /// against. PATCH re-reads the remote from disk first, so adding the remote
+    /// later is enough — no unregister/re-add dance.
+    #[tokio::test]
+    async fn patch_repo_picks_up_a_remote_added_after_registration() {
+        let (_pool, ctx, user, ws) = fixture().await;
+        let dir = init_git_repo().await;
+        let path = dir.to_string_lossy().into_owned();
+        let repo = register_repo(&ctx, &auth(&user, false), &ws, &path, &reg_req(&path))
+            .await
+            .unwrap();
+        assert!(repo.provider.is_none(), "fixture starts with no remote");
+        let account = seed_account(&ctx, &user, GitProviderKind::Github, "gh").await;
+
+        // Binding is refused while the repo has nothing to talk to…
+        let err = update_repo(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(UpdateRepoReq {
+                git_account_id: Some(account.id.clone()),
+            }),
+        )
+        .await
+        .unwrap_err()
+        .0;
+        assert!(
+            matches!(&err, Error::Invalid(m) if m.contains("no supported remote")),
+            "got {err:?}"
+        );
+
+        // …and works once `origin` exists, without re-registering the repo.
+        let ok = std::process::Command::new("git")
+            .args(["remote", "add", "origin", "https://github.com/o/later.git"])
+            .current_dir(&dir)
+            .status()
+            .expect("spawn git remote add")
+            .success();
+        assert!(ok, "git remote add failed");
+
+        let bound = update_repo(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(repo.id.clone()),
+            Json(UpdateRepoReq {
+                git_account_id: Some(account.id.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(bound.provider, Some(GitProviderKind::Github));
+        assert_eq!(
+            bound.remote_url.as_deref(),
+            Some("https://github.com/o/later.git")
+        );
+        assert_eq!(bound.git_account_id.as_ref(), Some(&account.id));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

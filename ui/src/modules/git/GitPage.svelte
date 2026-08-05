@@ -8,7 +8,7 @@
   import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { GitAccount, Repo, RemoteRepoSummary } from '../../lib/api/types';
+  import type { GitAccount, GitProviderKind, Repo, RemoteRepoSummary } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { git } from '../../lib/stores/git.svelte';
@@ -173,14 +173,42 @@
     }
   }
 
+  // Accounts back both the add/clone flow and the per-card account picker on
+  // the landing hub, so they load on mount — not only when the sheet opens.
+  // Re-read on every `addOpen` toggle so an account added there shows up in the
+  // cards without a reload.
   $effect(() => {
-    if (addOpen) {
-      void api
-        .get<GitAccount[]>('/git/accounts')
-        .then((a) => (accounts = a))
-        .catch(() => (accounts = []));
-    }
+    void addOpen;
+    void api
+      .get<GitAccount[]>('/git/accounts')
+      .then((a) => (accounts = a))
+      .catch(() => (accounts = []));
   });
+
+  /** Accounts that could serve a repo on `provider` (a token is provider-bound). */
+  function accountsFor(provider: GitProviderKind | null): GitAccount[] {
+    return provider === null ? [] : accounts.filter((a) => a.provider === provider);
+  }
+
+  /** (Re)bind a repo to a hosting account. Registration resolves the account
+   *  once, so a repo added before its account existed needs this — otherwise
+   *  every provider call fails with "repo has no git account". */
+  async function setRepoAccount(r: Repo, accountId: string): Promise<void> {
+    try {
+      const updated = await api.patch<Repo>(`/repos/${r.id}`, {
+        git_account_id: accountId === '' ? null : accountId,
+      });
+      await git.loadAllRepos(true);
+      toasts.success(
+        updated.git_account_id ? 'Account linked' : 'Account unlinked',
+        r.name,
+      );
+    } catch (e) {
+      toasts.error('Could not link account', e instanceof Error ? e.message : String(e));
+      // Snap the <select> back to the stored binding — the change never landed.
+      await git.loadAllRepos(true);
+    }
+  }
 
   async function addRepo(): Promise<void> {
     if (!ws.currentId) return;
@@ -324,6 +352,26 @@
                   <button class="btn small" onclick={() => git.openRepoTab(r.id, 'prs')}>
                     <Icon name="pr" size={11} /> PRs
                   </button>
+                  {#if r.provider}
+                    <!-- Which hosting credential this repo talks to. Unbound is a
+                         real failure mode (PRs/reviewers 400), so it reads as a
+                         warning rather than a blank field. -->
+                    <select
+                      class="repo-account"
+                      class:unbound={!r.git_account_id}
+                      title={r.git_account_id
+                        ? 'Git account used for pull requests'
+                        : `No ${r.provider} account linked — pull requests will fail`}
+                      aria-label="Git account for {r.name}"
+                      value={r.git_account_id ?? ''}
+                      onchange={(e) => setRepoAccount(r, e.currentTarget.value)}
+                    >
+                      <option value="">No account</option>
+                      {#each accountsFor(r.provider) as a (a.id)}
+                        <option value={a.id}>{a.label}</option>
+                      {/each}
+                    </select>
+                  {/if}
                   <span class="grow"></span>
                   <button class="icon-btn" title="Unregister" onclick={() => removeRepo(r)}>
                     <Icon name="trash" size={13} />
@@ -698,6 +746,25 @@
     gap: 6px;
     padding: 6px 10px 10px;
     padding-inline-start: 14px;
+  }
+
+  /* Account picker sits inline with the card actions; capped so a long label
+     can't stretch the (grid-sized) card. */
+  .repo-account {
+    max-width: 140px;
+    height: 24px;
+    padding: 0 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+  }
+
+  .repo-account.unbound {
+    color: var(--status-warn);
+    border-color: var(--status-warn);
+    background: var(--status-warn-soft);
   }
 
   /* ── Mobile + tablet (≤1024px): tighten the landing hub so the repo cards +

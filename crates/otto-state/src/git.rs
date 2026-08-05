@@ -280,6 +280,40 @@ impl GitStore {
         rows.iter().map(row_to_repo).collect()
     }
 
+    /// (Re)bind a repo to a hosting account, or unbind it with `None`. The
+    /// account is only resolved at registration time, so a repo registered
+    /// BEFORE its account existed stays unbound forever without this — every
+    /// provider call (PRs, collaborators) then fails with "no git account".
+    pub async fn set_repo_account(&self, id: &Id, account_id: Option<&Id>) -> Result<Repo> {
+        sqlx::query("UPDATE repos SET git_account_id = ? WHERE id = ?")
+            .bind(account_id)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set repo git account"))?;
+        self.get_repo(id).await
+    }
+
+    /// Refresh the remote URL + detected provider recorded for a repo. The
+    /// remote is read once at registration, so a repo registered before its
+    /// `origin` was added (or re-pointed since) carries stale/empty hosting
+    /// info; re-detection is what makes such a repo bindable at all.
+    pub async fn set_repo_remote(
+        &self,
+        id: &Id,
+        remote_url: Option<&str>,
+        provider: Option<GitProviderKind>,
+    ) -> Result<Repo> {
+        sqlx::query("UPDATE repos SET remote_url = ?, provider = ? WHERE id = ?")
+            .bind(remote_url)
+            .bind(provider.map(|p| p.as_str()))
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set repo remote"))?;
+        self.get_repo(id).await
+    }
+
     pub async fn delete_repo(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM repos WHERE id = ?")
             .bind(id)

@@ -1132,6 +1132,16 @@ pub struct AddRepoReq {
     pub clone_dir: Option<String>,
 }
 
+/// `PATCH /api/v1/repos/{id}` — (re)bind a registered repo to a hosting
+/// account. Registration resolves the account once, so a repo added before its
+/// account existed needs this to reach a provider at all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateRepoReq {
+    /// Account to bind; `null` unbinds (ssh-agent remotes need no account).
+    #[serde(default)]
+    pub git_account_id: Option<Id>,
+}
+
 /// One changed file in `GET /repos/{id}/status`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {
