@@ -192,12 +192,13 @@
   let commitsLoading = $state(true);
 
   // ── History paging ────────────────────────────────────────────────────────
-  // There is no ceiling on how far back the graph can reach: history loads a
-  // page at a time and keeps going while the user scrolls (and jumps straight to
-  // whatever page holds a ref they clicked). Paging — rather than one unbounded
-  // request — exists purely because every row renders as real DOM: a repo with
-  // 100k commits would otherwise lock the webview on mount.
-  const PAGE = 500;
+  // There is no ceiling on how far back the graph can reach. The page is big
+  // enough that essentially every real repo loads its ENTIRE history in one
+  // request (6k commits = one page), so clicking a ref never waits on a chain of
+  // round-trips. Paging survives only as a backstop for genuinely huge repos —
+  // every row renders as real DOM, so an unbounded fetch on a 100k-commit repo
+  // would lock the webview on mount.
+  const PAGE = 10000;
   /** False once a short page comes back — that's the root of history. */
   let hasMore = $state(true);
   /** Guards against overlapping page fetches (scroll fires far faster than IO). */
@@ -264,9 +265,47 @@
    *  jumping to a ref. */
   let graphPanelEl = $state<HTMLDivElement | null>(null);
 
+  // ── Row windowing (virtualization) ────────────────────────────────────────
+  // Only the rows near the viewport are put in the DOM. Every row is a button +
+  // an SVG lane gutter, so rendering a whole 6k-commit history cost seconds on
+  // mount; with a window it is flat no matter how deep history goes. Rows are a
+  // FIXED 28px pitch, which is what makes the arithmetic (and the jump-to-ref
+  // scroll target) exact — keep `.graph-row { height }` and ROW_H in lockstep.
+  const ROW_H = 28;
+  const OVERSCAN = 25; // rows rendered beyond each edge, so scrolling isn't bare
+  let viewTop = $state(0);
+  let viewH = $state(0);
+  /** The top spacer — its position gives the exact offset of the rows region
+   *  inside the scroll content (sticky header + WIP row), so a jump can compute
+   *  a scroll target for a row that isn't rendered yet. */
+  let topSpacerEl = $state<HTMLDivElement | null>(null);
+
+  // (rowWindow / visibleRows / padTop / padBottom live with the lane algorithm
+  //  below, since they derive from `laneRows`.)
+
+  /** Mirror the scroller's geometry into state so the window recomputes. */
+  function syncViewport(): void {
+    const el = graphPanelEl;
+    if (!el) return;
+    viewTop = el.scrollTop;
+    viewH = el.clientHeight;
+  }
+
+  // Keep `viewH` correct across panel resizes (detail pane opening, window
+  // resize, mobile accordion) — a stale height renders too few or too many rows.
+  $effect(() => {
+    const el = graphPanelEl;
+    if (!el) return;
+    syncViewport();
+    const ro = new ResizeObserver(() => syncViewport());
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
   /** Pull the next page in as the user approaches the bottom, so history just
    *  keeps going instead of stopping at an arbitrary cutoff. */
   function onGraphScroll(): void {
+    syncViewport();
     const el = graphPanelEl;
     if (!el || loadingMore || !hasMore) return;
     // Two viewports of runway — enough that the next page is usually there
@@ -1376,6 +1415,23 @@
 
   const laneRows = $derived(graph.rows);
 
+  // The visible slice of `laneRows` (see "Row windowing" above for why). Only
+  // these rows are rendered; `padTop`/`padBottom` reserve the rest of the height
+  // so the scrollbar still measures the FULL history.
+  const rowWindow = $derived.by(() => {
+    const total = laneRows.length;
+    if (total === 0) return { start: 0, end: 0 };
+    // viewH is 0 until the first measure — fall back to a screenful so the very
+    // first paint isn't a single row.
+    const h = viewH || 900;
+    const start = Math.max(0, Math.floor(viewTop / ROW_H) - OVERSCAN);
+    const end = Math.min(total, Math.ceil((viewTop + h) / ROW_H) + OVERSCAN);
+    return { start, end };
+  });
+  const visibleRows = $derived(laneRows.slice(rowWindow.start, rowWindow.end));
+  const padTop = $derived(rowWindow.start * ROW_H);
+  const padBottom = $derived(Math.max(0, (laneRows.length - rowWindow.end) * ROW_H));
+
   // WIP row: sits on the HEAD commit's lane so the dashed stub visually hangs
   // off the checked-out branch (falls back to lane 0 while the log loads).
   const wipCol = $derived(laneRows.find((r) => isHeadCommit(r.commit))?.col ?? 0);
@@ -1563,16 +1619,33 @@
    *  spinner/disabled state on very deep jumps). */
   let revealBusy = $state('');
 
-  /** Scroll the graph row for `sha` to the middle of the list and flash it. */
+  /** Jump the list so the row for `sha` sits in the middle, and flash it.
+   *
+   *  With windowing the target row is usually NOT in the DOM yet, so this can't
+   *  just call `scrollIntoView`. It computes the scroll offset from the row's
+   *  INDEX (fixed 28px pitch, measured off the top spacer so the sticky header
+   *  and WIP row are accounted for), jumps there, then corrects against the real
+   *  element once the window has rendered it. */
   function scrollToCommit(sha: string): void {
-    // Wait for the row to exist: a jump that just paged in history renders the
-    // new rows on the next tick.
+    const el = graphPanelEl;
+    if (!el) return;
+    const idx = laneRows.findIndex((r) => r.commit.sha === sha);
+    if (idx < 0) return;
+
+    // Offset of the rows region within the scroll content.
+    const rowsTop = topSpacerEl
+      ? topSpacerEl.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+      : 0;
+    // INSTANT, never 'smooth': a jump to an old ref can span tens of thousands
+    // of pixels, and smooth-scrolling that far is a multi-second animation — it
+    // reads as the app being slow when the data was already local.
+    el.scrollTop = Math.max(0, rowsTop + idx * ROW_H - Math.max(0, (el.clientHeight - ROW_H) / 2));
+    syncViewport();
+
+    // Correct on the next frame, once the window has rendered the target.
     requestAnimationFrame(() => {
-      const row = graphPanelEl?.querySelector<HTMLElement>(
-        `[data-sha="${CSS.escape(sha)}"]`,
-      );
-      if (!row) return;
-      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      const row = el.querySelector<HTMLElement>(`[data-sha="${CSS.escape(sha)}"]`);
+      if (row) row.scrollIntoView({ block: 'center', behavior: 'auto' });
       pulseSha = sha;
       if (pulseTimer) clearTimeout(pulseTimer);
       pulseTimer = setTimeout(() => (pulseSha = null), 1200);
@@ -1594,7 +1667,11 @@
       }
       const c = commits.find((x) => x.sha === sha);
       if (!c) return;
-      if (selectedSha !== c.sha) await selectCommit(c);
+      // Select WITHOUT awaiting: selectCommit sets the highlight synchronously
+      // and only then fetches the diff. Awaiting it made every jump wait on a
+      // `git diff` round-trip before the graph moved — the single biggest chunk
+      // of the delay, for a panel the user may not even be looking at.
+      if (selectedSha !== c.sha) void selectCommit(c);
       scrollToCommit(sha);
     } finally {
       revealBusy = '';
@@ -2487,7 +2564,16 @@
             </div>
           </button>
         {/if}
-        {#each laneRows as row (row.commit.sha)}
+        <!-- Windowed rows: the spacers stand in for everything scrolled past /
+             not yet reached, so the scrollbar reflects the FULL history while
+             only ~a screenful of rows exists in the DOM. -->
+        <div
+          bind:this={topSpacerEl}
+          class="row-spacer"
+          style="height: {padTop}px"
+          aria-hidden="true"
+        ></div>
+        {#each visibleRows as row (row.commit.sha)}
           {@const svgW = gutterWidth}
           {@const cx = row.col * LANE_W + LANE_W / 2}
           {@const cy = 14}
@@ -2637,6 +2723,7 @@
             </div>
           </button>
         {/each}
+        <div class="row-spacer" style="height: {padBottom}px" aria-hidden="true"></div>
         <!-- History footer: more pages stream in on scroll, so this is a status
              line (and a manual fallback for anyone who can't scroll-trigger it),
              never a cap. -->
@@ -3303,6 +3390,12 @@
     .row-pulse {
       animation: none;
     }
+  }
+  /* Windowing spacers: they only reserve height, so they must never be squeezed
+     by the list's flex layout or the scroll geometry drifts off the row pitch. */
+  .row-spacer {
+    flex: 0 0 auto;
+    width: 100%;
   }
   /* ── History footer (paging status / manual "load older") ── */
   .graph-more {
