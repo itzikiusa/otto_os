@@ -1253,6 +1253,10 @@
     // where the old code still trailed a stub into empty space).
     hasAbove: boolean;
     hasBelow: boolean;
+    /** Branch this node's LANE belongs to, or null when the lane's tip carries no
+     *  branch ref (a merged branch whose ref was deleted is genuinely unnamed —
+     *  we never guess one). Drives the hover tooltip on the lane. */
+    branch: string | null;
   }
 
   interface LaneLine {
@@ -1263,6 +1267,9 @@
     // merge-in  = this node's extra parent heading down into another lane
     // converge  = a duplicate-awaiting lane from above folding into this node
     kind: 'vert' | 'merge-in' | 'branch-out' | 'converge';
+    /** Branch of the lane this SEGMENT belongs to (same rule as LaneRow.branch),
+     *  so hovering any line — not just a node — names its branch. */
+    branch: string | null;
   }
 
   const LANE_W = 18; // pixels per lane column
@@ -1285,6 +1292,11 @@
     // through every push / pop / null so colors never drift off their lane.
     const lanes: (string | null)[] = [];
     const laneColors: number[] = [];
+    // laneBranch[i] = branch name this lane is drawing, kept index-aligned with
+    // lanes[] exactly like laneColors. A lane inherits its name from the branch
+    // ref that starts it (its tip) and CARRIES IT DOWN through the lane's
+    // commits, which is what makes hovering a line mid-history meaningful.
+    const laneBranch: (string | null)[] = [];
 
     let colorIdx = 0;
     let widest = 1;
@@ -1324,11 +1336,28 @@
         // the previous (unrelated) branch had, so two different branches showed
         // up in the same color within one view.
         laneColors[free] = freshColor(free);
+        // Same reasoning for the name: a recycled slot must not inherit the
+        // previous branch's label, or the tooltip would misattribute the lane.
+        laneBranch[free] = null;
         return free;
       }
       lanes.push(sha);
       laneColors.push(freshColor(lanes.length - 1));
+      laneBranch.push(null);
       return lanes.length - 1;
+    }
+
+    /** The branch a commit's decorations name, if any — the checked-out branch
+     *  wins, then a plain local branch, then a remote-tracking one. Tags, stashes
+     *  and a detached HEAD are NOT branches and never name a lane. */
+    function branchOf(commit: CommitInfo): string | null {
+      let remote: string | null = null;
+      for (const ref of commit.refs) {
+        const chip = classifyRef(ref);
+        if (chip.kind === 'head' || chip.kind === 'local') return chip.label;
+        if (chip.kind === 'remote' && remote === null) remote = chip.label;
+      }
+      return remote;
     }
 
     const rows: LaneRow[] = [];
@@ -1345,6 +1374,14 @@
       }
       const color = laneColorAt(col);
 
+      // Name the lane from this commit's own branch refs when it has any. At a
+      // tip that's the branch starting the lane; further down it re-asserts the
+      // name (and corrects a lane that was opened by a merge, whose branch isn't
+      // knowable until a decorated commit shows up in it).
+      const ownBranch = branchOf(commit);
+      if (ownBranch) laneBranch[col] = ownBranch;
+      const branch = laneBranch[col] ?? null;
+
       // Build line segments for BEFORE this node (connecting to previous)
       const lines: LaneLine[] = [];
 
@@ -1356,7 +1393,7 @@
       for (let i = 0; i < lanes.length; i++) {
         if (i === col) continue;
         if (lanes[i] === commit.sha) {
-          lines.push({ fromCol: i, toCol: col, color: laneColorAt(i), kind: 'converge' });
+          lines.push({ fromCol: i, toCol: col, color: laneColorAt(i), kind: 'converge', branch: laneBranch[i] ?? null });
           lanes[i] = null;
         }
       }
@@ -1365,7 +1402,7 @@
       for (let i = 0; i < lanes.length; i++) {
         if (i === col) continue;
         if (lanes[i] !== null) {
-          lines.push({ fromCol: i, toCol: i, color: laneColorAt(i), kind: 'vert' });
+          lines.push({ fromCol: i, toCol: i, color: laneColorAt(i), kind: 'vert', branch: laneBranch[i] ?? null });
         }
       }
 
@@ -1382,16 +1419,16 @@
         const existingLane = lanes.indexOf(parent);
         if (existingLane !== -1) {
           // already tracked — draw merge-in line
-          lines.push({ fromCol: col, toCol: existingLane, color, kind: 'merge-in' });
+          lines.push({ fromCol: col, toCol: existingLane, color, kind: 'merge-in', branch: laneBranch[existingLane] ?? null });
         } else if (lanes.length >= MAX_LANES && lanes.indexOf(null) === -1) {
           // Safety cap: no free lane and we're at the ceiling — don't open a new
           // lane for this merge parent (it goes untracked); just draw a stub
           // converging on the node's own column so the merge is still visible.
           // Degrades gracefully instead of widening the gutter without bound.
-          lines.push({ fromCol: col, toCol: col, color, kind: 'merge-in' });
+          lines.push({ fromCol: col, toCol: col, color, kind: 'merge-in', branch });
         } else {
           const newLane = allocateLane(parent);
-          lines.push({ fromCol: col, toCol: newLane, color: laneColorAt(newLane), kind: 'merge-in' });
+          lines.push({ fromCol: col, toCol: newLane, color: laneColorAt(newLane), kind: 'merge-in', branch: laneBranch[newLane] ?? null });
         }
       }
 
@@ -1400,6 +1437,7 @@
       while (lanes.length && lanes[lanes.length - 1] === null) {
         lanes.pop();
         laneColors.pop();
+        laneBranch.pop();
       }
 
       if (lanes.length > widest) widest = lanes.length;
@@ -1407,7 +1445,7 @@
       // A root commit (or the end of loaded history with no parent recorded) has
       // nothing below it — without this the gutter trailed a stub off the oldest
       // commit into empty space.
-      rows.push({ commit, col, lines, color, hasAbove, hasBelow: !!firstParent });
+      rows.push({ commit, col, lines, color, hasAbove, hasBelow: !!firstParent, branch });
     }
 
     return { rows, widest };
@@ -2639,28 +2677,25 @@
               height={totalH}
               style="flex-shrink: 0; width: {svgW}px;"
             >
-              <!-- draw lane lines (background, behind node) -->
+              <!-- draw lane lines (background, behind node). Each segment gets an
+                   invisible WIDE companion stroke carrying the <title>: the real
+                   line is 1.5px, far too thin to hover, and a nested SVG <title>
+                   wins over the row's own title attribute — so pointing at a line
+                   names its branch instead of repeating the commit subject. -->
               {#each row.lines as line}
                 {@const x1 = line.fromCol * LANE_W + LANE_W / 2}
                 {@const x2 = line.toCol * LANE_W + LANE_W / 2}
-                {#if line.kind === 'vert'}
-                  <line x1={x1} y1={0} x2={x1} y2={totalH} stroke={line.color} stroke-width="1.5" />
-                {:else if line.kind === 'converge'}
-                  <!-- converge: a lane from above (fromCol) folding into this node -->
-                  <path
-                    d="M{x1},0 Q{x1},{cy - 10} {cx},{cy}"
-                    stroke={line.color}
-                    stroke-width="1.5"
-                    fill="none"
-                  />
-                {:else}
-                  <!-- merge-in: curved path from node down to target column -->
-                  <path
-                    d="M{cx},{cy} Q{cx},{cy + 10} {x2},{totalH}"
-                    stroke={line.color}
-                    stroke-width="1.5"
-                    fill="none"
-                  />
+                {@const d =
+                  line.kind === 'vert'
+                    ? `M${x1},0 L${x1},${totalH}`
+                    : line.kind === 'converge'
+                      ? `M${x1},0 Q${x1},${cy - 10} ${cx},${cy}`
+                      : `M${cx},${cy} Q${cx},${cy + 10} ${x2},${totalH}`}
+                <path d={d} stroke={line.color} stroke-width="1.5" fill="none" />
+                {#if line.branch}
+                  <path class="lane-hit" d={d} fill="none">
+                    <title>{line.branch}</title>
+                  </path>
                 {/if}
               {/each}
               <!-- Leader line tying this row's ref chip(s) to their node, so a
@@ -2706,6 +2741,15 @@
                   <circle cx={cx} cy={cy} r={NODE_R + 3} fill="none" stroke={row.color} stroke-width="1.5" opacity="0.55" />
                 {/if}
                 <circle cx={cx} cy={cy} r={NODE_R} fill={row.color} />
+              {/if}
+              <!-- The node's own column: one hit target spanning the full row
+                   height, so hovering this commit's dot OR the line running
+                   through it names the branch the lane belongs to. Last in the
+                   SVG so it sits above the painted marks. -->
+              {#if row.branch}
+                <path class="lane-hit" d="M{cx},0 L{cx},{totalH}" fill="none">
+                  <title>{row.branch}</title>
+                </path>
               {/if}
             </svg>
 
@@ -3390,6 +3434,15 @@
     .row-pulse {
       animation: none;
     }
+  }
+  /* Invisible hover target for a lane. Transparent + a fat stroke so a 1.5px
+     line is actually pointable; `pointer-events: stroke` keeps the hit area on
+     the stroke itself (never the curve's implied fill), so neighbouring lanes
+     stay independently hoverable. */
+  .lane-hit {
+    stroke: transparent;
+    stroke-width: 11;
+    pointer-events: stroke;
   }
   /* Windowing spacers: they only reserve height, so they must never be squeezed
      by the list's flex layout or the scroll geometry drifts off the row pitch. */
