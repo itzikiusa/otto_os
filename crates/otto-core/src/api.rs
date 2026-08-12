@@ -1195,11 +1195,23 @@ pub struct RefBranch {
     /// clients / responses that predate the field.
     #[serde(default)]
     pub merged_into_base: bool,
+    /// Full sha this branch points at. Lets a client locate the branch in the
+    /// graph WITHOUT the tip having to be in the loaded page of history — the
+    /// tip of a long-dormant branch is exactly the one that isn't. Empty for
+    /// responses that predate the field.
+    #[serde(default)]
+    pub sha: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefTag {
     pub name: String,
+    /// Full sha of the COMMIT the tag resolves to — an annotated tag is
+    /// dereferenced (`%(*objectname)`), so this is never the tag object's own
+    /// sha and always matches a commit in `git log`. Empty for responses that
+    /// predate the field.
+    #[serde(default)]
+    pub sha: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

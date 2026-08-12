@@ -1192,7 +1192,11 @@ async fn repo_log<S: GitCtx>(
     Query(q): Query<LogQuery>,
 ) -> ApiResult<Json<Vec<CommitInfo>>> {
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Viewer).await?;
-    let limit = q.limit.unwrap_or(50).min(500);
+    // No server-side ceiling: `limit=0` (or an explicit large limit) returns the
+    // full reachable history. The graph pages through history with skip/limit and
+    // must be able to walk back to the ROOT commit — a silent .min(500) here made
+    // older commits unreachable no matter what the client asked for.
+    let limit = q.limit.unwrap_or(50);
     Ok(Json(
         git.log(limit, q.skip.unwrap_or(0), q.all.unwrap_or(false))
             .await?,

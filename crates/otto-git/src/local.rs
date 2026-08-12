@@ -574,17 +574,20 @@ impl LocalGit {
         Ok(msg.trim().to_string())
     }
 
+    /// Read history. `limit == 0` means NO `-n` at all — the caller wants the
+    /// whole reachable history, not a page of it.
     pub async fn log(&self, limit: u32, skip: u32, all: bool) -> Result<Vec<CommitInfo>> {
         let limit_s = limit.to_string();
         let skip_s = skip.to_string();
         let mut args = vec![
             "log",
             "--pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%P%x1f%D%x1e",
-            "-n",
-            &limit_s,
             "--skip",
             &skip_s,
         ];
+        if limit > 0 {
+            args.splice(2..2, ["-n", limit_s.as_str()]);
+        }
         if all {
             args.insert(1, "--all");
         }
@@ -603,11 +606,11 @@ impl LocalGit {
     /// branch itself is never flagged (it always "contains" itself). `base_branch`
     /// in the response echoes the resolved base so the UI can exclude/label it.
     pub async fn refs_with_base(&self, base_override: Option<&str>) -> Result<RefsResp> {
-        // Local branches: name TAB upstream TAB HEAD-marker
+        // Local branches: name TAB upstream TAB HEAD-marker TAB sha
         let local_out = self
             .run(&[
                 "for-each-ref",
-                "--format=%(refname:short)\t%(upstream:short)\t%(HEAD)",
+                "--format=%(refname:short)\t%(upstream:short)\t%(HEAD)\t%(objectname)",
                 "refs/heads",
             ])
             .await?;
@@ -622,10 +625,11 @@ impl LocalGit {
             .lines()
             .filter(|l| !l.trim().is_empty())
             .map(|line| {
-                let mut cols = line.splitn(3, '\t');
+                let mut cols = line.splitn(4, '\t');
                 let name = cols.next().unwrap_or("").to_string();
                 let upstream_raw = cols.next().unwrap_or("").trim().to_string();
                 let head = cols.next().unwrap_or("").trim();
+                let sha = cols.next().unwrap_or("").trim().to_string();
                 let merged = base.as_deref() != Some(name.as_str())
                     && merged_local.contains(name.as_str());
                 RefBranch {
@@ -638,19 +642,29 @@ impl LocalGit {
                     },
                     remote: false,
                     merged_into_base: merged,
+                    sha,
                 }
             })
             .collect();
 
-        // Remote branches: name only; skip entries ending in "/HEAD"
+        // Remote branches: name TAB sha; skip entries ending in "/HEAD"
         let remote_out = self
-            .run(&["for-each-ref", "--format=%(refname:short)", "refs/remotes"])
+            .run(&[
+                "for-each-ref",
+                "--format=%(refname:short)\t%(objectname)",
+                "refs/remotes",
+            ])
             .await?;
         let remote = remote_out
             .lines()
-            .filter(|l| !l.trim().is_empty() && !l.trim().ends_with("/HEAD"))
+            .filter(|l| {
+                let name = l.split('\t').next().unwrap_or("").trim();
+                !l.trim().is_empty() && !name.ends_with("/HEAD")
+            })
             .map(|line| {
-                let name = line.trim().to_string();
+                let mut cols = line.splitn(2, '\t');
+                let name = cols.next().unwrap_or("").trim().to_string();
+                let sha = cols.next().unwrap_or("").trim().to_string();
                 // Don't flag the base's own remote twin (origin/<base>) as safe.
                 let is_base_remote = base
                     .as_deref()
@@ -662,25 +676,35 @@ impl LocalGit {
                     upstream: None,
                     remote: true,
                     merged_into_base: merged,
+                    sha,
                 }
             })
             .collect();
 
-        // Tags: sorted newest-first, capped at 200
+        // Tags: sorted newest-first, ALL of them (an old tag is precisely the one
+        // a user reaches for). `%(*objectname)` is the dereferenced commit and is
+        // non-empty only for ANNOTATED tags, so fall back to `%(objectname)` for
+        // lightweight ones — either way `sha` names a commit, never a tag object.
         let tags_out = self
             .run(&[
                 "for-each-ref",
                 "--sort=-creatordate",
-                "--format=%(refname:short)",
+                "--format=%(refname:short)\t%(objectname)\t%(*objectname)",
                 "refs/tags",
             ])
             .await?;
         let tags = tags_out
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .take(200)
-            .map(|line| RefTag {
-                name: line.trim().to_string(),
+            .map(|line| {
+                let mut cols = line.splitn(3, '\t');
+                let name = cols.next().unwrap_or("").trim().to_string();
+                let obj = cols.next().unwrap_or("").trim();
+                let deref = cols.next().unwrap_or("").trim();
+                RefTag {
+                    name,
+                    sha: if deref.is_empty() { obj } else { deref }.to_string(),
+                }
             })
             .collect();
 
@@ -3051,5 +3075,91 @@ mod tests {
             "non-ASCII untracked file present: {:?}",
             diff.files.iter().map(|f| &f.path).collect::<Vec<_>>()
         );
+    }
+
+    /// A repo with `n` linear commits ("c1".."cn") on `main`.
+    fn fixture_n_commits(n: usize) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        sh_git(&dir, &["init", "-b", "main"]);
+        sh_git(&dir, &["config", "user.email", "otto@test.local"]);
+        sh_git(&dir, &["config", "user.name", "Otto Test"]);
+        sh_git(&dir, &["config", "commit.gpgsign", "false"]);
+        for i in 1..=n {
+            write(&dir, "f.txt", &format!("line {i}\n"));
+            sh_git(&dir, &["add", "."]);
+            sh_git(&dir, &["commit", "-m", &format!("c{i}")]);
+        }
+        (tmp, dir)
+    }
+
+    /// `limit = 0` means the WHOLE history — the graph must be able to walk back
+    /// to the root commit, which a hard `-n` cap silently prevented.
+    #[tokio::test]
+    async fn log_limit_zero_returns_full_history() {
+        let (_tmp, dir) = fixture_n_commits(30);
+        let git = LocalGit::new(&dir);
+
+        let all = git.log(0, 0, false).await.unwrap();
+        assert_eq!(all.len(), 30, "limit=0 returns every commit");
+        assert_eq!(all[0].subject, "c30", "newest first");
+        assert_eq!(all[29].subject, "c1", "reaches the root commit");
+    }
+
+    /// Paging with skip/limit must tile history exactly once — no gap, no
+    /// overlap — since the graph appends each page onto the previous one.
+    #[tokio::test]
+    async fn log_paging_tiles_history_without_gaps() {
+        let (_tmp, dir) = fixture_n_commits(25);
+        let git = LocalGit::new(&dir);
+
+        let mut paged = Vec::new();
+        let mut skip = 0u32;
+        loop {
+            let page = git.log(10, skip, true).await.unwrap();
+            if page.is_empty() {
+                break;
+            }
+            skip += page.len() as u32;
+            paged.extend(page);
+        }
+
+        let full = git.log(0, 0, true).await.unwrap();
+        assert_eq!(paged.len(), 25, "paging reaches every commit");
+        assert_eq!(
+            paged.iter().map(|c| &c.sha).collect::<Vec<_>>(),
+            full.iter().map(|c| &c.sha).collect::<Vec<_>>(),
+            "paged order matches an unpaged read"
+        );
+    }
+
+    /// Branch/tag rows carry the sha they point at so the UI can jump to a ref
+    /// whose commit is NOT in the currently loaded page. Annotated tags must
+    /// report the dereferenced COMMIT, never the tag object's own sha.
+    #[tokio::test]
+    async fn refs_carry_commit_shas_for_branches_and_tags() {
+        let (_tmp, dir) = fixture_n_commits(3);
+        let git = LocalGit::new(&dir);
+
+        // A lightweight tag and an annotated tag on the FIRST commit.
+        let head = git.log(0, 0, false).await.unwrap();
+        let root = head.last().unwrap().sha.clone();
+        sh_git(&dir, &["tag", "light", &root]);
+        sh_git(&dir, &["tag", "-a", "annotated", "-m", "ann", &root]);
+
+        let refs = git.refs().await.unwrap();
+
+        let main = refs.local.iter().find(|b| b.name == "main").unwrap();
+        assert_eq!(main.sha, head[0].sha, "branch sha is its tip commit");
+
+        for name in ["light", "annotated"] {
+            let t = refs
+                .tags
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("tag {name} present"));
+            assert_eq!(t.sha, root, "tag {name} resolves to the tagged COMMIT");
+        }
     }
 }

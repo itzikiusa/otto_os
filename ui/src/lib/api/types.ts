@@ -2081,10 +2081,17 @@ export interface RefBranch {
    *  branch — a hint that it's safe to delete. The base branch itself is never
    *  flagged. Absent on responses that predate the field → treat as false. */
   merged_into_base?: boolean;
+  /** Full sha this branch points at, so the graph can locate the branch even when
+   *  its tip is outside the currently loaded page of history. Absent on responses
+   *  that predate the field. */
+  sha?: string;
 }
 
 export interface RefTag {
   name: string;
+  /** Full sha of the COMMIT the tag resolves to (annotated tags are already
+   *  dereferenced server-side). Absent on responses that predate the field. */
+  sha?: string;
 }
 
 export interface RefsResp {

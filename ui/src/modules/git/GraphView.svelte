@@ -1,5 +1,6 @@
 <script lang="ts">
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
+  import { untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type {
     CommitInfo,
@@ -190,6 +191,100 @@
   let commits: CommitInfo[] = $state([]);
   let commitsLoading = $state(true);
 
+  // ── History paging ────────────────────────────────────────────────────────
+  // There is no ceiling on how far back the graph can reach: history loads a
+  // page at a time and keeps going while the user scrolls (and jumps straight to
+  // whatever page holds a ref they clicked). Paging — rather than one unbounded
+  // request — exists purely because every row renders as real DOM: a repo with
+  // 100k commits would otherwise lock the webview on mount.
+  const PAGE = 500;
+  /** False once a short page comes back — that's the root of history. */
+  let hasMore = $state(true);
+  /** Guards against overlapping page fetches (scroll fires far faster than IO). */
+  let loadingMore = $state(false);
+  /** Bumped on every repo switch / full reload so an in-flight page from the
+   *  PREVIOUS repo can't append its commits onto the new one. */
+  let loadGen = 0;
+  /** How many rows have been REQUESTED so far — the `skip` cursor. Deliberately
+   *  not `commits.length`: dedupe can drop rows from a page, and reusing the
+   *  deduped length would re-request the same offset forever (a page of pure
+   *  duplicates would spin `loadUntil` without ever advancing). */
+  let skipCursor = 0;
+
+  /** The page fetch currently in flight, so a ref-click that needs more history
+   *  JOINS it instead of bailing out (bailing made a click during a scroll-load
+   *  falsely report the commit as unreachable). */
+  let inflight: Promise<boolean> | null = null;
+
+  /** Append the next page of history. Returns false when nothing more arrived. */
+  function loadMore(): Promise<boolean> {
+    if (inflight) return inflight;
+    if (!hasMore) return Promise.resolve(false);
+    const p = loadPage();
+    inflight = p;
+    loadingMore = true;
+    // Release the slot by PROMISE IDENTITY, never by generation: a reload that
+    // bumps `loadGen` while a page is in flight would otherwise strand `inflight`
+    // set forever, and every later loadMore() would hand back this one stale,
+    // already-settled promise — freezing history at whatever had loaded.
+    void p.finally(() => {
+      if (inflight === p) {
+        inflight = null;
+        loadingMore = false;
+      }
+    });
+    return p;
+  }
+
+  async function loadPage(): Promise<boolean> {
+    const gen = loadGen;
+    try {
+      const page = await api.get<CommitInfo[]>(
+        `/repos/${repoId}/log?all=true&limit=${PAGE}&skip=${skipCursor}`,
+      );
+      if (gen !== loadGen) return false; // repo changed under us — drop it
+      skipCursor += page.length;
+      if (page.length < PAGE) hasMore = false;
+      if (page.length > 0) {
+        // `--all` + skip can re-emit a commit if refs moved between pages; dedupe
+        // so the lane algorithm never sees the same sha twice.
+        const seen = new Set(commits.map((c) => c.sha));
+        const fresh = page.filter((c) => !seen.has(c.sha));
+        if (fresh.length > 0) commits = [...commits, ...fresh];
+      }
+      return page.length > 0;
+    } catch {
+      // Leave `hasMore` alone: a transient failure shouldn't permanently declare
+      // the end of history — the next scroll retries.
+      return false;
+    }
+  }
+
+  /** The scrolling commit list — also the element rows are looked up inside when
+   *  jumping to a ref. */
+  let graphPanelEl = $state<HTMLDivElement | null>(null);
+
+  /** Pull the next page in as the user approaches the bottom, so history just
+   *  keeps going instead of stopping at an arbitrary cutoff. */
+  function onGraphScroll(): void {
+    const el = graphPanelEl;
+    if (!el || loadingMore || !hasMore) return;
+    // Two viewports of runway — enough that the next page is usually there
+    // before the user reaches the end.
+    if (el.scrollTop + el.clientHeight * 3 >= el.scrollHeight) void loadMore();
+  }
+
+  /** Page forward until `sha` is loaded (or history runs out). Used when a ref
+   *  the user clicked points at a commit older than everything loaded so far. */
+  async function loadUntil(sha: string): Promise<boolean> {
+    if (commits.some((c) => c.sha === sha)) return true;
+    while (hasMore) {
+      if (!(await loadMore())) break;
+      if (commits.some((c) => c.sha === sha)) return true;
+    }
+    return commits.some((c) => c.sha === sha);
+  }
+
   // ── Stashes (read-only `git stash list`) ──────────────────────────────────
   let stashes: StashInfo[] = $state([]);
 
@@ -243,6 +338,12 @@
     refs = null;
     commits = [];
     stashes = [];
+    // Reset paging for the new repo and invalidate any in-flight page.
+    loadGen++;
+    hasMore = true;
+    loadingMore = false;
+    skipCursor = 0;
+    inflight = null;
 
     void api
       .get<RefsResp>(`/repos/${id}/refs`)
@@ -250,11 +351,14 @@
       .catch(() => (refs = { local: [], remote: [], tags: [] }))
       .finally(() => (refsLoading = false));
 
-    void api
-      .get<CommitInfo[]>(`/repos/${id}/log?all=true&limit=200`)
-      .then((c) => (commits = c))
-      .catch(() => (commits = []))
-      .finally(() => (commitsLoading = false));
+    // UNTRACKED: loadMore() reads `hasMore` (and pages write it). Reading that
+    // inside the effect would subscribe this loader to it — so the first short
+    // page (`hasMore = false`) re-ran the whole effect, which resets `commits`
+    // and re-fetches skip=0, silently throwing away every page the user had
+    // scrolled in. The repo id read above is this effect's only real dependency.
+    untrack(() => {
+      void loadMore().finally(() => (commitsLoading = false));
+    });
 
     // Stashes are best-effort: a failure (or empty list) just leaves the section
     // empty; it must never block the graph from rendering.
@@ -311,11 +415,22 @@
    *  parent and re-query refs + log so the graph reflects the change. */
   async function refreshAfter(status?: RepoStatusResp): Promise<void> {
     if (status) onstatus(status);
+    // Re-read AT LEAST as much history as the user had already paged in, so a
+    // refresh after a commit/pull doesn't yank the graph back to the first page
+    // and lose their place. Rounded up to a whole page.
+    const want = Math.max(PAGE, Math.ceil((commits.length + 1) / PAGE) * PAGE);
+    loadGen++;
+    loadingMore = false;
+    inflight = null;
     await Promise.all([
       api.get<RefsResp>(`/repos/${repoId}/refs`).then((r) => (refs = r)).catch(() => {}),
       api
-        .get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=200`)
-        .then((c) => (commits = c))
+        .get<CommitInfo[]>(`/repos/${repoId}/log?all=true&limit=${want}`)
+        .then((c) => {
+          commits = c;
+          skipCursor = c.length;
+          hasMore = c.length >= want;
+        })
         .catch(() => {}),
       api.get<StashInfo[]>(`/repos/${repoId}/stashes`).then((s) => (stashes = s)).catch(() => {}),
       api.get<WorktreeInfo[]>(`/repos/${repoId}/worktrees`).then((w) => (worktrees = w)).catch(() => {}),
@@ -1438,13 +1553,71 @@
     return null;
   }
 
-  /** Branch row SINGLE-click: select/highlight the branch's tip commit in the
-   *  graph (lights up its spine + opens the commit detail). Checkout is on
-   *  double-click (activateLocalBranch / checkoutRemote). No-op when the tip
-   *  isn't in the loaded log. */
+  // ── Reveal a ref on the graph ─────────────────────────────────────────────
+  /** Sha the graph row for a revealed ref is pulsing on, so the row can flash
+   *  once the scroll lands (a selection highlight alone is easy to miss when the
+   *  jump moves the viewport hundreds of rows). */
+  let pulseSha = $state<string | null>(null);
+  let pulseTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Ref whose commit we're currently paging history to reach (drives the row's
+   *  spinner/disabled state on very deep jumps). */
+  let revealBusy = $state('');
+
+  /** Scroll the graph row for `sha` to the middle of the list and flash it. */
+  function scrollToCommit(sha: string): void {
+    // Wait for the row to exist: a jump that just paged in history renders the
+    // new rows on the next tick.
+    requestAnimationFrame(() => {
+      const row = graphPanelEl?.querySelector<HTMLElement>(
+        `[data-sha="${CSS.escape(sha)}"]`,
+      );
+      if (!row) return;
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      pulseSha = sha;
+      if (pulseTimer) clearTimeout(pulseTimer);
+      pulseTimer = setTimeout(() => (pulseSha = null), 1200);
+    });
+  }
+
+  /** Jump the graph to `sha`: page history in until the commit is loaded, select
+   *  it (opens the detail + lights its spine) and scroll it into view. This is
+   *  what a sidebar branch/tag click does — the point is to SHOW WHERE the ref
+   *  sits, which a plain selection never did. */
+  async function revealSha(sha: string, label: string): Promise<void> {
+    if (!sha) return;
+    revealBusy = label;
+    try {
+      const found = await loadUntil(sha);
+      if (!found) {
+        toasts.error('Not in this graph', `${label} points at a commit that isn't reachable here.`);
+        return;
+      }
+      const c = commits.find((x) => x.sha === sha);
+      if (!c) return;
+      if (selectedSha !== c.sha) await selectCommit(c);
+      scrollToCommit(sha);
+    } finally {
+      revealBusy = '';
+    }
+  }
+
+  /** Branch row SINGLE-click: JUMP to the branch's tip in the graph — scroll it
+   *  into view, light its spine and open the commit detail — paging history in
+   *  first if the tip is older than what's loaded. Checkout stays on
+   *  double-click (activateLocalBranch / checkoutRemote). Prefers the sha the
+   *  refs response carries; falls back to matching decorations for daemons that
+   *  predate the field. */
   function selectBranchRow(b: RefBranch): void {
-    const c = branchTipCommit(b);
-    if (c) void selectCommit(c);
+    const sha = b.sha || branchTipCommit(b)?.sha;
+    if (sha) void revealSha(sha, b.name);
+  }
+
+  /** Tag row SINGLE-click: same jump-to-it-on-the-graph as a branch. The tag's
+   *  action menu moved to right-click (and is still on the row's ⋯ affordance),
+   *  because a left-click that only opened a menu never showed WHERE the tag is. */
+  function selectTagRow(t: RefTag): void {
+    const sha = t.sha || commits.find((c) => c.refs.some((r) => r === `tag: ${t.name}`))?.sha;
+    if (sha) void revealSha(sha, t.name);
   }
 
   // Set of remote-branch names (e.g. "origin/main") from the refs response, used
@@ -2040,17 +2213,36 @@
           {#each refs.tags as t (t.name)}
             <div
               class="ref-row tag"
+              class:ref-row-busy={revealBusy === t.name}
               role="button"
               tabindex="0"
-              title={t.name}
-              onclick={(e) => tagMenu(e, t)}
+              title="{t.name} — click to show it on the graph, right-click for actions"
+              onclick={() => selectTagRow(t)}
               oncontextmenu={(e) => tagMenu(e, t)}
               onkeydown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') tagMenu(e, t);
+                if (e.key === 'Enter' || e.key === ' ') selectTagRow(t);
               }}
             >
               <Icon name="tag" size={10} />
               <span class="mono ref-name">{t.name}</span>
+              <!-- Actions stay reachable without a right-click (trackpad/touch),
+                   since left-click now jumps to the tag instead of opening them. -->
+              <span
+                class="ref-more"
+                role="button"
+                tabindex="-1"
+                title="Tag actions"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  tagMenu(e, t);
+                }}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.stopPropagation();
+                    tagMenu(e, t);
+                  }
+                }}
+              >⋯</span>
             </div>
           {:else}
             <div class="dim ref-empty">No tags</div>
@@ -2220,6 +2412,8 @@
     class:mob-collapsed={isMobile && !secCommitsOpen}
     class:resizing={listResizing}
     style:flex-basis={detailOpen && !isMobile ? `${ui.gitGraphListWidth}px` : null}
+    bind:this={graphPanelEl}
+    onscroll={onGraphScroll}
   >
     {#if commitsLoading}
       <div style="padding: 10px"><Skeleton rows={12} height={28} /></div>
@@ -2311,6 +2505,8 @@
             class:dimmed
             class:on-spine={onSpine}
             class:stash-row-commit={isStash}
+            class:row-pulse={pulseSha === row.commit.sha}
+            data-sha={row.commit.sha}
             onclick={() => selectCommit(row.commit)}
             oncontextmenu={(e) => commitMenu(e, row.commit)}
             title={isHead ? `${row.commit.subject} — you are here (HEAD)` : row.commit.subject}
@@ -2441,6 +2637,20 @@
             </div>
           </button>
         {/each}
+        <!-- History footer: more pages stream in on scroll, so this is a status
+             line (and a manual fallback for anyone who can't scroll-trigger it),
+             never a cap. -->
+        <div class="graph-more">
+          {#if loadingMore}
+            <span class="dim">Loading more history…</span>
+          {:else if hasMore}
+            <button class="more-btn" onclick={() => void loadMore()}>
+              Load older commits
+            </button>
+          {:else}
+            <span class="dim">{commits.length} commits · beginning of history</span>
+          {/if}
+        </div>
       </div>
     {/if}
   </div>
@@ -2828,6 +3038,30 @@
   .ref-row:disabled {
     cursor: default;
   }
+  /* Deep jump in flight (paging history to reach the ref's commit). */
+  .ref-row-busy {
+    opacity: 0.6;
+    cursor: progress;
+  }
+  /* Tag actions: revealed on hover/focus so the row stays clean, but always
+     present for pointers that have no right-click. */
+  .ref-more {
+    margin-inline-start: auto;
+    padding-inline: 4px;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1;
+    opacity: 0;
+    cursor: pointer;
+    transition: opacity 100ms ease-out, color 100ms ease-out;
+  }
+  .ref-row:hover .ref-more,
+  .ref-row:focus-within .ref-more {
+    opacity: 1;
+  }
+  .ref-more:hover {
+    color: var(--text);
+  }
   /* Folder children sit just inside the tree guide of `.folder-children`. */
   .ref-row.nested {
     padding-inline-start: 14px;
@@ -3050,6 +3284,46 @@
   .graph-row-selected .ci-subject {
     color: var(--accent);
     font-weight: 600;
+  }
+  /* Jump-to-ref landing flash: after scrolling hundreds of rows the selection
+     wash alone is easy to lose, so the destination row pulses once. */
+  .row-pulse {
+    animation: row-pulse 1.2s ease-out 1;
+  }
+  @keyframes row-pulse {
+    0%,
+    55% {
+      background: color-mix(in srgb, var(--accent) 42%, transparent);
+    }
+    100% {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .row-pulse {
+      animation: none;
+    }
+  }
+  /* ── History footer (paging status / manual "load older") ── */
+  .graph-more {
+    display: flex;
+    justify-content: center;
+    padding: 10px 12px 16px;
+    font-size: 11px;
+  }
+  .more-btn {
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 100ms ease-out, color 100ms ease-out;
+  }
+  .more-btn:hover {
+    background: var(--surface-2);
+    color: var(--text);
   }
   /* ── WIP row (uncommitted changes, GitKraken-style) ── */
   .wip-row:not(.graph-row-selected) {
