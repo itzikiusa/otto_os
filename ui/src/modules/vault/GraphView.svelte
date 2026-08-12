@@ -18,6 +18,7 @@
   import { vaultGraph, vaultSwitcher, type VaultGraphQuery } from '../../lib/api/vault';
   import type { VaultGraphPayload, VaultSwitchHit } from '../../lib/api/types';
   import { vault } from './vault.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
 
   let { local = false }: { local?: boolean } = $props();
@@ -87,6 +88,34 @@
   let draggingNode = $state(false); // suppresses the tooltip while dragging
   let dataRev = $state(0); // bumped per adopted payload (re-runs dependent effects)
   let panelOpen = $state(true);
+
+  // Panel width is drag-resizable and persisted: service/tag names are long and
+  // a fixed 210px truncated most of them. The handle is on the panel's LEFT edge
+  // (the panel is anchored right), so dragging left widens it.
+  let panelResizing = $state(false);
+  function startPanelResize(e: MouseEvent): void {
+    e.preventDefault();
+    e.stopPropagation();
+    panelResizing = true;
+    const startX = e.clientX;
+    const startW = ui.vaultGraphPanelWidth;
+    // Anchored to the right edge, so a leftward drag (negative dx) GROWS it.
+    // Mirrored under RTL, where the panel sits on the left instead.
+    const dir = document.dir === 'rtl' ? 1 : -1;
+    const onMove = (ev: MouseEvent) =>
+      ui.setVaultGraphPanelWidth(startW + dir * (ev.clientX - startX));
+    const onUp = () => {
+      panelResizing = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
   let rawNodeCount = $state(0); // pre-filter totals, for the "312 / 9,179" readout
   let rawEdgeCount = $state(0);
 
@@ -1244,8 +1273,18 @@
     {/if}
   </div>
 
-  <!-- Controls panel (collapsible, top-right). -->
-  <div class="panel">
+  <!-- Controls panel (collapsible, top-right, drag-resizable). -->
+  <div class="panel" class:resizing={panelResizing} style="width: {ui.vaultGraphPanelWidth}px">
+    <!-- Drag handle on the panel's outer edge. Its own element (not a border) so
+         it has a comfortable grab area without shifting the panel's layout.
+         Mirrors .graph-resizer / .refs-resizer on the Git page. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="panel-resizer"
+      title="Drag to resize · double-click to reset"
+      onmousedown={startPanelResize}
+      ondblclick={() => ui.setVaultGraphPanelWidth(210)}
+    ></div>
     <button class="panel-head" onclick={() => (panelOpen = !panelOpen)} aria-expanded={panelOpen}>
       <span>Graph</span>
       <span class="tri">{panelOpen ? '▾' : '▸'}</span>
@@ -1554,6 +1593,7 @@
     position: absolute;
     top: 8px;
     right: 8px;
+    /* Width comes from the store (drag-resizable); this is the fallback. */
     width: 210px;
     background: color-mix(in srgb, var(--surface, #1c1c1e) 92%, transparent);
     border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
@@ -1588,7 +1628,40 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    /* THE scroller for the whole sidebar. min-height:0 is what actually lets it
+       shrink inside the flex column — without it a tall body overflows the
+       panel's max-height instead of scrolling, which is how the controls ended
+       up clipped off the bottom on a short window. */
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  /* Children keep their natural height and let the BODY scroll. Without this the
+     flex column shrinks every section to fit — the facet lists collapsed to 0px
+     and their rows vanished entirely, which is the failure mode "make the panel
+     scroll" is meant to remove, not introduce. */
+  .panel-body > * {
+    flex-shrink: 0;
+  }
+  /* Grab area on the panel's outer edge. Sits just outside the panel so it never
+     overlaps the controls, and widens the pointer target beyond the 1px border. */
+  .panel-resizer {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: -3px;
+    width: 7px;
+    cursor: col-resize;
+    z-index: 2;
+    background: transparent;
+  }
+  .panel-resizer:hover,
+  .panel.resizing .panel-resizer {
+    background: color-mix(in srgb, var(--accent, #0a84ff) 45%, transparent);
+  }
+  /* Suspend hover affordances mid-drag so the pointer doesn't flicker. */
+  .panel.resizing {
+    user-select: none;
   }
   .filter {
     width: 100%;
@@ -1610,6 +1683,14 @@
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-dim, #98989f);
+    /* Now that the panel is one long scroller, pin the section label so you can
+       always tell which group the rows under the pointer belong to. Needs an
+       opaque background or rows would show through as it sticks. */
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding-block: 3px;
+    background: var(--surface, #1c1c1e);
   }
   .sec.sub {
     margin-top: 8px;
@@ -1631,14 +1712,19 @@
     line-height: 1.35;
   }
 
-  /* Facet lists are data-driven and long (40 services, 1k+ tags): cap the
-     height and scroll rather than growing the panel past the viewport. */
+  /* Facet lists are data-driven and long (40 services, 1k+ tags). They each used
+     to own a 148px scroller, so a short window showed three postage-stamp
+     viewports stacked up — each clipping a row mid-height, with the real controls
+     squeezed below. The PANEL is now the single scroller; this cap exists only so
+     a 1k-tag list can't bury Forces/Display, and is high enough that ordinary
+     lists never scroll internally at all. */
   .facets {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    max-height: 148px;
+    max-height: 340px;
     overflow-y: auto;
+    overscroll-behavior: contain; /* don't chain a list's scroll into the panel */
     padding-right: 2px;
   }
   .fl {

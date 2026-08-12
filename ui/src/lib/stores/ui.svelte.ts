@@ -58,6 +58,7 @@ const LS = {
   gitGraphSideWidth: 'otto_git_graph_side_width',
   apiSideWidth: 'otto_api_side_width',
   apiBuilderH: 'otto_api_builder_h',
+  vaultGraphPanelWidth: 'otto_vault_graph_panel_width',
 };
 
 export const RIGHT_MIN = 260;
@@ -158,6 +159,12 @@ function clampGitGraphList(px: number): number {
 function clampGitGraphSide(px: number): number {
   return Math.max(180, Math.min(480, Math.round(px)));
 }
+/** Vault graph controls panel. Floor keeps the section labels + counts legible;
+ *  cap stops the panel from eating the graph it is filtering. Service/tag names
+ *  are long, so the ceiling is generous. */
+function clampVaultGraphPanel(px: number): number {
+  return Math.max(200, Math.min(560, Math.round(px)));
+}
 /** API client Collections/History sidebar. */
 function clampApiSide(px: number): number {
   return Math.max(220, Math.min(520, Math.round(px)));
@@ -194,6 +201,10 @@ class UiStore {
   gitGraphListWidth = $state(clampGitGraphList(Number(lsGet(LS.gitGraphListWidth)) || 420));
   // Git graph LEFT refs sidebar width (drag-resizable; default matches the CSS 220px).
   gitGraphSideWidth = $state(clampGitGraphSide(Number(lsGet(LS.gitGraphSideWidth)) || 220));
+  // Vault graph controls panel width (drag-resizable; default matches the CSS).
+  vaultGraphPanelWidth = $state(
+    clampVaultGraphPanel(Number(lsGet(LS.vaultGraphPanelWidth)) || 210),
+  );
   // API client sidebar width + builder pane height (0 = unset → CSS default).
   apiSideWidth = $state(clampApiSide(Number(lsGet(LS.apiSideWidth)) || 280));
   apiBuilderHeight = $state(
@@ -435,6 +446,10 @@ class UiStore {
   setGitGraphSideWidth(px: number): void {
     this.gitGraphSideWidth = clampGitGraphSide(px);
     lsSet(LS.gitGraphSideWidth, String(this.gitGraphSideWidth));
+  }
+  setVaultGraphPanelWidth(px: number): void {
+    this.vaultGraphPanelWidth = clampVaultGraphPanel(px);
+    lsSet(LS.vaultGraphPanelWidth, String(this.vaultGraphPanelWidth));
   }
   setApiSideWidth(px: number): void {
     this.apiSideWidth = clampApiSide(px);
