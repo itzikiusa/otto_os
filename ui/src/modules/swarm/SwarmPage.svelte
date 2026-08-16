@@ -832,6 +832,16 @@
     min-height: 0;
     display: flex;
   }
+  /* SessionView's `.pane` has NO intrinsic width to shrink-wrap: its header is a
+     `container-type: inline-size` query container (size-contained on the inline
+     axis) and the terminal below it is a canvas. As a plain flex item it
+     therefore collapses to its padding — a ~20px sliver with just the status dot
+     — so the panel must tell it to fill. (Splits/TiledView escape this because
+     their parents are CSS grids, where items stretch by default.) */
+  .session-panel > :global(.pane) {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
 
   /* Toggles — invisible chrome on desktop (the rail/header are always open);
      they only carry the chevron + tappable target on a phone. */
