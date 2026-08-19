@@ -779,6 +779,13 @@
   function shortRunId(id: string): string {
     return id.length > 6 ? id.slice(-6) : id;
   }
+
+  // The daemon caps parallel workflow runs; a `pending` run is one PARKED in
+  // its FIFO queue (it starts the moment a slot frees). Say so — "pending"
+  // read as "about to start any second" and made the queue look stuck.
+  function runStatusLabel(status: string): string {
+    return status === 'pending' ? 'queued' : status;
+  }
   const activeRunOrdinals = $derived.by(() => {
     const counts: Record<string, number> = {};
     const map: Record<string, number> = {};
@@ -1268,7 +1275,7 @@
             class="run-row"
             class:active={run?.id === r.run_id}
             onclick={() => openRunById(r.workflow_id, r.run_id)}
-            title={`${r.workflow_name} — ${r.status}`}
+            title={`${r.workflow_name} — ${runStatusLabel(r.status)}`}
           >
             <span class="dot {r.status}"></span>
             <span class="run-name">{r.workflow_name}</span>
@@ -1393,7 +1400,7 @@
               {#each runs as r (r.id)}
                 <button class="run-item" data-testid="run-item" class:active={run?.id === r.id} onclick={() => { run = r; runsOpen = false; void refetchRun(r.id); }}>
                   <span class="dot {r.status}"></span>
-                  <span class="run-status">{r.status}</span>
+                  <span class="run-status">{runStatusLabel(r.status)}</span>
                   <span class="run-when">{new Date(r.started_at).toLocaleTimeString()}</span>
                   <span class="grow"></span>
                   <code class="run-id" title={r.id}>{shortRunId(r.id)}</code>
@@ -1632,7 +1639,7 @@
           {#if run}
             <!-- Run bar: live status + Cancel (R7) + maximize/zoom (R6). -->
             <div class="insp-bar">
-              <span class="tl-label"><span class="dot {run.status}"></span>{run.status}</span>
+              <span class="tl-label"><span class="dot {run.status}"></span>{runStatusLabel(run.status)}</span>
               <span class="grow"></span>
               {#if runActive}
                 <button

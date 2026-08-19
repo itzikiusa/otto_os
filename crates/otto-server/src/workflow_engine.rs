@@ -20,6 +20,7 @@
 //! so subsequent re-runs can skip unchanged steps.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use otto_brokers::types::{ConsumeReq, ValueFormat};
@@ -388,25 +389,157 @@ fn param_str_list(params: &Value, key: &str) -> Vec<String> {
 /// real work.
 const RUN_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60 * 60);
 
-/// Fail any workflow run left `pending`/`running` by a previous daemon process.
+/// Fail any workflow run left EXECUTING by a previous daemon process.
 ///
-/// A run executes in a background task that dies with the process, so a row left
-/// non-terminal is orphaned and would otherwise poll forever in the UI. Called
-/// once on daemon startup (mirrors the review / skill-eval / product / swarm
-/// startup reconciliation). Writes inline SQL against `workflow_runs` so it needs
-/// no repo method. Returns the number of rows updated.
-pub async fn reap_orphaned_runs(pool: &SqlitePool) -> std::result::Result<u64, sqlx::Error> {
-    let res = sqlx::query(
-        "UPDATE workflow_runs
-         SET status = 'error',
-             error = 'Interrupted by a daemon restart — re-run the workflow.',
-             finished_at = COALESCE(finished_at, ?)
-         WHERE status IN ('pending', 'running')",
-    )
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(pool)
-    .await?;
-    Ok(res.rows_affected())
+/// A run executes in a background task that dies with the process, so a
+/// `running` row is orphaned and would otherwise poll forever in the UI. A
+/// QUEUED run (fresh `pending`, no node progress — see [`spawn_run`]) is *not*
+/// orphaned: its row is the persistent queue entry and [`resume_queued_runs`]
+/// re-enqueues it right after this. The exception is a `pending` row that
+/// already carries node states — a reopened retry-a-step whose scope (start
+/// node, adopted prior states) lived only in the dead process's memory; re-
+/// running it blind would replay finished steps' side effects, so it fails
+/// like a running row. Called once on daemon startup (mirrors the review /
+/// skill-eval / product / swarm startup reconciliation). Returns the number of
+/// rows updated.
+pub async fn reap_orphaned_runs(pool: &SqlitePool) -> Result<u64> {
+    WorkflowsRepo::new(pool.clone())
+        .fail_interrupted_runs("Interrupted by a daemon restart — re-run the workflow.")
+        .await
+}
+
+/// Default cap on workflow runs EXECUTING at once, daemon-wide. Every run
+/// beyond it queues FIFO in [`spawn_run`] and stays `pending`. A single run
+/// can fan out dozens of agent PTYs (a `review_run` node alone launches the
+/// whole reviewer fleet), so uncapped parallel runs exhausted fds and starved
+/// interactive sessions; 2 keeps one long run from blocking a quick one while
+/// bounding the process/fd blast radius.
+const DEFAULT_MAX_PARALLEL_RUNS: usize = 2;
+
+/// The effective cap: `OTTO_WF_MAX_PARALLEL_RUNS` (≥ 1) when set, else
+/// [`DEFAULT_MAX_PARALLEL_RUNS`]. Read once — the gate's permit count can't
+/// change while runs hold permits.
+fn max_parallel_runs() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("OTTO_WF_MAX_PARALLEL_RUNS")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(DEFAULT_MAX_PARALLEL_RUNS)
+    })
+}
+
+/// Daemon-wide run gate. Tokio's semaphore queues waiters FIFO, so runs start
+/// in the order they were requested.
+fn run_gate() -> &'static tokio::sync::Semaphore {
+    static GATE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Semaphore::new(max_parallel_runs()))
+}
+
+/// Spawn a workflow run through the daemon-wide concurrency gate. This is THE
+/// way to launch [`run_workflow`] — every trigger path (manual run, retry,
+/// webhook, schedule/event trigger, chat, scheduled task) goes through it so
+/// at most [`max_parallel_runs`] runs execute at once and the rest wait FIFO.
+///
+/// The queue is PERSISTENT with no extra table: a queued run is exactly its
+/// already-created `workflow_runs` row still in `pending` with no node
+/// progress. If the daemon dies while runs wait, startup re-enqueues them via
+/// [`resume_queued_runs`] in the same (creation) order. A run canceled while
+/// queued is honored here — the permit is released without executing.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_run(
+    ctx: ServerCtx,
+    ws: Workspace,
+    workflow: Workflow,
+    run_id: Id,
+    input: Value,
+    start_node: Option<String>,
+    only_node: bool,
+    prior_nodes: Option<Vec<NodeRunState>>,
+) {
+    tokio::spawn(async move {
+        let gate = run_gate();
+        let permit = match gate.try_acquire() {
+            Ok(p) => p,
+            Err(_) => {
+                // Parked. Announce the (still all-pending) run so the sidebar
+                // list picks it up; rev 0 makes clients refetch rather than
+                // trust the event's empty node counts.
+                tracing::info!(
+                    %run_id, workflow = %workflow.name,
+                    "workflow run queued ({} already executing)", max_parallel_runs()
+                );
+                emit_run_updated(
+                    &ctx, &workflow.workspace_id, &run_id, "pending", None, 0, None, &[], false,
+                );
+                match gate.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => return, // gate closed — daemon shutting down
+                }
+            }
+        };
+        // Canceled (or otherwise settled) while it sat in the queue → skip.
+        match WorkflowsRepo::new(ctx.pool.clone()).get_run(&run_id).await {
+            Ok(r) if r.status == RunStatus::Pending => {}
+            Ok(r) => {
+                tracing::info!(%run_id, status = ?r.status, "queued workflow run settled before start — skipping");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(%run_id, "queued workflow run unavailable — skipping: {e}");
+                return;
+            }
+        }
+        run_workflow(ctx, ws, workflow, run_id, input, start_node, only_node, prior_nodes).await;
+        drop(permit);
+    });
+}
+
+/// Re-enqueue runs that were QUEUED (fresh `pending`) when the previous daemon
+/// process died, oldest first — the persistent half of the run queue. Called
+/// once on daemon startup, after [`reap_orphaned_runs`] has failed the rows
+/// that can't be safely resumed. Returns how many runs were re-enqueued.
+pub async fn resume_queued_runs(ctx: &ServerCtx) -> usize {
+    let repo = WorkflowsRepo::new(ctx.pool.clone());
+    let ids = match repo.queued_run_ids().await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("workflow queue resume: listing queued runs: {e}");
+            return 0;
+        }
+    };
+    let mut resumed = 0;
+    for id in ids {
+        let Ok(run) = repo.get_run(&id).await else { continue };
+        // Workflow/workspace gone (deleted while queued) → the run can never
+        // execute; settle it instead of leaving a forever-pending row.
+        let loaded = match repo.get(&run.workflow_id).await {
+            Ok(wf) => match ctx.workspaces.get(&wf.workspace_id).await {
+                Ok(ws) => Ok((wf, ws)),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        match loaded {
+            Ok((wf, ws)) => {
+                spawn_run(ctx.clone(), ws, wf, run.id.clone(), run.input.clone(), None, false, None);
+                resumed += 1;
+            }
+            Err(e) => {
+                let _ = repo
+                    .update_run(
+                        &id,
+                        RunStatus::Error,
+                        &[],
+                        Some(&format!("queued run can no longer start: {e}")),
+                        true,
+                    )
+                    .await;
+            }
+        }
+    }
+    resumed
 }
 
 /// The node-kind catalog: drives the editor palette and validates generated
@@ -5150,6 +5283,27 @@ mod tests {
     }
     fn edge(s: &str, t: &str) -> WorkflowEdge {
         WorkflowEdge { id: format!("{s}-{t}"), source: s.into(), target: t.into(), condition: None }
+    }
+
+    /// The daemon-wide run gate: at most `max_parallel_runs()` (default 2)
+    /// workflow runs execute at once; `spawn_run` parks the rest FIFO, their
+    /// still-`pending` rows doubling as the persistent queue.
+    #[tokio::test]
+    async fn run_gate_caps_parallel_runs_at_two() {
+        // The gate is sized once from the env; with an operator override this
+        // test's permit arithmetic wouldn't apply — skip rather than mislead.
+        if std::env::var("OTTO_WF_MAX_PARALLEL_RUNS").is_ok() {
+            return;
+        }
+        assert_eq!(max_parallel_runs(), 2);
+        let gate = run_gate();
+        let a = gate.try_acquire().expect("first run starts");
+        let b = gate.try_acquire().expect("second run starts");
+        assert!(gate.try_acquire().is_err(), "third run must queue");
+        drop(a);
+        let c = gate.try_acquire().expect("a slot frees when a run finishes");
+        drop(b);
+        drop(c);
     }
 
     #[test]

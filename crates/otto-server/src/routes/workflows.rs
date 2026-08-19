@@ -460,14 +460,19 @@ pub async fn run_workflow(
         .await
         .map_err(ApiError)?;
 
-    // Execute in the background; the UI polls GET /workflow-runs/{id}.
-    let ctx2 = ctx.clone();
-    let run_id = run.id.clone();
-    let start_node = req.start_node.clone();
-    let only_node = req.only_node;
-    tokio::spawn(async move {
-        workflow_engine::run_workflow(ctx2, ws, wf, run_id, input, start_node, only_node, None).await;
-    });
+    // Execute in the background (gated to the daemon-wide parallel-run cap;
+    // beyond it the run queues as this `pending` row). The UI polls
+    // GET /workflow-runs/{id}.
+    workflow_engine::spawn_run(
+        ctx.clone(),
+        ws,
+        wf,
+        run.id.clone(),
+        input,
+        req.start_node.clone(),
+        req.only_node,
+        None,
+    );
 
     Ok(Json(run))
 }
@@ -522,15 +527,16 @@ pub async fn retry_run_node(
     let ws = ctx.workspaces.get(&wf.workspace_id).await.map_err(ApiError)?;
     repo(&ctx).reopen_run(&id).await.map_err(ApiError)?;
 
-    let ctx2 = ctx.clone();
-    let run_id = run.id.clone();
-    let input = run.input.clone();
-    let start = Some(node_id.to_string());
-    let only = !req.include_downstream;
-    let prior = run.nodes.clone();
-    tokio::spawn(async move {
-        workflow_engine::run_workflow(ctx2, ws, wf, run_id, input, start, only, Some(prior)).await;
-    });
+    workflow_engine::spawn_run(
+        ctx.clone(),
+        ws,
+        wf,
+        run.id.clone(),
+        run.input.clone(),
+        Some(node_id.to_string()),
+        !req.include_downstream,
+        Some(run.nodes.clone()),
+    );
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     Ok(Json(run))
 }
@@ -1335,11 +1341,7 @@ pub async fn webhook_trigger(
         .await
         .map_err(ApiError)?;
 
-    let ctx2 = ctx.clone();
-    let run_id = run.id.clone();
-    tokio::spawn(async move {
-        workflow_engine::run_workflow(ctx2, ws, wf, run_id, input, None, false, None).await;
-    });
+    workflow_engine::spawn_run(ctx.clone(), ws, wf, run.id.clone(), input, None, false, None);
 
     Ok(Json(run))
 }

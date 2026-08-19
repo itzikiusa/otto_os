@@ -138,16 +138,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             "workflow trigger scheduler: firing schedule trigger"
         );
 
-        let ctx2 = ctx.clone();
-        let run_id = run.id.clone();
-        tokio::spawn(async move {
-            crate::workflow_engine::run_workflow(
-                ctx2, ws, wf, run_id,
-                input,
-                None, false, None,
-            )
-            .await;
-        });
+        crate::workflow_engine::spawn_run(ctx.clone(), ws, wf, run.id.clone(), input, None, false, None);
     }
     Ok(())
 }
@@ -379,16 +370,9 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
                     "workflow event-trigger listener: firing event trigger"
                 );
 
-                let ctx2 = ctx.clone();
-                let run_id = run.id.clone();
-                tokio::spawn(async move {
-                    crate::workflow_engine::run_workflow(
-                        ctx2, ws, wf, run_id,
-                        input,
-                        None, false, None,
-                    )
-                    .await;
-                });
+                crate::workflow_engine::spawn_run(
+                    ctx.clone(), ws, wf, run.id.clone(), input, None, false, None,
+                );
             }
         }
     });

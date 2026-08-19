@@ -303,6 +303,41 @@ impl WorkflowsRepo {
         Ok(row.is_some())
     }
 
+    /// Startup reconciliation: fail every run a dead daemon left EXECUTING
+    /// (`running`), plus any `pending` run that already carries node progress —
+    /// a reopened retry-a-step whose scope lived only in the dead process's
+    /// memory (re-running it blind would replay finished steps' side effects).
+    /// FRESH `pending` rows (nodes_json still `[]`) are left untouched: they
+    /// are the persistent run QUEUE, re-enqueued right after this by
+    /// `workflow_engine::resume_queued_runs`. Returns the rows updated.
+    pub async fn fail_interrupted_runs(&self, error: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE workflow_runs
+             SET status = 'error', error = ?, finished_at = COALESCE(finished_at, ?),
+                 rev = rev + 1
+             WHERE status = 'running' OR (status = 'pending' AND nodes_json != '[]')",
+        )
+        .bind(error)
+        .bind(fmt(Utc::now()))
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("fail interrupted runs"))?;
+        Ok(res.rows_affected())
+    }
+
+    /// Ids of QUEUED runs — fresh `pending`, no node progress — oldest first:
+    /// the FIFO order `resume_queued_runs` re-enqueues them in after a restart.
+    pub async fn queued_run_ids(&self) -> Result<Vec<Id>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM workflow_runs
+             WHERE status = 'pending' AND nodes_json = '[]'
+             ORDER BY started_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("queued run ids"))
+    }
+
     /// In-flight runs (pending|running) across a workspace, newest first, joined
     /// with their workflow name and with per-run step progress pre-computed.
     /// Backs the "Running" sidebar list (`GET /workspaces/{wid}/workflow-runs/active`).
@@ -672,6 +707,60 @@ mod tests {
         assert_eq!(r.status, RunStatus::Pending);
         assert!(r.error.is_none());
         assert!(r.finished_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_reap_fails_started_runs_but_keeps_the_queue() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let g = WorkflowGraph::default();
+        let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
+        let mk = || repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null);
+
+        // r1: EXECUTING when the daemon died → must fail.
+        let r1 = mk().await.unwrap();
+        repo.update_run(&r1.id, RunStatus::Running, &[], None, false).await.unwrap();
+        // r2: fresh pending (queued behind the run gate) → must SURVIVE.
+        let r2 = mk().await.unwrap();
+        // r3: a reopened retry-a-step (pending but carrying node progress) —
+        // its retry scope lived only in the dead process's memory → must fail.
+        let r3 = mk().await.unwrap();
+        let node = NodeRunState {
+            node_id: "a".into(),
+            status: NodeStatus::Error,
+            output: None,
+            error: Some("boom".into()),
+            logs: vec![],
+            started_at: None,
+            duration_ms: None,
+            attempts: None,
+            sessions: vec![],
+        };
+        repo.update_run(&r3.id, RunStatus::Error, &[node], Some("boom"), true).await.unwrap();
+        repo.reopen_run(&r3.id).await.unwrap();
+
+        assert_eq!(repo.fail_interrupted_runs("interrupted").await.unwrap(), 2);
+        assert_eq!(repo.get_run(&r1.id).await.unwrap().status, RunStatus::Error);
+        assert_eq!(repo.get_run(&r3.id).await.unwrap().status, RunStatus::Error);
+        // The queued run is untouched and is exactly what re-enqueues.
+        assert_eq!(repo.get_run(&r2.id).await.unwrap().status, RunStatus::Pending);
+        assert_eq!(repo.queued_run_ids().await.unwrap(), vec![r2.id.clone()]);
+    }
+
+    #[tokio::test]
+    async fn queued_run_ids_are_fifo_by_creation() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let g = WorkflowGraph::default();
+        let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
+        let a = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null).await.unwrap();
+        let b = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null).await.unwrap();
+        let c = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null).await.unwrap();
+        // A run that already started is not queued.
+        repo.update_run(&b.id, RunStatus::Running, &[], None, false).await.unwrap();
+        // Same-timestamp rows tiebreak on id; ULIDs are creation-ordered, so
+        // FIFO order holds either way.
+        assert_eq!(repo.queued_run_ids().await.unwrap(), vec![a.id.clone(), c.id.clone()]);
     }
 
     #[tokio::test]

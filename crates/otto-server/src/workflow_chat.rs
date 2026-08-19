@@ -604,13 +604,16 @@ impl WorkflowChatTriggerImpl {
         );
         let run = repo.create_run(&wf.id, &wf.workspace_id, &input).await.ok()?;
         let ws = self.ctx.workspaces.get(&wf.workspace_id).await.ok()?;
-        let ctx2 = self.ctx.clone();
-        let run_id = run.id.clone();
-        let wf2 = wf.clone();
-        let input2 = input.clone();
-        tokio::spawn(async move {
-            crate::workflow_engine::run_workflow(ctx2, ws, wf2, run_id, input2, None, false, None).await;
-        });
+        crate::workflow_engine::spawn_run(
+            self.ctx.clone(),
+            ws,
+            wf.clone(),
+            run.id.clone(),
+            input.clone(),
+            None,
+            false,
+            None,
+        );
 
         let tail = detail.unwrap_or_else(|| "Working through the steps now.".to_string());
         Some(WorkflowChatAck {

@@ -725,6 +725,29 @@ maps directly onto the `{channel, chat, thread?, mention_only?}` spec.
 A run executes in a background task (`run_workflow`) and persists progress to the
 `workflow_runs` row after **every** node transition.
 
+### Run queue (parallel-run cap)
+
+At most **2** runs execute at once, daemon-wide (`OTTO_WF_MAX_PARALLEL_RUNS`
+overrides, minimum 1). A single run can fan out dozens of agent PTYs — one
+`review_run` node launches the entire reviewer fleet — so uncapped parallel
+runs exhausted the daemon's file descriptors (`spawn claude: Too many open
+files`) and starved interactive sessions. Every trigger path (manual run,
+retry-node, webhook, schedule/event trigger, chat, scheduled task) shares one
+FIFO gate (`workflow_engine::spawn_run`):
+
+- A run beyond the cap keeps its `pending` status — shown as **queued** in the
+  UI — and starts automatically, in creation order, when a slot frees.
+- The queue is **persistent** with no extra table: the still-`pending`
+  `workflow_runs` row *is* the queue entry. On daemon restart, startup
+  recovery fails the runs that were **executing** ("interrupted by a daemon
+  restart", as before) and re-enqueues the queued ones in order
+  (`resume_queued_runs`). Exception: a queued **retry-node** re-entry fails
+  instead — its retry scope (start node + adopted prior states) lives only in
+  the dead process's memory, and re-running blind would replay finished
+  steps' side effects.
+- **Stop** on a queued run works: the gate re-checks the run's status when a
+  slot frees and a canceled run never starts.
+
 ### Run repos & branches (`repos[]` input)
 
 Declare which repos/branches/worktrees the run operates on — **source and
@@ -823,7 +846,9 @@ RunStatus  = 'pending' | 'running' | 'success' | 'error' | 'canceled';
 NodeStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped';
 ```
 A run is `error` if **any** node errored ("one or more nodes failed"). Cached
-nodes show as `success` with a "Success (cached)" log line.
+nodes show as `success` with a "Success (cached)" log line. `pending` means the
+run is **queued** behind the parallel-run cap (the UI labels it "queued"); it
+flips to `running` the moment a gate slot frees.
 
 ### Live progress over WebSocket (`workflow_run_updated`)
 The engine emits `Event::WorkflowRunUpdated` on the shared event bus at **every

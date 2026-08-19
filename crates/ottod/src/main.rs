@@ -583,12 +583,20 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
 
     // Same recovery for orphaned workflow runs: a run executes in a background
-    // task that dies with the process, so any row left `pending`/`running` would
-    // otherwise poll forever in the UI. Mark them error so they're re-runnable.
+    // task that dies with the process, so a row left EXECUTING (`running`) is
+    // failed so it's re-runnable. QUEUED runs (fresh `pending`, parked behind
+    // the parallel-run gate) are NOT orphans — re-enqueue them in order so the
+    // persistent run queue survives the restart.
     match otto_server::workflow_engine::reap_orphaned_runs(&pool).await {
         Ok(n) if n > 0 => tracing::info!("workflow recovery: marked {n} orphaned run(s) as error"),
         Ok(_) => {}
         Err(e) => tracing::warn!("workflow recovery: {e}"),
+    }
+    {
+        let n = otto_server::workflow_engine::resume_queued_runs(&ctx).await;
+        if n > 0 {
+            tracing::info!("workflow recovery: re-enqueued {n} queued run(s)");
+        }
     }
     // And their leftover run worktrees (+ safe otto-wf/<id> branch cleanup) —
     // finalize-time reaping can't run for a crashed daemon, and pre-reap

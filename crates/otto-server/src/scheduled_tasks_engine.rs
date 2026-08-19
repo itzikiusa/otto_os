@@ -581,16 +581,16 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
         .create_run(&workflow.id, &workflow.workspace_id, &input)
         .await?;
     let run_id = run.id.clone();
-    {
-        let ctx2 = ctx.clone();
-        let ws2 = ws.clone();
-        let wf2 = workflow.clone();
-        let rid = run_id.clone();
-        let input2 = input.clone();
-        tokio::spawn(async move {
-            crate::workflow_engine::run_workflow(ctx2, ws2, wf2, rid, input2, None, false, None).await;
-        });
-    }
+    crate::workflow_engine::spawn_run(
+        ctx.clone(),
+        ws.clone(),
+        workflow.clone(),
+        run_id.clone(),
+        input.clone(),
+        None,
+        false,
+        None,
+    );
 
     // Wait (bounded) for the workflow to finish so the report reflects its outcome.
     let deadline = std::time::Instant::now() + WORKFLOW_WAIT;

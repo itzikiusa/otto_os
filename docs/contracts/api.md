@@ -1365,7 +1365,7 @@ workspace from the workflow/run row.
 | GET /workflows/{id} | ws viewer | — | Workflow |
 | PATCH /workflows/{id} | ws editor | UpdateWorkflowReq | Workflow |
 | DELETE /workflows/{id} | ws editor | — | 204 |
-| POST /workflows/{id}/run | ws editor | RunWorkflowReq? | WorkflowRun |
+| POST /workflows/{id}/run | ws editor | RunWorkflowReq? | WorkflowRun — created immediately; may start **queued** (see Run queue) |
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
@@ -1414,6 +1414,21 @@ rows report 0. The approval columns now ride the run too:
 run-view approval banner unreachable. Each `NodeRunState` gains `started_at`
 (set on the pending→running transition; drives the live elapsed timer on a
 running step).
+
+**Run queue.** At most **2** workflow runs execute at once, daemon-wide
+(override: `OTTO_WF_MAX_PARALLEL_RUNS`, ≥ 1) — a single run can fan out dozens
+of agent PTYs (a `review_run` node launches the whole reviewer fleet), so
+uncapped parallel runs exhausted file descriptors and starved interactive
+sessions. Every trigger path (manual run, retry-node, webhook, schedule/event
+trigger, chat, scheduled task) shares the gate. A run beyond the cap stays
+`pending` (the UI shows it as *queued*) and starts FIFO as slots free; its
+`workflow_runs` row **is** the queue entry, so the queue is persistent: on
+daemon restart, queued runs re-enqueue in creation order while runs that were
+*executing* are failed as interrupted (as before). `POST
+/workflow-runs/{id}/cancel` on a queued run is honored — it never starts. One
+exception on restart: a **retry-node** re-entry that was still queued fails
+instead of resuming (its retry scope lives only in the engine's memory;
+re-running blind would replay finished steps' side effects).
 
 **Running list.** `GET /workspaces/{wid}/workflow-runs/active` returns
 `ActiveWorkflowRun = {run_id, workflow_id, workspace_id, workflow_name, status,
