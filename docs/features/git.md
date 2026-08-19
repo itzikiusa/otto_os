@@ -237,7 +237,10 @@ context menu (see §[Context menus](#context-menus)). Removing a repo
 The **Changes** tab is the working-tree view, backed by `git status`:
 
 - **Stage / unstage** selected paths (`POST /repos/{id}/stage`,
-  `/unstage`). Each returns the fresh `RepoStatusResp` so the UI updates.
+  `/unstage`). Each returns the fresh `RepoStatusResp` so the UI updates. The
+  WIP panel's trees offer this at every level: a checkbox per **file**, per
+  **folder** (stages/unstages the whole subtree in one call), and per section
+  ("Stage all" / "Unstage all").
 - **Discard** un-staged changes to selected paths (`POST /repos/{id}/discard`) —
   this reverts/removes working-tree changes, so confirm before using it.
 - **Commit** the staged changes (`POST /repos/{id}/commit`, returns the new

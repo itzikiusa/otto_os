@@ -287,21 +287,25 @@
 {#snippet treeNode(node: TNode, depth: number, section: 'unstaged' | 'staged')}
   {#if node.type === 'folder'}
     {@const key = `${section}:${node.path}`}
+    <!-- Folder row: the checkbox stages/unstages EVERY file under the folder
+         (recursively — node.files carries the whole subtree) in one call, the
+         same affordance file rows have. The name/chevron only folds — a name
+         click must never mutate the index. -->
     <div class="wp-folder" style="padding-inline-start:{8 + depth * 14}px">
+      <input
+        type="checkbox"
+        checked={section === 'staged'}
+        onchange={() => stagePaths(node.files.map((f) => f.path), section === 'unstaged')}
+        title="{section === 'staged' ? 'Unstage' : 'Stage'} {node.path}/ ({node.files.length} file{node.files.length === 1 ? '' : 's'})"
+        aria-label="{section === 'staged' ? 'Unstage' : 'Stage'} folder {node.path}"
+      />
       <button
-        class="wp-fold-toggle"
+        class="wp-fold-name"
         onclick={() => toggleFolder(key)}
-        aria-label="Toggle folder"
+        title="{node.path}/ ({node.files.length})"
         aria-expanded={!collapsed.has(key)}
       >
         <Icon name={collapsed.has(key) ? 'chevronRight' : 'chevronDown'} size={12} />
-      </button>
-      <button
-        class="wp-fold-name"
-        onclick={() =>
-          stagePaths(node.files.map((f) => f.path), section === 'unstaged')}
-        title="{section === 'staged' ? 'Unstage' : 'Stage'} {node.path}/ ({node.files.length})"
-      >
         <Icon name="folder" size={12} />
         <span class="wp-fold-label">{node.name}</span>
         <span class="wp-fold-count">{node.files.length}</span>
@@ -633,17 +637,6 @@
   .wp-folder:hover {
     background: color-mix(in srgb, var(--accent) 7%, transparent);
   }
-  .wp-fold-toggle {
-    display: grid;
-    place-items: center;
-    width: 16px;
-    height: 16px;
-    flex-shrink: 0;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
   .wp-fold-name {
     display: flex;
     align-items: center;
@@ -811,7 +804,8 @@
     .wp-fold-label {
       font-size: 13px;
     }
-    .wp-file input[type='checkbox'] {
+    .wp-file input[type='checkbox'],
+    .wp-folder input[type='checkbox'] {
       width: 17px;
       height: 17px;
     }
