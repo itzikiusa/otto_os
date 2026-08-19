@@ -20,9 +20,12 @@
     substituteVars,
     renderVar,
     defaultVarSpec,
+    looksLikeMongoshScript,
     type SplitMode,
     type VarSpec,
   } from './sql-util';
+  import { api } from '../../lib/api/client';
+  import type { MongoshInfo } from '../../lib/api/types';
 
   const tab = $derived(database.tab);
 
@@ -58,6 +61,25 @@
   // Variables the current tab's statement references (:name / {name}).
   const queryVars = $derived(extractVars(tab.statement, splitMode));
   let varsBarEl = $state<HTMLElement | null>(null);
+
+  // Mongosh SCRIPT notice: when the buffer is real JavaScript (consts,
+  // functions, control flow — mirrors the daemon's detection), Run executes it
+  // through the actual `mongosh` CLI. Probe the daemon for the binary the
+  // FIRST time a script is detected so a missing mongosh becomes an inline
+  // install hint here, before the run — never a surprise run-time error.
+  const isMongoshScript = $derived(
+    database.queryLanguage === 'mongo' && looksLikeMongoshScript(tab.statement),
+  );
+  let mongoshInfo = $state<MongoshInfo | null>(null);
+  let mongoshProbed = false;
+  $effect(() => {
+    if (!isMongoshScript || mongoshProbed) return;
+    mongoshProbed = true;
+    void api
+      .get<MongoshInfo>('/db/mongosh')
+      .then((i) => (mongoshInfo = i))
+      .catch(() => (mongoshInfo = { available: false }));
+  });
 
   // Reset the tracked selection/cursor when switching query tabs, so a stale
   // selection from another tab can never run against the newly-active one.
@@ -786,6 +808,27 @@
     </div>
   {/if}
 
+  {#if isMongoshScript}
+    <div class="qe-script" class:missing={mongoshInfo?.available === false} data-testid="mongosh-script-bar">
+      <Icon name="zap" size={11} />
+      <span>
+        mongosh script detected — Run executes it through the real
+        <code class="mono">mongosh</code> CLI against this connection (counts as a write).
+      </span>
+      {#if mongoshInfo === null}
+        <span class="qe-script-state dim">checking for mongosh…</span>
+      {:else if mongoshInfo.available}
+        <span class="qe-script-state ok" title="The daemon found the mongosh CLI on its PATH">
+          ✓ {mongoshInfo.version ?? 'mongosh found'}
+        </span>
+      {:else}
+        <span class="qe-script-state warn">
+          mongosh is not installed on the daemon's PATH — <code class="mono">brew install mongosh</code>, then re-open this tab.
+        </span>
+      {/if}
+    </div>
+  {/if}
+
   {#if saving}
     <div class="save-bar">
       <!-- svelte-ignore a11y_autofocus -->
@@ -1020,6 +1063,38 @@
     flex-wrap: wrap;
     gap: 8px;
     padding: 0 0 8px;
+    color: var(--text-dim);
+  }
+  /* Mongosh-script notice: what Run will do + whether the CLI exists. */
+  .qe-script {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+    padding: 5px 10px;
+    font-size: 11.5px;
+    color: var(--text);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border-radius: var(--radius-s);
+  }
+  .qe-script.missing {
+    border-color: color-mix(in srgb, var(--status-warn) 50%, transparent);
+    background: color-mix(in srgb, var(--status-warn) 10%, transparent);
+  }
+  .qe-script-state {
+    font-size: 11px;
+  }
+  .qe-script-state.ok {
+    color: var(--status-working);
+    font-weight: 600;
+  }
+  .qe-script-state.warn {
+    color: var(--status-warn);
+    font-weight: 600;
+  }
+  .qe-script-state.dim {
     color: var(--text-dim);
   }
   .qe-vars-label {

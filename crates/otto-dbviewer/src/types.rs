@@ -1302,6 +1302,17 @@ fn mongo_is_write(statement: &str) -> bool {
     !is_read
 }
 
+/// `GET /db/mongosh` response: whether the `mongosh` CLI — used to execute
+/// pasted mongosh SCRIPTS (see [`looks_like_mongosh_script`]) and by Mongo
+/// terminal sessions — is on the daemon's PATH, and its version when it is.
+/// Lets the editor tell the user BEFORE a run instead of failing at run time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MongoshInfo {
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
 /// Re-export for drivers.
 pub type DbResult<T> = Result<T>;
 

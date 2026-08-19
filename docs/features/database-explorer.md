@@ -476,8 +476,12 @@ surfaces the tail of both streams as the error.
   read-only — so the production / read-only typed-confirmation gate applies
   before anything runs, and the MCP read-only surface refuses scripts outright.
 - Needs the `mongosh` CLI on the daemon's PATH (`brew install mongosh`) — the
-  same binary Otto's Mongo **terminal sessions** spawn. Missing binary → a
-  clear error with that hint, never a silent failure.
+  same binary Otto's Mongo **terminal sessions** spawn. The moment the editor
+  detects a script it shows a **notice bar** ("mongosh script detected — Run
+  executes it through the real mongosh CLI") and probes `GET /db/mongosh` for
+  the binary: ✓ + version when present, or the install hint inline **before**
+  you run — a missing binary is never a silent failure or a surprise run-time
+  error.
 - Scripts are capped at 30 minutes and 10,000 output lines (truncated badge
   beyond).
 

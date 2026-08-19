@@ -331,3 +331,41 @@ export function renderVar(spec: VarSpec, mode: SplitMode = 'sql'): string {
   }
   return `${quote}${inner}${quote}`;
 }
+
+/**
+ * True when a Mongo statement is a mongosh SCRIPT — real JavaScript
+ * (variable/function declarations, control flow, `getSiblingDB`, `print`)
+ * rather than the single `db.<coll>.<method>(...)` / JSON-command surface the
+ * explorer parses natively. MUST mirror `looks_like_mongosh_script` in
+ * `crates/otto-dbviewer/src/types.rs` — the daemon uses the same detection to
+ * route the run through the real `mongosh` CLI (and to classify it as a
+ * write), and the editor uses this to show the script notice + the
+ * mongosh-availability check before the user runs anything.
+ */
+export function looksLikeMongoshScript(statement: string): boolean {
+  const openers = [
+    'const ', 'let ', 'var ', 'function ', 'if (', 'if(', 'for (', 'for(',
+    'while (', 'while(', 'try ', 'try{', 'throw ', 'print(',
+  ];
+  let inBlockComment = false;
+  for (const raw of statement.split('\n')) {
+    const line = raw.trim();
+    if (inBlockComment) {
+      if (line.includes('*/')) inBlockComment = false;
+      continue;
+    }
+    if (line === '' || line.startsWith('//')) continue;
+    if (line.startsWith('/*')) {
+      inBlockComment = !line.includes('*/');
+      continue;
+    }
+    if (
+      openers.some((kw) => line.startsWith(kw)) ||
+      line.includes('db.getSiblingDB(') ||
+      line.includes('process.env')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}

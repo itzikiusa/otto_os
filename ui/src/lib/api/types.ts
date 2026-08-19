@@ -4572,6 +4572,16 @@ export interface DbQueryPlan {
   raw: unknown;
 }
 
+/** `GET /db/mongosh` — whether the `mongosh` CLI (used to execute pasted
+ *  mongosh SCRIPTS and by Mongo terminal sessions) is on the daemon's PATH.
+ *  The query editor probes this when it detects a script, so a missing binary
+ *  surfaces as an inline install hint before the run. Mirrors `MongoshInfo`
+ *  in `crates/otto-dbviewer/src/types.rs`. */
+export interface MongoshInfo {
+  available: boolean;
+  version?: string;
+}
+
 /**
  * Body for the read-only MCP query endpoint
  * (`POST /api/v1/connections/{id}/db/mcp-query`) — the agent-facing query path used

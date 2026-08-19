@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::export::ExportFormat as PathFormat;
 use crate::service::DbViewerService;
 use crate::types::{
-    statement_is_write, CompletionContext, Engine, ObjectSearchReq, QueryRequest,
+    statement_is_write, CompletionContext, Engine, MongoshInfo, ObjectSearchReq, QueryRequest,
 };
 
 /// Server-side context required by the DB Explorer routes.
@@ -227,6 +227,9 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
         .route("/connections/{id}/db/import", post(import_query::<S>))
         .route("/connections/{id}/db/nl-to-sql", post(nl_to_sql::<S>))
         .route("/connections/{id}/db/history", get(history::<S>))
+        // Daemon-level probe (no `{id}` — the binary is per-machine, not
+        // per-connection): is the `mongosh` CLI available for script runs?
+        .route("/db/mongosh", get(mongosh_info::<S>))
         // Saved queries.
         .route(
             "/workspaces/{wid}/db/saved-queries",
@@ -1030,6 +1033,50 @@ async fn history<S: DbViewerCtx>(
         ctx.db().list_history_for_user(&id, &user.id, limit).await?
     };
     Ok(Json(entries).into_response())
+}
+
+/// `GET /db/mongosh` — whether the `mongosh` CLI is on the daemon's PATH (and
+/// its version). The editor calls this the moment it detects a pasted mongosh
+/// SCRIPT, so a missing binary becomes an inline install hint BEFORE the run
+/// instead of a run-time error. The probe spawns `mongosh --version` (a Node
+/// startup, hundreds of ms), so the outcome is cached for a minute — snappy
+/// for the editor, and a fresh `brew install mongosh` still shows up without
+/// restarting the daemon.
+async fn mongosh_info<S: DbViewerCtx>(
+    State(_ctx): State<S>,
+    Extension(AuthUser(_user)): Extension<AuthUser>,
+) -> Json<MongoshInfo> {
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<tokio::sync::Mutex<Option<(Instant, MongoshInfo)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut slot = cache.lock().await;
+    if let Some((at, info)) = slot.as_ref() {
+        if at.elapsed() < Duration::from_secs(60) {
+            return Json(info.clone());
+        }
+    }
+    let probe = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new("mongosh").arg("--version").output(),
+    )
+    .await;
+    let info = match probe {
+        Ok(Ok(out)) if out.status.success() => MongoshInfo {
+            available: true,
+            version: String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty()),
+        },
+        _ => MongoshInfo {
+            available: false,
+            version: None,
+        },
+    };
+    *slot = Some((Instant::now(), info.clone()));
+    Json(info)
 }
 
 // --- Saved queries ----------------------------------------------------------
