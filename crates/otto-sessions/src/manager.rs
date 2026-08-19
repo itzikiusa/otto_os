@@ -820,6 +820,31 @@ const STATUS_TICK: Duration = Duration::from_secs(2);
 /// stays resumable, so reopening it auto-resumes via `--resume`.
 pub const SUSPEND_GRACE: Duration = Duration::from_secs(5 * 60);
 
+/// How long a LIVE but NON-resumable **background** (engine-owned) agent
+/// session must be idle+unattached before the sweep KILLS it. Suspend can
+/// never reclaim these (no provider id to resume — e.g. a codex review agent
+/// whose rollout pick was ambiguous across a same-cwd fan-out), so before this
+/// existed each one held its PTY (~3 fds), its agent process and that
+/// process's MCP sidecar FOREVER; review fleets accumulated hundreds of fds
+/// and pushed the daemon over launchd's 256 soft cap ("spawn claude: Too many
+/// open files (os error 24)", `accept()` failures, seconds-long keystrokes).
+/// Generous — every engine turn-watcher trips its stall/quiet windows
+/// (≤ 3 min) long before this — and it only ever fires on sessions whose
+/// owning engine is done with them. Foreground sessions are never touched.
+pub const REAP_UNRESUMABLE_GRACE: Duration = Duration::from_secs(30 * 60);
+
+/// Pure decision for the sweep's kill branch (see [`REAP_UNRESUMABLE_GRACE`]):
+/// only an **agent** session (never a connection terminal), only an
+/// engine-owned **background** one (a foreground session is the user's own
+/// live conversation — killing a non-resumable one would destroy it), and only
+/// past the reap grace. The caller has already established the session is
+/// live, unattached, not `keep_alive`-pinned, CPU-quiet and not resumable.
+fn should_reap_unresumable(session: &Session, idle_for: Duration) -> bool {
+    session.kind == SessionKind::Agent
+        && !session.is_foreground_agent()
+        && idle_for >= REAP_UNRESUMABLE_GRACE
+}
+
 /// Hook that inspects live PTY output for a session, used by otto-server's
 /// credential monitor to detect mid-session re-auth prompts (e.g. "run
 /// `claude login`", "session expired").
@@ -2612,8 +2637,12 @@ impl SessionManager {
 
     /// One sweep of the idle-suspend policy: suspend every LIVE session that is
     /// resumable, idle (no output for ≥ [`SUSPEND_GRACE`]) and has no attached
-    /// WS viewer. Working sessions, attached sessions and non-resumable
-    /// providers are never touched. Returns the number suspended.
+    /// WS viewer — and KILL every idle, unattached background session that can
+    /// never be suspended (not resumable), once it has sat idle past the much
+    /// longer [`REAP_UNRESUMABLE_GRACE`] (see [`should_reap_unresumable`]).
+    /// Working sessions, attached sessions and the user's own (foreground)
+    /// non-resumable sessions are never touched. Returns the number reclaimed
+    /// (suspended + killed).
     ///
     /// Resilient: a failure on one session is logged and skipped; the loop
     /// never panics or aborts.
@@ -2702,6 +2731,28 @@ impl SessionManager {
                 && session.provider_session_id.is_some()
                 && self.providers.supports_resume(&session.provider);
             if !resumable {
+                // Suspend can never reclaim this one. A background
+                // (engine-owned) session loses nothing when killed — its
+                // engine already consumed the turn output — so reap it after
+                // the much longer [`REAP_UNRESUMABLE_GRACE`] instead of
+                // leaking its PTY fds, agent process and MCP sidecar forever.
+                // Foreground sessions are the user's own live conversation
+                // and are left alone, as before.
+                if should_reap_unresumable(&session, last_output.elapsed()) {
+                    match self.kill_session(&id).await {
+                        Ok(()) => {
+                            suspended += 1;
+                            self.suspend_cpu.remove(&id);
+                            tracing::info!(
+                                session = %id,
+                                provider = %session.provider,
+                                title = %session.title,
+                                "killed idle, unattached, non-resumable background session (freed PTY + agent process)"
+                            );
+                        }
+                        Err(e) => tracing::warn!(session = %id, "unresumable reap failed: {e}"),
+                    }
+                }
                 continue;
             }
             match self.suspend(&id).await {
@@ -4041,6 +4092,48 @@ mod tests {
             None,
             "a claimed rollout id must never be re-claimed by another session"
         );
+    }
+
+    /// The sweep's kill branch (fd-leak fix): a live agent session that can
+    /// never be suspended (no resume id) used to hold its PTY, agent process
+    /// and MCP sidecar forever — 60 leaked review agents took the daemon over
+    /// launchd's 256-fd cap. Only engine-owned (background) agent sessions
+    /// past the reap grace qualify; the user's own sessions and connection
+    /// terminals never do.
+    #[test]
+    fn reap_decision_targets_only_idle_background_agents() {
+        let mk = |kind: SessionKind, meta: serde_json::Value| Session {
+            id: "s".into(),
+            workspace_id: "ws".into(),
+            kind,
+            provider: "codex".into(),
+            title: "t".into(),
+            status: SessionStatus::Idle,
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta,
+        };
+        let past = REAP_UNRESUMABLE_GRACE;
+        let under = REAP_UNRESUMABLE_GRACE - Duration::from_secs(1);
+        let bg = serde_json::json!({ "source": "review" });
+
+        // Engine-owned, idle past the grace → reap.
+        assert!(should_reap_unresumable(&mk(SessionKind::Agent, bg.clone()), past));
+        // Not yet past the (long) grace → keep.
+        assert!(!should_reap_unresumable(&mk(SessionKind::Agent, bg.clone()), under));
+        // Foreground (no source / unknown source) → NEVER killed.
+        assert!(!should_reap_unresumable(&mk(SessionKind::Agent, serde_json::json!({})), past));
+        assert!(!should_reap_unresumable(
+            &mk(SessionKind::Agent, serde_json::json!({ "source": "someday-new" })),
+            past
+        ));
+        // Connection terminals (ssh/db) are not agent sessions → never killed.
+        assert!(!should_reap_unresumable(&mk(SessionKind::Connection, bg), past));
     }
 
     #[tokio::test]

@@ -332,6 +332,19 @@ keeping it resumable."*
 auto-suspend)"* (agent sessions only), toggling `meta.keep_alive`. A pinned
 session is never auto-suspended.
 
+**Non-resumable background sessions are reaped, not leaked.** A live agent
+session that can *never* be suspended (no captured provider id — e.g. a codex
+review agent whose rollout pick was ambiguous across a same-cwd fan-out) used
+to hold its PTY (~3 fds), agent process and MCP sidecar forever; review fleets
+accumulated hundreds of descriptors and pushed the daemon over launchd's
+256-fd soft cap ("Too many open files", failing `accept()`, seconds-long
+keystrokes). The same sweep now **kills** such a session — same unattached /
+CPU-quiet / not-pinned guards — once it has been idle for
+`REAP_UNRESUMABLE_GRACE` (**30 minutes**, far beyond every engine's stall
+window), but **only engine-owned (background) sessions**: the owning engine
+already consumed the turn output, so nothing is lost. The user's own
+(foreground) sessions and connection terminals are never touched.
+
 ### Restart
 
 `POST /api/v1/sessions/{id}/restart` (or the pane's refresh button, tooltip

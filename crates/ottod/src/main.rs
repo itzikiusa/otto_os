@@ -112,6 +112,8 @@ fn main() -> ExitCode {
         )
         .init();
 
+    raise_nofile_limit();
+
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -126,6 +128,42 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Raise the soft `RLIMIT_NOFILE` as far as the hard limit allows (capped at
+/// 65536). launchd starts agents with a 256-descriptor soft limit, and every
+/// live PTY session costs ~3 descriptors on top of sockets, SQLite and
+/// ClickHouse — a daemon carrying a fleet of agent sessions hit the cap and
+/// EVERYTHING failed at once: `accept()` (the UI's "slow keystrokes"), spawns
+/// ("spawn claude: Too many open files (os error 24)"), state writes. Raising
+/// the soft limit needs no privileges. On macOS `setrlimit` rejects values
+/// above `OPEN_MAX` when the hard limit is unlimited, so fall back to that.
+fn raise_nofile_limit() {
+    use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
+    let lim = getrlimit(Resource::Nofile);
+    let target = lim.maximum.map_or(65536, |h| h.min(65536));
+    match lim.current {
+        None => return,                       // already unlimited
+        Some(cur) if cur >= target => return, // already high enough
+        _ => {}
+    }
+    let try_set = |cur: u64| {
+        setrlimit(Resource::Nofile, Rlimit { current: Some(cur), maximum: lim.maximum }).is_ok()
+    };
+    // macOS rejects soft values above OPEN_MAX (10240) when the hard limit is
+    // reported unlimited — retry at that ceiling.
+    let new = if try_set(target) {
+        target
+    } else if target > 10240 && try_set(10240) {
+        10240
+    } else {
+        tracing::warn!(
+            "could not raise open-file limit past {:?}; heavy agent load may hit it",
+            lim.current
+        );
+        return;
+    };
+    tracing::info!("raised open-file soft limit {:?} -> {new}", lim.current);
 }
 
 async fn run(cfg: Config) -> Result<(), String> {

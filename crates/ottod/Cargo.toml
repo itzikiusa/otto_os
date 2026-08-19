@@ -41,6 +41,10 @@ otto-vault.workspace = true
 # the running daemon over loopback HTTP with a per-session read-only token.
 reqwest.workspace = true
 
+# getrlimit/setrlimit: raise the soft open-file limit at startup (launchd's
+# 256 default is far too low for a PTY-heavy daemon).
+rustix = { workspace = true, features = ["process"] }
+
 # TLS for the optional 0.0.0.0 network listener (S3). rustls-only to match the
 # rest of the tree (reqwest uses rustls). `tls-rustls-no-provider` so we install
 # the crypto provider explicitly (both ring + aws-lc are compiled in this tree,

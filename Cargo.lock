@@ -3818,6 +3818,7 @@ dependencies = [
  "otto-workgraph",
  "rcgen",
  "reqwest",
+ "rustix",
  "rustls",
  "rustls-pemfile",
  "serde_json",
