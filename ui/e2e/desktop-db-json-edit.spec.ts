@@ -99,6 +99,13 @@ test('JSON cell + JSON-view document editing round-trips through review', async 
   await expect(cellEditor).toBeVisible();
   await cellEditor.fill('[{ "productId": 1, "qty": 5 }]');
   await viewer.locator('.btn.primary', { hasText: 'Save' }).click();
+  // Saving PARKS the cell as a pending change (multi-field batching): the
+  // dirty cell + the pending bar appear, and "Review & apply" prepares ONE
+  // updateOne carrying every parked column of the row.
+  const pendingBar = page.locator('[data-testid="pending-edits-bar"]');
+  await expect(pendingBar).toBeVisible();
+  await expect(page.locator('.cell.dirty').first()).toBeVisible();
+  await pendingBar.locator('.btn.primary', { hasText: 'Review & apply' }).click();
   await runReviewModal(page, ['updateOne', '"items"', '"qty":5']);
 
   await runStatement(page, 'db.e2e_json_edit.find({})');

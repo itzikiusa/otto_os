@@ -547,10 +547,16 @@ splices onto the edited text.
 
 Editing is **never applied directly.** Otto detects when a result is safely
 editable and, if so, lets you **double-click a cell** to edit it (or duplicate /
-delete rows). Committing an edit **builds the statement and opens a "Review SQL"
-modal**; the statement only runs when you press **Run** there. After a successful
-run the grid **re-runs the active query** so values reflect the database (no
-optimistic patching).
+delete rows). Committing a cell **parks it as a pending change** (the cell shows
+the draft with an amber marker) so you can edit **several fields — in one row or
+across rows — before anything is prepared**. A bar above the footer counts the
+pending changes; **Review & apply** builds **one statement per touched row with
+every changed column in a single `SET`** (`$set` for Mongo; several rows become
+a multi-statement batch) and opens the "Review SQL" modal — the statement only
+runs when you press **Run** there. **Discard** drops the drafts; re-editing a
+parked cell back to its stored value un-parks it. After a successful run the
+grid **re-runs the active query** so values reflect the database (no optimistic
+patching — and any drafts left over are invalidated by the refresh).
 
 A result is editable only when Otto can target a row unambiguously:
 

@@ -1050,11 +1050,28 @@
   });
 
   // ── Inline editing ───────────────────────────────────────────────────────────
-  // Edits are NOT applied directly. Committing a cell (or duplicating a row)
-  // builds SQL and opens the "Review SQL" modal; the SQL only runs when the
-  // user confirms there. After a successful run the grid refreshes by re-running
-  // the active query, so values reflect the database (no optimistic patching).
+  // Edits are NOT applied directly. Committing a cell PARKS it as a pending
+  // change (the cell renders the draft with a dirty marker) so several fields —
+  // in one row or across rows — are prepared as ONE statement per row, every
+  // changed column in a single SET/$set. "Review & apply" (the bar above the
+  // footer) builds the statements and opens the "Review SQL" modal; nothing
+  // runs until the user confirms there. After a successful run the grid
+  // refreshes by re-running the active query, so values reflect the database
+  // (no optimistic patching).
   let editing = $state<{ rowIdx: number; colIdx: number; value: string } | null>(null);
+
+  // Pending cell drafts, keyed by liveRows index (row → col → raw draft).
+  // Any upstream result change shifts the indexes, so pending edits are
+  // cleared alongside the row selection (same $effect).
+  let pendingEdits = $state<Map<number, Map<number, string>>>(new Map());
+  const pendingCells = $derived([...pendingEdits.values()].reduce((n, m) => n + m.size, 0));
+
+  function pendingValue(rowIdx: number, colIdx: number): string | undefined {
+    return pendingEdits.get(rowIdx)?.get(colIdx);
+  }
+  function discardPending(): void {
+    pendingEdits = new Map();
+  }
 
   function isEditableCell(colIdx: number): boolean {
     if (!editable) return false;
@@ -1083,8 +1100,14 @@
 
   function beginEdit(rowIdx: number, colIdx: number): void {
     if (!isEditableCell(colIdx) || reviewSql) return;
+    // Re-editing a parked cell resumes its draft, not the stored value.
+    const draft = pendingValue(rowIdx, colIdx);
     const v = liveRows[rowIdx]?.[colIdx];
-    editing = { rowIdx, colIdx, value: v === null || v === undefined ? '' : cellStr(v) };
+    editing = {
+      rowIdx,
+      colIdx,
+      value: draft ?? (v === null || v === undefined ? '' : cellStr(v)),
+    };
   }
   function cancelEdit(): void {
     editing = null;
@@ -1111,38 +1134,63 @@
     return editDb ? `${qid(editDb)}.${t}` : t;
   }
 
-  /** Build the UPDATE for the in-progress cell edit and open the review modal.
-   * ClickHouse uses `ALTER TABLE … UPDATE` (a mutation); other SQL engines use
-   * a plain `UPDATE`. */
+  /** Park the in-progress cell edit as a pending change. A draft that matches
+   * the stored value again un-parks the cell. The statement is built later, in
+   * `reviewPending` — every parked column of a row in ONE UPDATE / updateOne. */
   function commitEdit(): void {
     if (!editing || !result || !editTable || editPkCols.length === 0) {
       editing = null;
       return;
     }
     const { rowIdx, colIdx, value } = editing;
-    const colName = result.columns[colIdx].name;
     const prev = liveRows[rowIdx][colIdx];
     const prevStr = prev === null || prev === undefined ? '' : cellStr(prev);
-    if (value === prevStr) {
-      editing = null; // no change → nothing to review
-      return;
-    }
-    // Mongo: build an updateOne targeting `_id` and open the review modal.
-    if (engine === 'mongodb') {
-      const cmd = `db.${editTable}.updateOne(${mongoIdFilter(rowIdx)}, {"$set": {${JSON.stringify(colName)}: ${mongoLiteral(value, prev)}}})`;
-      editing = null;
-      openReview('Review updateOne', cmd);
-      return;
-    }
-    const asNumber = typeof prev === 'number';
-    const setExpr = `${qid(colName)} = ${sqlLiteral(value, asNumber)}`;
-    const where = whereByPk(rowIdx);
-    const sql =
-      engine === 'clickhouse'
-        ? `ALTER TABLE ${tableRef()} UPDATE ${setExpr} WHERE ${where};`
-        : `UPDATE ${tableRef()} SET ${setExpr} WHERE ${where};`;
+    const next = new Map(pendingEdits);
+    const row = new Map(next.get(rowIdx) ?? []);
+    if (value === prevStr) row.delete(colIdx);
+    else row.set(colIdx, value);
+    if (row.size === 0) next.delete(rowIdx);
+    else next.set(rowIdx, row);
+    pendingEdits = next;
     editing = null;
-    openReview(engine === 'clickhouse' ? 'Review ALTER … UPDATE (mutation)' : 'Review UPDATE', sql);
+  }
+
+  /** Build ONE statement per pending row — every parked column in a single
+   * SET (`$set` for Mongo; ClickHouse uses `ALTER TABLE … UPDATE`, a mutation)
+   * — and open the review modal. Multiple rows become a multi-statement batch
+   * (each driver splits and runs them in order). */
+  function reviewPending(): void {
+    if (!result || !editTable || pendingEdits.size === 0) return;
+    const stmts: string[] = [];
+    for (const [rowIdx, cols] of [...pendingEdits.entries()].sort((a, b) => a[0] - b[0])) {
+      const entries = [...cols.entries()].sort((a, b) => a[0] - b[0]);
+      if (engine === 'mongodb') {
+        const sets = entries
+          .map(([ci, value]) =>
+            `${JSON.stringify(result!.columns[ci].name)}: ${mongoLiteral(value, liveRows[rowIdx][ci])}`)
+          .join(', ');
+        stmts.push(`db.${editTable}.updateOne(${mongoIdFilter(rowIdx)}, {"$set": {${sets}}})`);
+        continue;
+      }
+      const sets = entries
+        .map(([ci, value]) =>
+          `${qid(result!.columns[ci].name)} = ${sqlLiteral(value, typeof liveRows[rowIdx][ci] === 'number')}`)
+        .join(', ');
+      const where = whereByPk(rowIdx);
+      stmts.push(
+        engine === 'clickhouse'
+          ? `ALTER TABLE ${tableRef()} UPDATE ${sets} WHERE ${where};`
+          : `UPDATE ${tableRef()} SET ${sets} WHERE ${where};`,
+      );
+    }
+    openReview(
+      engine === 'mongodb'
+        ? 'Review updateOne'
+        : engine === 'clickhouse'
+          ? 'Review ALTER … UPDATE (mutation)'
+          : 'Review UPDATE',
+      stmts.join('\n'),
+    );
   }
 
   /** Build an INSERT cloning a row. With a single (likely auto-increment) PK we
@@ -1240,11 +1288,13 @@
   let lastClickedIdx = $state<number | null>(null);
 
   // Clear the selection whenever the upstream result changes (incl. the re-query
-  // after a delete runs).
+  // after a delete runs). Pending cell drafts are keyed by liveRows index, so a
+  // result change invalidates them too — cleared together.
   $effect(() => {
     void result;
     selected = new Set();
     lastClickedIdx = null;
+    pendingEdits = new Map();
   });
 
   const allInViewSelected = $derived(
@@ -2077,6 +2127,16 @@
                       onblur={commitEdit}
                     />
                   </td>
+                {:else if pendingValue(idx, ci) !== undefined}
+                  {@const pv = pendingValue(idx, ci) ?? ''}
+                  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                  <td
+                    class="cell dirty"
+                    title="Pending change — Review & apply (bar below) writes it; double-click to keep editing"
+                    style="width:{w}ch; max-width:{w}ch;"
+                    ondblclick={() => beginEdit(idx, ci)}
+                    oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
+                  >{#if pv === ''}<span class="null-glyph">∅</span>{:else}{pv}{/if}</td>
                 {:else if v === null || v === undefined}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                   <td
@@ -2117,6 +2177,19 @@
         </tbody>
       </table>
     </div>
+    {/if}
+    {#if pendingCells > 0}
+      <div class="pending-bar" data-testid="pending-edits-bar">
+        <Icon name="edit" size={12} />
+        <span>
+          <strong>{pendingCells}</strong> pending change{pendingCells === 1 ? '' : 's'} on
+          <strong>{pendingEdits.size}</strong> row{pendingEdits.size === 1 ? '' : 's'} — nothing
+          is written until you review &amp; run.
+        </span>
+        <span class="pending-spacer"></span>
+        <button class="btn small ghost" onclick={discardPending}>Discard</button>
+        <button class="btn small primary" onclick={reviewPending}>Review &amp; apply</button>
+      </div>
     {/if}
     {#if !mini}
       <div class="grid-foot">
@@ -3300,6 +3373,32 @@
     padding: 0;
     background: var(--surface) !important;
     box-shadow: inset 0 0 0 1.5px var(--accent);
+  }
+  /* A parked (pending) cell draft: visibly different until reviewed & applied. */
+  .cell.dirty {
+    background: color-mix(in srgb, var(--status-warn) 14%, transparent) !important;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-warn) 55%, transparent);
+    font-style: italic;
+    cursor: default;
+  }
+  .pending-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 7px;
+    padding: 6px 10px;
+    border: 1px solid color-mix(in srgb, var(--status-warn) 45%, transparent);
+    background: color-mix(in srgb, var(--status-warn) 10%, transparent);
+    border-radius: var(--radius-s);
+    font-size: 11.5px;
+    color: var(--text);
+    flex-shrink: 0;
+  }
+  .pending-bar strong {
+    font-variant-numeric: tabular-nums;
+  }
+  .pending-spacer {
+    flex: 1;
   }
   .cell-input {
     width: 100%;
