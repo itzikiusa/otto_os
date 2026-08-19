@@ -1411,13 +1411,48 @@ impl LocalGit {
             .await
     }
 
+    /// Run a mutating git command with a short bounded retry when the index is
+    /// locked by a CONCURRENT git process. Agent sessions run git in the same
+    /// repos the user clicks around in, so "Unable to create '….git/index.lock':
+    /// File exists" is a transient collision, not a real failure — it surfaced
+    /// as stash/stage buttons "sometimes erroring" for no visible reason.
+    async fn run_raw_retry_lock(
+        &self,
+        args: &[&str],
+    ) -> Result<(bool, String, String, Option<i32>)> {
+        for attempt in 1u64..=3 {
+            let res = self.run_raw(args, &[]).await?;
+            if res.0 || attempt == 3 || !res.2.contains("index.lock") {
+                return Ok(res);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300 * attempt)).await;
+        }
+        unreachable!("loop returns on its final attempt")
+    }
+
+    /// `git stash push --include-untracked`: stash tracked changes AND
+    /// untracked files. Without `-u` a tree whose only changes were NEW files
+    /// "stashed" successfully while stashing nothing — the button looked dead.
+    /// A genuinely clean tree errors explicitly for the same reason: git exits
+    /// 0 with "No local changes to save", and swallowing that toasted a
+    /// success that did nothing.
     pub async fn stash_save(&self) -> Result<String> {
-        let (out, _) = self.run_env(&["stash", "push"], &[]).await?;
+        let (ok, out, err, code) = self
+            .run_raw_retry_lock(&["stash", "push", "--include-untracked"])
+            .await?;
+        if !ok {
+            return Err(upstream_err(&err, &out, code));
+        }
+        if out.contains("No local changes to save") || err.contains("No local changes to save") {
+            return Err(Error::Invalid(
+                "nothing to stash — the working tree has no local changes".into(),
+            ));
+        }
         Ok(out.trim().to_string())
     }
 
     pub async fn stash_pop(&self) -> Result<String> {
-        let (ok, out, err, code) = self.run_raw(&["stash", "pop"], &[]).await?;
+        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "pop"]).await?;
         // A conflicting pop exits non-zero but HAS applied the stash (conflict
         // markers written, paths left unmerged) — a normal result the user
         // resolves, not a failure. Surface it as Ok so the caller refreshes into
@@ -1459,7 +1494,7 @@ impl LocalGit {
     /// list. A resulting merge conflict is a normal outcome (see `stash_pop`).
     pub async fn stash_apply(&self, sha: &str) -> Result<String> {
         let sel = self.resolve_stash_selector(sha).await?;
-        let (ok, out, err, code) = self.run_raw(&["stash", "apply", &sel], &[]).await?;
+        let (ok, out, err, code) = self.run_raw_retry_lock(&["stash", "apply", &sel]).await?;
         if ok || out.contains("CONFLICT") {
             return Ok(out.trim().to_string());
         }
@@ -2188,6 +2223,47 @@ mod tests {
         write(&dir, "e.txt", "loose\n");
 
         (tmp, dir)
+    }
+
+    /// Stash must take UNTRACKED files too — without `-u`, a tree whose only
+    /// changes were new files "stashed" successfully while stashing nothing
+    /// (the Stash button looked dead) — and a genuinely clean tree must error
+    /// loudly instead of toasting a success that did nothing.
+    #[tokio::test]
+    async fn stash_includes_untracked_and_clean_tree_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        sh_git(&dir, &["init", "-b", "main"]);
+        sh_git(&dir, &["config", "user.email", "otto@test.local"]);
+        sh_git(&dir, &["config", "user.name", "Otto Test"]);
+        sh_git(&dir, &["config", "commit.gpgsign", "false"]);
+        write(&dir, "base.txt", "base\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        let git = LocalGit::new(&dir);
+
+        // Untracked-only tree → the stash really takes it.
+        write(&dir, "new.txt", "loose\n");
+        git.stash_save().await.expect("untracked-only stash");
+        assert!(
+            git.status().await.unwrap().changes.is_empty(),
+            "tree must be clean after stashing the untracked file"
+        );
+        assert_eq!(git.stash_list().await.unwrap().len(), 1);
+
+        // Pop restores it.
+        git.stash_pop().await.expect("pop");
+        assert!(dir.join("new.txt").exists(), "pop must restore the untracked file");
+
+        // Clean tree → explicit error, not a silent no-op "success".
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "absorb"]);
+        let err = git.stash_save().await.expect_err("clean tree must not 'stash'");
+        assert!(
+            err.to_string().contains("nothing to stash"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

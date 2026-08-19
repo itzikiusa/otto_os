@@ -410,7 +410,7 @@ distinction from the **"Draft message with agent"** button, which drafts the
 | `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; conflict → 502 with git stderr |
 | `POST /repos/{id}/branch` · `/branch/rename` · `/branch/delete` | ws editor | Create / rename / delete branch |
 | `POST /repos/{id}/tag` · `/tag/push` · `/tag/delete` | ws editor | Create / push / delete tags |
-| `POST /repos/{id}/stash` | ws editor | `{op: save\|pop}` |
+| `POST /repos/{id}/stash` | ws editor | `{op: save\|pop\|apply\|drop, sha?}` — `save` runs `git stash push -u` (untracked included) and 400s with "nothing to stash" on a clean tree; mutating ops retry briefly on a concurrent `index.lock` |
 | `POST /repos/{id}/merge` · `/merge/preview` · `/merge/abort` · `/merge/commit` | ws editor/viewer | Local merge + conflict lifecycle |
 | `GET /repos/{id}/merge/status` · `/conflict` | ws viewer | Merge state / one file's conflict |
 | `POST /repos/{id}/conflict/resolve` | ws editor | `ResolveConflictReq` |
