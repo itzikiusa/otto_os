@@ -305,6 +305,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
             || p.ends_with("/db/test"); // connectivity probe — non-mutating
         return Require(Database, if read { View } else { Edit });
     }
+    // Daemon-level `mongosh` CLI availability probe (no `{id}` — the binary is
+    // per-machine). Read-only capability check the editor calls before running a
+    // pasted mongosh script; View tier, whatever the method (only GET exists).
+    if p == "/db/mongosh" {
+        return Require(Database, View);
+    }
     if p.starts_with("/workspaces/{wid}/db/")
         || p.starts_with("/db/saved-queries")
         || p.starts_with("/db/dashboards")
