@@ -36,8 +36,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
 rustls-pki-types = "1"
 webpki-roots = "1"
+# mongosh-script execution: the pasted script is written to a temp .js file and
+# run through the real `mongosh --file` (drivers/mongodb.rs `run_script`).
+tempfile = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 sqlx = { workspace = true }
-tempfile = { workspace = true }

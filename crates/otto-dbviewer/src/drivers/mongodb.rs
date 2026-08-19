@@ -454,6 +454,15 @@ impl Driver for MongoDriver {
     }
 
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
+        // A mongosh SCRIPT (variables, functions, control flow, getSiblingDB —
+        // e.g. a seed/bootstrap file) is beyond the command parser: run it
+        // through the real `mongosh` CLI instead of failing line one. The
+        // service classified it as a WRITE before we got here (see
+        // `types::looks_like_mongosh_script`), so guarded connections already
+        // demanded their confirmation.
+        if crate::types::looks_like_mongosh_script(&req.statement) {
+            return self.run_script(cfg, req).await;
+        }
         // A pasted script may hold several statements (e.g. a `deleteOne(...)`
         // followed by an `insertOne(...)`). Split on top-level `;` and run each
         // in order; a single statement takes the fast path unchanged.
@@ -1307,6 +1316,190 @@ impl MongoDriver {
 
         Ok(opts)
     }
+
+    /// Execute a mongosh SCRIPT (real JavaScript — see
+    /// `types::looks_like_mongosh_script`) through an actual
+    /// `mongosh --quiet --file` run against the SAME resolved endpoint the
+    /// native driver uses (tunnel, TLS, credentials). The explorer's parser
+    /// covers single `db.coll.op(...)` statements; operational scripts need
+    /// genuine shell semantics, and a faked JS subset would silently diverge
+    /// from what the same file does under mongosh — so run the real thing.
+    /// Output is the shell's stdout, one line per row.
+    async fn run_script(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
+        /// A bootstrap script legitimately builds indexes; an interactive query
+        /// console still needs SOME bound. Generous on purpose.
+        const SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+        /// Stdout lines kept in the result grid before truncation.
+        const SCRIPT_MAX_LINES: usize = 10_000;
+
+        let started = Instant::now();
+        let (uri, extra_args) = mongosh_invocation(cfg, req.node.as_deref())?;
+        let mut file = tempfile::Builder::new()
+            .prefix("otto-mongosh-")
+            .suffix(".js")
+            .tempfile()
+            .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
+        std::io::Write::write_all(&mut file, req.statement.as_bytes())
+            .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
+
+        let mut cmd = tokio::process::Command::new("mongosh");
+        cmd.arg(&uri)
+            .arg("--quiet")
+            .arg("--file")
+            .arg(file.path())
+            .args(&extra_args)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let out = match tokio::time::timeout(SCRIPT_TIMEOUT, cmd.output()).await {
+            Err(_) => {
+                return Err(types::upstream(format!(
+                    "mongosh script timed out after {} minutes",
+                    SCRIPT_TIMEOUT.as_secs() / 60
+                )))
+            }
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(types::invalid(
+                    "this input is a mongosh SCRIPT (variables/functions/control flow), which \
+                     Otto runs through the real `mongosh` CLI — but `mongosh` was not found on \
+                     the daemon's PATH. Install it (`brew install mongosh`), or open a terminal \
+                     session on this connection (Connections → this MongoDB), which runs \
+                     mongosh directly.",
+                ));
+            }
+            Ok(Err(e)) => return Err(types::upstream(format!("spawn mongosh: {e}"))),
+            Ok(Ok(out)) => out,
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        if !out.status.success() {
+            // The script's own prints ARE the diagnostic (e.g. a "[FAIL] idx…"
+            // line before an assertion throws) — surface the tail of both
+            // streams, not just stderr.
+            let clip = |s: &str| -> String {
+                let t = s.trim();
+                let start = t.char_indices().rev().nth(3999).map(|(i, _)| i).unwrap_or(0);
+                t[start..].to_string()
+            };
+            let code = out
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "killed by signal".into());
+            return Err(types::upstream(format!(
+                "mongosh exited {code}\n{}\n{}",
+                clip(&stderr),
+                clip(&stdout)
+            )));
+        }
+        let mut rows: Vec<Vec<Value>> = stdout
+            .lines()
+            .map(|l| vec![Value::String(l.to_string())])
+            .collect();
+        let truncated = rows.len() > SCRIPT_MAX_LINES;
+        rows.truncate(SCRIPT_MAX_LINES);
+        let row_count = rows.len();
+        Ok(QueryResult {
+            columns: vec![Column::new("output")],
+            rows,
+            message: Some("mongosh script finished".into()),
+            stats: QueryStats {
+                duration_ms: started.elapsed().as_millis() as u64,
+                row_count,
+                bytes_read: None,
+            },
+            truncated,
+            ..QueryResult::empty()
+        })
+    }
+}
+
+/// Percent-encode a URI userinfo component (RFC 3986: unreserved bytes kept).
+fn pct(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Build the `mongosh` invocation for a script run: the connection URI
+/// (mirroring `client_options` — a full `conn_string` wins, else host/port +
+/// credential + replica_set, with the SSH SOCKS5 tunnel layered on as the
+/// Node driver's `proxyHost`/`proxyPort` URI options, which mongosh honors)
+/// plus TLS flags for the host/port path (a `conn_string` carries its own TLS
+/// options). Pure so tests can assert the shapes without spawning a shell.
+fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<(String, Vec<String>)> {
+    let (mut uri, args) = match cfg.param_str("conn_string") {
+        Some(conn_string) => {
+            let uri = match cfg.password.as_deref() {
+                Some(secret) => conn_string.replace("{secret}", secret),
+                None => conn_string,
+            };
+            (uri, Vec::new())
+        }
+        None => {
+            let auth = match (cfg.user.as_deref(), cfg.password.as_deref()) {
+                (Some(u), Some(p)) => format!("{}:{}@", pct(u), pct(p)),
+                (Some(u), None) => format!("{}@", pct(u)),
+                _ => String::new(),
+            };
+            // The selected database lands in the URI path so bare `db` refers
+            // to it, exactly like the native run path; a script that targets
+            // others calls db.getSiblingDB itself.
+            let db = resolve_db(cfg, node).unwrap_or_default();
+            let mut query: Vec<String> = Vec::new();
+            if cfg.user.is_some() {
+                query.push(format!(
+                    "authSource={}",
+                    cfg.param_str("auth_source").unwrap_or_else(|| "admin".into())
+                ));
+            }
+            if let Some(rs) = cfg.param_str("replica_set") {
+                query.push(format!("replicaSet={rs}"));
+            }
+            let mut args = Vec::new();
+            if cfg.tls.enabled() {
+                let files = TlsFiles::materialize(&cfg.tls)?;
+                args.push("--tls".to_string());
+                if !cfg.tls.verify {
+                    args.push("--tlsAllowInvalidCertificates".to_string());
+                }
+                if let Some(ca) = files.ca {
+                    args.push("--tlsCAFile".to_string());
+                    args.push(ca.to_string_lossy().into_owned());
+                }
+                if let Some(pair) = files.client_pair.or(files.client_cert) {
+                    args.push("--tlsCertificateKeyFile".to_string());
+                    args.push(pair.to_string_lossy().into_owned());
+                }
+            }
+            let query = if query.is_empty() {
+                String::new()
+            } else {
+                format!("?{}", query.join("&"))
+            };
+            (
+                format!(
+                    "mongodb://{auth}{host}:{port}/{db}{query}",
+                    host = cfg.host,
+                    port = cfg.port
+                ),
+                args,
+            )
+        }
+    };
+    // Tunnelled (service::resolve set `__socks_port`): dial through the SSH
+    // dynamic SOCKS5 proxy exactly like the native client does.
+    if let Some(port) = cfg.params.get("__socks_port").and_then(Value::as_u64) {
+        let sep = if uri.contains('?') { '&' } else { '?' };
+        uri.push_str(&format!("{sep}proxyHost=127.0.0.1&proxyPort={port}"));
+    }
+    Ok((uri, args))
 }
 
 // --- command parsing --------------------------------------------------------
@@ -2552,6 +2745,60 @@ const MONGO_OPERATORS: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn script_cfg(params: Value) -> ResolvedConfig {
+        ResolvedConfig {
+            engine: crate::types::Engine::Mongodb,
+            host: "127.0.0.1".into(),
+            port: 27017,
+            user: Some("root".into()),
+            password: Some("p@ss/w".into()),
+            database: None,
+            tls: Default::default(),
+            params,
+        }
+    }
+
+    /// The script runner must dial EXACTLY what the native client dials:
+    /// host/port + percent-encoded credentials + authSource/replicaSet, the
+    /// selected database in the URI path, and — when the service opened an SSH
+    /// tunnel — the SOCKS5 proxy as Node-driver URI options.
+    #[test]
+    fn mongosh_invocation_builds_the_native_equivalent_uri() {
+        let (uri, args) =
+            mongosh_invocation(&script_cfg(json!({})), Some("db:promotions")).unwrap();
+        assert_eq!(
+            uri,
+            "mongodb://root:p%40ss%2Fw@127.0.0.1:27017/promotions?authSource=admin"
+        );
+        assert!(args.is_empty());
+
+        // Tunnelled → SOCKS options appended to the existing query string.
+        let (uri, _) = mongosh_invocation(
+            &script_cfg(json!({ "__socks_port": 1080, "replica_set": "rs0" })),
+            Some("db:promotions"),
+        )
+        .unwrap();
+        assert!(uri.contains("replicaSet=rs0"), "uri: {uri}");
+        assert!(uri.ends_with("&proxyHost=127.0.0.1&proxyPort=1080"), "uri: {uri}");
+    }
+
+    /// A full `conn_string` wins verbatim (with `{secret}` substituted), and
+    /// the SOCKS options join with the right separator.
+    #[test]
+    fn mongosh_invocation_conn_string_wins_with_secret_substitution() {
+        let mut cfg = script_cfg(json!({
+            "conn_string": "mongodb+srv://u:{secret}@cluster.example.net/app?retryWrites=true",
+            "__socks_port": 1081,
+        }));
+        cfg.password = Some("s3c".into());
+        let (uri, args) = mongosh_invocation(&cfg, None).unwrap();
+        assert_eq!(
+            uri,
+            "mongodb+srv://u:s3c@cluster.example.net/app?retryWrites=true&proxyHost=127.0.0.1&proxyPort=1081"
+        );
+        assert!(args.is_empty());
+    }
 
     #[test]
     fn binary_uuid_subtype_renders_uuid_string() {

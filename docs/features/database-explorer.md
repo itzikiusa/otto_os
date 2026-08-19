@@ -457,6 +457,30 @@ Mongo — native Mongo queries (`db.coll.find({…})`, aggregate pipelines, BSON
 literals) are JS-shaped, so JS highlighting reads naturally (the SQL subset Mongo
 also accepts still renders fine).
 
+### MongoDB: running full mongosh scripts
+
+Pasting a real **mongosh script** — variables, functions, control flow,
+`db.getSiblingDB(…)`, `print(…)` (think a seed/bootstrap `.js` file) — into a
+Mongo query tab runs it through the **actual `mongosh` CLI** rather than the
+explorer's command parser: the statement is detected as a script
+(`types::looks_like_mongosh_script` — line-anchored and comment-aware, so a
+multi-line `insertOne({…})` body or JSON command is never hijacked), written to
+a temp `.js` file, and executed as `mongosh <uri> --quiet --file …` against the
+**same resolved endpoint** the native driver uses — including the SSH tunnel
+(the SOCKS5 proxy rides the URI as `proxyHost`/`proxyPort`, which mongosh
+honors), TLS material, credentials and the selected database. The shell's
+stdout comes back as the result grid (one line per row); a non-zero exit
+surfaces the tail of both streams as the error.
+
+- A script **always classifies as a write** — arbitrary JS can't be proven
+  read-only — so the production / read-only typed-confirmation gate applies
+  before anything runs, and the MCP read-only surface refuses scripts outright.
+- Needs the `mongosh` CLI on the daemon's PATH (`brew install mongosh`) — the
+  same binary Otto's Mongo **terminal sessions** spawn. Missing binary → a
+  clear error with that hint, never a silent failure.
+- Scripts are capped at 30 minutes and 10,000 output lines (truncated badge
+  beyond).
+
 ### Automatic read `LIMIT`
 
 To avoid scanning a huge table by accident, a read with **no explicit `LIMIT`**
@@ -885,7 +909,8 @@ response puts the first statement's result at the top level with the rest in
 - **ClickHouse native transport** caveats: per-query database scoping and per-query
   cancellation are **not** wired on the native (9000/9440) transport — use the HTTP
   transport (8123/8443) for those.
-- **MongoDB** supports a mongosh-style shorthand, raw JSON command documents, **and**
+- **MongoDB** supports a mongosh-style shorthand, raw JSON command documents,
+  **full mongosh scripts** (below), **and**
   a SQL→Mongo translation for a single-base-collection `SELECT` (WHERE / ORDER BY /
   LIMIT / COUNT / GROUP BY / aggregates / INNER & LEFT equi-joins → `$lookup`).
   RIGHT/FULL/CROSS joins, non-equi joins, subqueries, UNION, HAVING, and DISTINCT

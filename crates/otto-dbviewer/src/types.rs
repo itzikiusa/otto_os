@@ -1103,6 +1103,49 @@ pub fn statement_is_write(engine: Engine, statement: &str) -> bool {
     }
 }
 
+/// True when a Mongo `statement` is a mongosh SCRIPT — real JavaScript
+/// (variable/function declarations, control flow, `getSiblingDB`, `print`)
+/// rather than the single `db.<collection>.<method>(...)` / JSON-command
+/// surface the explorer parses natively. Shared by two callers that must
+/// agree: [`mongo_is_write`] (a script is ALWAYS a write — it cannot be
+/// statically proven read-only, and a `db.getSiblingDB(...).find(...)` opener
+/// must not make a mutating script look like a read) and the mongodb driver,
+/// which executes a detected script through a real `mongosh --file` run.
+///
+/// Detection is line-anchored and comment-aware so it can never hijack input
+/// the native parser handles: a multi-line `insertOne({...})` body, a JSON
+/// command document or translated SQL contains none of these openers.
+pub fn looks_like_mongosh_script(statement: &str) -> bool {
+    const OPENERS: [&str; 14] = [
+        "const ", "let ", "var ", "function ", "if (", "if(", "for (", "for(", "while (",
+        "while(", "try ", "try{", "throw ", "print(",
+    ];
+    let mut in_block_comment = false;
+    for raw in statement.lines() {
+        let line = raw.trim();
+        if in_block_comment {
+            if line.contains("*/") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with("/*") {
+            in_block_comment = !line.contains("*/");
+            continue;
+        }
+        if OPENERS.iter().any(|kw| line.starts_with(kw))
+            || line.contains("db.getSiblingDB(")
+            || line.contains("process.env")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// SQL: a write unless every (non-empty) statement starts with a read keyword.
 /// An empty / comment-only statement isn't a write.
 fn sql_is_write(statement: &str) -> bool {
@@ -1208,6 +1251,13 @@ const REDIS_READ_COMMANDS: &[&str] = &[
 /// else (including raw command JSON we can't safely vet) is treated as a write.
 fn mongo_is_write(statement: &str) -> bool {
     let s = statement.trim();
+    // A mongosh SCRIPT is always a write: arbitrary JavaScript cannot be
+    // proven read-only, and this must be decided BEFORE the read-method scan —
+    // a script opening with `db.getSiblingDB(...).find(...)` would otherwise
+    // pattern-match as a read while its body mutates.
+    if looks_like_mongosh_script(s) {
+        return true;
+    }
     // A Mongo connection also accepts SQL: `run` translates a `SELECT` into a
     // find/aggregate via `mongo_sql`. The shapes below don't know that spelling,
     // so a plain `SELECT … FROM coll` used to fall through to "unrecognised ⇒
@@ -1284,6 +1334,58 @@ pub fn cap_cell(v: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mongosh-script detector must catch real scripts (a seed/bootstrap
+    /// file with comments, consts, functions, getSiblingDB) and must NEVER
+    /// hijack input the native parser handles — including multi-line command
+    /// bodies whose inner lines look nothing like the single-line forms.
+    #[test]
+    fn mongosh_script_detection_is_line_anchored_and_comment_aware() {
+        // Real scripts → detected.
+        assert!(looks_like_mongosh_script(
+            "// bootstrap\nconst brandId = 1501;\ndb.lookups.insertOne({ brand_id: brandId })"
+        ));
+        assert!(looks_like_mongosh_script(
+            "/* header\n multi-line */\nfunction seed(x) { return x; }\nseed(1)"
+        ));
+        assert!(looks_like_mongosh_script("const d = db.getSiblingDB(\"promotions\");"));
+        assert!(looks_like_mongosh_script("print(\"hello\")"));
+        assert!(looks_like_mongosh_script(
+            "db.getSiblingDB(\"promotions\").achievements.find({})"
+        ));
+
+        // Native command surface → NOT a script.
+        assert!(!looks_like_mongosh_script("db.customers.find({ city: \"Rome\" })"));
+        assert!(!looks_like_mongosh_script(
+            "db.orders.insertOne({\n  status: \"pending\",\n  items: [{ qty: 1 }]\n})"
+        ));
+        assert!(!looks_like_mongosh_script(
+            "db.a.deleteOne({ _id: 1 });\ndb.b.insertOne({ _id: 1 })"
+        ));
+        assert!(!looks_like_mongosh_script("{ \"find\": \"customers\", \"limit\": 5 }"));
+        assert!(!looks_like_mongosh_script("SELECT * FROM customers WHERE id = 1"));
+        // A commented-out const does not make a plain command a script.
+        assert!(!looks_like_mongosh_script("// const x = 1;\ndb.c.find({})"));
+    }
+
+    /// A script is ALWAYS classified as a write — even when it opens with a
+    /// read-shaped `db.getSiblingDB(...).find(...)` — so the production /
+    /// read-only confirmation gates always apply before it can run.
+    #[test]
+    fn mongosh_scripts_always_classify_as_writes() {
+        for script in [
+            "const n = 1;\ndb.stats.find({})",
+            "db.getSiblingDB(\"promotions\").achievements.find({})",
+            "print(db.customers.find({}).toArray())",
+        ] {
+            assert!(
+                statement_is_write(Engine::Mongodb, script),
+                "script must classify as write: {script}"
+            );
+        }
+        // Plain reads stay reads.
+        assert!(!statement_is_write(Engine::Mongodb, "db.customers.find({})"));
+    }
 
     #[test]
     fn search_req_defaults_scope_to_this_schema() {
