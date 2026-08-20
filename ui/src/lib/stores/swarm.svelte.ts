@@ -41,6 +41,17 @@ class SwarmStore {
   selectedProjectId: string | null = $state(null);
   selectedSessionId: string | null = $state(null);
   loading = $state(false);
+  /** Set when the last swarm-list load FAILED. A silent `[]` is indistinguishable
+   *  from an empty workspace, so a hiccup reads as "my swarms are gone" — the rail
+   *  shows this + a retry instead of the "no swarms" empty state. */
+  swarmsError: string | null = $state(null);
+  /** Other workspaces that DO have swarms, filled on demand by
+   *  {@link findSwarmsElsewhere}. Swarms are per-workspace, so an empty rail is
+   *  far more often "wrong workspace" than "none created". */
+  elsewhere: { id: string; name: string; count: number }[] = $state([]);
+  elsewhereBusy = $state(false);
+  /** True once a cross-workspace probe has run (so "none found" can be stated). */
+  elsewhereChecked = $state(false);
 
   // -- Goals / verification / triggers / library skills --------------------
   /** Goals keyed by task id (per-task explicit + applied standing goals). */
@@ -74,11 +85,56 @@ class SwarmStore {
   // -- Swarms ---------------------------------------------------------------
 
   async loadSwarms(workspaceId: string): Promise<void> {
+    const switching = this.wsId !== workspaceId;
     this.wsId = workspaceId;
-    try {
-      this.swarms = await api.get<Swarm[]>(`/workspaces/${workspaceId}/swarm/swarms`);
-    } catch {
+    if (switching) {
+      // Never show the PREVIOUS workspace's swarms while the new list loads.
       this.swarms = [];
+      this.elsewhere = [];
+      this.elsewhereChecked = false;
+    }
+    try {
+      const list = await api.get<Swarm[]>(`/workspaces/${workspaceId}/swarm/swarms`);
+      if (this.wsId !== workspaceId) return; // a newer switch won the race
+      this.swarms = list;
+      this.swarmsError = null;
+    } catch (e) {
+      if (this.wsId !== workspaceId) return;
+      // Keep whatever is on screen (if it's this workspace's) and say what went
+      // wrong — blanking the rail on a transient failure looks like data loss.
+      this.swarmsError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Probe the user's OTHER workspaces for swarms. Swarms are scoped to a
+   * workspace, so "I created two swarms and now they're gone" is nearly always
+   * "the app is on a different workspace" (a fresh install/profile falls back to
+   * the first workspace). Runs only when the operator asks — one small GET per
+   * workspace — and feeds the empty state's "jump there" shortcuts.
+   */
+  async findSwarmsElsewhere(all: { id: string; name: string }[]): Promise<void> {
+    if (this.elsewhereBusy) return;
+    const cur = this.wsId;
+    this.elsewhereBusy = true;
+    try {
+      const hits = await Promise.all(
+        all
+          .filter((w) => w.id !== cur)
+          .map(async (w) => {
+            try {
+              const list = await api.get<Swarm[]>(`/workspaces/${w.id}/swarm/swarms`);
+              return list.length > 0 ? { id: w.id, name: w.name, count: list.length } : null;
+            } catch {
+              return null; // no access / offline — just not a hit
+            }
+          }),
+      );
+      if (this.wsId !== cur) return; // switched mid-probe
+      this.elsewhere = hits.filter((h): h is { id: string; name: string; count: number } => h !== null);
+      this.elsewhereChecked = true;
+    } finally {
+      this.elsewhereBusy = false;
     }
   }
 

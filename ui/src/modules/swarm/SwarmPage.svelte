@@ -373,7 +373,13 @@
         </button>
       {/each}
       {#if swarm.swarms.length === 0}
-        <p class="dim empty">No swarms yet.</p>
+        {#if swarm.swarmsError}
+          <!-- A failed load must never masquerade as "you have no swarms". -->
+          <p class="dim empty">Couldn't load swarms — {swarm.swarmsError}</p>
+          <button class="btn small" onclick={() => ws.currentId && swarm.loadSwarms(ws.currentId)}>Retry</button>
+        {:else}
+          <p class="dim empty">No swarms in {ws.current?.name ?? 'this workspace'}.</p>
+        {/if}
       {/if}
     </div>
   </aside>
@@ -394,13 +400,47 @@
   <!-- Main -->
   <section class="main">
     {#if !detail}
-      <EmptyState
-        icon="user"
-        title="Build an agent swarm"
-        body="A team of role-specialized agents that work projects together — pick a preset or start blank."
-        actionLabel="New swarm"
-        onaction={() => (showNew = true)}
-      />
+      {#if swarm.swarms.length > 0}
+        <EmptyState
+          icon="user"
+          title="Pick a swarm"
+          body="Open one from the list to see its org tree, board, runs and feed."
+        />
+      {:else}
+        <!-- Nothing in THIS workspace. Swarms are workspace-scoped, so name the
+             workspace and offer to go looking in the others before concluding
+             the team was lost. -->
+        <EmptyState
+          icon="user"
+          title="No swarms in {ws.current?.name ?? 'this workspace'}"
+          body="A swarm is a team of role-specialized agents that work projects together — pick a preset or start blank. Swarms belong to the workspace they were created in."
+          actionLabel="New swarm"
+          onaction={() => (showNew = true)}
+        >
+          <div class="elsewhere">
+            {#if swarm.elsewhere.length > 0}
+              <p class="dim">Found swarms in your other workspaces — jump to one:</p>
+              <div class="ws-hits">
+                {#each swarm.elsewhere as w (w.id)}
+                  <button class="btn small" onclick={() => ws.select(w.id)}>
+                    {w.name} · {w.count} swarm{w.count === 1 ? '' : 's'}
+                  </button>
+                {/each}
+              </div>
+            {:else if swarm.elsewhereChecked}
+              <p class="dim">No swarms in any of your other workspaces either.</p>
+            {:else}
+              <button
+                class="btn small ghost"
+                disabled={swarm.elsewhereBusy}
+                onclick={() => swarm.findSwarmsElsewhere(ws.workspaces)}
+              >
+                {swarm.elsewhereBusy ? 'Searching…' : 'Look in my other workspaces'}
+              </button>
+            {/if}
+          </div>
+        </EmptyState>
+      {/if}
     {:else}
       <header class="page-header swarm-head" class:head-collapsed={viewport.isPhone && !headOpen}>
         <div class="title-wrap">
@@ -650,6 +690,25 @@
     padding: 12px;
     font-size: 12px;
   }
+  /* "Your swarms are in another workspace" shortcuts, rendered inside the main
+     empty state. */
+  .elsewhere {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    font-size: 12px;
+  }
+  .elsewhere p {
+    margin: 0;
+  }
+  .ws-hits {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+  }
   .dot {
     width: 8px;
     height: 8px;
@@ -831,6 +890,16 @@
     min-width: 0;
     min-height: 0;
     display: flex;
+  }
+  /* SessionView's `.pane` has NO intrinsic width to shrink-wrap: its header is a
+     `container-type: inline-size` query container (size-contained on the inline
+     axis) and the terminal below it is a canvas. As a plain flex item it
+     therefore collapses to its padding — a ~20px sliver with just the status dot
+     — so the panel must tell it to fill. (Splits/TiledView escape this because
+     their parents are CSS grids, where items stretch by default.) */
+  .session-panel > :global(.pane) {
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   /* Toggles — invisible chrome on desktop (the rail/header are always open);
