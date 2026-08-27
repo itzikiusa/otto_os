@@ -1956,6 +1956,34 @@ fn remote_ref_absent(stderr: &str) -> bool {
     stderr.contains("remote ref does not exist")
 }
 
+/// True when git's own message says the LOCAL repository refused the operation
+/// — a dirty tree, an unconfigured upstream, divergent branches, an unfinished
+/// merge. Nothing is wrong with the remote (git usually never even dialled it),
+/// so these must NOT surface as `Error::Upstream`/502: the UI reports a 502 as
+/// "the git provider is unavailable" and raises a global outage banner, which
+/// for "please commit your changes before you merge" is simply untrue.
+///
+/// Matched on git's stable porcelain wording; anything unrecognised keeps the
+/// conservative 502 (a genuine network/auth failure looks like nothing here).
+fn local_refusal(msg: &str) -> bool {
+    const MARKERS: [&str; 12] = [
+        "local changes to the following files would be overwritten",
+        "would be overwritten by",
+        "please commit your changes or stash them",
+        "you have unstaged changes",
+        "cannot pull with rebase",
+        "need to specify how to reconcile divergent branches",
+        "there is no tracking information for the current branch",
+        "you have not concluded your merge",
+        "fix conflicts and run",
+        "refusing to merge unrelated histories",
+        "not something we can merge",
+        "no such ref was fetched",
+    ];
+    let lc = msg.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lc.contains(m))
+}
+
 fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
     // Among the meaningful (non-noise) lines, prefer one that actually names the
     // failure — git scatters the real reason ("! [remote rejected] …", "error:
@@ -1978,6 +2006,15 @@ fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
         })
         .or_else(|| meaningful.first().copied())
         .unwrap_or("git failed with no output");
+    // Classify BEFORE wrapping: a local refusal is a 409 the user can act on
+    // ("stash your changes"), not a 502 that accuses the remote of being down.
+    // Scan every meaningful line, not just `pick` — git prints the reason
+    // ("Please commit your changes…") on a different line from the "error:" it
+    // leads with.
+    let full = meaningful.join("\n");
+    if local_refusal(&full) {
+        return Error::Conflict(pick.to_string());
+    }
     Error::Upstream(format!(
         "git exited {}: {}",
         code.map_or_else(|| "?".to_string(), |c| c.to_string()),
@@ -2385,6 +2422,37 @@ mod tests {
         match git.checkout("no-such-branch", false).await {
             Err(Error::Upstream(msg)) => assert!(msg.contains("git exited")),
             other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// A LOCAL refusal (dirty tree, no upstream, divergent branches) is a 409,
+    /// not the 502 that makes the UI announce a git-provider outage. A remote
+    /// failure — and anything unrecognised — still maps to Upstream.
+    #[test]
+    fn local_git_refusals_are_conflicts_not_upstream() {
+        let local = [
+            "error: Your local changes to the following files would be overwritten by merge:\n\tsrc/a.rs\nPlease commit your changes or stash them before you merge.",
+            "fatal: Need to specify how to reconcile divergent branches",
+            "fatal: There is no tracking information for the current branch.",
+            "error: You have not concluded your merge (MERGE_HEAD exists).",
+            "fatal: refusing to merge unrelated histories",
+        ];
+        for msg in local {
+            match upstream_err(msg, "", Some(1)) {
+                Error::Conflict(_) => {}
+                other => panic!("expected Conflict for {msg:?}, got {other:?}"),
+            }
+        }
+        let remote = [
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "ssh: connect to host github.com port 22: Connection timed out",
+            "error: pathspec 'no-such-branch' did not match any file(s) known to git",
+        ];
+        for msg in remote {
+            match upstream_err(msg, "", Some(1)) {
+                Error::Upstream(_) => {}
+                other => panic!("expected Upstream for {msg:?}, got {other:?}"),
+            }
         }
     }
 

@@ -53,10 +53,23 @@
   async function gitOp(op: 'push' | 'pull'): Promise<void> {
     busy = op;
     try {
-      const r = await api.post<{ output: string }>(`/repos/${repoId}/${op}`);
-      toasts.success(`${op} complete`, r.output.split('\n')[0]);
-      const s = await api.get<RepoStatusResp>(`/repos/${repoId}/status`);
+      // Both endpoints return the FRESH RepoStatusResp (they used to return
+      // `{output}` — reading `.output` here threw a TypeError that the catch
+      // below reported as "pull failed" on a pull that had actually SUCCEEDED).
+      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/${op}`);
       onstatus(s);
+      // A pull whose merge conflicted comes back 200 with unmerged paths — that
+      // is not a failure, it needs the conflict resolver (same wording as the
+      // graph toolbar).
+      const conflicts = s.changes.filter((c) => c.kind === 'conflicted').length;
+      if (op === 'pull' && conflicts > 0) {
+        toasts.warn(
+          'Pulled with conflicts',
+          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts"`,
+        );
+      } else {
+        toasts.success(op === 'pull' ? 'Pulled' : 'Pushed');
+      }
     } catch (e) {
       toasts.error(`${op} failed`, e instanceof Error ? e.message : String(e));
     } finally {
