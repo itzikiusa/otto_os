@@ -178,4 +178,83 @@ test.describe('desktop terminal copy', () => {
       )
       .toContain('OTTOCOPY');
   });
+
+  // The bug that made copy look permanently broken. A TUI that turns on mouse
+  // reporting (claude, codex, vim, htop — `CSI ?1000h`) owns the mouse: xterm
+  // hands the drag to the app and cancels it, so NO selection is created. The
+  // only escape is `shouldForceSelection`, which on macOS is
+  // `altKey && macOptionClickForcesSelection` — and that option defaults to
+  // FALSE, so there was no way to select at all. Every copy path is gated on
+  // `hasSelection()`, so all of them silently did nothing and Edit ▸ Copy came
+  // up greyed. `Terminal.svelte` now enables the option; ⌥-drag is the same
+  // gesture iTerm2 and Terminal.app use.
+  test('⌥-drag selects even while the app has mouse reporting on', async ({ page }) => {
+    const { ctx, base } = await apiCtx();
+    await ctx.post(`${base}/api/v1/sessions/${sessionId}/input`, {
+      // Enable mouse reporting, then print fresh output to select.
+      data: { text: 'printf "\\033[?1000h"; for i in $(seq 1 20); do echo "OTTOMOUSE-$i"; done', submit: true },
+    });
+    await ctx.dispose();
+
+    await page.goto(`/#/agents/${sessionId}`);
+    await expect(page.locator('.xterm-rows')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('OTTOMOUSE-5', { exact: false }).first()).toBeVisible({
+      timeout: 20_000,
+    });
+
+    const box = await page.locator('.xterm-screen').boundingBox();
+    if (!box) throw new Error('no .xterm-screen box');
+    const readMirror = () =>
+      page.evaluate(
+        () => (document.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement)?.value ?? '',
+      );
+    const drag = async (alt: boolean) => {
+      await page.evaluate(() => {
+        const ta = document.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+        if (ta) ta.value = '';
+      });
+      if (alt) await page.keyboard.down('Alt');
+      await page.mouse.move(box.x + 8, box.y + 20);
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width - 40, box.y + 120, { steps: 25 });
+      await page.mouse.up();
+      if (alt) await page.keyboard.up('Alt');
+      await page.waitForTimeout(400);
+      return readMirror();
+    };
+
+    // Plain drag belongs to the app while mouse reporting is on — that is
+    // correct terminal behaviour and must NOT be "fixed" by stealing the mouse.
+    await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__md = [];
+      document.querySelector('.xterm-screen')?.addEventListener(
+        'mousedown',
+        (e) => {
+          ((window as unknown as Record<string, unknown>).__md as unknown[]).push({
+            alt: (e as MouseEvent).altKey,
+            button: (e as MouseEvent).button,
+          });
+        },
+        true,
+      );
+    });
+    const plain = await drag(false);
+    // ⌥-drag must select regardless. This is the assertion that fails without
+    // `macOptionClickForcesSelection`.
+    const withAlt = await drag(true);
+    const md = await page.evaluate(
+      () => (window as unknown as Record<string, unknown>).__md,
+    );
+    console.log(
+      '[mouse-report]',
+      JSON.stringify({ plain: plain.slice(0, 30), withAlt: withAlt.slice(0, 30), mousedowns: md }),
+    );
+    // The invariant is about WHETHER a selection happens, not which lines the
+    // drag happened to cover — the viewport scrolls as output arrives.
+    expect(plain, 'plain drag belongs to the app while mouse reporting is on').toBe('');
+    expect(
+      withAlt.length,
+      '⌥-drag forces a selection despite mouse reporting',
+    ).toBeGreaterThan(0);
+  });
 });

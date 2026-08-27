@@ -969,6 +969,16 @@
       scrollback: 10_000,
       theme: untrack(() => terminalTheme(ui.theme, untrack(() => effScheme))),
       macOptionIsMeta: true,
+      // ⌥-drag forces a LOCAL selection even while the running app has mouse
+      // reporting on. Without this there is no way to select at all in a
+      // mouse-reporting TUI (claude, codex, vim, htop…) on macOS: xterm's
+      // mousedown handler hands the drag to the app and cancels it, and
+      // `shouldForceSelection` is `altKey && macOptionClickForcesSelection`,
+      // which is false by default. Selection silently never happened, so every
+      // copy path — ⌘C, right-click ▸ Copy, copy-on-select — had nothing to
+      // copy and Edit ▸ Copy showed up greyed out. Matches iTerm2 / Terminal.app,
+      // where ⌥-drag is the established "select anyway" gesture.
+      macOptionClickForcesSelection: true,
     });
     fit = new FitAddon();
     search = new SearchAddon();

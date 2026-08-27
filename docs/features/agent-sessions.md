@@ -258,8 +258,24 @@ The terminal is a canvas, not a document, so the browser has no DOM selection to
 copy from — xterm only syncs its selection into the hidden textarea on
 **right-click**. Otto therefore handles the chords itself:
 
+> **⌥-drag to select in an agent session.** Agent CLIs (claude, codex) — like
+> vim or htop — turn on **mouse reporting**, and a terminal that reports the
+> mouse gives drags to the *application*, not to selection: xterm hands the
+> mousedown to the app and cancels it, so no selection is created at all. The
+> macOS escape hatch is **⌥ Option + drag** (`macOptionClickForcesSelection`,
+> set in `Terminal.svelte`) — the same gesture iTerm2 and Terminal.app use.
+> Plain drag still belongs to the app, deliberately: stealing it would break the
+> TUI's own click handling.
+>
+> This is worth knowing because of how it FAILS: with no selection there is
+> nothing to copy, so ⌘C does nothing, right-click ▸ Copy shows up **greyed**,
+> and copy-on-select never fires. That looks exactly like a broken clipboard and
+> sends you hunting through permissions and secure contexts — the clipboard is
+> fine; there is simply no selection.
+
 | Gesture | Behaviour |
 |---|---|
+| ⌥-drag (mouse-reporting sessions) | Forces a local selection. Without it, agent sessions cannot be selected at all on macOS. |
 | Drag-select + `⌘C` (or `Ctrl+Shift+C`) | Copies the terminal selection. Only claimed when a selection exists, so bare `Ctrl+C` remains SIGINT. |
 | Right-click → Copy | Native browser copy (xterm's own path). |
 | Copy-on-select | Toolbar `copy` toggle — any new selection is copied immediately. Off by default, and stored per-origin in `localStorage`, so enabling it locally does **not** enable it on a remote origin. |
