@@ -20,6 +20,9 @@
   import { openFile } from '../stores/openfile.svelte';
   import { openExternal, isExternalUrl } from '../external';
   import { keyContext } from '../keys';
+  import { copyText } from '../clipboard';
+  import { snipApi } from '../snip';
+  import { toasts } from '../toast.svelte';
   import TermKeysBar from './TermKeysBar.svelte';
 
   interface Props {
@@ -289,6 +292,44 @@
   function onTouchPointerUp(e: PointerEvent): void {
     if (!e.isPrimary) return;
     touchScrolling = false;
+  }
+
+  // ── Pasted-image upload ───────────────────────────────────────────────────
+  /** Store a pasted image on the DAEMON and type its path into the PTY.
+   *  Agent CLIs (claude, codex) take an image as a file path, and that path has
+   *  to resolve where the CLI runs — the daemon's machine — which is NOT the
+   *  browser's whenever Otto is driven remotely. `POST /snips` already owns
+   *  "bytes in → file on disk → path out" (it backs the snipping tool), so the
+   *  paste rides that rather than inventing a second image store. */
+  async function uploadPastedImage(file: File): Promise<void> {
+    try {
+      const png = await toPngBytes(file);
+      const snip = await snipApi.upload(bytesToBase64(png), file.name || 'pasted.png');
+      // Bracketed paste: the path lands as one literal chunk the TUI will not
+      // auto-submit, so the user can still type a prompt around it.
+      sendJson({ type: 'input', data: textToBase64(`\x1b[200~${snip.path}\x1b[201~`) });
+    } catch (e) {
+      toasts.error('Could not paste image', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** PNG bytes for an arbitrary pasted image. The daemon stores PNG only
+   *  (`store_snip`'s `png_dims` rejects anything else) and a clipboard image is
+   *  frequently JPEG or TIFF — re-encode through a canvas instead of refusing
+   *  the paste. PNG input is passed through untouched (no needless re-encode). */
+  async function toPngBytes(file: File): Promise<Uint8Array> {
+    if (file.type === 'image/png') return new Uint8Array(await file.arrayBuffer());
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas 2d context unavailable');
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/png'));
+    if (!blob) throw new Error('could not re-encode the image as PNG');
+    return new Uint8Array(await blob.arrayBuffer());
   }
 
   function connect(): void {
@@ -1005,6 +1046,61 @@
         if (!readOnly) sendJson({ type: 'input', data: textToBase64('\x1b\r') });
         return false; // suppress xterm's default `\r` (which would submit)
       }
+
+      // ── Copy (⌘C / Ctrl+Shift+C) ──────────────────────────────────────────
+      // xterm does NOT make ⌘C work on its own. It syncs the selection into its
+      // hidden textarea in exactly one place — `rightClickHandler`, on
+      // `contextmenu` — so a right-click → Copy works while a plain drag-select
+      // + ⌘C does nothing: the renderer paints the selection, but the document
+      // never gets a real DOM selection, so the browser's copy command stays
+      // disabled and the `copy` listener xterm registers never fires. Handle
+      // the chord ourselves against `getSelection()`, which is always correct.
+      //
+      // Ctrl+Shift+C is the terminal convention on Linux/Windows (bare Ctrl+C
+      // must stay SIGINT). Both are only claimed when there IS a selection —
+      // otherwise ⌘C/Ctrl+Shift+C fall through untouched.
+      if (e.type === 'keydown' && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+        const chord = (e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey && !e.metaKey);
+        if (chord && term?.hasSelection()) {
+          const sel = term.getSelection();
+          if (sel) {
+            e.preventDefault();
+            e.stopPropagation();
+            void copyText(sel);
+            return false; // never let this reach the PTY as ^C
+          }
+        }
+      }
+
+      // ── Paste (Ctrl+Shift+V) ──────────────────────────────────────────────
+      // ⌘V / Ctrl+V need nothing from us: the browser fires a `paste` event and
+      // xterm's own handler reads `clipboardData` — which works on ANY origin,
+      // secure or not. Ctrl+Shift+V has no native paste behind it, so it is the
+      // one chord that must read the clipboard programmatically, and
+      // `readText()` is the single clipboard call with no legacy fallback (it
+      // needs a secure context AND a permission grant). Best-effort: on refusal
+      // we stay silent rather than claim a paste that never happened, and ⌘V
+      // still works.
+      if (
+        e.type === 'keydown' &&
+        e.key.toLowerCase() === 'v' &&
+        e.ctrlKey &&
+        e.shiftKey &&
+        !e.metaKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!readOnly) {
+          navigator.clipboard
+            ?.readText?.()
+            .then((t) => {
+              if (t) term?.paste(t); // xterm brackets it when the app asked for it
+            })
+            .catch(() => {/* no permission — ⌘V still works */});
+        }
+        return false;
+      }
       return true;
     });
 
@@ -1016,11 +1112,15 @@
     // Copy-on-select: when enabled, immediately copy any new selection to the
     // clipboard so the user doesn't have to press ⌘C. Implemented via the
     // selection-change event (no xterm built-in; works across all renderers).
+    // Goes through `copyText` (never throws, falls back to execCommand): the
+    // old `navigator.clipboard.writeText(...).catch(...)` threw a SYNCHRONOUS
+    // TypeError on any origin without the async API — the `.catch()` never ran,
+    // and the throw landed inside xterm's selection-change emitter.
     term.onSelectionChange(() => {
       if (!ui.termCopyOnSelect) return;
       if (!term || !term.hasSelection()) return;
       const text = term.getSelection();
-      if (text) navigator.clipboard.writeText(text).catch(() => {/* clipboard denied */});
+      if (text) void copyText(text);
     });
     term.onBinary((data) => {
       if (readOnly) return;
@@ -1048,6 +1148,30 @@
     };
     textarea?.addEventListener('focus', onFocus);
     textarea?.addEventListener('blur', onBlur);
+
+    // ── Image paste ───────────────────────────────────────────────────────────
+    // Agent CLIs take an image as a FILE PATH, and the path has to exist on the
+    // machine the CLI runs on — which is the daemon's machine, not necessarily
+    // the browser's. So a pasted image is uploaded to the daemon first and the
+    // stored path is injected as text. Runs in the CAPTURE phase so we get the
+    // event before xterm's own paste handler (which is text/plain only and
+    // would otherwise swallow the gesture as an empty paste).
+    //
+    // Text pastes are left entirely alone — xterm handles those correctly on
+    // every origin, since `clipboardData` on a real paste event needs neither a
+    // secure context nor a permission grant.
+    const onPaste = (e: ClipboardEvent) => {
+      if (readOnly) return;
+      const items = Array.from(e.clipboardData?.items ?? []);
+      const img = items.find((it) => it.kind === 'file' && it.type.startsWith('image/'));
+      if (!img) return; // not an image paste — let xterm do its thing
+      const file = img.getAsFile();
+      if (!file) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void uploadPastedImage(file);
+    };
+    container.addEventListener('paste', onPaste, true);
 
     // The WS is connected lazily on the first *valid* fit so the very first
     // sendResize(true) in sock.onopen ships a correct grid (covers first open).
@@ -1105,6 +1229,7 @@
       termDidInit = false;
       textarea?.removeEventListener('focus', onFocus);
       textarea?.removeEventListener('blur', onBlur);
+      container.removeEventListener('paste', onPaste, true);
       onBlur();
       sock?.close();
       sock = null;

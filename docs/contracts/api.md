@@ -2779,5 +2779,10 @@ Feature gate: `Agents` (GET = View, everything else = Edit).
 | DELETE /snips/{id} | member (Agents:Edit) | — | 204 |
 
 `Snip {id, created_at, width, height, source: "capture"|"upload",
-has_annotated}` — `has_annotated` is computed from the filesystem at read time.
+has_annotated, path}` — `has_annotated` and `path` are both computed from the
+filesystem at read time (never trusted from the sidecar, so a moved data dir
+can't serve a stale path). `path` is the PNG's absolute path **on the daemon's
+machine** — what an agent CLI needs to open it, and why the terminal's
+image-paste flow uploads through `POST /snips` before typing the path into the
+PTY: the browser may be on a different machine entirely.
 Clipboard failure degrades to `copied:false` (the snip itself is always saved).

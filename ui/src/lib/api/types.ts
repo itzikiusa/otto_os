@@ -6098,6 +6098,11 @@ export interface Snip {
   source: 'capture' | 'upload';
   /** Computed from the filesystem: a flattened annotated export exists. */
   has_annotated: boolean;
+  /** Absolute path of the stored PNG **on the daemon's machine** — what an
+   *  agent CLI needs to open it (the CLI runs next to the daemon, which is a
+   *  different machine whenever Otto is driven from a remote browser).
+   *  Recomputed server-side on every read. */
+  path: string;
 }
 
 /** `POST /snips/capture` — long-polls while the native crosshair is on screen.

@@ -2,7 +2,8 @@
 // translates chords into named actions; App.svelte supplies the dispatcher.
 //
 // ⌘K palette · ⌘I ask Otto (plain English) · ⌘⇧B broadcast · ⌘⇧R hard reload · ⌘1 rail ·
-// ⌘J right panel · ⌘T new session · ⌘W close tab ·
+// ⌘J right panel · ⌘T new session · ⌘W close tab (⌃⇧T / ⌃⇧W in a browser tab,
+// which reserves the ⌘ pair for itself) ·
 // ⌃Tab / ⌃⇧Tab cycle tabs · ⌘[ / ⌘] prev/next session · ⌃1…⌃9 jump to session N ·
 // ⌘D / ⌘⇧D splits · ⌘F find (terminal) ·
 // ⌘+ / ⌘- / ⌘0 zoom (app zoom, or terminal font-size when a terminal is focused)
@@ -77,6 +78,29 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
       e.preventDefault();
       dispatch(e.shiftKey ? 'prevTab' : 'nextTab', e);
       return;
+    }
+
+    // ⌃⇧T / ⌃⇧W → new session / close tab. These are ALIASES for ⌘T / ⌘W,
+    // which a browser TAB reserves for itself (new tab / close tab) at a level
+    // above the page: the keydown never reaches us, so preventDefault can't
+    // help. The ⌘ chords stay bound — they do arrive in the desktop shell and
+    // in an installed PWA / `--app=` window — and these give a keyboard route
+    // when Otto is just a tab, which is how it's reached remotely.
+    // (macOS browsers leave ⌃⇧T / ⌃⇧W free. On Windows/Linux Chrome, Ctrl+Shift+T
+    // is "reopen closed tab" — the same reservation, and no chord escapes it
+    // there; Otto's own shell is macOS-only.)
+    if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === 't') {
+        e.preventDefault();
+        dispatch('newSession', e);
+        return;
+      }
+      if (k === 'w') {
+        e.preventDefault();
+        dispatch('closeTab', e);
+        return;
+      }
     }
 
     // ⌃1…⌃9 → jump straight to the Nth session tab (ctrl specifically, so it

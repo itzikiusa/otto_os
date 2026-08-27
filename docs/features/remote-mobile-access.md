@@ -381,6 +381,46 @@ RTL treatment. Highlights relevant to remote access:
 > Known minor TODO: the phone navigation **drawer defaults open** on first paint
 > in some layouts.
 
+### Clipboard on a remote origin
+
+Copy/paste works over a remote origin, including the self-signed
+`0.0.0.0` listener — but only because the UI deliberately avoids the parts of
+the clipboard stack that need a trusted origin:
+
+- **Writes** go through `ui/src/lib/clipboard.ts`, which prefers
+  `navigator.clipboard` and falls back to `execCommand('copy')`. The async
+  Clipboard API is a secure-context API and is **absent** on any origin the
+  browser de-privileges (a cert-error origin, plain http, older webviews), and
+  reading `.writeText` off it throws a *synchronous* `TypeError` — so a bare
+  `navigator.clipboard.writeText(x).catch(…)` is not a safe shape anywhere in
+  this codebase.
+- **Reads** ride the DOM `paste` event (`clipboardData`), which needs neither a
+  secure context nor a permission grant. `navigator.clipboard.readText()` is used
+  only for `Ctrl+Shift+V`, which has no native paste behind it, and it degrades
+  silently when refused.
+- **Pasted images** are uploaded to the daemon (`POST /snips`) and the returned
+  path — a path on the *daemon's* machine, which is the one the agent CLI runs
+  on — is typed into the PTY. See
+  [`./agent-sessions.md`](./agent-sessions.md) § *Copy & paste*.
+
+### Keyboard shortcuts a browser tab steals
+
+`⌘T` (new session) and `⌘W` (close tab) are reserved by the browser **above the
+page** in a normal tab, so the keydown never reaches the app and
+`preventDefault()` cannot help. Otto binds **`⌃⇧T`** and **`⌃⇧W`** as aliases
+that macOS browsers leave free (`ui/src/lib/keys.ts`). The `⌘` chords stay bound
+and do arrive in the desktop shell, in an installed PWA, and in a Chrome
+`--app=` window:
+
+```bash
+open -na "Google Chrome" --args --app=https://<host>/
+```
+
+An app window has no tab strip, so the browser stops reserving `⌘T`. Note the
+self-signed listener blocks both service-worker registration and PWA
+installability — use the Cloudflare tunnel (§2b) or trust the cert if you want
+the installed-app route.
+
 ---
 
 ## 8. API / contract reference

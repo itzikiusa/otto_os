@@ -7,6 +7,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { InjectBundle } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   // The rewrite/tests/inject run spawns an agent CLI session via the live
   // registry, so the provider must be a real registered agent (built-in or
@@ -51,7 +52,7 @@
     if (!bundle || copying) return;
     copying = true;
     try {
-      await navigator.clipboard.writeText(bundle.markdown);
+      await copyTextOrThrow(bundle.markdown);
       toasts.success('Copied to clipboard', 'Inject bundle markdown copied.');
     } catch (e) {
       toasts.error('Copy failed', product.errMsg(e));

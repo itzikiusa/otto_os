@@ -9,6 +9,7 @@
   import { database } from '../../lib/stores/database.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { DbForeignKey, DbIndexDef, SchemaNode } from '../../lib/api/types';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   const detail = $derived(database.objectDetail);
   // A stored procedure / function — its "columns" are parameters and its main
@@ -49,7 +50,7 @@
   async function copyDdl(): Promise<void> {
     if (!detail?.ddl) return;
     try {
-      await navigator.clipboard.writeText(detail.ddl);
+      await copyTextOrThrow(detail.ddl);
       toasts.success('Copied DDL');
     } catch {
       toasts.error('Copy failed');
@@ -128,7 +129,7 @@
   }
   async function copyText(text: string, label: string): Promise<void> {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
       toasts.error('Copy failed');

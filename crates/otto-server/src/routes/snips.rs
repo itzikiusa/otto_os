@@ -78,8 +78,9 @@ pub fn snips_routes() -> Router<ServerCtx> {
 // DTOs + sidecar
 // ---------------------------------------------------------------------------
 
-/// Wire + sidecar shape. `has_annotated` is computed from the filesystem at
-/// read time (never stored) so the sidecar can't drift from reality.
+/// Wire + sidecar shape. `has_annotated` and `path` are computed from the
+/// filesystem at read time (never trusted from the sidecar) so neither can
+/// drift from reality — the data dir can move between runs.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Snip {
     pub id: String,
@@ -90,6 +91,13 @@ pub struct Snip {
     pub source: String,
     #[serde(default)]
     pub has_annotated: bool,
+    /// Absolute path of the stored PNG **on the daemon's machine**. This is what
+    /// an agent CLI needs to open the image: the CLI runs next to the daemon, so
+    /// a browser-side path would be meaningless whenever Otto is driven from
+    /// another machine. Recomputed on every read; `default` keeps sidecars
+    /// written before this field loadable.
+    #[serde(default)]
+    pub path: String,
 }
 
 #[derive(Deserialize)]
@@ -181,6 +189,7 @@ async fn load_snip(ctx: &ServerCtx, id: &str) -> Result<Snip, Error> {
     let mut snip: Snip =
         serde_json::from_slice(&raw).map_err(|e| Error::Internal(format!("snip sidecar: {e}")))?;
     snip.has_annotated = annotated_path(ctx, id).exists();
+    snip.path = png_path(ctx, id).to_string_lossy().into_owned();
     Ok(snip)
 }
 
@@ -202,6 +211,7 @@ async fn store_snip(ctx: &ServerCtx, bytes: &[u8], source: &str) -> Result<Snip,
         height,
         source: source.into(),
         has_annotated: false,
+        path: png_path(ctx, &id).to_string_lossy().into_owned(),
     };
     let sidecar = serde_json::to_vec(&snip)
         .map_err(|e| Error::Internal(format!("encode snip sidecar: {e}")))?;

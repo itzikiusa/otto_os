@@ -12,6 +12,7 @@
   import type { CreateShareReq, CreateShareResp, ShareInfo, EmailSenderResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   interface Props {
     sessionId: string;
@@ -133,7 +134,7 @@
   async function copyUrl(): Promise<void> {
     if (!mintedUrl) return;
     try {
-      await navigator.clipboard.writeText(mintedUrl);
+      await copyTextOrThrow(mintedUrl);
       toasts.success('Copied!', 'Share link is in your clipboard.');
     } catch {
       toasts.error('Copy failed', 'Could not access clipboard.');

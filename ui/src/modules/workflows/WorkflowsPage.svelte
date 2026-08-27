@@ -21,6 +21,7 @@
   import { api } from '../../lib/api/client';
   import { listWorkflowVersions, restoreWorkflowVersion } from '../../lib/api/workflows';
   import { workflowRunBus } from '../../lib/events.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
   import type {
     Workflow,
     WorkflowGraph,
@@ -687,7 +688,7 @@
   );
   async function copyMtSlack(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(mtSlackSnippet);
+      await copyTextOrThrow(mtSlackSnippet);
       mtCopied = true;
       setTimeout(() => (mtCopied = false), 1500);
     } catch {

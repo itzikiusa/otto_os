@@ -9,6 +9,7 @@
   import { router } from '../../lib/router.svelte';
   import { retryRunNode } from '../../lib/api/workflows';
   import type { WorkflowRun, NodeRunState } from '../../lib/api/types';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   interface Props {
     run: WorkflowRun;
@@ -115,7 +116,7 @@
 
   async function copy(text: string, label = 'output'): Promise<void> {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
       toasts.error('Copy failed');

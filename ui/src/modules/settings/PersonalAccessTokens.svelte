@@ -8,6 +8,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   let tokens: ApiTokenInfo[] = $state([]);
   let loading = $state(true);
@@ -73,7 +74,7 @@
   async function copySecret(): Promise<void> {
     if (!freshSecret) return;
     try {
-      await navigator.clipboard.writeText(freshSecret);
+      await copyTextOrThrow(freshSecret);
       toasts.success('Copied', 'Token secret copied to clipboard.');
     } catch {
       toasts.error('Copy failed', 'Could not write to clipboard.');

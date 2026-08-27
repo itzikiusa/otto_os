@@ -12,6 +12,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { agentProviders } from '../../lib/providers';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   // ---------------------------------------------------------------------------
   // State
@@ -72,7 +73,7 @@
   async function copyText(text: string): Promise<void> {
     if (!text) return;
     try {
-      await navigator.clipboard.writeText(text);
+      await copyTextOrThrow(text);
       toasts.info('Copied to clipboard');
     } catch {
       toasts.error('Copy failed', 'Select and copy manually.');

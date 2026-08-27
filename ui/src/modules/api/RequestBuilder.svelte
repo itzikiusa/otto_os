@@ -14,6 +14,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   interface Props {
     /** Compact mode trims spacing + uses a textarea instead of CodeEditor. */
@@ -611,7 +612,7 @@
   const codeSnippet = $derived(codeOpen ? generateCode(draft, codeLang) : '');
   async function copyCode(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(codeSnippet);
+      await copyTextOrThrow(codeSnippet);
       toasts.success('Copied snippet', codeLang);
     } catch {
       toasts.error('Copy failed', 'Clipboard unavailable');
@@ -631,7 +632,7 @@
 
   async function copyAsCurl(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(apiClient.toCurl());
+      await copyTextOrThrow(apiClient.toCurl());
       toasts.success('Copied as curl');
     } catch {
       toasts.error('Copy failed', 'Clipboard unavailable');

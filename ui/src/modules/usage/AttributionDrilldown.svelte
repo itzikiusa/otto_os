@@ -86,7 +86,13 @@
   }
 
   async function copyRow(r: AttributionRow): Promise<void> {
-    await copyAsJson(r);
+    // A blocked clipboard must not flash the "copied" tick — swallow it here
+    // and leave the row unmarked so the failure is visible, not silent.
+    try {
+      await copyAsJson(r);
+    } catch {
+      return;
+    }
     copiedRow = r.key;
     setTimeout(() => {
       copiedRow = null;

@@ -14,6 +14,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
   import type {
     McpOttoServerStatus,
     McpOttoToolInfo,
@@ -130,7 +131,7 @@
 
   async function copy(text: string, what: string): Promise<void> {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyTextOrThrow(text);
       toasts.success(`${what} copied`);
     } catch {
       toasts.error('Copy failed', 'Select and copy manually.');

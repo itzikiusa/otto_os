@@ -10,6 +10,7 @@
   import { copyAsJson } from '../../lib/components/exporters';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   let users: User[] = $state([]);
   let loading = $state(true);
@@ -34,7 +35,7 @@
 
   async function copyUsername(u: User): Promise<void> {
     try {
-      await navigator.clipboard.writeText(`@${u.username}`);
+      await copyTextOrThrow(`@${u.username}`);
       toasts.success('Copied', `@${u.username}`);
     } catch {
       toasts.error('Copy failed', 'Could not write to clipboard.');
@@ -42,8 +43,12 @@
   }
 
   async function copyUserJson(u: User): Promise<void> {
-    await copyAsJson(u);
-    toasts.success('Copied', 'User JSON copied to clipboard.');
+    try {
+      await copyAsJson(u);
+      toasts.success('Copied', 'User JSON copied to clipboard.');
+    } catch {
+      toasts.error('Copy failed', 'Could not write to clipboard.');
+    }
   }
 
   // role matrix

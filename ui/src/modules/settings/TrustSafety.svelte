@@ -143,6 +143,8 @@
     copyingId = e.id;
     try {
       await copyAsJson(e);
+    } catch {
+      toasts.error('Copy failed', 'The browser blocked the clipboard write.');
     } finally {
       // Brief flash so the user sees the button change.
       setTimeout(() => {

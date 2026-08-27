@@ -252,6 +252,37 @@ on `claude`/`codex` repaints.
   its WS so the session can re-suspend. Without this, opening a tiled view of M
   suspended sessions would wake all M agents (~200 MB each) at once.
 
+### Copy & paste
+
+The terminal is a canvas, not a document, so the browser has no DOM selection to
+copy from — xterm only syncs its selection into the hidden textarea on
+**right-click**. Otto therefore handles the chords itself:
+
+| Gesture | Behaviour |
+|---|---|
+| Drag-select + `⌘C` (or `Ctrl+Shift+C`) | Copies the terminal selection. Only claimed when a selection exists, so bare `Ctrl+C` remains SIGINT. |
+| Right-click → Copy | Native browser copy (xterm's own path). |
+| Copy-on-select | Toolbar `copy` toggle — any new selection is copied immediately. Off by default, and stored per-origin in `localStorage`, so enabling it locally does **not** enable it on a remote origin. |
+| `⌘V` / `Ctrl+V` | Native paste, handled by xterm from the `paste` event. |
+| `Ctrl+Shift+V` | Programmatic paste via `navigator.clipboard.readText()` — the one clipboard call that needs a secure context *and* a permission grant; silently declines if refused (`⌘V` still works). |
+| Paste an **image** | Uploaded to the daemon via `POST /snips`, then the stored PNG's absolute path is typed into the PTY as a bracketed paste. |
+
+Clipboard **writes** everywhere in the UI go through `ui/src/lib/clipboard.ts`,
+which prefers `navigator.clipboard` and falls back to a hidden-textarea
+`execCommand('copy')`. That fallback is what keeps Copy buttons working on
+origins the browser de-privileges — the self-signed `0.0.0.0` TLS listener, a
+LAN reverse proxy, an older WKWebView — where `navigator.clipboard` is simply
+absent. Note that reading `.writeText` off an absent `navigator.clipboard`
+throws a *synchronous* `TypeError`, so the common
+`navigator.clipboard.writeText(x).catch(…)` shape does not catch it; never
+reintroduce it.
+
+Image paste goes through the daemon on purpose: an agent CLI opens an image by
+**file path**, and that path has to resolve on the machine the CLI runs on. When
+Otto is driven from a browser on another machine, a browser-side path is
+meaningless — so the bytes are uploaded first and the daemon's path is what
+reaches the PTY.
+
 ### RTL & touch
 
 The terminal supports right-to-left/bidi reflow and a touch-first phone mode

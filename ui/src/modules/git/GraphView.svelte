@@ -27,6 +27,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import CreatePr from './CreatePr.svelte';
   import WipPanel from './WipPanel.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   /** Strip trailing slashes so worktree paths match registered repo paths. */
   function normPath(p: string): string {
@@ -443,7 +444,7 @@
   /** Copy `text` to the clipboard and toast success/failure with `label`. */
   async function clip(text: string, label: string): Promise<void> {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyTextOrThrow(text);
       toasts.success('Copied', label);
     } catch (e) {
       toasts.error('Copy failed', e instanceof Error ? e.message : String(e));

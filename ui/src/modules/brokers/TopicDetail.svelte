@@ -389,15 +389,19 @@
 
   async function copySelectedAsJson() {
     if (!selected) return;
-    await copyAsJson({
-      partition: selected.partition,
-      offset: selected.offset,
-      timestamp_ms: selected.timestamp_ms,
-      key: selected.key,
-      value: selected.value,
-      headers: selected.headers,
-    });
-    toasts.success('Copied to clipboard');
+    try {
+      await copyAsJson({
+        partition: selected.partition,
+        offset: selected.offset,
+        timestamp_ms: selected.timestamp_ms,
+        key: selected.key,
+        value: selected.value,
+        headers: selected.headers,
+      });
+      toasts.success('Copied to clipboard');
+    } catch {
+      toasts.error('Copy failed', 'The browser blocked the clipboard write.');
+    }
   }
 </script>
 

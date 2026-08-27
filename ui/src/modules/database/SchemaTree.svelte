@@ -8,6 +8,7 @@
   import { database } from '../../lib/stores/database.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { DbNodeKind, ObjectHit, SchemaNode } from '../../lib/api/types';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   // Top-level schema search / filter. Client-side, this only filters ROOT nodes
   // and already-cached subtrees — it can never find a table inside a schema you
@@ -130,7 +131,7 @@
 
   async function copyName(node: SchemaNode): Promise<void> {
     try {
-      await navigator.clipboard.writeText(node.label);
+      await copyTextOrThrow(node.label);
     } catch {
       /* clipboard unavailable — ignore */
     }

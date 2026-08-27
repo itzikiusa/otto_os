@@ -8,6 +8,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   interface Props {
     reviewId: string;
@@ -53,7 +54,7 @@
 
   async function copyMarkdown(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(exportedMd);
+      await copyTextOrThrow(exportedMd);
       toasts.success('Copied to clipboard');
     } catch {
       toasts.warn('Could not copy', 'Select the text and copy manually.');

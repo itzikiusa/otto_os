@@ -20,7 +20,8 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import { renderD2 } from './d2';
-  import { svgToPngDownload, copyText } from './export';
+  import { svgToPngDownload } from './export';
+  import { copyText } from '../../lib/clipboard';
   import type { CanvasDoc, CanvasFormat } from './types';
   import Icon from '../../lib/components/Icon.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';

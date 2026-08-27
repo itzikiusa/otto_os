@@ -4,12 +4,16 @@
 // export endpoint and feed the streamed text to `downloadText`; these client
 // helpers cover what is already in memory.
 
-/** Copy a value to the clipboard as pretty JSON (strings are copied verbatim). */
+import { copyTextOrThrow } from '../clipboard';
+
+/** Copy a value to the clipboard as pretty JSON (strings are copied verbatim).
+ *  Throws when the browser blocked the copy, so callers report a failure rather
+ *  than toasting a success the clipboard never received. (The old body silently
+ *  no-op'd whenever `navigator.clipboard` was absent — i.e. on every origin the
+ *  browser de-privileges, which is exactly where the button looked broken.) */
 export async function copyAsJson(value: unknown): Promise<void> {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  if (typeof navigator !== 'undefined' && navigator.clipboard) {
-    await navigator.clipboard.writeText(text);
-  }
+  await copyTextOrThrow(text);
 }
 
 /** Trigger a browser download of arbitrary text. */

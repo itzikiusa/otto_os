@@ -6,6 +6,7 @@
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { WorkflowTrigger, TriggerKind } from '../../lib/api/types';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   interface Props {
     workflowId: string;
@@ -37,7 +38,7 @@
   let copied = $state(false);
   async function copyChat(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(chatSnippet);
+      await copyTextOrThrow(chatSnippet);
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch {

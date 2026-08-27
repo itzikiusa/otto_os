@@ -46,6 +46,7 @@ import {
   type VarSpec,
 } from '../../modules/database/sql-util';
 import { bsonScalar } from '../../modules/database/bson';
+import { copyTextOrThrow } from '../clipboard';
 
 /** Connection kinds the explorer can browse (the DB engines). */
 export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -1712,7 +1713,7 @@ class DatabaseStore {
       return;
     }
     try {
-      await navigator.clipboard.writeText(ddl);
+      await copyTextOrThrow(ddl);
       toasts.success('Create statement copied', node.label);
     } catch {
       toasts.error('Clipboard unavailable', 'Could not copy the create statement.');

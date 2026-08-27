@@ -21,6 +21,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Scorecard from './Scorecard.svelte';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   interface Props {
     evalId: string;
@@ -238,7 +239,7 @@
   }
   async function copySkill(it: EvalIteration, source: 'tested' | 'improved'): Promise<void> {
     try {
-      await navigator.clipboard.writeText(skillContent(it, source));
+      await copyTextOrThrow(skillContent(it, source));
       toasts.success('Skill copied to clipboard');
     } catch {
       toasts.error('Copy failed');

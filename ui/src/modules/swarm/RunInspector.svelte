@@ -10,6 +10,7 @@
   import { openExternal, isExternalUrl } from '../../lib/external';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import type { SwarmRun, SwarmMessage, TurnResult, TurnArtifact } from './types';
+  import { copyTextOrThrow } from '../../lib/clipboard';
 
   interface Props {
     run: SwarmRun;
@@ -72,7 +73,7 @@
 
   async function copy(text: string, label = 'output'): Promise<void> {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
       toasts.error('Copy failed');
