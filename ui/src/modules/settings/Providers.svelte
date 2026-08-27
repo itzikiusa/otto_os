@@ -44,6 +44,12 @@
   let custom: Record<string, ProviderDef> = $state({});
   let allSettings: Record<string, unknown> = $state({});
   let defaultProvider = $state('');
+  /** Model for the PR / commit DRAFT turns (`pr_draft_model`). Deliberately
+   *  separate from the default provider model: drafting is a short, mechanical,
+   *  user-blocking turn, so it defaults to the fastest model rather than
+   *  inheriting a reasoning model and making the modal wait minutes. */
+  let draftModel = $state('');
+  const DRAFT_MODELS = ['haiku', 'sonnet', 'opus'];
   // Providers the user has EXCLUDED — hidden from every picker (they may have the
   // CLI installed but don't want to use it). Persisted as `disabled_providers`.
   // `shell` is never excludable (plain terminals need it).
@@ -101,6 +107,7 @@
         };
         lastRun = (allSettings['cli_auto_update_last_run'] as string | undefined) ?? null;
         skipPermissions = (allSettings['agent_skip_permissions'] as boolean | undefined) ?? true;
+        draftModel = (allSettings['pr_draft_model'] as string | undefined) ?? '';
       } catch {
         toasts.error('Could not load provider settings');
       } finally {
@@ -141,6 +148,27 @@
       await auth.refreshMeta();
       toasts.success('Providers saved', 'Available immediately for new sessions');
       formOpen = false;
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function saveDraftModel(): Promise<void> {
+    saving = true;
+    try {
+      allSettings = await api.put<Record<string, unknown>>('/settings', {
+        ...allSettings,
+        pr_draft_model: draftModel,
+      });
+      draftModel = (allSettings['pr_draft_model'] as string | undefined) ?? '';
+      toasts.success(
+        'Draft model saved',
+        draftModel === ''
+          ? 'PR and commit drafts use haiku (fastest)'
+          : `PR and commit drafts use ${draftModel}`,
+      );
     } catch (e) {
       toasts.error('Save failed', e instanceof Error ? e.message : String(e));
     } finally {
@@ -349,6 +377,24 @@
       <p class="dim sm">
         The agent CLI used for new sessions and channel replies unless explicitly
         overridden.
+      </p>
+    </div>
+
+    <div class="section">
+      <div class="label">PR &amp; commit draft model</div>
+      <div class="row">
+        <select bind:value={draftModel} onchange={saveDraftModel} disabled={saving}>
+          <option value="">Fastest (haiku)</option>
+          {#each DRAFT_MODELS as m (m)}
+            <option value={m}>{m}</option>
+          {/each}
+        </select>
+      </div>
+      <p class="dim sm">
+        Used only for drafting a PR title/description or a commit message from a
+        diff — a short job that blocks the dialog you are looking at, so it does
+        not inherit the model above. The turn also skips MCP servers and tools,
+        since the diff is already in the prompt. Raise it if drafts come out thin.
       </p>
     </div>
 

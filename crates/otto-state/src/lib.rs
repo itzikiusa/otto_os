@@ -126,7 +126,10 @@ pub use reviews::ReviewsRepo;
 pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
 pub use vault_docs_runs::{VaultDocsRunRow, VaultDocsRunsRepo};
-pub use settings::{otto_mcp_enabled_for, SettingsRepo, OTTO_MCP_ENABLED_KEY};
+pub use settings::{
+    otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, OTTO_MCP_ENABLED_KEY,
+    PR_DRAFT_MODEL_DEFAULT, PR_DRAFT_MODEL_KEY,
+};
 pub use eval_lab::{EvalMatricesRepo, GoldenTaskInput, GoldenTasksRepo};
 pub use skill_evals::SkillEvalsRepo;
 pub use skill_reviews::SkillReviewsRepo;

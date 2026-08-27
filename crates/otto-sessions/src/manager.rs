@@ -69,6 +69,30 @@ fn model_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     vec!["--model".to_string(), model.to_string()]
 }
 
+/// Extra argv for a **lean turn** — a short, mechanical, user-blocking agent
+/// turn (drafting a PR title/description, a commit message) whose prompt is
+/// entirely self-contained.
+///
+/// Opted in with `meta.lean_turn = true`. Two costs dominate such a turn and
+/// neither buys anything here:
+///   * **MCP servers.** Otto injects its own `otto` server into every claude
+///     session; `--strict-mcp-config` with no `--mcp-config` loads none at all.
+///   * **Tool round trips.** The diff is already in the prompt, so `Bash`,
+///     edits and web access can only add latency. Read/Grep/Glob stay allowed
+///     as an escape hatch for a truncated diff.
+///
+/// Claude-only: codex takes neither flag.
+fn lean_turn_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
+    if provider != "claude" || meta.get("lean_turn").and_then(|v| v.as_bool()) != Some(true) {
+        return vec![];
+    }
+    vec![
+        "--strict-mcp-config".to_string(),
+        "--disallowed-tools".to_string(),
+        "Bash Edit Write NotebookEdit WebFetch WebSearch Task".to_string(),
+    ]
+}
+
 /// Per-session creds file for the Codex `otto` MCP server: a daemon-private temp
 /// path (`<tmp>/otto-mcp/<session_id>.json`, mode 0600). Holds the per-session
 /// token so it never appears on Codex's argv; removed when the session is removed.
@@ -1670,6 +1694,7 @@ impl SessionManager {
                 let meta_val = req.meta.clone().unwrap_or(serde_json::json!({}));
                 spec.args.extend(add_dir_args(&provider, &meta_val));
                 spec.args.extend(model_args(&provider, &meta_val));
+                spec.args.extend(lean_turn_args(&provider, &meta_val));
                 // Record the provider_session_id NOW only when Otto assigns it
                 // (claude, via `--session-id {sid}`). Providers that mint their
                 // own id (codex) start with None and have it captured from disk
@@ -4264,6 +4289,22 @@ mod tests {
     // ── model_args tests ────────────────────────────────────────────────────
 
     /// claude with a model set → ["--model", name].
+    #[test]
+    fn lean_turn_args_only_for_opted_in_claude() {
+        let on = serde_json::json!({ "lean_turn": true });
+        let args = lean_turn_args("claude", &on);
+        assert_eq!(args[0], "--strict-mcp-config");
+        assert_eq!(args[1], "--disallowed-tools");
+        // Read/Grep/Glob stay allowed — a truncated diff still needs an escape hatch.
+        assert!(!args[2].contains("Read"), "read-only tools must stay allowed");
+        assert!(args[2].contains("Bash"));
+
+        // Off / absent / wrong provider ⇒ no flags at all.
+        assert!(lean_turn_args("claude", &serde_json::json!({ "lean_turn": false })).is_empty());
+        assert!(lean_turn_args("claude", &serde_json::json!({})).is_empty());
+        assert!(lean_turn_args("codex", &on).is_empty(), "codex takes neither flag");
+    }
+
     #[test]
     fn model_args_claude_with_model() {
         let meta = serde_json::json!({ "model": "claude-opus-4-8" });

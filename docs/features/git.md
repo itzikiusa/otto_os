@@ -24,7 +24,7 @@ step-by-step way to set up a git token so PR creation works.
 | **Forges supported** | GitHub, **Bitbucket Cloud**, GitLab (incl. GitHub Enterprise and self-hosted GitLab via host heuristics). |
 | **How PRs authenticate** | A per-user **git account** (a PAT/app password) stored in the macOS Keychain. |
 | **Branch push on PR create** | Automatic (`git push --set-upstream` for a fresh branch) before the PR is opened. |
-| **Agent drafting** | The "Draft message with agent" button runs your default agent CLI over the branch diff to produce title + Markdown body. |
+| **Agent drafting** | The "Draft message with agent" button runs a lean claude turn over the branch diff to produce title + Markdown body. It runs as a real, watchable Otto session and uses the fast `pr_draft_model` (default `haiku`), not your default agent model. |
 | **Where it lives** | The **Git** section of the app (top-level nav); accounts under **Settings → Git Accounts**. |
 | **Daemon** | `ottod` on `127.0.0.1:7700`; routes under `/api/v1` (contract endpoints #31–#56 plus the extras table). |
 
@@ -318,12 +318,28 @@ branch/commit context menu, which pre-fills the source branch).
    Otto:
    - computes the diff of the current branch against the chosen target
      (`POST /repos/{id}/pr/draft` → server `draft_pr`),
-   - caps the diff at ~40 KB and feeds it to your **default agent CLI** with a
-     prompt asking for an imperative title (~72 chars) and a Markdown body
-     (summary + "What changed" bullets + "Testing" notes),
+   - caps the diff at ~40 KB and feeds it to a **claude turn** with a prompt
+     asking for an imperative title (~72 chars) and a Markdown body (summary +
+     "What changed" bullets + "Testing" notes),
    - fills the **Title** and **Description** fields from the agent's JSON reply.
      You review and edit before creating. (If the branch has no changes vs the
      target, drafting returns an error.)
+
+   The turn runs as a **real Otto session** titled `PR draft · <branch>`, so it
+   appears in Agents the moment it spawns: open it in another window to watch it
+   work — or talk to it — while the dialog stays put. The dialog itself shows an
+   elapsed-seconds counter so a slow turn never looks the same as a wedged one.
+
+   It is deliberately a **lean** turn, which is what keeps it quick:
+   - the model comes from the `pr_draft_model` setting (**Settings ▸ Providers ▸
+     PR & commit draft model**), defaulting to `haiku` — drafting is a short,
+     mechanical job that blocks a dialog, so it does NOT inherit your default
+     agent model. Inheriting a reasoning model is what used to make drafting
+     take minutes;
+   - `lean_turn` passes `--strict-mcp-config` (no MCP servers) and denies
+     `Bash`/`Edit`/`Write`/web tools. The diff and the `pull-request` skill are
+     already in the prompt, so servers and tool round trips are pure latency.
+     `Read`/`Grep`/`Glob` stay allowed as an escape hatch for a truncated diff.
 3. **Create.** On **Create Pull Request**, Otto:
    - **pushes the source branch first** (`POST /repos/{id}/push`,
      `--set-upstream` for a fresh branch) so the provider can see it. A real push

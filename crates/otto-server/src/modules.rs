@@ -3706,7 +3706,12 @@ async fn draft_pr(
 
     // Empty base ⇒ detect the repo's default branch instead of erroring.
     let want = Some(body.base.as_str()).filter(|s| !s.trim().is_empty());
-    let resp = draft_pr_core(&ctx, &repo.path, want)
+    let ws = ctx
+        .workspaces
+        .get(&repo.workspace_id)
+        .await
+        .map_err(crate::error::ApiError)?;
+    let resp = draft_pr_core(&ctx, &ws, &user, &repo.path, want)
         .await
         .map_err(crate::error::ApiError)?;
     Ok(Json(resp))
@@ -3721,17 +3726,47 @@ async fn draft_pr(
 /// fabricated `main`, so a master-/develop-based repo can't exit 128.
 pub(crate) async fn draft_pr_core(
     ctx: &ServerCtx,
+    ws: &otto_core::domain::Workspace,
+    user: &otto_core::domain::User,
     repo_path: &str,
     base: Option<&str>,
 ) -> Result<otto_core::api::DraftPrResp> {
-    // HTTP path: draft with the default agent (orchestrator = claude PTY). The
-    // workflow git_pr node uses `pr_draft_prompt` + `run_node_agent` instead so it
-    // can honor the node's chosen Provider/Model.
+    // Runs as a REAL Otto session, not a throwaway orchestrator PTY. Drafting
+    // blocks a modal for as long as it takes, and the old headless PTY gave the
+    // user nothing to look at — no way to tell "thinking" from "wedged". As a
+    // session it appears in Agents the moment it is created (`on_ready` fires
+    // before the turn completes), so it can be opened in a pane and watched, or
+    // talked to, while the modal is still spinning.
+    //
+    // `lean_turn` + the configured drafting model are what make it quick: the
+    // prompt already carries the diff and the `pull-request` skill, so MCP
+    // servers and tool round trips are pure latency (see `lean_turn_args`).
+    //
+    // The workflow git_pr node uses `pr_draft_prompt` + `run_node_agent` instead
+    // so it can honor the node's chosen Provider/Model.
     let (prompt, source, base_branch) = pr_draft_prompt(ctx, repo_path, base).await?;
-    let reply = ctx
-        .orchestrator
-        .run_agent(&prompt, repo_path, None, std::time::Duration::from_secs(150))
-        .await?;
+    let model = pr_draft_model(ctx).await;
+    let meta = serde_json::json!({
+        "source": "pr-draft",
+        "model": model,
+        "lean_turn": true,
+    });
+    let title = format!("PR draft · {source}");
+    let (reply, session_id) = crate::agent_session::run_session_turn(
+        ctx,
+        ws,
+        user,
+        None,
+        &title,
+        repo_path,
+        "claude",
+        meta,
+        &prompt,
+        DRAFT_STUCK_AFTER,
+        |_id| {},
+    )
+    .await
+    .map_err(|e| e.0)?;
     let (mut title, description) = parse_pr_draft(&reply, &source);
     if let Some(key) = jira_key_from_branch(&source) {
         title = ensure_jira_in_subject(&title, &key);
@@ -3741,7 +3776,22 @@ pub(crate) async fn draft_pr_core(
         description,
         source_branch: source,
         target_branch: base_branch,
+        session_id: Some(session_id),
     })
+}
+
+/// Idle trip for a drafting turn. Generous next to how long the turn *should*
+/// take (seconds), because the session is visible: a user watching it stall is
+/// better served by a live session they can inspect than by a fast error.
+const DRAFT_STUCK_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The model that drafts PR titles/descriptions and commit messages, from the
+/// `pr_draft_model` setting. Falls back to the fast default when unset — never
+/// to the user's default agent model, which is what made drafting take minutes.
+pub(crate) async fn pr_draft_model(ctx: &ServerCtx) -> String {
+    let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
+    let value = repo.get(otto_state::PR_DRAFT_MODEL_KEY).await.ok().flatten();
+    otto_state::pr_draft_model_from(value.as_ref())
 }
 
 /// Build the PR-draft agent prompt for the checkout at `repo_path` vs `base`

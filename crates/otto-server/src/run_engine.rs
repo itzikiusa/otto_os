@@ -504,7 +504,11 @@ async fn stage_draft_pr(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
     // None ⇒ draft_pr_core resolves the repo's detected default branch.
     let base = run.base_branch.clone().filter(|s| !s.trim().is_empty());
 
-    match crate::modules::draft_pr_core(ctx, &wt, base.as_deref()).await {
+    let ws = ctx.workspaces.get(&run.workspace_id).await?;
+    let user = otto_state::UsersRepo::new(ctx.pool.clone())
+        .get(&run.created_by)
+        .await?;
+    match crate::modules::draft_pr_core(ctx, &ws, &user, &wt, base.as_deref()).await {
         Ok(draft) => {
             let json = serde_json::to_string(&draft).unwrap_or_default();
             ctx.runs

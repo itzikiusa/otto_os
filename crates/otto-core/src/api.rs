@@ -1715,6 +1715,12 @@ pub struct DraftPrResp {
     pub description: String,
     pub source_branch: String,
     pub target_branch: String,
+    /// The Otto session that did the drafting. Drafting runs as a REAL session
+    /// (visible in Agents from the moment it spawns, so it can be opened in a
+    /// pane and watched while the modal spins), and this is how the caller links
+    /// to it afterwards. `None` only for callers that draft without a session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Id>,
 }
 
 /// `POST /repos/{id}/draft-commit-message` — ask an agent to draft a commit

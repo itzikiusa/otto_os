@@ -37,6 +37,32 @@ pub fn otto_mcp_enabled_for(value: Option<&serde_json::Value>, workspace_id: &st
     }
 }
 
+/// Settings key for the model that drafts PR titles/descriptions and commit
+/// messages (`POST /repos/{id}/pr/draft`, `…/draft-commit-message`).
+///
+/// These turns are a narrow, mechanical job — read a diff, emit a title and a
+/// bullet list — and they block a modal the user is sitting in front of, so the
+/// default is the FASTEST model rather than the user's default agent model.
+/// Drafting used to inherit the default (Opus) and take minutes. The value is a
+/// bare string (`"haiku"`, `"sonnet"`, a full model id…); anything empty or
+/// non-string falls back to [`PR_DRAFT_MODEL_DEFAULT`]. Stored through the
+/// generic settings KV (`PUT /api/v1/settings`).
+pub const PR_DRAFT_MODEL_KEY: &str = "pr_draft_model";
+
+/// Default drafting model — fast, and more than capable of a title + bullets.
+pub const PR_DRAFT_MODEL_DEFAULT: &str = "haiku";
+
+/// Resolve the drafting model from a settings value, per
+/// [`PR_DRAFT_MODEL_KEY`]. Pure (no I/O) so it is trivially testable.
+pub fn pr_draft_model_from(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(PR_DRAFT_MODEL_DEFAULT)
+        .to_string()
+}
+
 #[derive(Clone)]
 pub struct SettingsRepo {
     pool: SqlitePool,
@@ -116,5 +142,19 @@ mod tests {
         assert!(otto_mcp_enabled_for(Some(&map), "ws3"));
         // Wrong shape ⇒ ON (best-effort attach; the toggle is the off switch).
         assert!(otto_mcp_enabled_for(Some(&json!("yes")), "ws1"));
+    }
+
+    #[test]
+    fn pr_draft_model_falls_back_to_the_fast_default() {
+        // Unset / blank / wrong shape must NEVER fall through to the user's
+        // default agent model — inheriting a reasoning model is what made the
+        // draft dialog sit for minutes.
+        assert_eq!(pr_draft_model_from(None), PR_DRAFT_MODEL_DEFAULT);
+        assert_eq!(pr_draft_model_from(Some(&json!(""))), PR_DRAFT_MODEL_DEFAULT);
+        assert_eq!(pr_draft_model_from(Some(&json!("   "))), PR_DRAFT_MODEL_DEFAULT);
+        assert_eq!(pr_draft_model_from(Some(&json!(true))), PR_DRAFT_MODEL_DEFAULT);
+        // An explicit choice wins, whitespace-trimmed.
+        assert_eq!(pr_draft_model_from(Some(&json!("sonnet"))), "sonnet");
+        assert_eq!(pr_draft_model_from(Some(&json!("  opus  "))), "opus");
     }
 }

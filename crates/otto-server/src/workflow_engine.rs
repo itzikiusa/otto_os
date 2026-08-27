@@ -4003,7 +4003,10 @@ async fn execute_node(
                                 if let Some(key) = crate::modules::jira_key_from_branch(&source) {
                                     title = crate::modules::ensure_jira_in_subject(&title, &key);
                                 }
-                                otto_core::api::DraftPrResp { title, description, source_branch: source, target_branch: base_branch }
+                                otto_core::api::DraftPrResp { title, description, source_branch: source, target_branch: base_branch,
+                                // The workflow node runs the turn itself (honoring the node's
+                                // provider/model), so there is no drafting session to link to.
+                                session_id: None }
                             }
                             Err(e) => {
                                 notes.push(format!("{}: PR draft agent failed ({e})", repo.name));

@@ -2347,6 +2347,10 @@ export interface DraftPrResp {
   description: string;
   source_branch: string;
   target_branch: string;
+  /** The Otto session that drafted this. Drafting runs as a REAL session —
+   *  it appears in Agents the moment it spawns, so it can be opened in a pane
+   *  and watched (or talked to) while the modal is still spinning. */
+  session_id?: Id;
 }
 
 export interface DraftCommitMessageResp {

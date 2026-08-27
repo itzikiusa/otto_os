@@ -4,7 +4,7 @@
   // is pushed automatically (with --set-upstream) right before the PR is opened.
   import Modal from '../../lib/components/Modal.svelte';
   import { api } from '../../lib/api/client';
-  import type { BranchInfo, Collaborator, DraftPrResp, PrSummary } from '../../lib/api/types';
+  import type { BranchInfo, Collaborator, DraftPrResp, Id, PrSummary } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
@@ -25,6 +25,13 @@
   let description = $state('');
   let busy = $state(false);
   let drafting = $state(false);
+  /** Session that drafted (or is drafting). Drafting runs as a REAL Otto
+   *  session, so it shows up in Agents the moment it spawns and can be opened
+   *  in another window/tab and watched while this dialog stays put. */
+  let draftSessionId = $state<Id | null>(null);
+  /** Seconds since the draft started — the whole point is that a long turn
+   *  should never look indistinguishable from a wedged one. */
+  let draftElapsed = $state(0);
   // What the Create button is doing, for the label.
   let phase: '' | 'pushing' | 'creating' = $state('');
 
@@ -112,15 +119,20 @@
       return;
     }
     drafting = true;
+    draftSessionId = null;
+    draftElapsed = 0;
+    const tick = setInterval(() => (draftElapsed += 1), 1000);
     try {
       const d = await api.post<DraftPrResp>(`/repos/${repoId}/pr/draft`, { base: target });
       title = d.title;
       description = d.description;
       if (d.source_branch) source = d.source_branch;
+      draftSessionId = d.session_id ?? null;
       toasts.info('Draft ready', 'Review and edit before creating.');
     } catch (e) {
       toasts.error('Draft failed', e instanceof Error ? e.message : String(e));
     } finally {
+      clearInterval(tick);
       drafting = false;
     }
   }
@@ -221,7 +233,18 @@
         <Icon name="zap" size={11} /> Draft message with agent
       {/if}
     </button>
-    <span class="dim draft-hint">Generates the title + description from your branch diff vs {target || 'target'}.</span>
+    {#if drafting}
+      <span class="dim draft-hint">
+        {draftElapsed}s · running as the <strong>PR draft · {source}</strong> session — open it
+        from Agents to watch it work.
+      </span>
+    {:else if draftSessionId}
+      <span class="dim draft-hint">
+        Drafted by the <strong>PR draft · {source}</strong> session in Agents.
+      </span>
+    {:else}
+      <span class="dim draft-hint">Generates the title + description from your branch diff vs {target || 'target'}.</span>
+    {/if}
   </div>
 
   <div class="field">
