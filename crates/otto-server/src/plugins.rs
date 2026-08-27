@@ -562,19 +562,32 @@ fn mime_for(p: &Path) -> &'static str {
 // ===========================================================================
 
 /// Authenticate a sidecar by its `Authorization: Bearer <OTTO_PLUGIN_TOKEN>`.
-async fn auth_plugin(ctx: &ServerCtx, headers: &HeaderMap) -> Result<PluginRecord, Response> {
+///
+/// The error is BOXED because an `axum::Response` is ~128 bytes: returning one
+/// by value would make every `Result` this produces that wide, on the success
+/// path too (`clippy::result_large_err`). Callers unbox with `return *r`.
+async fn auth_plugin(
+    ctx: &ServerCtx,
+    headers: &HeaderMap,
+) -> Result<PluginRecord, Box<Response>> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
     if token.is_empty() {
-        return Err((StatusCode::UNAUTHORIZED, "missing plugin token").into_response());
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "missing plugin token").into_response(),
+        ));
     }
     match ctx.plugins.repo().find_enabled_by_token(token).await {
         Ok(Some(rec)) => Ok(rec),
-        Ok(None) => Err((StatusCode::UNAUTHORIZED, "invalid plugin token").into_response()),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+        Ok(None) => Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "invalid plugin token").into_response(),
+        )),
+        Err(e) => Err(Box::new(
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        )),
     }
 }
 
@@ -588,7 +601,7 @@ struct HostRepo {
 
 async fn host_repos(State(ctx): State<ServerCtx>, headers: HeaderMap) -> Response {
     if let Err(r) = auth_plugin(&ctx, &headers).await {
-        return r;
+        return *r;
     }
     match ctx.git_store.list_all_repos().await {
         Ok(repos) => Json(
@@ -617,7 +630,7 @@ struct HostJiraAccount {
 
 async fn host_jira_accounts(State(ctx): State<ServerCtx>, headers: HeaderMap) -> Response {
     if let Err(r) = auth_plugin(&ctx, &headers).await {
-        return r;
+        return *r;
     }
     match ctx.issues_store.list_all_accounts().await {
         Ok(accts) => Json(
@@ -656,7 +669,7 @@ async fn host_jira_credentials(
     Query(q): Query<AccountQuery>,
 ) -> Response {
     if let Err(r) = auth_plugin(&ctx, &headers).await {
-        return r;
+        return *r;
     }
     let account = match ctx.issues_store.get_account(&otto_core::Id::from(q.account.as_str())).await {
         Ok(a) => a,
@@ -700,7 +713,7 @@ async fn host_agents_run(
     Json(req): Json<AgentRunReq>,
 ) -> Response {
     if let Err(r) = auth_plugin(&ctx, &headers).await {
-        return r;
+        return *r;
     }
     let cwd = req.cwd.unwrap_or_else(|| ".".into());
     // No workspace context here (plugins are host-scoped), so resolve the default
