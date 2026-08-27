@@ -12,7 +12,10 @@
 //
 // Bump CACHE_NAME on any policy change so `activate` purges the old cache.
 
-const CACHE_NAME = 'otto-shell-v2';
+// v3: v2 could poison itself with a stale (or error) shell — see the navigation
+// handler below. Bumping the name makes `activate` purge every v2 entry once,
+// which is the only way to evict a bad shell from clients already carrying one.
+const CACHE_NAME = 'otto-shell-v3';
 const PRECACHE_URLS = ['/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
@@ -51,8 +54,15 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(event.request)
         .then((resp) => {
-          const clone = resp.clone();
-          caches.open(CACHE_NAME).then((c) => c.put(event.request, clone));
+          // ONLY cache a good shell. The daemon restarts on every deploy, and a
+          // request landing in that window can come back 502/503 — caching that
+          // pins a broken or outdated shell that later loads happily from
+          // cache-first hashed assets, so the app silently keeps running an old
+          // build across reloads. Anything non-OK is passed through uncached.
+          if (resp && resp.ok) {
+            const clone = resp.clone();
+            caches.open(CACHE_NAME).then((c) => c.put(event.request, clone));
+          }
           return resp;
         })
         .catch(() => caches.match(event.request).then((c) => c || caches.match('/'))),

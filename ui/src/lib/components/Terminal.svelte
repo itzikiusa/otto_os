@@ -1070,7 +1070,18 @@
           if (sel) {
             e.preventDefault();
             e.stopPropagation();
-            void copyText(sel);
+            // Say so when the browser refuses. A blocked copy is otherwise
+            // indistinguishable from a working one until you paste and get the
+            // PREVIOUS clipboard entry — which reads as "copy did nothing" and
+            // is impossible to tell from a stale page or a dead shortcut.
+            void copyText(sel).then((ok) => {
+              if (!ok) {
+                toasts.error(
+                  'Copy blocked',
+                  'The browser refused the clipboard write. Right-click → Copy still works.',
+                );
+              }
+            });
             return false; // never let this reach the PTY as ^C
           }
         }

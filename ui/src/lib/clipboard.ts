@@ -26,14 +26,27 @@
  *  http / cert-degraded origins and older webviews. Never throws — returns
  *  whether the copy is believed to have succeeded. */
 export async function copyText(text: string): Promise<boolean> {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+  // `document.hasFocus()` is part of the GUARD, not an optimisation. Chrome
+  // rejects `writeText` with `NotAllowedError: Document is not focused` on an
+  // unfocused document, and awaiting that rejection is fatal to the fallback:
+  // once we have awaited, the user-gesture window has closed, so the
+  // `execCommand` path in the catch fails too and BOTH routes die silently.
+  // Checking first means the unfocused case never awaits at all — `legacyCopy`
+  // runs synchronously, still inside the gesture that called us.
+  const canUseAsync =
+    typeof navigator !== 'undefined' &&
+    !!navigator.clipboard &&
+    window.isSecureContext &&
+    (typeof document === 'undefined' || document.hasFocus());
+  if (canUseAsync) {
+    try {
       await navigator.clipboard.writeText(text);
       return true;
+    } catch {
+      // Refused anyway (permission policy, a focus race, a cert-degraded
+      // origin). Try the legacy path even though the gesture may be spent — it
+      // sometimes still lands, and a failed attempt costs nothing.
     }
-  } catch {
-    // Present but refused (permission policy, unfocused document, …) — the
-    // legacy path below often still works, so fall through rather than fail.
   }
   return legacyCopy(text);
 }
