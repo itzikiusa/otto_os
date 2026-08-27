@@ -329,11 +329,54 @@ fn split_branch_fields(
     (None, Some(b), Some(note))
 }
 
-/// Strip Slack entity tokens so the structured parser sees clean text: `<@U…>`
-/// mentions, `<#C…>` channel refs and `<!here>` are removed; `<url|label>` links
-/// keep their label. (A leading bot mention is what otherwise breaks the first
-/// `Action: Workflow` line.)
+/// Strip Slack entity tokens, then decode Slack's HTML escapes, so the
+/// structured parser sees the text the user actually typed: `<@U…>` mentions,
+/// `<#C…>` channel refs and `<!here>` are removed; `<url|label>` links keep
+/// their label; `&amp;`/`&lt;`/`&gt;` become `&`/`<`/`>`.
+///
+/// The ORDER matters and is the whole point of doing both here. Slack escapes
+/// `&`, `<` and `>` in message text, so a `<` that survives to the token scan
+/// can only be a real Slack token — a literal one the user typed arrives as
+/// `&lt;`. Stripping first and decoding after therefore can't turn a user's
+/// `<foo>` into a token, and can't leave an entity inside a link label.
+///
+/// Without the decode, `&` in a workflow name was fatal: `Name: A &amp; B` never
+/// matched the workflow actually called `A & B` (the lookup is an exact
+/// `name = ? COLLATE NOCASE`), so `try_start` returned `None` and the message
+/// fell through to a plain chat session with no error anywhere.
 fn strip_slack_tokens(text: &str) -> String {
+    decode_html_entities(&strip_entity_tokens(text))
+}
+
+/// Slack's `&amp;` / `&lt;` / `&gt;` → `&` / `<` / `>`. Single left-to-right
+/// pass, so `&amp;lt;` decodes to the literal `&lt;` rather than to `<`.
+/// Slack escapes exactly these three characters and nothing else, so this
+/// deliberately does NOT implement general HTML entity decoding — inventing
+/// extra entities would corrupt text Slack never escaped.
+fn decode_html_entities(text: &str) -> String {
+    const ENTITIES: &[(&str, char)] = &[("&amp;", '&'), ("&lt;", '<'), ("&gt;", '>')];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        match ENTITIES.iter().find(|(pat, _)| tail.starts_with(pat)) {
+            Some((pat, ch)) => {
+                out.push(*ch);
+                rest = &tail[pat.len()..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The token pass of [`strip_slack_tokens`] — see there for why it runs first.
+fn strip_entity_tokens(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let bytes = text.as_bytes();
@@ -1143,6 +1186,35 @@ mod tests {
             parse_workflow_command(own_line).unwrap().name,
             "Write tests for a story"
         );
+    }
+
+    #[test]
+    fn slack_html_escapes_are_decoded_in_field_values() {
+        // Slack escapes `&`, `<` and `>` in message text, so a workflow whose
+        // name contains an ampersand arrived as `A &amp; B` and never matched
+        // the row named `A & B` (an exact `name = ? COLLATE NOCASE` lookup) —
+        // try_start returned None and the trigger silently became a chat
+        // session. Every `… fetch &amp; review` workflow was unreachable from
+        // Slack because of this.
+        let text =
+            "Action: Workflow\nName: Game Attributes &amp; Games Update\nMsg: a &lt;b&gt; c\n";
+        let cmd = parse_workflow_command(text).unwrap();
+        assert_eq!(cmd.name, "Game Attributes & Games Update");
+        assert_eq!(cmd.msg, "a <b> c");
+    }
+
+    #[test]
+    fn entity_decode_runs_after_token_stripping() {
+        // A `<` the user actually typed reaches us as `&lt;`, so it must never
+        // be re-scanned as a Slack token: decoding strictly after the token
+        // pass is what guarantees that. `&amp;lt;` is a literal `&lt;`, not `<`.
+        assert_eq!(decode_html_entities("&amp;lt;"), "&lt;");
+        assert_eq!(strip_slack_tokens("&lt;@U123&gt;"), "<@U123>");
+        assert_eq!(strip_slack_tokens("<@U123> hi"), " hi");
+        // A bare `&` (Slack does escape it, but be forgiving) survives intact.
+        assert_eq!(strip_slack_tokens("A & B &nbsp; C"), "A & B &nbsp; C");
+        // Entities inside a `<url|label>` label are decoded too.
+        assert_eq!(strip_slack_tokens("<https://x/y|A &amp; B>"), "A & B");
     }
 
     #[test]

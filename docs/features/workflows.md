@@ -492,6 +492,18 @@ starts a run whose **input carries every parsed field** (`trigger:"chat"`, `chan
 info" agent) can consolidate the ticket / working dir / paths into a brief for the
 rest of the graph — and replies in-thread (*"🚀 Started workflow … (run `…`)"*).
 
+`Name:` must match a workflow **exactly** (`name = ? COLLATE NOCASE`). Before
+matching, `strip_slack_tokens` removes Slack's entity tokens (`<@U…>`, `<#C…>`,
+`<!here>`; `<url|label>` keeps the label) and *then* decodes Slack's HTML escapes
+(`&amp;`/`&lt;`/`&gt;`) — in that order, so a `<` the user actually typed
+(delivered as `&lt;`) can never be re-scanned as a Slack token. The decode is
+not cosmetic: Slack escapes `&` in message text, so a workflow named
+*"Provider — games fetch & review"* arrived as `… fetch &amp; review`, matched
+nothing, and `try_start` returned `None` — the trigger became a plain chat
+session with **no error reported anywhere**. If a name still doesn't match,
+that silent fall-through is the symptom to look for (the daemon logs
+`parsed Action:Workflow but no workflow named '…' exists — ignoring`).
+
 **Worked example — trigger the "Write tests for a story" template from Slack.**
 Instantiate the `write-tests` template (workflow name *"Write tests for a story"*),
 then post this where the Otto bot is configured for the workspace (`Name:` must
