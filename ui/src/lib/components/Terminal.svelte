@@ -110,6 +110,10 @@
    *  composer resize, etc.) into one rAF so rapid TUI frames don't thrash. */
   let tuiRefreshRaf: number | null = null;
 
+  /** True while an IME composition is open on xterm's textarea — the selection
+   *  mirror must leave the textarea alone for its duration. */
+  let composing = false;
+
   let connected = $state(false);
   let exitCode: number | null = $state(null);
   let disconnected = $state(false);
@@ -1109,18 +1113,41 @@
       sendJson({ type: 'input', data: textToBase64(data) });
     });
 
-    // Copy-on-select: when enabled, immediately copy any new selection to the
-    // clipboard so the user doesn't have to press ⌘C. Implemented via the
-    // selection-change event (no xterm built-in; works across all renderers).
-    // Goes through `copyText` (never throws, falls back to execCommand): the
-    // old `navigator.clipboard.writeText(...).catch(...)` threw a SYNCHRONOUS
-    // TypeError on any origin without the async API — the `.catch()` never ran,
-    // and the throw landed inside xterm's selection-change emitter.
     term.onSelectionChange(() => {
-      if (!ui.termCopyOnSelect) return;
-      if (!term || !term.hasSelection()) return;
-      const text = term.getSelection();
-      if (text) void copyText(text);
+      if (!term) return;
+      const text = term.hasSelection() ? term.getSelection() : '';
+
+      // Mirror the selection into xterm's hidden textarea and select it there.
+      //
+      // This is what actually makes ⌘C work, and it is not optional. xterm
+      // paints its selection with the renderer; the DOCUMENT has no selection,
+      // so every "copy" path that asks the document what to copy comes up
+      // empty. In a plain browser that means the copy command stays disabled
+      // and no `copy` event ever fires. In the Tauri app it is worse: the
+      // native Edit ▸ Copy item (`apps/desktop/src-tauri/src/main.rs`,
+      // `PredefinedMenuItem::copy`) owns the ⌘C key equivalent at the AppKit
+      // level, so the keydown never reaches the page at all — WebKit runs
+      // `copy:` against an empty DOM selection and the clipboard silently keeps
+      // whatever it held before. Giving the textarea a real selection fixes
+      // both: the command becomes enabled and operates on the right text.
+      //
+      // Safe to stuff the textarea: xterm's `_inputEvent` sends `e.data` (the
+      // inserted text), never `textarea.value`, which is why xterm's own
+      // `rightClickHandler` already does exactly this on contextmenu. Skipped
+      // mid-IME-composition, where the textarea belongs to the input method.
+      const ta = term.textarea;
+      if (ta && !composing) {
+        ta.value = text;
+        if (text) ta.select();
+      }
+
+      // Copy-on-select: when enabled, any new selection goes straight to the
+      // clipboard so the user never has to press ⌘C. Goes through `copyText`
+      // (never throws, falls back to execCommand): the old
+      // `navigator.clipboard.writeText(...).catch(...)` threw a SYNCHRONOUS
+      // TypeError on any origin without the async API — the `.catch()` never
+      // ran, and the throw landed inside xterm's selection-change emitter.
+      if (ui.termCopyOnSelect && text) void copyText(text);
     });
     term.onBinary((data) => {
       if (readOnly) return;
@@ -1131,6 +1158,33 @@
     });
 
     const textarea = term.textarea;
+
+    // The textarea is the IME's scratch space during composition; the
+    // selection mirror above must not touch it while a composition is open.
+    const onCompStart = () => {
+      composing = true;
+    };
+    const onCompEnd = () => {
+      composing = false;
+    };
+    textarea?.addEventListener('compositionstart', onCompStart);
+    textarea?.addEventListener('compositionend', onCompEnd);
+
+    // Whatever triggers the copy — the page's own ⌘C, the browser's
+    // right-click ▸ Copy, or the Tauri app's native Edit ▸ Copy — the bytes
+    // must be the TERMINAL's selection, not whatever the mirrored textarea
+    // happens to hold (it can lag a redraw, and xterm trims trailing
+    // whitespace differently). Capture phase so this wins over xterm's own
+    // `copy` listener, which reads the same selection but only fires when it
+    // already believes there is one.
+    const onCopy = (e: ClipboardEvent) => {
+      const sel = term?.hasSelection() ? term.getSelection() : '';
+      if (!sel) return; // nothing selected in the terminal — let the page be
+      e.clipboardData?.setData('text/plain', sel);
+      e.preventDefault();
+    };
+    container.addEventListener('copy', onCopy, true);
+
     const onFocus = () => {
       keyContext.terminalFocused = true;
       keyContext.openFind = openFind;
@@ -1229,7 +1283,10 @@
       termDidInit = false;
       textarea?.removeEventListener('focus', onFocus);
       textarea?.removeEventListener('blur', onBlur);
+      textarea?.removeEventListener('compositionstart', onCompStart);
+      textarea?.removeEventListener('compositionend', onCompEnd);
       container.removeEventListener('paste', onPaste, true);
+      container.removeEventListener('copy', onCopy, true);
       onBlur();
       sock?.close();
       sock = null;
