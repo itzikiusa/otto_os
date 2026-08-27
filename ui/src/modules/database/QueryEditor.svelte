@@ -236,6 +236,16 @@
   }
 
   function run(): void {
+    // A mongosh SCRIPT is INDIVISIBLE. `statementAtCursor` cuts on top-level
+    // `;`, which for real JavaScript slices the file into fragments that share
+    // no scope — running one alone either does nothing visible (the leading
+    // `const …;`) or dies on an undefined variable from an earlier fragment.
+    // With no explicit selection, Run therefore executes the whole buffer,
+    // exactly what the script notice above the editor promises.
+    if (isMongoshScript && !editorSel.text.trim()) {
+      execBase(tab.statement);
+      return;
+    }
     // Run the selection if there is one, else the statement under the cursor.
     execBase(
       editorSel.text.trim()
@@ -597,12 +607,19 @@
         Stop
       </button>
     {:else}
-      <button class="btn small primary" onclick={run} disabled={!database.selectedConnId}>
+      <button
+        class="btn small primary"
+        onclick={run}
+        disabled={!database.selectedConnId}
+        title={isMongoshScript
+          ? 'Run the WHOLE script through mongosh — a script is indivisible, so Run never sends a single ;-delimited fragment (⌘↵)'
+          : 'Run the selection, else the statement under the cursor (⌘↵)'}
+      >
         <Icon name="play" size={12} />
         Run
         <span class="kbd">⌘↵</span>
       </button>
-      {#if stmtCount > 1}
+      {#if stmtCount > 1 && !isMongoshScript}
         <button
           class="btn small"
           onclick={runAll}
@@ -812,8 +829,9 @@
     <div class="qe-script" class:missing={mongoshInfo?.available === false} data-testid="mongosh-script-bar">
       <Icon name="zap" size={11} />
       <span>
-        mongosh script detected — Run executes it through the real
+        mongosh script detected — Run executes the WHOLE file through the real
         <code class="mono">mongosh</code> CLI against this connection (counts as a write).
+        Select a region first to run only that part.
       </span>
       {#if mongoshInfo === null}
         <span class="qe-script-state dim">checking for mongosh…</span>
@@ -902,10 +920,12 @@
         <PlanView plan={database.queryPlan} onclose={() => database.closePlan()} />
       </div>
     {/if}
+    <!-- `statement` is the one that PRODUCED these rows, not the live buffer: the
+         grid describes what is on screen (see QueryTab.ran_statement). -->
     <ResultsGrid
       result={tab.result}
       error={tab.error}
-      statement={tab.statement}
+      statement={tab.ran_statement ?? tab.statement}
       connectionId={database.selectedConnId}
       running={tab.running}
       offset={tab.offset}

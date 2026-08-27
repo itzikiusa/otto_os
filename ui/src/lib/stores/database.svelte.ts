@@ -325,6 +325,16 @@ export interface QueryTab {
   name: string;
   statement: string;
   result: QueryResult | null;
+  /**
+   * The statement that PRODUCED `result` — not what is currently in the editor.
+   * The grid's editability probe, "Copy as INSERT" target, filter-chip splices
+   * and "Export all rows…" all describe the rows ON SCREEN, so they must key off
+   * this and not the live buffer: keying them off the editor text made the whole
+   * result toolbar re-derive (and visibly flicker) on EVERY keystroke, and would
+   * have exported / spliced a query the user was still typing. Transient — a
+   * reload has no result to describe.
+   */
+  ran_statement: string | null;
   running: boolean;
   error: string | null;
   /** Quick-filter chips that own the statement's WHERE clause. */
@@ -399,6 +409,7 @@ function blankTab(statement = ''): QueryTab {
     name: 'Query',
     statement,
     result: null,
+    ran_statement: null,
     running: false,
     error: null,
     filters: [],
@@ -1896,6 +1907,7 @@ class DatabaseStore {
         }
       }
       t.result = result;
+      t.ran_statement = sql;
       this.clearPending(t);
       void this.loadHistory(id);
       return result;
@@ -2022,6 +2034,7 @@ class DatabaseStore {
         : { statement: stmt, max_rows: this.rowLimit, node: this.activeDb || null, explain: true };
       const result = await api.post<QueryResult>(`${this.connBase(id)}/query`, body);
       t.result = result;
+      t.ran_statement = stmt;
       return result;
     } catch (e) {
       t.error = errMsg(e);
@@ -2168,6 +2181,9 @@ class DatabaseStore {
         if (st.error != null) t.error = st.error;
         else if (st.result) {
           t.result = st.result;
+          // A re-attached run's statement is whatever was in the editor when it
+          // started; the server doesn't hand it back, so fall back to the buffer.
+          t.ran_statement = t.ran_statement ?? t.statement;
           t.error = null;
         }
         void this.loadHistory(pending.connId);

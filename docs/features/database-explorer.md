@@ -482,6 +482,13 @@ surfaces the tail of both streams as the error.
   the binary: ✓ + version when present, or the install hint inline **before**
   you run — a missing binary is never a silent failure or a surprise run-time
   error.
+- **Run sends the WHOLE buffer** for a script. A script is indivisible — the
+  usual "run the statement under the cursor" split (on top-level `;`) would cut
+  real JavaScript into fragments that share no scope, so ⌘↵ used to execute the
+  leading `const …;` alone (silently doing nothing) or a middle fragment that
+  died on a variable defined earlier in the file. Select a region first if you
+  genuinely want to run only part of it; "Run all" is hidden for scripts because
+  the plain Run already is one.
 - Scripts are capped at 30 minutes and 10,000 output lines (truncated badge
   beyond).
 
@@ -567,9 +574,12 @@ preserving `ORDER BY`/`LIMIT`/`GROUP BY`/ClickHouse `SETTINGS`·`FORMAT` tails,
 parenthesizing an existing `OR` before the `AND`, and `IS NULL` for null cells.
 The items are hidden when the active statement can't be safely filtered (a
 non-`SELECT`, a multi-statement buffer, or a Mongo aggregate) and for engines
-without a query language (Redis). The base for the rewrite is the editor's
-current statement, so if you edit the query without re-running, the filter
-splices onto the edited text.
+without a query language (Redis). The base for the rewrite is the statement that
+PRODUCED the rows on screen (`QueryTab.ran_statement`), not the editor's live
+text — the grid always describes what you are looking at. That is also why
+editability, the "Copy as INSERT" target and "Export all rows…" no longer
+re-derive (and visibly flicker, one `object_detail` probe per keystroke) while
+you type the next query.
 
 ### Approval-gated inline editing
 
