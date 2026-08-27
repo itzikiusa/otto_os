@@ -124,6 +124,31 @@
     ]);
   }
 
+  /** Right-click a folder row: the same two actions a file row offers, applied
+   *  to every file under it (recursively — `files` carries the whole subtree). */
+  function folderMenu(
+    e: MouseEvent,
+    node: TFolder,
+    section: 'unstaged' | 'staged',
+  ): void {
+    e.preventDefault();
+    const paths = node.files.map((f) => f.path);
+    const n = `${paths.length} file${paths.length === 1 ? '' : 's'}`;
+    ctxMenu.show(e, [
+      {
+        label: `${section === 'staged' ? 'Unstage' : 'Stage'} ${node.name}/ (${n})`,
+        action: () => void stagePaths(paths, section === 'unstaged'),
+      },
+      { separator: true },
+      {
+        label: `Discard ${node.name}/ (${n})`,
+        icon: 'trash',
+        danger: true,
+        action: () => void discardPaths(paths, `${node.path}/ (${n})`),
+      },
+    ]);
+  }
+
   // ── Folder tree (shared shape with the old Changes tab) ────────────────────
   type TFile = { type: 'file'; name: string; change: FileChange };
   type TFolder = {
@@ -291,7 +316,12 @@
          (recursively — node.files carries the whole subtree) in one call, the
          same affordance file rows have. The name/chevron only folds — a name
          click must never mutate the index. -->
-    <div class="wp-folder" style="padding-inline-start:{8 + depth * 14}px">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="wp-folder"
+      style="padding-inline-start:{8 + depth * 14}px"
+      oncontextmenu={(e) => folderMenu(e, node, section)}
+    >
       <input
         type="checkbox"
         checked={section === 'staged'}
@@ -309,6 +339,20 @@
         <Icon name="folder" size={12} />
         <span class="wp-fold-label">{node.name}</span>
         <span class="wp-fold-count">{node.files.length}</span>
+      </button>
+      <!-- Discard the whole folder in one confirmed call — the counterpart to
+           the folder checkbox, which already stages/unstages the subtree. -->
+      <button
+        class="wp-discard"
+        title="Discard changes to every file under {node.path}/"
+        aria-label="Discard folder {node.path}"
+        onclick={() =>
+          void discardPaths(
+            node.files.map((f) => f.path),
+            `${node.path}/ (${node.files.length} file${node.files.length === 1 ? '' : 's'})`,
+          )}
+      >
+        <Icon name="trash" size={12} />
       </button>
     </div>
     {#if !collapsed.has(key)}
@@ -353,6 +397,22 @@
               }
             }}
           >Stage all</span>
+          <span
+            class="wp-sec-action danger"
+            role="button"
+            tabindex="-1"
+            title="Discard changes to all unstaged files"
+            onclick={(e) => {
+              e.stopPropagation();
+              void discardPaths(unstaged.map((c) => c.path), 'all unstaged files');
+            }}
+            onkeydown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.stopPropagation();
+                void discardPaths(unstaged.map((c) => c.path), 'all unstaged files');
+              }
+            }}
+          >Discard all</span>
         {/if}
       </button>
       {#if unstagedOpen}
@@ -389,6 +449,22 @@
               }
             }}
           >Unstage all</span>
+          <span
+            class="wp-sec-action danger"
+            role="button"
+            tabindex="-1"
+            title="Discard changes to all staged files"
+            onclick={(e) => {
+              e.stopPropagation();
+              void discardPaths(staged.map((c) => c.path), 'all staged files');
+            }}
+            onkeydown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.stopPropagation();
+                void discardPaths(staged.map((c) => c.path), 'all staged files');
+              }
+            }}
+          >Discard all</span>
         {/if}
       </button>
       {#if stagedOpen}
@@ -569,6 +645,12 @@
   .wp-sec-action:hover {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
+  .wp-sec-action.danger {
+    color: var(--status-exited);
+  }
+  .wp-sec-action.danger:hover {
+    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
+  }
   .wp-list {
     padding: 4px 2px;
   }
@@ -619,7 +701,8 @@
     transition: opacity 100ms ease-out;
   }
   .wp-file:hover .wp-discard,
-  .wp-file.selected .wp-discard {
+  .wp-file.selected .wp-discard,
+  .wp-folder:hover .wp-discard {
     opacity: 1;
   }
   .wp-discard:hover {

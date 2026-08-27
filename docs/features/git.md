@@ -241,8 +241,11 @@ The **Changes** tab is the working-tree view, backed by `git status`:
   WIP panel's trees offer this at every level: a checkbox per **file**, per
   **folder** (stages/unstages the whole subtree in one call), and per section
   ("Stage all" / "Unstage all").
-- **Discard** un-staged changes to selected paths (`POST /repos/{id}/discard`) —
-  this reverts/removes working-tree changes, so confirm before using it.
+- **Discard** changes to selected paths (`POST /repos/{id}/discard`) — this
+  reverts/removes working-tree changes, so it always confirms first. Offered at
+  the same three levels as staging: the trash button (or context menu) on a
+  **file**, on a **folder** (the whole subtree in one confirmed call), and
+  "Discard all" per section.
 - **Commit** the staged changes (`POST /repos/{id}/commit`, returns the new
   `{sha}`); supports **amend**.
 - **Draft a commit message with an agent** — `POST /repos/{id}/draft-commit-message`
@@ -425,6 +428,17 @@ distinction from the **"Draft message with agent"** button, which drafts the
 | `POST /repos/{id}/stage` · `/unstage` · `/discard` | ws editor | `StagePathsReq` → `RepoStatusResp` |
 | `POST /repos/{id}/commit` | ws editor | `CommitReq` (`amend`) → `{sha}` |
 | `POST /repos/{id}/push` · `/pull` · `/fetch` | ws editor | Returns fresh `RepoStatusResp` |
+
+> **Why a failed pull isn't a 502.** Git failures used to map wholesale to
+> `Error::Upstream` → **502**, and the UI reads a 502 as "the git provider is
+> unavailable" and raises the global outage banner. But a pull that stops on a
+> dirty tree, an unconfigured upstream, divergent branches or an unfinished
+> merge never dialled the remote at all — nothing is down. Those messages
+> (matched on git's stable wording, `local_refusal` in `otto-git/src/local.rs`)
+> now return **409** with git's own line, so you get "Please commit your changes
+> or stash them before you merge" instead of a false provider outage. A real
+> network/auth failure is still a 502.
+
 | `POST /repos/{id}/checkout` | ws editor | `CheckoutReq` (`create`) |
 | `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; conflict → 502 with git stderr |
 | `POST /repos/{id}/branch` · `/branch/rename` · `/branch/delete` | ws editor | Create / rename / delete branch |
