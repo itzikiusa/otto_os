@@ -256,5 +256,31 @@ test.describe('desktop terminal copy', () => {
       withAlt.length,
       '⌥-drag forces a selection despite mouse reporting',
     ).toBeGreaterThan(0);
+    // It must be the WHOLE dragged region, not one line — the drag spans rows.
+    expect(
+      withAlt.split('\n').length,
+      '⌥-drag selects every row it covers, not a single line',
+    ).toBeGreaterThan(1);
+
+    // End-to-end: ⌥-drag then plain ⌘C (⌥ is for the DRAG only) must put the
+    // full multi-line selection on the clipboard. This is the path a user
+    // actually takes; right-click ▸ Copy is the fallback, and it only preserves
+    // a drag when the click lands INSIDE the selection (xterm's
+    // `rightClickSelect` → `_isClickInSelection`), otherwise it re-selects the
+    // word under the pointer.
+    await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__ottoCopied = '';
+      document.addEventListener('copy', (e: ClipboardEvent) => {
+        (window as unknown as Record<string, unknown>).__ottoCopied =
+          e.clipboardData?.getData('text/plain') ?? '';
+      });
+    });
+    await page.keyboard.press('ControlOrMeta+c');
+    await page.waitForTimeout(500);
+    const copied = await page.evaluate(
+      () => (window as unknown as Record<string, string>).__ottoCopied,
+    );
+    console.log('[alt-drag-copy]', JSON.stringify(copied.slice(0, 60)));
+    expect(copied.split('\n').length, '⌘C copies every selected row').toBeGreaterThan(1);
   });
 });
