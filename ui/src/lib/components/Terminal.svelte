@@ -113,6 +113,11 @@
   /** True while an IME composition is open on xterm's textarea — the selection
    *  mirror must leave the textarea alone for its duration. */
   let composing = false;
+  /** Set by the `copy` listener below. The ⌘C path leaves the browser's native
+   *  copy command to run (it needs no clipboard permission); this is how it
+   *  tells whether that actually happened, so the permissioned API is only
+   *  used when the native one genuinely did nothing. */
+  let copySawEvent = false;
 
   let connected = $state(false);
   let exitCode: number | null = $state(null);
@@ -1080,26 +1085,40 @@
             // on an origin the browser de-privileges (the self-signed
             // `0.0.0.0` listener) the async API is refused and the copy dies,
             // even though the native command would have succeeded.
-            const nativeCanCopy = !!document.getSelection()?.toString();
-            if (nativeCanCopy) {
-              e.stopPropagation();
-              return false;
+            // Re-mirror RIGHT HERE, synchronously, before the browser runs its
+            // copy command. `onSelectionChange` normally does this, but if it
+            // was missed for any reason the textarea would be empty and the
+            // native copy would have nothing to take — which is precisely the
+            // greyed-out Edit ▸ Copy symptom.
+            const ta = term.textarea;
+            if (ta && !composing && ta.value !== sel) {
+              ta.value = sel;
+              ta.select();
             }
-            // No DOM selection to copy from (canvas renderer, mirror refused).
-            // Now the async API is the only route left — take it, and SAY SO
-            // when it is refused. A blocked copy is otherwise indistinguishable
-            // from a working one until you paste and get the PREVIOUS entry.
-            e.preventDefault();
+            // Do NOT preventDefault: the browser's own copy command needs no
+            // permission, and the mirrored textarea gives it something to copy.
+            // (Deliberately NOT gated on `document.getSelection()` — Chromium
+            // does not surface a textarea's internal selection there, so that
+            // check reads empty exactly when the mirror is working and would
+            // send us down the permissioned path the browser is refusing.)
+            copySawEvent = false;
             e.stopPropagation();
-            void copyText(sel).then((ok) => {
-              if (!ok) {
-                toasts.error(
-                  'Copy blocked',
-                  'The browser refused the clipboard write. Right-click → Copy still works.',
-                );
-              }
-            });
-            return false;
+            // If the browser never fires `copy`, nothing was copied and the
+            // async API is the only route left. Say so when that is refused
+            // too — a silent failure is indistinguishable from a working copy
+            // until you paste and get the PREVIOUS clipboard entry.
+            setTimeout(() => {
+              if (copySawEvent) return;
+              void copyText(sel).then((ok) => {
+                if (!ok) {
+                  toasts.error(
+                    'Copy blocked',
+                    'The browser refused the clipboard write. Right-click → Copy still works.',
+                  );
+                }
+              });
+            }, 80);
+            return false; // suppress xterm only — never ^C to the PTY
           }
         }
       }
@@ -1208,6 +1227,7 @@
     const onCopy = (e: ClipboardEvent) => {
       const sel = term?.hasSelection() ? term.getSelection() : '';
       if (!sel) return; // nothing selected in the terminal — let the page be
+      copySawEvent = true; // the native command ran; no need for the async API
       e.clipboardData?.setData('text/plain', sel);
       e.preventDefault();
     };

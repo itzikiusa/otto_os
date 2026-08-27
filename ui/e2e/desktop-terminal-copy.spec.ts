@@ -121,4 +121,61 @@ test.describe('desktop terminal copy', () => {
       )
       .toContain('OTTOCOPY');
   });
+
+  // The subtler half of the same bug. The selection mirror puts the text INSIDE
+  // xterm's hidden textarea and calls `select()` — and Chromium does not expose
+  // a textarea's internal selection through `document.getSelection()`. So any
+  // "is there something to copy?" check written against the document Selection
+  // API reads EMPTY exactly when the mirror is doing its job, and sends ⌘C down
+  // the permissioned path the browser is refusing. Forcing the selection into
+  // the textarea reproduces that state directly.
+  test('⌘C copies when the selection lives only inside the helper textarea', async ({
+    page,
+    context,
+  }) => {
+    await context.clearPermissions();
+    await page.goto(`/#/agents/${sessionId}`);
+    await expect(page.locator('.xterm-rows')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText('OTTOCOPY-5', { exact: false }).first()).toBeVisible({
+      timeout: 20_000,
+    });
+
+    const box = await page.locator('.xterm-screen').boundingBox();
+    if (!box) throw new Error('no .xterm-screen box');
+    await page.mouse.move(box.x + 8, box.y + 20);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 40, box.y + 120, { steps: 25 });
+    await page.mouse.up();
+
+    const forced = await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__ottoCopied = '';
+      document.addEventListener('copy', (e: ClipboardEvent) => {
+        (window as unknown as Record<string, unknown>).__ottoCopied =
+          e.clipboardData?.getData('text/plain') ?? '';
+      });
+      // Collapse the document selection into the textarea, the state the mirror
+      // actually produces.
+      const ta = document.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+      ta?.focus();
+      ta?.select();
+      return {
+        mirror: (ta?.value ?? '').slice(0, 200),
+        domSel: String(document.getSelection() ?? '').slice(0, 60),
+      };
+    });
+    // Not asserted as empty: Chromium's behaviour here is version-dependent,
+    // which is exactly why the copy path must not be gated on it. Recorded so a
+    // future failure shows which selection actually existed.
+    console.log('[forced-selection]', JSON.stringify(forced));
+    expect(forced.mirror, 'the mirror holds the terminal selection').toContain('OTTOCOPY');
+
+    await page.keyboard.press('ControlOrMeta+c');
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() => (window as unknown as Record<string, string>).__ottoCopied),
+        { timeout: 5_000 },
+      )
+      .toContain('OTTOCOPY');
+  });
 });
