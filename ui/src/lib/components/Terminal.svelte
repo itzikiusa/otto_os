@@ -1068,12 +1068,29 @@
         if (chord && term?.hasSelection()) {
           const sel = term.getSelection();
           if (sel) {
+            // Suppress xterm (never send ^C to the PTY) but do NOT
+            // preventDefault: let the browser run its OWN copy command. The
+            // selection mirror above has given the document a real selection,
+            // so the native path works — and the `copy` listener below fills
+            // the clipboard with the exact terminal text.
+            //
+            // This ordering is the whole point. Calling preventDefault here and
+            // routing through `navigator.clipboard` REPLACES a permission-free
+            // native copy with a permissioned one, which is strictly worse:
+            // on an origin the browser de-privileges (the self-signed
+            // `0.0.0.0` listener) the async API is refused and the copy dies,
+            // even though the native command would have succeeded.
+            const nativeCanCopy = !!document.getSelection()?.toString();
+            if (nativeCanCopy) {
+              e.stopPropagation();
+              return false;
+            }
+            // No DOM selection to copy from (canvas renderer, mirror refused).
+            // Now the async API is the only route left — take it, and SAY SO
+            // when it is refused. A blocked copy is otherwise indistinguishable
+            // from a working one until you paste and get the PREVIOUS entry.
             e.preventDefault();
             e.stopPropagation();
-            // Say so when the browser refuses. A blocked copy is otherwise
-            // indistinguishable from a working one until you paste and get the
-            // PREVIOUS clipboard entry — which reads as "copy did nothing" and
-            // is impossible to tell from a stale page or a dead shortcut.
             void copyText(sel).then((ok) => {
               if (!ok) {
                 toasts.error(
@@ -1082,7 +1099,7 @@
                 );
               }
             });
-            return false; // never let this reach the PTY as ^C
+            return false;
           }
         }
       }
