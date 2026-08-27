@@ -202,7 +202,13 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
             &PredefinedMenuItem::cut(handle, None)?,
             &PredefinedMenuItem::copy(handle, None)?,
             &PredefinedMenuItem::paste(handle, None)?,
-            &PredefinedMenuItem::select_all(handle, None)?,
+            // NOT PredefinedMenuItem::select_all: AppKit resolves its ⌘A key
+            // equivalent before the webview sees the key and runs `selectAll:`
+            // on the rendered DOM — and CodeMirror / xterm render only their
+            // viewport, so that selected just the on-screen part of a long
+            // document. The SPA handles this id (see ui/src/lib/selectall.ts)
+            // and selects against the real text model.
+            &MenuItem::with_id(handle, "select-all", "Select All", true, Some("Cmd+A"))?,
         ],
     )?;
 

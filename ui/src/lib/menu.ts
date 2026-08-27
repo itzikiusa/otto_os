@@ -5,6 +5,7 @@ import { ui } from './stores/ui.svelte';
 import { ws } from './stores/workspace.svelte';
 import { router } from './router.svelte';
 import { startSnip } from './snip';
+import { selectAllInFocus } from './selectall';
 
 export function handleMenu(id: string): void {
   switch (id) {
@@ -12,6 +13,13 @@ export function handleMenu(id: string): void {
       // File → Take Snip, and the global shortcut (the Rust handler emits the
       // same menu id to exactly one window — focused, else main).
       void startSnip();
+      break;
+    case 'select-all':
+      // Edit ▸ Select All (⌘A). Deliberately NOT a PredefinedMenuItem: the
+      // native action selects the rendered DOM, and CodeMirror / xterm only
+      // render their viewport, so ⌘A used to grab the visible part of a long
+      // document. Select against the model instead.
+      selectAllInFocus();
       break;
     case 'settings':
       router.go('settings/appearance');

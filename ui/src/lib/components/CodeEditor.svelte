@@ -452,9 +452,11 @@
       // already binds this (selectAll operates on the doc model, not the rendered
       // viewport), so this is belt-and-braces: it guarantees nothing can shadow
       // Mod-a and that CM handles the key (and preventDefault) before any other
-      // extension. Note: a macOS webview's native "Select All" menu action can
-      // still act directly on the virtualized contenteditable (only on-screen
-      // lines exist in the DOM) — that path is outside CM's keymap.
+      // extension. The macOS Edit ▸ Select All menu item used to shadow this
+      // entirely (AppKit resolves ⌘A before the webview sees the key) and acted
+      // on the virtualized contenteditable, selecting only the on-screen lines;
+      // it is now a custom menu id routed through `lib/selectall.ts`, which
+      // selects this view's whole DOCUMENT.
       Prec.highest(keymap.of([{ key: 'Mod-a', run: selectAll }])),
       keymap.of([
         ...(readOnly ? [] : closeBracketsKeymap),

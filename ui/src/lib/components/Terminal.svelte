@@ -23,6 +23,7 @@
   import { copyText } from '../clipboard';
   import { snipApi } from '../snip';
   import { toasts } from '../toast.svelte';
+  import { registerSelectAll } from '../selectall';
   import TermKeysBar from './TermKeysBar.svelte';
 
   interface Props {
@@ -985,6 +986,13 @@
     term.loadAddon(fit);
     term.loadAddon(search);
     term.open(container);
+    // Edit ▸ Select All (⌘A) while this terminal has focus selects the whole
+    // BUFFER. xterm renders only the visible rows, so a DOM-level select-all
+    // would grab just what is on screen.
+    const unregisterSelectAll = registerSelectAll(container, () => {
+      term?.selectAll();
+      return true;
+    });
     // Mount-time focus (untracked: autoFocus/readOnly must not re-run this
     // effect — a rebuild here tears down the whole GPU canvas + WS).
     if (untrack(() => autoFocus && !readOnly) && !viewport.isPhone) term.focus();
@@ -1339,6 +1347,7 @@
       }
       closedByUs = true;
       termDidInit = false;
+      unregisterSelectAll();
       textarea?.removeEventListener('focus', onFocus);
       textarea?.removeEventListener('blur', onBlur);
       textarea?.removeEventListener('compositionstart', onCompStart);
