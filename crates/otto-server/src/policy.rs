@@ -956,6 +956,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mongosh_probe_is_database_view() {
+        // Shipped without a policy entry, so `policy_for` denied it outright —
+        // caught by the `policy_coverage` gate, not by anything at runtime.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/db/mongosh"),
+            Require(Database, View)
+        );
+    }
+
     // ---- Snips --------------------------------------------------------------
 
     #[test]
