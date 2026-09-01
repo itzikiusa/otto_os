@@ -52,7 +52,9 @@
   </div>
 
   {#if annotations.length === 0}
-    <p class="empty">No marks yet. Enable "Mark element" and click something in the reader.</p>
+    <p class="empty">
+      No marks yet. Enable "Mark element" (reader) or the picker (live) and click something.
+    </p>
   {:else}
     <ul class="list">
       {#each annotations as a (a.id)}

@@ -7,10 +7,12 @@
   //
   // Mark mode: toggling "Mark element" arms a click-to-annotate overlay on the
   // rendered `.page` tree. A click on a rendered element (while armed) builds a
-  // short, stable CSS selector scoped to `.page` (tag + nth-of-type per
-  // ancestor step — the DOM here is our own sanitized render, not the
-  // original page, so there's no id/class to lean on), snapshots its outerHTML
-  // (excerpt) + textContent (text), and opens an inline note composer. Saving
+  // short, stable CSS selector scoped to `.page` via `buildSelector` (shared
+  // with the live-tab picker overlay — see `./selector.ts`; id/data-attr, else
+  // tag + nth-of-type per ancestor step — the DOM here is our own sanitized
+  // render, not the original page, so it's almost always the nth-of-type
+  // fallback), snapshots its outerHTML (excerpt) + textContent (text), and
+  // opens an inline note composer. Saving
   // calls `browser.createAnnotation`, which the store also appends locally for
   // instant feedback (see browser.svelte.ts). Existing marks for this URL are
   // re-highlighted after every render by re-resolving each annotation's
@@ -22,6 +24,7 @@
   import { browser } from '../../lib/stores/browser.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { buildSelector } from './selector';
   import type { BrowserPage } from '../../lib/api/types';
 
   let { page, loading, error }: { page: BrowserPage | null; loading: boolean; error: string } =
@@ -40,28 +43,6 @@
   function toggleMark(): void {
     markMode = !markMode;
     pending = null;
-  }
-
-  /** Build a selector for `el`, scoped to `root`, as a chain of
-   *  `tag:nth-of-type(n)` steps from `root` down to `el`. Stops climbing once
-   *  it reaches `root` (exclusive) or runs out of parents. */
-  function buildSelector(el: Element, root: Element): string {
-    const steps: string[] = [];
-    let cur: Element | null = el;
-    while (cur && cur !== root) {
-      const tag = cur.tagName.toLowerCase();
-      const parent: Element | null = cur.parentElement;
-      if (!parent) {
-        steps.unshift(tag);
-        break;
-      }
-      const currentTag = cur.tagName;
-      const siblings = Array.from(parent.children).filter((c) => c.tagName === currentTag);
-      const idx = siblings.indexOf(cur) + 1;
-      steps.unshift(siblings.length > 1 ? `${tag}:nth-of-type(${idx})` : tag);
-      cur = parent === root ? null : parent;
-    }
-    return steps.join(' > ');
   }
 
   async function onArticleClick(e: MouseEvent): Promise<void> {

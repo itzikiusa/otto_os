@@ -154,6 +154,46 @@ build` can't exercise the native webview itself):
 5. Close the tab (✕ in the tab strip) — the child webview is destroyed, not
    just hidden.
 
+### Element picker overlay (live tabs)
+
+A live tab gets its own "Mark element" equivalent: the crosshair button next
+to the Reader/Live toggle. Unlike reader mode's click-to-annotate (which runs
+inside Otto's own DOM), the live tab is a real native webview, and — same as
+every other webview `nativeBrowser` opens — it's **denied Tauri IPC**, so a
+page inside it has no way to call back into the app. The picker overlay
+(`ui/src/modules/browser/overlay.js`) is therefore injected via
+`browser_eval` (raw source text, `?raw`-imported — see the file's own header)
+and driven by **polling**, not a callback: `BrowserView.svelte` calls
+`window.__ottoOverlay.tick(highlightJson)` over `browser_eval` on an interval
+whenever a live tab is active. `tick` applies the given highlight list (the
+existing marks for that URL, so returning to a page re-highlights them) to the
+page, then drains and returns whatever the overlay queued since the last poll
+— marks made by clicking an element while picking is armed. The overlay is
+re-injected on every navigation (a fresh page has a fresh JS context), and
+re-injection restores pick mode if it was armed mid-navigation.
+
+Marks made this way save immediately with no comment (a live page can't host
+Otto's inline note composer) — add a comment afterward from the Marks rail,
+same as any other mark. The selector algorithm
+(`ui/src/modules/browser/selector.ts`, hand-duplicated in plain JS inside
+`overlay.js` since the injected copy can't `import` it) prefers `#id`, then a
+`data-testid`/`data-test`/`data-id`/`data-qa` attribute, then an nth-of-type
+tag-path from `<body>` — unlike reader mode's own click-to-annotate (which
+almost always falls through to the tag-path, since its sanitized render
+rarely carries an id or test attribute from the original page).
+
+**Manual checklist** (desktop app only):
+
+1. Flip a tab to **Live**, navigate to a real page, click the crosshair
+   button — hovering an element outlines it; clicking one adds a mark (dashed
+   hover outline vs. a solid highlight box for a saved mark).
+2. Check the Marks rail — the new mark appears with an excerpt, same as a
+   reader-mode mark.
+3. Reload the page (or navigate away and back) — the mark's highlight box
+   reappears without re-clicking.
+4. Click the crosshair button again to disarm picking — hovering/clicking no
+   longer outlines or marks anything.
+
 ## Troubleshooting
 
 - **A URL 400s immediately** — netguard blocked it (loopback/private/link-local/

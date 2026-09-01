@@ -13,6 +13,10 @@
   import TabStrip from './TabStrip.svelte';
   import ReaderView from './ReaderView.svelte';
   import NotesRail from './NotesRail.svelte';
+  // Raw source text of the picker overlay — `eval`'d into the live tab's own
+  // JS context via `browser_eval`, never bundled/imported as a module (see
+  // overlay.js's header for why).
+  import overlaySrc from './overlay.js?raw';
 
   let urlInput = $state('');
   let summarizing = $state(false);
@@ -75,7 +79,10 @@
     if (!r) return;
     if (openedUrl[active.id] !== active.url) {
       openedUrl[active.id] = active.url;
-      void nativeBrowser.open(active.id, active.url, r); // create-or-navigate + show
+      // create-or-navigate + show, then arm the picker overlay on the fresh
+      // page (a same-tab URL change reloads the DOM, dropping any overlay a
+      // previous injection installed).
+      void nativeBrowser.open(active.id, active.url, r).then(() => injectOverlay(active.id));
     } else {
       void nativeBrowser.bounds(active.id, r);
       void nativeBrowser.show(active.id);
@@ -101,6 +108,90 @@
     };
   });
 
+  // ── Live tab: element picker overlay ────────────────────────────────────
+  // The overlay can't call back into the app over IPC (child webviews are
+  // denied it — see Task 9's report), so the app polls it instead: every tick
+  // it pushes the current URL's marks in (for re-highlighting) and pulls out
+  // whatever the overlay queued since the last poll (marks made by clicking
+  // in pick mode). See overlay.js's header for the full protocol.
+  let pickMode = $state(false);
+
+  async function injectOverlay(id: string): Promise<void> {
+    if (!nativeBrowserAvailable) return;
+    await nativeBrowser.eval(id, overlaySrc);
+    // Picking was already armed before this (re-)injection (e.g. an in-page
+    // nav reloaded the DOM mid-pick) — restore it on the fresh page.
+    if (pickMode && id === activeLive?.id) {
+      void nativeBrowser.eval(id, 'window.__ottoOverlay && window.__ottoOverlay.setPicking(true)');
+    }
+  }
+
+  function togglePick(): void {
+    const active = activeLive;
+    if (!active) return;
+    pickMode = !pickMode;
+    void nativeBrowser.eval(
+      active.id,
+      `window.__ottoOverlay && window.__ottoOverlay.setPicking(${pickMode})`,
+    );
+  }
+
+  // Pick mode is per-tab-load, not per-tab — reset it when the active LIVE
+  // TAB actually changes (not on every `activeLive` object identity change,
+  // which happens on every annotation-list update too and would otherwise
+  // flip picking back off right after a mark round-trips).
+  let lastLiveId: string | null = null;
+  $effect(() => {
+    const id = activeLive?.id ?? null;
+    if (id !== lastLiveId) {
+      lastLiveId = id;
+      pickMode = false;
+    }
+  });
+
+  async function pollOverlay(id: string, url: string): Promise<void> {
+    const highlights = browser.annotations
+      .filter((a) => a.url === url)
+      .map((a) => ({ selector: a.selector, color: a.color || 'yellow' }));
+    const arg = JSON.stringify(JSON.stringify(highlights));
+    const raw = await nativeBrowser.eval(id, `window.__ottoOverlay && window.__ottoOverlay.tick(${arg})`);
+    if (!raw) return;
+    let drained: Array<{ selector: string; outerHtml: string; text: string }>;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      drained = parsed;
+    } catch {
+      return;
+    }
+    for (const m of drained) {
+      try {
+        await browser.createAnnotation({
+          url,
+          selector: m.selector,
+          excerpt: (m.outerHtml || '').slice(0, 2000),
+          text: m.text || '',
+          comment: '',
+        });
+      } catch (e) {
+        toasts.error('Failed to save mark', e instanceof Error ? e.message : undefined);
+      }
+    }
+  }
+
+  // Poll while a live tab is active — even outside pick mode, so marks made
+  // just before switching tabs still drain, and existing marks stay
+  // highlighted across scroll/DOM changes.
+  $effect(() => {
+    if (!nativeBrowserAvailable) return;
+    const active = activeLive;
+    if (!active) return;
+    const id = active.id;
+    const url = active.url;
+    const timer = setInterval(() => void pollOverlay(id, url), 700);
+    return () => clearInterval(timer);
+  });
+
   // Reflect a live tab's in-page navigations into the store + address bar.
   // Event-driven (wry on_navigation) — never polls url().
   $effect(() => {
@@ -112,6 +203,7 @@
         openedUrl[id] = url; // keep the driver effect from re-navigating (loop)
         browser.trackLiveNav(id, url);
         if (!urlFocused && id === browser.activeId) urlInput = url;
+        void injectOverlay(id); // in-page nav reloaded the DOM — re-arm the picker
       })
       .then((un) => (disposed ? un() : (unlisten = un)));
     return () => {
@@ -285,6 +377,17 @@
         </button>
       </div>
     {/if}
+    {#if activeLive}
+      <button
+        class="btn"
+        class:active={pickMode}
+        onclick={togglePick}
+        title={pickMode ? 'Picking… click an element in the page' : 'Pick an element to mark'}
+        aria-pressed={pickMode}
+      >
+        <Icon name="target" size={14} />
+      </button>
+    {/if}
     <button
       class="btn"
       onclick={doSummarize}
@@ -408,6 +511,11 @@
   .btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .btn.active {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .summary {
     margin: 0.6rem 0.75rem 0;
