@@ -218,6 +218,29 @@ impl BrowserService {
         }
     }
 
+    /// Run a CSS-selector query against the settled page, falling back to
+    /// plain-fetch when the primary engine is unavailable (or the host is
+    /// denylisted) — same policy as [`Self::page`], sharing its denylist.
+    ///
+    /// Caller must netguard-check `url` first — see crate docs.
+    pub async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError> {
+        let host = host_of(url);
+        if self.is_denylisted(&host) {
+            return self.fallback.query(url, selector).await;
+        }
+        match self.engine.query(url, selector).await {
+            Ok(matches) => {
+                self.clear_failures(&host);
+                Ok(matches)
+            }
+            Err(EngineError::Unavailable(_)) => {
+                self.record_failure(&host);
+                self.fallback.query(url, selector).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     fn is_denylisted(&self, host: &str) -> bool {
         let denylist = self.denylist.lock().expect("denylist mutex poisoned");
         denylist.get(host).copied().unwrap_or(0) >= DENYLIST_THRESHOLD
@@ -384,6 +407,42 @@ mod tests {
             Ok(p) => assert_eq!(p.engine, "fallback"),
             Err(e) => assert!(matches!(e, EngineError::Nav(_) | EngineError::Timeout(_))),
         }
+    }
+
+    #[tokio::test]
+    async fn service_query_falls_back_when_engine_unavailable() {
+        let svc = BrowserService::with_engines(
+            Arc::new(Down),
+            FallbackEngine::from_static("<div id=\"x\">Hi</div>"),
+        );
+        let matches = svc.query("https://example.com", "#x").await.unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].text.contains("Hi"));
+    }
+
+    #[tokio::test]
+    async fn service_query_propagates_non_unavailable_errors() {
+        let svc = BrowserService::with_engines(
+            Arc::new(AlwaysNav),
+            FallbackEngine::from_static("<h1>Hi</h1>"),
+        );
+        let err = svc.query("https://example.com", "#x").await.unwrap_err();
+        assert!(matches!(err, EngineError::Nav(_)));
+    }
+
+    #[tokio::test]
+    async fn query_host_is_denylisted_after_three_failures() {
+        let svc = BrowserService::with_engines(
+            Arc::new(Down),
+            FallbackEngine::from_static("<div id=\"x\">Hi</div>"),
+        );
+        for _ in 0..DENYLIST_THRESHOLD {
+            svc.query("https://flaky2.example.com", "#x").await.unwrap();
+        }
+        assert!(svc.is_denylisted("flaky2.example.com"));
+        // Still resolves fine — straight to fallback, no engine call needed.
+        let matches = svc.query("https://flaky2.example.com", "#x").await.unwrap();
+        assert_eq!(matches.len(), 1);
     }
 
     #[tokio::test]
