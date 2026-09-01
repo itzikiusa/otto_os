@@ -330,12 +330,12 @@ async fn capabilities_root_gets_all_admin() {
     assert_eq!(st, StatusCode::OK, "capabilities call failed: {body}");
 
     let caps = body["capabilities"].as_object().expect("capabilities object");
-    // At least the 18 built-in features are present. Installed custom plugins add
+    // At least the 22 built-in features are present. Installed custom plugins add
     // their own slug-keyed capabilities too (string-keyed RBAC axis), so the map
-    // may be larger than 18 — assert a lower bound, not an exact count.
+    // may be larger than 22 — assert a lower bound, not an exact count.
     assert!(
-        caps.len() >= 18,
-        "root capabilities should cover at least the 18 built-in features; got: {body}"
+        caps.len() >= 22,
+        "root capabilities should cover at least the 22 built-in features; got: {body}"
     );
     // Every value is "admin" (including any plugin slugs — root is admin everywhere).
     for (feat, cap_val) in caps {

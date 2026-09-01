@@ -636,18 +636,80 @@ mod tests {
         Router::new().merge(routes()).with_state(ctx)
     }
 
-    async fn test_app() -> (TempDir, Router) {
+    /// Like `test_app`, but also hands back the pool so a test can seed a
+    /// non-root user / workspace / `workspace_members` row directly (the
+    /// authz-failure tests need this — `send` alone always authenticates
+    /// as root, which bypasses `require_ws_role` entirely).
+    async fn test_app_with_pool() -> (TempDir, SqlitePool, Router) {
         let tmp = TempDir::new().expect("tempdir");
         let pool = mem_pool().await;
         let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
-        (tmp, browser_router(ctx))
+        (tmp, pool.clone(), browser_router(ctx))
     }
 
-    async fn send(
+    async fn test_app() -> (TempDir, Router) {
+        let (tmp, _pool, app) = test_app_with_pool().await;
+        (tmp, app)
+    }
+
+    /// Non-root fixture user (root would bypass `require_ws_role` via
+    /// `WorkspacesRepo::role_of`'s unconditional `Admin` short-circuit).
+    fn non_root_user(id: &str) -> User {
+        User {
+            id: id.into(),
+            username: id.into(),
+            display_name: id.into(),
+            is_root: false,
+            disabled: false,
+            created_at: Utc::now(),
+        }
+    }
+
+    async fn seed_user(pool: &SqlitePool, id: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, created_at)
+             VALUES (?, ?, 'x', ?, 0, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+    }
+
+    async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, settings_json, archived, created_at)
+             VALUES (?, 'ws', '/tmp', '{}', 0, ?)",
+        )
+        .bind(ws_id)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+    }
+
+    /// `role` is the lowercase `WorkspaceRole` string (`"viewer"` | `"editor"` | `"admin"`).
+    async fn set_member(pool: &SqlitePool, ws_id: &str, user_id: &str, role: &str) {
+        sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)")
+            .bind(ws_id)
+            .bind(user_id)
+            .bind(role)
+            .execute(pool)
+            .await
+            .expect("set member");
+    }
+
+    async fn send_as(
         app: &Router,
         method: Method,
         uri: &str,
         body: Option<serde_json::Value>,
+        user: &User,
     ) -> (StatusCode, Vec<u8>) {
         let b = Request::builder().method(method).uri(uri);
         let req = match body {
@@ -658,11 +720,20 @@ mod tests {
             None => b.body(Body::empty()).unwrap(),
         };
         let mut req = req;
-        req.extensions_mut().insert(AuthUser(root_user()));
+        req.extensions_mut().insert(AuthUser(user.clone()));
         let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let body = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
         (status, body)
+    }
+
+    async fn send(
+        app: &Router,
+        method: Method,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, Vec<u8>) {
+        send_as(app, method, uri, body, &root_user()).await
     }
 
     async fn post_json(app: &Router, uri: &str, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
@@ -806,5 +877,84 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = send(&app, Method::DELETE, "/browser/annotations/nope", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn viewer_role_cannot_write() {
+        let (_tmp, pool, app) = test_app_with_pool().await;
+        seed_user(&pool, "viewer1").await;
+        seed_workspace(&pool, "ws1").await;
+        set_member(&pool, "ws1", "viewer1", "viewer").await;
+        let viewer = non_root_user("viewer1");
+
+        // Viewer role is below the Editor `require_ws_role` floor for a write —
+        // 403, never a partial/degraded 200.
+        let (status, _) = send_as(
+            &app,
+            Method::POST,
+            "/workspaces/ws1/browser/tabs",
+            Some(serde_json::json!({"url": "https://example.com"})),
+            &viewer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "a Viewer must not be able to create a tab");
+
+        // A Viewer CAN read the (empty) tab list — the collection route is View-gated.
+        let (status, _) = send_as(&app, Method::GET, "/workspaces/ws1/browser/tabs", None, &viewer).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cross_workspace_tab_idor_is_blocked() {
+        let (_tmp, pool, app) = test_app_with_pool().await;
+        seed_user(&pool, "editor1").await;
+        seed_workspace(&pool, "ws1").await;
+        seed_workspace(&pool, "ws2").await;
+        // editor1 is an Editor of ws1 only — NOT a member of ws2 at all.
+        set_member(&pool, "ws1", "editor1", "editor").await;
+        let editor1 = non_root_user("editor1");
+
+        // Seed a tab that belongs to ws2 (as root, so seeding itself isn't
+        // gated by the thing under test).
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws2/browser/tabs",
+            serde_json::json!({"url": "https://b.io"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tab_id = json(&body)["id"].as_str().unwrap().to_string();
+
+        // editor1 (member of ws1 only) must not be able to PATCH or DELETE
+        // ws2's tab by id — the flat route resolves workspace_id from the row
+        // and checks the caller's role THERE, not on any workspace they belong
+        // to (the IDOR guard).
+        let (status, _) = send_as(
+            &app,
+            Method::PATCH,
+            &format!("/browser/tabs/{tab_id}"),
+            Some(serde_json::json!({"title": "hijacked"})),
+            &editor1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "cross-workspace PATCH must be rejected");
+        assert_ne!(status, StatusCode::OK);
+
+        let (status, _) = send_as(
+            &app,
+            Method::DELETE,
+            &format!("/browser/tabs/{tab_id}"),
+            None,
+            &editor1,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "cross-workspace DELETE must be rejected");
+        assert_ne!(status, StatusCode::OK);
+
+        // The tab must still exist (root can still see it) — the blocked
+        // DELETE did not sneak through.
+        let (status, body) = get(&app, "/workspaces/ws2/browser/tabs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json(&body).as_array().map(|a| a.len()), Some(1));
     }
 }
