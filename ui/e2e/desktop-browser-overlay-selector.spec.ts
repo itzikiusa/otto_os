@@ -113,3 +113,20 @@ test('tick highlights existing marks and un-highlights ones no longer passed', a
   await page.evaluate((json) => (window as any).__ottoOverlay.tick(json), '[]');
   await expect(page.locator('.__otto_mark__')).toHaveCount(0);
 });
+
+// Task 12: autofill key-icon detection. `hasLoginForm()` is a separate,
+// on-demand public method (not part of the tick()/queue protocol above) so
+// the app can poll password-field presence without disturbing the mark
+// queue's drain semantics.
+test('hasLoginForm reports whether the CURRENT page has a password field', async ({ page }) => {
+  expect(await page.evaluate(() => (window as any).__ottoOverlay.hasLoginForm())).toBe(false);
+
+  // A same-document navigation replaces the JS context entirely, so
+  // __ottoOverlay must be re-injected — exactly what a real in-page nav does
+  // in the app (see BrowserView.svelte's onUrlChange re-arming injectOverlay).
+  await page.setContent(
+    '<!doctype html><html><body><form><input type="email"/><input type="password"/></form></body></html>',
+  );
+  await page.addScriptTag({ content: OVERLAY_SRC });
+  expect(await page.evaluate(() => (window as any).__ottoOverlay.hasLoginForm())).toBe(true);
+});

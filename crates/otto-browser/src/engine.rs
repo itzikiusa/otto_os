@@ -52,6 +52,26 @@ pub trait BrowserEngine: Send + Sync {
     /// Caller must netguard-check `url` first — see crate docs.
     async fn fetch_page(&self, url: &str) -> Result<Page, EngineError>;
     async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError>;
+    /// Navigate to `url`, fill the page's first `input[type=password]` (plus a
+    /// best-effort username/email field) with `username`/`password`, and
+    /// submit the enclosing form (or click a submit button when there is no
+    /// form). Returns a heuristic `logged_in`: the password field is gone
+    /// from the settled DOM after submit.
+    ///
+    /// Caller must netguard-check `url` first — see crate docs. The password
+    /// is passed by value into this call and must never be logged, returned
+    /// in an error message, or otherwise echoed by an implementation.
+    ///
+    /// Default: unsupported. Only a CDP-driven backend (`LightpandaEngine`)
+    /// can actually fill/submit a form — `FallbackEngine` never runs JS, so
+    /// it can't drive one. This default keeps every existing `BrowserEngine`
+    /// implementor (including test mocks) source-compatible with the trait.
+    async fn login(&self, url: &str, username: &str, password: &str) -> Result<bool, EngineError> {
+        let _ = (url, username, password);
+        Err(EngineError::Unavailable(
+            "this engine does not support login()".into(),
+        ))
+    }
     /// Stable engine identifier: `"lightpanda"` | `"fallback"` | `"mock"`.
     fn name(&self) -> &'static str;
 }

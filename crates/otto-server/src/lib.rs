@@ -9,6 +9,7 @@ pub mod api_helpers;
 pub mod api_scripts;
 pub mod api_secrets;
 pub mod auth;
+pub mod browser_login_throttle;
 pub mod cadence;
 pub mod canvas_assist;
 pub mod canvas_refs;

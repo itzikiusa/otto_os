@@ -77,3 +77,6 @@ http-body-util = "0.1"
 # Browser-credentials route tests exercise the real `OTTO_SECRETS=file` keychain
 # fallback (not the noop test double) so the reveal round-trip is real.
 otto-keychain.workspace = true
+# browser_login's audit-log test captures real `tracing` output (via a custom
+# `MakeWriter`) to assert the domain is logged and the password never is.
+tracing-subscriber.workspace = true

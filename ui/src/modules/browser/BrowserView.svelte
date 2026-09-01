@@ -7,8 +7,11 @@
   import { browser } from '../../lib/stores/browser.svelte';
   import { vault } from '../vault/vault.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { nativeBrowser, nativeBrowserAvailable, type Rect } from '../../lib/nativeBrowser';
+  import * as browserApi from '../../lib/api/browser';
+  import type { BrowserCredential } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import TabStrip from './TabStrip.svelte';
   import ReaderView from './ReaderView.svelte';
@@ -204,6 +207,158 @@
     return () => clearInterval(timer);
   });
 
+  // ── Live tab: credential autofill (user-triggered, key icon) ───────────
+  // Distinct from `browser_login` (the governed AGENT tool, `crates/otto-
+  // server/src/routes/browser.rs`'s `/browser/login` route) — that drives an
+  // off-screen CDP session server-side and never touches a visible tab. This
+  // fills the credential straight into the tab the user is looking at, via
+  // `browser_eval`, and NEVER submits the form — the user reviews and
+  // submits it themselves. The key icon only appears when ALL of: a live
+  // tab is active, its host matches a stored credential's domain, the
+  // CURRENT page actually has a password field right now (not just "this
+  // domain has one somewhere"), and the page isn't plain `http:` on a
+  // non-loopback host (credentials over unencrypted transport is the one
+  // case this refuses outright, loopback dev servers excepted).
+  let credentials: BrowserCredential[] = $state([]);
+  $effect(() => {
+    const id = ws.currentId;
+    if (!id) return;
+    void browserApi
+      .listCredentials(id)
+      .then((c) => (credentials = c))
+      .catch(() => {
+        // No Editor role, or the call failed — the key icon simply never
+        // appears; autofill is a convenience, not something to surface an
+        // error toast for on every workspace switch.
+        credentials = [];
+      });
+  });
+
+  function hostOf(url: string): string | null {
+    try {
+      return new URL(url).hostname || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Mirrors `otto_state::browser_credentials::match_domain` (exact host, or
+   *  any subdomain of a stored domain). Client-side only — a mismatch here
+   *  just hides the key icon; the server independently re-derives its own
+   *  match for the agent-facing `/browser/login` route, so this is never a
+   *  security boundary, only a UX one. */
+  function matchDomain(host: string, domain: string): boolean {
+    const h = host.trim().replace(/\.$/, '').toLowerCase();
+    const d = domain.trim().replace(/\.$/, '').toLowerCase();
+    if (!d) return false;
+    return h === d || h.endsWith(`.${d}`);
+  }
+
+  function fillAllowedForUrl(url: string): boolean {
+    let u: URL;
+    try {
+      u = new URL(url);
+    } catch {
+      return false;
+    }
+    if (u.protocol === 'https:') return true;
+    if (u.protocol === 'http:') {
+      return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1';
+    }
+    return false;
+  }
+
+  const matchedCredential = $derived.by(() => {
+    const tab = activeLive;
+    if (!tab) return null;
+    const host = hostOf(tab.url);
+    if (!host || !fillAllowedForUrl(tab.url)) return null;
+    return credentials.find((c) => matchDomain(host, c.domain)) ?? null;
+  });
+
+  // Whether the CURRENT page (not just the domain) actually has a password
+  // field right now — polled only while a domain match exists, so a normal
+  // browsing session with no matching credential never pays for the extra
+  // `browser_eval` round-trip.
+  let hasLoginForm = $state(false);
+  $effect(() => {
+    if (!nativeBrowserAvailable) return;
+    const cred = matchedCredential;
+    const active = activeLive;
+    if (!cred || !active) {
+      hasLoginForm = false;
+      return;
+    }
+    const id = active.id;
+    let cancelled = false;
+    const check = async (): Promise<void> => {
+      const raw = await nativeBrowser.eval(
+        id,
+        "window.__ottoOverlay && window.__ottoOverlay.hasLoginForm ? window.__ottoOverlay.hasLoginForm() : false",
+      );
+      if (!cancelled) hasLoginForm = raw === 'true';
+    };
+    void check();
+    const timer = setInterval(() => void check(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  });
+
+  const canAutofill = $derived(!!activeLive && !!matchedCredential && hasLoginForm);
+  let filling = $state(false);
+
+  async function autofill(): Promise<void> {
+    const tab = activeLive;
+    const cred = matchedCredential;
+    if (!tab || !cred || filling) return;
+    const ok = await confirmer.ask(
+      `Fill the saved credentials for "${cred.username}" on ${cred.domain} into this page? Nothing is submitted automatically — review it before you sign in.`,
+      { title: 'Autofill Credentials', confirmLabel: 'Fill' },
+    );
+    if (!ok) return;
+    filling = true;
+    try {
+      // Reveal is Edit-gated and returns the plaintext password ONLY to this
+      // call — it's never stored beyond the local scope below, never logged
+      // (the eval string below is never passed to `toasts`/`console`), and
+      // it never re-enters this component's own $state.
+      const { password } = await browserApi.revealCredential(cred.id);
+      const userJs = JSON.stringify(cred.username);
+      const passJs = JSON.stringify(password);
+      const js =
+        '(function(){' +
+        'var pwd = document.querySelector(\'input[type="password"]\');' +
+        "if (!pwd) return 'no-password-field';" +
+        'var user = document.querySelector(\'input[type="email"]\') || ' +
+        'document.querySelector(\'input[autocomplete="username"]\') || ' +
+        'document.querySelector(\'input[type="text"]\');' +
+        'if (user) {' +
+        'user.focus();' +
+        `user.value = ${userJs};` +
+        "user.dispatchEvent(new Event('input', {bubbles: true}));" +
+        "user.dispatchEvent(new Event('change', {bubbles: true}));" +
+        '}' +
+        'pwd.focus();' +
+        `pwd.value = ${passJs};` +
+        "pwd.dispatchEvent(new Event('input', {bubbles: true}));" +
+        "pwd.dispatchEvent(new Event('change', {bubbles: true}));" +
+        "return 'filled';" +
+        '})()';
+      const result = await nativeBrowser.eval(tab.id, js);
+      if (result === "'no-password-field'" || result === 'no-password-field') {
+        toasts.warn('Nothing to fill', 'The page no longer has a password field.');
+      } else {
+        toasts.success('Autofilled', `${cred.username} · ${cred.domain} — review before submitting`);
+      }
+    } catch (e) {
+      toasts.error('Autofill failed', e instanceof Error ? e.message : undefined);
+    } finally {
+      filling = false;
+    }
+  }
+
   // Reflect a live tab's in-page navigations into the store + address bar.
   // Event-driven (wry on_navigation) — never polls url().
   $effect(() => {
@@ -398,6 +553,16 @@
         aria-pressed={pickMode}
       >
         <Icon name="target" size={14} />
+      </button>
+    {/if}
+    {#if canAutofill}
+      <button
+        class="btn"
+        onclick={autofill}
+        disabled={filling}
+        title={`Autofill ${matchedCredential?.username ?? ''} for ${matchedCredential?.domain ?? ''}`}
+      >
+        <Icon name="key" size={14} />
       </button>
     {/if}
     <button

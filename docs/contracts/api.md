@@ -2842,6 +2842,7 @@ denylist/fallback policy with `/page`. Broadcasts `browser_tab_updated`
 | PATCH /api/v1/browser/credentials/{id} | ws editor · Browser Edit | `{username?, allow_agent_use?, notes?, password?}` | `BrowserCredential` — an included `password` rotates the Keychain entry in place (same `keychain_ref`) |
 | DELETE /api/v1/browser/credentials/{id} | ws editor · Browser Edit | — | 204 — also deletes the Keychain entry |
 | POST /api/v1/browser/credentials/{id}/reveal | ws editor · Browser Edit | `{confirm: true}` (else 400) | `{password}` — the ONLY route that returns the plaintext password; audit-logs the credential id only (`tracing::info!`, never the domain/username/password) |
+| POST /api/v1/workspaces/{wid}/browser/login | ws editor · Browser Edit | `{domain}` | `{logged_in, engine}` — governed agent sign-in; see below |
 
 `BrowserTab {id, workspace_id, url, title, mode, created_at}`.
 `BrowserAnnotation {id, workspace_id, tab_id, url, selector, excerpt, text,
@@ -2863,6 +2864,31 @@ documented conservative approximation of eTLD+1 (no public-suffix list is
 vendored in this workspace), not true registrable-domain matching, so e.g. it
 correctly widens `login.example.com` → a stored `example.com` but does not
 special-case multi-label public suffixes like `co.uk`.
+
+**`POST /browser/login`** is the governed agent-facing sign-in
+(`browser_login` MCP tool; `crates/ottod/src/mcp_tools.rs`). The password
+**never** appears in the request, the response, an MCP tool result, the
+`mcp_tool_calls` audit row, or a log line — the server resolves it from the
+Keychain the same way `reveal_credential` does and hands it directly to
+`otto_browser::BrowserEngine::login(url, username, password)`, which only
+ever splices it into the fill-and-submit JS run inside the CDP session for
+the target page. Resolution order: per-domain rate limit
+(`crate::browser_login_throttle`, 3/min, 429 `Retry-After` on the domain
+being over budget) → normalize `domain` → look up a credential for
+`(workspace, domain)` — **404** if none exists at all, **403**
+`"credential not enabled for agents"` if one exists but its
+`allow_agent_use` is `false` → resolve the password from the Keychain →
+netguard-check `https://{domain}/` (the credential's `domain` is expected to
+be, or redirect to, wherever that site's own login form lives — there is no
+separate stored login-page URL) → drive the engine. `logged_in` is the
+engine's heuristic: the page's `input[type=password]` is gone from the
+settled DOM after the fill-and-submit navigates/settles. `engine` names
+which backend ran it (`"lightpanda"` normally; `"fallback"` never supports
+`login()` — it doesn't run JS, so a fallback-only daemon answers every
+`browser_login` call with an `EngineError::Unavailable` → 502). The only
+thing this route logs (`tracing::info!`) is the domain and the boolean
+outcome, matching `reveal_credential`'s domain/username/password-free audit
+discipline.
 
 Both `/summarize` and `/annotations/{id}/send` embed attacker-controlled page
 content (the fetched markdown; the annotation's excerpt/comment) into text

@@ -241,6 +241,27 @@ impl BrowserService {
         }
     }
 
+    /// Fill and submit a login form at `url` with `username`/`password` and
+    /// return the logged-in heuristic. Goes straight to the primary engine —
+    /// no fallback: `FallbackEngine` can't run JS, so there is nothing
+    /// sensible to fall back TO for a login (a `login()` call against it
+    /// always returns `EngineError::Unavailable` per the trait default), and
+    /// this is a one-shot action rather than a read worth denylist-tracking.
+    ///
+    /// Caller must netguard-check `url` first — see crate docs. Never logs
+    /// or echoes `username`/`password`.
+    pub async fn login(&self, url: &str, username: &str, password: &str) -> Result<bool, EngineError> {
+        self.engine.login(url, username, password).await
+    }
+
+    /// Stable identifier of the primary engine currently in use (`"lightpanda"`
+    /// | `"fallback"` | `"mock"`) — for callers (e.g. the `/browser/login`
+    /// route) that want to report which engine ran without threading a whole
+    /// `Page`/result struct through just for this.
+    pub fn engine_name(&self) -> &'static str {
+        self.engine.name()
+    }
+
     fn is_denylisted(&self, host: &str) -> bool {
         let denylist = self.denylist.lock().expect("denylist mutex poisoned");
         denylist.get(host).copied().unwrap_or(0) >= DENYLIST_THRESHOLD
@@ -273,6 +294,10 @@ impl BrowserEngine for SidecarBackedEngine {
 
     async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError> {
         self.engine.query(url, selector).await
+    }
+
+    async fn login(&self, url: &str, username: &str, password: &str) -> Result<bool, EngineError> {
+        self.engine.login(url, username, password).await
     }
 
     fn name(&self) -> &'static str {
@@ -443,6 +468,83 @@ mod tests {
         // Still resolves fine — straight to fallback, no engine call needed.
         let matches = svc.query("https://flaky2.example.com", "#x").await.unwrap();
         assert_eq!(matches.len(), 1);
+    }
+
+    /// The trait's default `login()` — every existing `BrowserEngine`
+    /// implementor that doesn't override it (both mocks above, and
+    /// `FallbackEngine` itself) must reject with `Unavailable`, never panic
+    /// or silently no-op.
+    #[tokio::test]
+    async fn default_login_is_unavailable() {
+        let err = Down.login("https://example.com", "alice", "hunter2").await.unwrap_err();
+        assert!(matches!(err, EngineError::Unavailable(_)));
+
+        let err = FallbackEngine::from_static("<h1>Hi</h1>")
+            .login("https://example.com", "alice", "hunter2")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::Unavailable(_)));
+    }
+
+    /// A scripted engine whose `login()` always succeeds — stands in for a
+    /// real CDP-driven engine so `BrowserService::login` can be verified to
+    /// delegate straight to the primary engine (no fallback, no denylist
+    /// interaction) without needing a real browser.
+    struct ScriptedLogin {
+        result: Result<bool, EngineError>,
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserEngine for ScriptedLogin {
+        async fn fetch_page(&self, _: &str) -> Result<Page, EngineError> {
+            Err(EngineError::Unavailable("not used".into()))
+        }
+        async fn query(&self, _: &str, _: &str) -> Result<Vec<MatchedNode>, EngineError> {
+            Err(EngineError::Unavailable("not used".into()))
+        }
+        async fn login(&self, _url: &str, _username: &str, _password: &str) -> Result<bool, EngineError> {
+            match &self.result {
+                Ok(v) => Ok(*v),
+                Err(EngineError::Nav(m)) => Err(EngineError::Nav(m.clone())),
+                Err(_) => Err(EngineError::Unavailable("scripted failure".into())),
+            }
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    #[tokio::test]
+    async fn service_login_delegates_to_primary_engine_scripted_success() {
+        let svc = BrowserService::with_engines(
+            Arc::new(ScriptedLogin { result: Ok(true) }),
+            FallbackEngine::from_static("<h1>Hi</h1>"),
+        );
+        let logged_in = svc
+            .login("https://example.com/login", "alice", "hunter2")
+            .await
+            .unwrap();
+        assert!(logged_in);
+        assert_eq!(svc.engine_name(), "mock");
+    }
+
+    #[tokio::test]
+    async fn service_login_propagates_scripted_failure_without_falling_back() {
+        // `Unavailable` normally triggers the fallback engine for page()/query();
+        // login() must NOT fall back, since the fallback engine can never
+        // support login() (it never runs JS) — confirm the error still comes
+        // straight back rather than resolving via the fallback.
+        let svc = BrowserService::with_engines(
+            Arc::new(ScriptedLogin {
+                result: Err(EngineError::Unavailable("down".into())),
+            }),
+            FallbackEngine::from_static("<h1>Hi</h1>"),
+        );
+        let err = svc
+            .login("https://example.com/login", "alice", "hunter2")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::Unavailable(_)));
     }
 
     #[tokio::test]

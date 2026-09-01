@@ -198,10 +198,22 @@ impl CdpClient {
     }
 
     pub async fn evaluate_outer_html(&self, session_id: &str) -> Result<String, CdpError> {
+        self.evaluate(session_id, "document.documentElement.outerHTML")
+            .await?
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| CdpError::Protocol("Runtime.evaluate: no string value".into()))
+    }
+
+    /// Run `expression` in the page and return its JSON-encoded result
+    /// (`Runtime.evaluate` with `returnByValue: true`). Generalizes
+    /// `evaluate_outer_html` for callers that need something other than a
+    /// bare string (e.g. a boolean login-success check).
+    pub async fn evaluate(&self, session_id: &str, expression: &str) -> Result<Value, CdpError> {
         let result = self
             .call(
                 "Runtime.evaluate",
-                json!({"expression": "document.documentElement.outerHTML", "returnByValue": true}),
+                json!({"expression": expression, "returnByValue": true}),
                 Some(session_id),
             )
             .await?;
@@ -210,12 +222,11 @@ impl CdpClient {
                 "Runtime.evaluate threw: {details}"
             )));
         }
-        result
+        Ok(result
             .get("result")
             .and_then(|r| r.get("value"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| CdpError::Protocol("Runtime.evaluate: no string value".into()))
+            .cloned()
+            .unwrap_or(Value::Null))
     }
 
     pub async fn close_target(&self, target_id: &str) -> Result<(), CdpError> {
@@ -300,6 +311,124 @@ impl LightpandaEngine {
         let _ = client.close_target(&target_id).await;
         Ok(html)
     }
+
+    /// Caller must netguard-check `url` first — see crate docs.
+    ///
+    /// Bounded by one `PAGE_TIMEOUT_SECS` timeout, same contract as
+    /// [`Self::navigate_and_snapshot`]. `username`/`password` are only ever
+    /// interpolated into the fill-and-submit JS expression run in the
+    /// target page's own context — never logged, never returned in an
+    /// `EngineError`.
+    async fn login_flow(&self, url: &str, username: &str, password: &str) -> Result<bool, EngineError> {
+        tokio::time::timeout(
+            Duration::from_secs(PAGE_TIMEOUT_SECS),
+            self.login_flow_inner(url, username, password),
+        )
+        .await
+        .unwrap_or(Err(EngineError::Timeout(PAGE_TIMEOUT_SECS)))
+    }
+
+    async fn login_flow_inner(
+        &self,
+        url: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<bool, EngineError> {
+        let client = CdpClient::connect(&self.cdp_url).await.map_err(cdp_err)?;
+        let result = self.drive_login(&client, url, username, password).await;
+        // Deterministic cleanup on every path, same as `navigate_and_snapshot_inner`.
+        client.close().await;
+        result
+    }
+
+    async fn drive_login(
+        &self,
+        client: &CdpClient,
+        url: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<bool, EngineError> {
+        let target_id = client.create_target("about:blank").await.map_err(cdp_err)?;
+        let session_id = client.attach_to_target(&target_id).await.map_err(cdp_err)?;
+        client.enable_page(&session_id).await.map_err(cdp_err)?;
+        client.navigate(&session_id, url).await.map_err(cdp_err)?;
+        client
+            .wait_for_load_event(Duration::from_secs(PAGE_TIMEOUT_SECS))
+            .await
+            .map_err(cdp_err)?;
+
+        // `serde_json::to_string` on a `&str` produces a properly-escaped
+        // JSON string literal, which is also a valid JS string literal — the
+        // one safe way to splice an arbitrary username/password into a JS
+        // expression string without risking injection into the surrounding
+        // script (see `fill_and_submit_expr`'s doc comment).
+        let outcome = client
+            .evaluate(&session_id, &fill_and_submit_expr(username, password))
+            .await
+            .map_err(cdp_err)?;
+        if outcome.as_str() == Some("no-password-field") {
+            let _ = client.close_target(&target_id).await;
+            return Err(EngineError::Nav(
+                "no password field found on login page".into(),
+            ));
+        }
+
+        // Best-effort settle: a classic form submit fires a real navigation
+        // (Page.loadEventFired); a JS/SPA login (fetch/XHR, no navigation)
+        // never will, so a timeout here is expected, not an error — it just
+        // means "check the DOM as it stands now" instead of "reload happened".
+        let _ = client
+            .wait_for_load_event(Duration::from_secs(5))
+            .await;
+
+        let still_present = client
+            .evaluate(&session_id, "!!document.querySelector('input[type=\"password\"]')")
+            .await
+            .map_err(cdp_err)?;
+        let _ = client.close_target(&target_id).await;
+        Ok(!still_present.as_bool().unwrap_or(true))
+    }
+}
+
+/// Builds the JS expression `drive_login` evaluates in the target page to
+/// fill and submit a login form. `username`/`password` are embedded via
+/// `serde_json::to_string` (JSON string-literal escaping, which is also
+/// valid JS string-literal escaping for the characters that matter here —
+/// quotes, backslashes, control characters) rather than any hand-rolled
+/// escaping, so a credential containing `"`, `\`, or a newline can't break
+/// out of the string literal into surrounding script.
+fn fill_and_submit_expr(username: &str, password: &str) -> String {
+    let user_js = serde_json::to_string(username).unwrap_or_else(|_| "\"\"".to_string());
+    let pass_js = serde_json::to_string(password).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "(function(){{\
+           var pwd = document.querySelector('input[type=\"password\"]');\
+           if (!pwd) return 'no-password-field';\
+           var user = document.querySelector('input[type=\"email\"]') || \
+                      document.querySelector('input[autocomplete=\"username\"]') || \
+                      document.querySelector('input[type=\"text\"]');\
+           if (user) {{\
+             user.focus();\
+             user.value = {user_js};\
+             user.dispatchEvent(new Event('input', {{bubbles: true}}));\
+             user.dispatchEvent(new Event('change', {{bubbles: true}}));\
+           }}\
+           pwd.focus();\
+           pwd.value = {pass_js};\
+           pwd.dispatchEvent(new Event('input', {{bubbles: true}}));\
+           pwd.dispatchEvent(new Event('change', {{bubbles: true}}));\
+           var form = pwd.closest('form');\
+           if (form) {{\
+             if (typeof form.requestSubmit === 'function') form.requestSubmit();\
+             else form.submit();\
+           }} else {{\
+             var btn = document.querySelector('button[type=\"submit\"]') || \
+                       document.querySelector('input[type=\"submit\"]');\
+             if (btn) btn.click();\
+           }}\
+           return 'submitted';\
+         }})()"
+    )
 }
 
 #[async_trait::async_trait]
@@ -334,6 +463,11 @@ impl BrowserEngine for LightpandaEngine {
                 text: el.text().collect::<Vec<_>>().join(" "),
             })
             .collect())
+    }
+
+    /// Caller must netguard-check `url` first — see crate docs.
+    async fn login(&self, url: &str, username: &str, password: &str) -> Result<bool, EngineError> {
+        self.login_flow(url, username, password).await
     }
 
     fn name(&self) -> &'static str {

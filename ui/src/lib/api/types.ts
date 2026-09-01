@@ -6310,3 +6310,18 @@ export interface BrowserRevealCredentialReq {
 export interface BrowserRevealCredentialResp {
   password: string;
 }
+
+/** `POST /workspaces/{wid}/browser/login` request — the governed agent
+ *  sign-in. The server resolves the credential for `domain` server-side; the
+ *  password never travels through this request or its response. */
+export interface BrowserLoginReq {
+  domain: string;
+}
+
+/** `POST /workspaces/{wid}/browser/login` response. `engine` is the backend
+ *  that ran it (`"lightpanda"` normally — `"fallback"` never supports
+ *  login(), since it doesn't run JS). */
+export interface BrowserLoginResp {
+  logged_in: boolean;
+  engine: string;
+}

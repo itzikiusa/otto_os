@@ -12,6 +12,7 @@ import type {
   BrowserAnnotation,
   BrowserCreateCredentialReq,
   BrowserCredential,
+  BrowserLoginResp,
   BrowserPage,
   BrowserPatchCredentialReq,
   BrowserQueryResp,
@@ -121,4 +122,16 @@ export function revealCredential(id: string) {
   return api.post<BrowserRevealCredentialResp>(`/browser/credentials/${id}/reveal`, {
     confirm: true,
   });
+}
+
+/** Governed AGENT sign-in (the `browser_login` MCP tool's own HTTP route) —
+ *  the server resolves the credential for `domain` (must exist and have
+ *  `allow_agent_use: true`) and drives an off-screen CDP fill+submit itself;
+ *  the password never travels through this call. NOT what user-triggered
+ *  autofill in a live tab should call — that fills the user's own visible
+ *  webview via `revealCredential` + `nativeBrowser.eval` instead (see
+ *  `BrowserView.svelte`'s `autofill()`), since this route drives a separate,
+ *  invisible navigation rather than the tab the user is looking at. */
+export function browserLogin(ws: string, domain: string) {
+  return api.post<BrowserLoginResp>(`${base(ws)}/login`, { domain });
 }

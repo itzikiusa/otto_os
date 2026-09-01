@@ -210,6 +210,15 @@
       picking = !!v;
       if (!picking) clearHover();
     },
+    // Autofill key-icon detection: does the CURRENT page have a password
+    // field right now? The app polls this (see BrowserView.svelte's
+    // pollLoginForm) rather than trusting the tab's URL alone — a domain the
+    // user has a credential for may have navigated away from its login page
+    // to some other route with no form at all, and the key icon should
+    // track the actual page, not just the host.
+    hasLoginForm: function () {
+      return !!document.querySelector('input[type="password"]');
+    },
     // Applies `highlightJson` (a JSON string of [{selector,color}, …] — the
     // existing marks for this URL) to the page, then drains and returns the
     // queue of marks captured since the previous tick.

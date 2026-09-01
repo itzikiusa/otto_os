@@ -916,6 +916,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/browser/credentials/{id}" || p == "/browser/credentials/{id}/reveal" {
         return Require(Browser, Edit);
     }
+    // Governed agent sign-in: resolves + drives a stored credential, so it's
+    // gated exactly like the rest of the module's mutations. The per-
+    // credential `allow_agent_use` gate is enforced in the handler, not here
+    // — this axis only answers "can this caller use the Browser feature at
+    // all", same separation as everywhere else in this file.
+    if p == "/workspaces/{wid}/browser/login" {
+        return Require(Browser, Edit);
+    }
 
     // ----------------------------------------------------------------------
     // 4. Default — fail closed.
@@ -1845,6 +1853,14 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/browser/credentials/{id}/reveal"),
+            Require(Browser, Edit)
+        );
+    }
+
+    #[test]
+    fn browser_login_is_edit() {
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{wid}/browser/login"),
             Require(Browser, Edit)
         );
     }

@@ -19,17 +19,20 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use otto_core::api::Problem;
 use otto_core::domain::WorkspaceRole;
 use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_state::{BrowserAnnotation, BrowserTab, NewBrowserAnnotation, NewBrowserTab};
 
 use crate::auth::{require_ws_role, CurrentUser};
+use crate::browser_login_throttle;
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
@@ -68,6 +71,7 @@ pub fn routes() -> Router<ServerCtx> {
             "/browser/credentials/{id}/reveal",
             post(reveal_credential),
         )
+        .route("/workspaces/{wid}/browser/login", post(login_credential))
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +123,33 @@ impl BrowserEngineHandle {
         selector: &str,
     ) -> Result<Vec<otto_browser::MatchedNode>, otto_browser::EngineError> {
         self.service().await.query(url, selector).await
+    }
+
+    /// Test-only: wraps an already-built `BrowserService` (e.g. a scripted
+    /// mock engine via `BrowserService::with_engines`) so route tests can
+    /// exercise `login`/`page`/`query` deterministically without depending
+    /// on a real `lightpanda` binary or network access.
+    #[cfg(test)]
+    pub fn with_service(service: otto_browser::BrowserService) -> Self {
+        Self {
+            configured_bin: None,
+            data_dir: std::path::PathBuf::new(),
+            cell: tokio::sync::OnceCell::new_with(Some(service)),
+        }
+    }
+
+    /// Fill and submit a login form at `url`, returning the logged-in
+    /// heuristic and which engine ran it. Caller must netguard-check `url`
+    /// first — see module docs. Never logs or echoes `username`/`password`.
+    pub async fn login(
+        &self,
+        url: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(bool, &'static str), otto_browser::EngineError> {
+        let svc = self.service().await;
+        let logged_in = svc.login(url, username, password).await?;
+        Ok((logged_in, svc.engine_name()))
     }
 }
 
@@ -1166,6 +1197,134 @@ async fn reveal_credential(
     let _ = ctx.browser_credentials.touch_last_used(&id).await;
     tracing::info!(credential = %id, "browser credential revealed");
     Ok(Json(RevealCredentialResp { password }))
+}
+
+// ---------------------------------------------------------------------------
+// browser_login — governed agent-facing sign-in.
+// ---------------------------------------------------------------------------
+//
+// The password NEVER enters this route's caller-visible surface: it is
+// resolved server-side from the Keychain (same `ctx.secrets.get` path
+// `reveal_credential` uses) and handed directly to `BrowserEngine::login`,
+// which only ever splices it into the fill-and-submit JS run inside the
+// target page's own CDP session. The response is `{logged_in, engine}` —
+// never the password, never the username. The one thing this route logs
+// (`tracing::info!`) is the requested domain and the outcome — never the
+// resolved username/password — matching `reveal_credential`'s audit
+// discipline.
+//
+// Gated per-credential by `allow_agent_use` (a credential that exists for
+// `domain` but has it `false` is a typed 403, not a 404 — the caller should
+// be able to tell "no such credential" from "this one isn't opted in for
+// agents" apart, same as a human reading the Credentials panel would). Rate
+// limited per domain via `crate::browser_login_throttle` (429, independent
+// of `otto_core::Error` since this endpoint needs a `Retry-After` header —
+// same bespoke-`Response` pattern `routes/auth_routes.rs::too_many_requests`
+// and `routes/share.rs` already use for their own 429s).
+
+#[derive(Deserialize)]
+struct LoginCredentialReq {
+    domain: String,
+}
+
+#[derive(Serialize)]
+struct LoginCredentialResp {
+    logged_in: bool,
+    engine: String,
+}
+
+fn browser_login_too_many_requests() -> Response {
+    let body = Problem {
+        code: "too_many_requests".to_string(),
+        message: "too many browser_login attempts for this domain; try again shortly".to_string(),
+    };
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [("retry-after", browser_login_throttle::WINDOW.as_secs().to_string())],
+        Json(body),
+    )
+        .into_response()
+}
+
+/// `POST /workspaces/{wid}/browser/login` — `{domain}` → `{logged_in, engine}`.
+///
+/// Resolution order: rate limit → normalize `domain` → find a credential for
+/// (workspace, domain) with `allow_agent_use = true` (404 if none exists for
+/// the domain at all; 403 if one exists but isn't agent-enabled) → resolve
+/// the password from the Keychain → netguard-check the login URL → drive the
+/// engine.
+///
+/// The login page URL is `https://{domain}/` — the credential's `domain` is
+/// expected to be (or redirect to) wherever that site's own login form
+/// lives; there is no separate stored "login URL" field on
+/// `BrowserCredential` (a judgment call — see task-12 report).
+async fn login_credential(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<LoginCredentialReq>,
+) -> Response {
+    if let Err(e) = require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await {
+        return e.into_response();
+    }
+    let domain = otto_state::normalize_domain(&req.domain);
+    if domain.is_empty() {
+        return ApiError(Error::Invalid("domain is required".into())).into_response();
+    }
+
+    if !browser_login_throttle::global().try_acquire(&domain) {
+        tracing::warn!(domain = %domain, "browser_login rate-limited");
+        return browser_login_too_many_requests();
+    }
+
+    let creds = match ctx.browser_credentials.list(&wid).await {
+        Ok(c) => c,
+        Err(e) => return ApiError(e).into_response(),
+    };
+    let matching: Vec<_> = creds.into_iter().filter(|c| c.domain == domain).collect();
+    if matching.is_empty() {
+        return ApiError(Error::NotFound(format!("no browser credential for domain {domain}")))
+            .into_response();
+    }
+    let Some(cred) = matching.into_iter().find(|c| c.allow_agent_use) else {
+        return ApiError(Error::Forbidden("credential not enabled for agents".into())).into_response();
+    };
+
+    let password = match ctx.secrets.get(&cred.keychain_ref) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return ApiError(Error::NotFound(format!("secret for browser credential {}", cred.id)))
+                .into_response()
+        }
+        Err(e) => return ApiError(e).into_response(),
+    };
+
+    let url = format!("https://{domain}/");
+    if let Err(m) = otto_netguard::check_url(&url).await {
+        return ApiError(Error::Invalid(m)).into_response();
+    }
+
+    let result = ctx.browser.login(&url, &cred.username, &password).await;
+    // `password` must not outlive this call — drop it explicitly so a future
+    // edit below (a stray `tracing::debug!("{:?}", ...)` etc.) can't
+    // accidentally capture it from a still-live binding.
+    drop(password);
+
+    match result {
+        Ok((logged_in, engine)) => {
+            let _ = ctx.browser_credentials.touch_last_used(&cred.id).await;
+            tracing::info!(domain = %domain, logged_in, engine, "browser_login attempted");
+            Json(LoginCredentialResp {
+                logged_in,
+                engine: engine.to_string(),
+            })
+            .into_response()
+        }
+        Err(e) => {
+            tracing::warn!(domain = %domain, "browser_login engine error: {e}");
+            engine_err(e).into_response()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2423,5 +2582,210 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // -----------------------------------------------------------------
+    // browser_login
+    // -----------------------------------------------------------------
+
+    /// A scripted `BrowserEngine` whose `login()` always returns the given
+    /// result — stands in for a real CDP-driven engine so the route can be
+    /// exercised deterministically without a `lightpanda` binary or network
+    /// access (this sandbox has neither DNS nor a way to launch a real
+    /// browser against a live site).
+    struct ScriptedLoginEngine {
+        logged_in: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl otto_browser::BrowserEngine for ScriptedLoginEngine {
+        async fn fetch_page(&self, _: &str) -> std::result::Result<otto_browser::Page, otto_browser::EngineError> {
+            Err(otto_browser::EngineError::Unavailable("not used".into()))
+        }
+        async fn query(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<Vec<otto_browser::MatchedNode>, otto_browser::EngineError> {
+            Err(otto_browser::EngineError::Unavailable("not used".into()))
+        }
+        async fn login(
+            &self,
+            _url: &str,
+            _username: &str,
+            _password: &str,
+        ) -> std::result::Result<bool, otto_browser::EngineError> {
+            Ok(self.logged_in)
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    /// Rebuilds `ctx` (same pool/secrets — a clone, not a fresh store) with
+    /// its `browser` engine swapped for a scripted one, so a login attempt
+    /// through the resulting router deterministically returns `logged_in`.
+    fn with_scripted_login(ctx: &ServerCtx, logged_in: bool) -> ServerCtx {
+        let service = otto_browser::BrowserService::with_engines(
+            Arc::new(ScriptedLoginEngine { logged_in }),
+            otto_browser::FallbackEngine::new(),
+        );
+        ServerCtx {
+            browser: Arc::new(BrowserEngineHandle::with_service(service)),
+            ..ctx.clone()
+        }
+    }
+
+    /// Captures everything written through it into a shared buffer — used to
+    /// install a throwaway `tracing_subscriber::fmt` subscriber for exactly
+    /// one test, so the login route's audit log line can be asserted on.
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn login_404_when_no_credential_for_domain() {
+        let (_tmp, app) = test_app().await;
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/login",
+            serde_json::json!({"domain": "nocred-example.com"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{}", String::from_utf8_lossy(&body));
+    }
+
+    #[tokio::test]
+    async fn login_403_when_credential_not_agent_enabled() {
+        let (_tmp, app) = test_app().await;
+
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/credentials",
+            serde_json::json!({
+                "domain": "notenabled-example.com", "username": "alice", "password": "s3cr3t!"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+        // `allow_agent_use` defaults false — the credential exists (404 would
+        // be wrong), but agent use is not opted in (typed 403, not a bare
+        // "denied").
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/login",
+            serde_json::json!({"domain": "notenabled-example.com"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{}", String::from_utf8_lossy(&body));
+        let resp = json(&body);
+        assert!(
+            resp["message"].as_str().unwrap_or("").contains("not enabled for agents"),
+            "got {resp:?}"
+        );
+    }
+
+    /// Full success path against a scripted (never-real) engine: the login
+    /// response carries only `{logged_in, engine}` — never the username or
+    /// password — and the `tracing::info!` audit line records the domain
+    /// but never the credential's secret.
+    #[tokio::test]
+    async fn login_succeeds_and_audit_log_never_carries_the_password() {
+        let tmp = TempDir::new().expect("tempdir");
+        let pool = mem_pool().await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let setup_app = browser_router(ctx.clone());
+
+        // A bare public IP literal: `otto_netguard::check_url` special-cases
+        // an IP-literal host to a synchronous, DNS-free classification (no
+        // network access needed — this sandbox has none), while still
+        // exercising the real netguard call the route makes.
+        let domain = "1.1.1.1";
+        let (status, body) = post_json(
+            &setup_app,
+            "/workspaces/ws1/browser/credentials",
+            serde_json::json!({
+                "domain": domain, "username": "alice", "password": "hunter2", "allow_agent_use": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+        let login_app = browser_router(with_scripted_login(&ctx, true));
+
+        let buf: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CaptureWriter(buf.clone()))
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let (status, body) = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            post_json(
+                &login_app,
+                "/workspaces/ws1/browser/login",
+                serde_json::json!({"domain": domain}),
+            )
+            .await
+        };
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+        let resp = json(&body);
+        assert_eq!(resp["logged_in"], true);
+        assert_eq!(resp["engine"], "mock");
+        let raw = String::from_utf8_lossy(&body);
+        assert!(!raw.contains("hunter2"), "response body must never carry the password");
+        assert!(!raw.contains("alice"), "response body must never carry the username");
+
+        let logged = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+        assert!(logged.contains(domain), "audit log must record the domain: {logged}");
+        assert!(!logged.contains("hunter2"), "audit log must never carry the password: {logged}");
+        assert!(!logged.contains("alice"), "audit log must never carry the username: {logged}");
+    }
+
+    #[tokio::test]
+    async fn login_is_rate_limited_per_domain() {
+        let (_tmp, app) = test_app().await;
+        // No credential exists for this domain, so every attempt 404s — the
+        // throttle check runs BEFORE the credential lookup, so the call over
+        // the per-domain cap must 429 regardless of what would happen next.
+        let domain = "throttle-example.com";
+        for _ in 0..browser_login_throttle::MAX_ATTEMPTS_PER_WINDOW {
+            let (status, body) = post_json(
+                &app,
+                "/workspaces/ws1/browser/login",
+                serde_json::json!({"domain": domain}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{}", String::from_utf8_lossy(&body));
+        }
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/login",
+            serde_json::json!({"domain": domain}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
     }
 }

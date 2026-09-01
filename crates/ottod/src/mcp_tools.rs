@@ -724,6 +724,11 @@ fn tool_catalog() -> Value {
                 "name": "browser_summarize",
                 "description": "Fetch a URL (netguard-checked) and run one short-lived agent turn to summarize its markdown (capped at 30k chars) for a developer notebook.",
                 "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }
+            },
+            {
+                "name": "browser_login",
+                "description": "Sign in to a stored site credential for `domain` (a Site Credential the user created and explicitly marked \"allow agent use\" — otherwise this is refused). The daemon resolves the credential server-side, drives the fill+submit over CDP, and returns only whether it worked — the password never enters this tool's arguments, result, or the audit log.",
+                "inputSchema": { "type": "object", "properties": { "domain": { "type": "string" } }, "required": ["domain"] }
             }
         ]
     })
@@ -1449,6 +1454,21 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .await?;
             Ok(finalize(raw))
         }
+        // The daemon resolves the credential (`allow_agent_use` required,
+        // else a typed 403) and drives the fill+submit itself — this arm only
+        // ever sends/receives `domain`/`logged_in`/`engine`; the password
+        // never reaches this process at all. `finalize`'s `redact_json` pass
+        // is defense-in-depth on top of that, not the only guard.
+        "browser_login" => {
+            let Some(ws) = ctx.workspace_id.as_deref() else {
+                return Err("no workspace context (OTTO_WORKSPACE_ID unset); cannot sign in".into());
+            };
+            let domain = arg_str(args, "domain")?;
+            let raw = ctx
+                .post_json(&format!("/workspaces/{}/browser/login", seg(ws)), &json!({ "domain": domain }))
+                .await?;
+            Ok(finalize(raw))
+        }
         // First-party feature reads (workflows / brokers / issues / swarm / vault /
         // repos / sessions / product / findings / usage / self-improvement). All
         // route through the pure `read_route` and post-process identically: the raw
@@ -2048,7 +2068,13 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        for t in ["browser_navigate", "browser_page", "browser_query", "browser_summarize"] {
+        for t in [
+            "browser_navigate",
+            "browser_page",
+            "browser_query",
+            "browser_summarize",
+            "browser_login",
+        ] {
             assert!(names.contains(&t), "catalog missing {t}");
         }
     }
@@ -2141,6 +2167,36 @@ mod tests {
         assert_eq!(resp["result"]["isError"], json!(true));
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("url"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn browser_login_errors_without_domain() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 26, "method": "tools/call",
+                    "params": { "name": "browser_login", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("domain"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn browser_login_errors_without_workspace() {
+        let mut ctx = test_ctx();
+        ctx.workspace_id = None;
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 27, "method": "tools/call",
+                    "params": { "name": "browser_login", "arguments": { "domain": "example.com" } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("workspace"));
     }
 
     #[test]
