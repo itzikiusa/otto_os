@@ -9,11 +9,15 @@
 //! resolve/re-check hosts itself, to keep the SSRF policy defined exactly
 //! once (see `otto-netguard`).
 
+pub mod cdp;
 pub mod engine;
 pub mod extract;
+pub mod lightpanda;
 
+pub use cdp::LightpandaEngine;
 pub use engine::{BrowserEngine, EngineError, MatchedNode, Page, PAGE_BYTE_CAP, PAGE_TIMEOUT_SECS};
 pub use extract::{html_to_markdown, readability};
+pub use lightpanda::Lightpanda;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -133,7 +137,7 @@ impl BrowserEngine for FallbackEngine {
     }
 }
 
-fn extract_title(html: &str) -> String {
+pub(crate) fn extract_title(html: &str) -> String {
     let document = Html::parse_document(html);
     let sel = Selector::parse("title").expect("static selector");
     document
@@ -160,6 +164,36 @@ impl BrowserService {
             fallback,
             denylist: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Locate + start a lightpanda sidecar and use it as the primary engine;
+    /// falls back to plain-fetch-only (as both primary and fallback) when no
+    /// binary is found or the sidecar fails to start. Never errors — a
+    /// missing/broken lightpanda degrades gracefully rather than blocking
+    /// startup.
+    pub async fn autodetect(configured_bin: Option<&str>, data_dir: std::path::PathBuf) -> Self {
+        if let Some(bin) = Lightpanda::locate(configured_bin) {
+            match Lightpanda::start(bin, data_dir).await {
+                Ok(sidecar) => {
+                    let engine = LightpandaEngine::new(sidecar.cdp_url());
+                    return Self::with_engines(
+                        Arc::new(SidecarBackedEngine {
+                            engine,
+                            _sidecar: sidecar,
+                        }),
+                        FallbackEngine::new(),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "browser: lightpanda sidecar failed to start, using plain fetch: {e}"
+                    );
+                }
+            }
+        } else {
+            tracing::info!("browser: no lightpanda binary found, using plain fetch");
+        }
+        Self::with_engines(Arc::new(FallbackEngine::new()), FallbackEngine::new())
     }
 
     /// Navigate and return the settled page, falling back to plain-fetch
@@ -197,6 +231,29 @@ impl BrowserService {
     fn clear_failures(&self, host: &str) {
         let mut denylist = self.denylist.lock().expect("denylist mutex poisoned");
         denylist.remove(host);
+    }
+}
+
+/// Pairs a [`LightpandaEngine`] with the [`Lightpanda`] sidecar it talks to,
+/// so the sidecar (and its restart supervisor) stays alive for as long as
+/// the engine — and only that long.
+struct SidecarBackedEngine {
+    engine: LightpandaEngine,
+    _sidecar: Lightpanda,
+}
+
+#[async_trait::async_trait]
+impl BrowserEngine for SidecarBackedEngine {
+    async fn fetch_page(&self, url: &str) -> Result<Page, EngineError> {
+        self.engine.fetch_page(url).await
+    }
+
+    async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError> {
+        self.engine.query(url, selector).await
+    }
+
+    fn name(&self) -> &'static str {
+        self.engine.name()
     }
 }
 
@@ -243,7 +300,10 @@ mod tests {
 
     #[tokio::test]
     async fn service_falls_back_when_engine_unavailable() {
-        let svc = BrowserService::with_engines(Arc::new(Down), FallbackEngine::from_static("<h1>Hi</h1>"));
+        let svc = BrowserService::with_engines(
+            Arc::new(Down),
+            FallbackEngine::from_static("<h1>Hi</h1>"),
+        );
         let page = svc.page("https://example.com").await.unwrap();
         assert!(page.degraded);
         assert_eq!(page.engine, "fallback");
@@ -252,7 +312,10 @@ mod tests {
 
     #[tokio::test]
     async fn service_propagates_non_unavailable_errors() {
-        let svc = BrowserService::with_engines(Arc::new(AlwaysNav), FallbackEngine::from_static("<h1>Hi</h1>"));
+        let svc = BrowserService::with_engines(
+            Arc::new(AlwaysNav),
+            FallbackEngine::from_static("<h1>Hi</h1>"),
+        );
         let err = svc.page("https://example.com").await.unwrap_err();
         assert!(matches!(err, EngineError::Nav(_)));
     }
@@ -304,8 +367,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn autodetect_falls_back_to_plain_fetch_without_a_lightpanda_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = BrowserService::autodetect(
+            Some("/definitely/not/a/real/lightpanda/binary"),
+            tmp.path().into(),
+        )
+        .await;
+        let page = svc
+            .page("https://example.com/nonexistent-host-for-test")
+            .await;
+        // Either the plain fetch fails on DNS (fine — no network in CI) or it
+        // succeeds; either way the primary engine must be "fallback", never a
+        // lightpanda engine we never actually started.
+        match page {
+            Ok(p) => assert_eq!(p.engine, "fallback"),
+            Err(e) => assert!(matches!(e, EngineError::Nav(_) | EngineError::Timeout(_))),
+        }
+    }
+
+    #[tokio::test]
     async fn host_is_denylisted_after_three_failures() {
-        let svc = BrowserService::with_engines(Arc::new(Down), FallbackEngine::from_static("<h1>Hi</h1>"));
+        let svc = BrowserService::with_engines(
+            Arc::new(Down),
+            FallbackEngine::from_static("<h1>Hi</h1>"),
+        );
         for _ in 0..DENYLIST_THRESHOLD {
             svc.page("https://flaky.example.com").await.unwrap();
         }
