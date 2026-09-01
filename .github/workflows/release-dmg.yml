@@ -1,0 +1,139 @@
+name: Weekly DMG
+
+# Build the macOS desktop app (Apple Silicon) and publish the .dmg to a ROLLING
+# GitHub Release tagged `weekly`, every Sunday morning — so the latest build is
+# always at a stable URL:
+#
+#   https://github.com/<owner>/<repo>/releases/download/weekly/Otto-macos-arm64.dmg
+#
+# "Updating" = download the same URL again and drag to /Applications (the app
+# self-deploys its bundled ottod daemon on launch). The build is ad-hoc signed
+# unless Apple Developer ID secrets are configured (see the Sign note below),
+# so first launch needs right-click → Open, or:
+#   xattr -cr /Applications/Otto.app
+#
+# Also runnable on demand via workflow_dispatch.
+
+on:
+  schedule:
+    # Sundays 05:00 UTC (07:00/08:00 Israel time).
+    - cron: '0 5 * * 0'
+  workflow_dispatch:
+
+# The release job must create/update the `weekly` tag + release assets.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-dmg
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  dmg:
+    name: Build + publish Otto.dmg (arm64)
+    runs-on: macos-latest # Apple Silicon
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The desktop shell is a SEPARATE cargo workspace with its own target
+          # dir — cache both.
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> apps/desktop/src-tauri/target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # otto-brokers compiles librdkafka from source via CMake (preinstalled on
+      # macOS runners, but don't rely on the image).
+      - name: Ensure cmake
+        run: command -v cmake || brew install cmake
+
+      # 1. Frontend → ui/dist (must precede the daemon build: `embed-ui` bakes
+      #    ui/dist into the binary at compile time via rust-embed).
+      - name: Build UI
+        run: cd ui && npm ci && npm run build
+
+      # 2. Daemon (release, embed-ui — same as packaging/deploy.sh) → sidecar.
+      - name: Build ottod (release, embed-ui)
+        run: cargo build --release -p ottod --features embed-ui
+
+      - name: Stage sidecar (target-triple name)
+        run: |
+          triple=$(rustc -vV | sed -n 's/host: //p')
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/release/ottod "apps/desktop/src-tauri/binaries/ottod-${triple}"
+
+      # 3. Desktop app + DMG (the `app` and `dmg` targets from tauri.conf.json).
+      #
+      # Sign note: without secrets Tauri ad-hoc signs — installable after
+      # right-click → Open (or `xattr -cr`). To ship a Gatekeeper-clean,
+      # notarized build later, add repo secrets and the bundle is signed
+      # automatically: APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
+      # APPLE_SIGNING_IDENTITY, and for notarization APPLE_ID, APPLE_PASSWORD
+      # (app-specific), APPLE_TEAM_ID.
+      - name: Build desktop app (Tauri)
+        working-directory: apps/desktop/src-tauri
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx --yes @tauri-apps/cli@^2 build
+
+      # Stable-named copy so the download URL never changes week to week.
+      - name: Collect artifacts
+        id: collect
+        run: |
+          dmg=$(ls apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          test -n "$dmg"
+          cp "$dmg" Otto-macos-arm64.dmg
+          echo "versioned=$dmg" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          shasum -a 256 Otto-macos-arm64.dmg | tee Otto-macos-arm64.dmg.sha256
+
+      # Keep a copy on the run itself too (survives even if the release upload
+      # is edited away).
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Otto-macos-arm64-dmg
+          path: |
+            Otto-macos-arm64.dmg
+            Otto-macos-arm64.dmg.sha256
+          retention-days: 30
+
+      # Rolling release: same `weekly` tag every run, assets replaced in place.
+      - name: Publish rolling `weekly` release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: weekly
+          name: Otto Weekly Build
+          prerelease: true
+          body: |
+            Automated weekly macOS build (Apple Silicon) — ${{ steps.collect.outputs.date }}, `${{ github.sha }}`.
+
+            **Install / update:** download `Otto-macos-arm64.dmg`, open it, drag **Otto** to
+            `/Applications` (replace the existing app to update). The app deploys its bundled
+            daemon on launch.
+
+            This build is not notarized: on first launch use **right-click → Open**, or run
+            `xattr -cr /Applications/Otto.app`.
+          files: |
+            Otto-macos-arm64.dmg
+            Otto-macos-arm64.dmg.sha256

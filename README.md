@@ -273,6 +273,17 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   `otto-workgraph` (Mission Control work graph), `otto-server` (routes),
   `ottod` (binary).
 
+## Download (prebuilt DMG)
+
+A GitHub Actions workflow builds the Apple-Silicon `.dmg` **every Sunday
+morning** (and on demand) and publishes it to the rolling
+[`weekly` release](../../releases/tag/weekly) — the newest build is always at
+the same URL: `releases/download/weekly/Otto-macos-arm64.dmg`. Download, open,
+drag **Otto** to `/Applications`; to **update**, download it again and replace
+the app (the bundled daemon self-deploys on launch). The CI build isn't
+notarized, so on first launch use **right-click → Open** or run
+`xattr -cr /Applications/Otto.app`.
+
 ## Prerequisites
 
 - **macOS** (Apple Silicon or Intel). Otto uses launchd, the macOS Keychain, and

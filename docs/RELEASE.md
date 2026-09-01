@@ -4,6 +4,16 @@ Deterministic, gated steps to cut a local Otto release (macOS-only). Each gate
 must pass before moving on — stop on the first failure. There is no Makefile;
 these are the real commands (mirrors `README.md` + `packaging/`).
 
+> **CI weekly DMG:** `.github/workflows/release-dmg.yml` runs this same build
+> (UI → `ottod --release --features embed-ui` → sidecar → `tauri build`) on a
+> macOS runner every Sunday 05:00 UTC (+ `workflow_dispatch`), and publishes
+> `Otto-macos-arm64.dmg` (+ sha256) to the rolling `weekly` GitHub Release. The
+> CI bundle is ad-hoc signed unless the Apple Developer ID secrets
+> (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+> and `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` for notarization) are added
+> to the repo — first launch of an ad-hoc build needs right-click → Open or
+> `xattr -cr`. The checklist below remains the local, TCC-stable flow.
+
 > Prerequisites: macOS (Apple Silicon or Intel), Rust stable, Node 20+, and a
 > one-time signing identity (`packaging/make-cert.sh`). The Tauri CLI is invoked
 > via `npx --yes @tauri-apps/cli@^2` — no global install needed.
