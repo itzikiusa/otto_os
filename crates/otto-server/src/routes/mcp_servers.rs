@@ -212,9 +212,13 @@ pub async fn delete(
 }
 
 /// `McpServerProvider` backed by the SQLite repo: resolves a workspace's enabled
-/// servers for the session manager to merge into `.mcp.json` at spawn. Sync trait
-/// over an async repo, so it blocks briefly on the current Tokio runtime — fine
-/// for the handful of rows per workspace, and best-effort (errors → empty).
+/// servers for the session manager to reconcile into `.mcp.json` at spawn. Sync
+/// trait over an async repo, so it blocks briefly on a bridge thread — fine for
+/// the handful of rows per workspace, and best-effort per the trait contract
+/// (a lookup failure returns empty so the spawn proceeds) — but every failure
+/// path is logged with the workspace context: an empty result silently standing
+/// in for "the DB query failed" is exactly how a session ends up minus its MCP
+/// servers with nothing in the logs to say why.
 ///
 /// Keychain-backed secret env values are resolved HERE, at merge time — the
 /// rendered `.mcp.json` on disk still contains real values (the agent CLI
@@ -237,21 +241,25 @@ impl McpServerProvider for DbMcpServerProvider {
         let repo = McpServersRepo::new(self.pool.clone());
         let ws = workspace_id.to_string();
         // Bridge the async repo onto the calling thread without holding the
-        // runtime: spawn the query and block this thread on its result.
+        // runtime: spawn the query and block this thread on its result. (The
+        // trait is sync by design — `block_in_place` would panic on the
+        // current-thread runtimes tests run under, so the bridge thread stays.)
         let servers = std::thread::scope(|s| {
             s.spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
+                let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .ok()
-                    .and_then(|rt| rt.block_on(repo.list_enabled(&ws)).ok())
+                    .map_err(|e| format!("build runtime: {e}"))?;
+                rt.block_on(repo.list_enabled(&ws))
+                    .map_err(|e| format!("list enabled mcp servers: {e}"))
             })
             .join()
-            .ok()
-            .flatten()
+            .unwrap_or_else(|_| Err("mcp server lookup thread panicked".into()))
         });
+        // "no servers enabled" (Ok, possibly empty) vs "lookup failed" (Err):
+        // only the latter is a fault, and it must reach the logs.
         match servers {
-            Some(rows) => rows
+            Ok(rows) => rows
                 .into_iter()
                 .map(|r| {
                     let env = if r.secret_env_keys.is_empty() {
@@ -268,7 +276,10 @@ impl McpServerProvider for DbMcpServerProvider {
                     }
                 })
                 .collect(),
-            None => Vec::new(),
+            Err(e) => {
+                tracing::warn!(workspace = %workspace_id, "mcp servers unavailable for spawn: {e}");
+                Vec::new()
+            }
         }
     }
 }

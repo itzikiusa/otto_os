@@ -163,6 +163,11 @@ fn otto_tools_env(
 struct OttoToolsInjection {
     args: Vec<String>,
     env: std::collections::BTreeMap<String, String>,
+    /// The launcher entry for the workspace `.mcp.json` (identity-neutral —
+    /// command/args only end up in the shared file). `None` when the feature
+    /// is off for the workspace; the caller folds it into the single per-spawn
+    /// MCP reconcile ([`SessionManager::sync_workspace_mcp`]).
+    server: Option<crate::mcp::OttoToolsServer>,
 }
 
 /// One row of the live process table: (pid, ppid, cumulative CPU ms).
@@ -1580,11 +1585,11 @@ impl SessionManager {
             args: vec!["mcp-tools".to_string()],
             env: env.clone(),
         };
-        // Claude / agy read the identity-neutral workspace `.mcp.json`; their
+        // Claude / agy read the identity-neutral workspace `.mcp.json`; the
+        // entry itself is written by the caller's single per-spawn reconcile
+        // (`sync_workspace_mcp`, which receives `server` below). The
         // session-specific token and routing values come from the spawn env.
-        if let Err(e) = crate::mcp::enable_otto_tools(&session.cwd, &server) {
-            tracing::warn!("otto MCP tools: write .mcp.json failed: {e}");
-        }
+        //
         // grok reads its own project-scoped `.grok/config.toml`, never
         // `.mcp.json` — without this a grok session has no otto tools.
         if session.provider == "grok" {
@@ -1612,6 +1617,7 @@ impl SessionManager {
                             &path.to_string_lossy(),
                         ),
                         env,
+                        server: Some(server),
                     };
                 }
                 Err(e) => tracing::warn!("otto MCP tools: write codex creds failed: {e}"),
@@ -1620,6 +1626,75 @@ impl SessionManager {
         OttoToolsInjection {
             args: Vec::new(),
             env,
+            server: Some(server),
+        }
+    }
+
+    /// Apply everything Otto manages in this session's cwd MCP launcher
+    /// configs — the browser opt-in, the workspace's *enabled* user servers,
+    /// and the `otto` first-party entry — as ONE reconcile per file (see
+    /// `crate::mcp`): stale managed entries are removed, so a disable/delete
+    /// finally propagates, and concurrent spawns sharing a cwd can't lose each
+    /// other's updates. Also snapshots the resolved managed server names into
+    /// the session meta (`mcp_servers`) so the session records what this spawn
+    /// actually wired up. Best-effort throughout — never blocks the spawn.
+    ///
+    /// Returns the codex `-c` overrides for the user's servers (codex doesn't
+    /// read `.mcp.json`; grok gets its `.grok/config.toml` tables here too).
+    async fn sync_workspace_mcp(
+        &self,
+        session: &Session,
+        otto_tools: Option<crate::mcp::OttoToolsServer>,
+    ) -> Vec<String> {
+        let user_servers: Vec<crate::mcp::UserMcpServer> = match &self.mcp_servers {
+            Some(provider) => provider
+                .enabled_servers(&session.workspace_id)
+                .into_iter()
+                .map(|s| crate::mcp::UserMcpServer {
+                    name: s.name,
+                    command: s.command,
+                    args: s.args,
+                    env: s.env,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let browser = session
+            .meta
+            .get("browser")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let cfg = crate::mcp::ManagedMcpConfig {
+            browser,
+            user_servers: user_servers.clone(),
+            otto_tools,
+        };
+        let names = match crate::mcp::reconcile_managed_servers(&session.cwd, &cfg) {
+            Ok(names) => names,
+            Err(e) => {
+                tracing::warn!(session = %session.id, cwd = %session.cwd, "reconcile workspace MCP config: {e}");
+                Vec::new()
+            }
+        };
+        // Snapshot-at-spawn: the managed name set this session resolved
+        // (browser + otto + user servers — the same set every provider's
+        // surface is derived from), atomically merged into the meta.
+        if let Err(e) = self
+            .repo
+            .merge_meta(&session.id, &serde_json::json!({ "mcp_servers": names }))
+            .await
+        {
+            tracing::warn!(session = %session.id, "record MCP server snapshot: {e}");
+        }
+        if session.provider == "grok" {
+            if let Err(e) = crate::mcp::reconcile_user_servers_grok(&session.cwd, &user_servers) {
+                tracing::warn!(session = %session.id, "reconcile grok MCP config: {e}");
+            }
+        }
+        if session.provider == "codex" {
+            crate::mcp::codex_user_server_args(&user_servers)
+        } else {
+            Vec::new()
         }
     }
 
@@ -1775,45 +1850,21 @@ impl SessionManager {
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
             crate::trust::ensure_trusted(&session.provider, &session.cwd);
-            // Browser tools: wire an MCP browser server into the workspace
-            // when the session opted in (meta.browser == true).
-            if session
-                .meta
-                .get("browser")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                if let Err(e) = crate::mcp::enable_browser(&session.cwd) {
-                    tracing::warn!("enable browser MCP: {e}");
-                }
-            }
-            // User-configured MCP servers: merge the workspace's *enabled* ones
-            // into `.mcp.json` alongside any managed entries. Opt-in by the user
-            // (each server is enabled explicitly); best-effort — never blocks spawn.
-            if let Some(provider) = &self.mcp_servers {
-                let specs = provider.enabled_servers(&session.workspace_id);
-                if !specs.is_empty() {
-                    let servers: Vec<crate::mcp::UserMcpServer> = specs
-                        .into_iter()
-                        .map(|s| crate::mcp::UserMcpServer {
-                            name: s.name,
-                            command: s.command,
-                            args: s.args,
-                            env: s.env,
-                        })
-                        .collect();
-                    if let Err(e) = crate::mcp::merge_user_servers(&session.cwd, &servers) {
-                        tracing::warn!("merge user MCP servers: {e}");
-                    }
-                }
-            }
             // Otto's first-party read-only tool server: when the workspace has
-            // opted in (`otto_mcp_enabled`), mint a per-session token and inject
-            // the `otto` MCP entry alongside the user/browser servers. Opt-in,
+            // opted in (`otto_mcp_enabled`), mint a per-session token; the
+            // launcher entry itself lands via the reconcile below. Opt-in,
             // best-effort — never blocks spawn.
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
             spec.args.extend(otto_tools.args);
             spec.env.extend(otto_tools.env);
+            // Everything MCP in the shared cwd — the browser opt-in
+            // (meta.browser), the workspace's *enabled* user servers, and the
+            // `otto` entry above — is written in ONE reconcile per launcher
+            // file, so disables propagate as removals and concurrent spawns
+            // sharing a cwd can't lose each other's updates. Codex doesn't
+            // read `.mcp.json`; its user servers ride per-spawn `-c` overrides.
+            let codex_user_args = self.sync_workspace_mcp(&session, otto_tools.server).await;
+            spec.args.extend(codex_user_args);
             // Otto context provisioning: materialize the workspace's active
             // skills + soul + context into this CLI's native form. Best-effort —
             // the hook logs and swallows its own errors, never blocking spawn.
@@ -3060,6 +3111,11 @@ impl SessionManager {
             let otto_tools = self.maybe_enable_otto_tools(&session).await;
             spec.args.extend(otto_tools.args);
             spec.env.extend(otto_tools.env);
+            // Re-run the same MCP reconcile as create(): a resumed session
+            // picks up server enable/disable changes made since its original
+            // spawn instead of keeping the stale `.mcp.json` forever.
+            let codex_user_args = self.sync_workspace_mcp(&session, otto_tools.server).await;
+            spec.args.extend(codex_user_args);
             // Re-wire the per-session ingest env (the hooks config persists in
             // the workspace from the initial spawn).
             spec.env.extend(self.ingest_env(&session.id));

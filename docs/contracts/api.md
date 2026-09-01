@@ -516,11 +516,19 @@ Default macOS config paths probed (all under `~/Library`):
 ## Workspace MCP servers (user-managed `.mcp.json` entries)
 
 User-configured MCP (Model Context Protocol) servers, per workspace. *Enabled* servers are
-merged into the workspace's `.mcp.json` — alongside Otto's own managed entries (e.g. the
-browser server) — when an agent session spawns there (see `otto-sessions::mcp`). Nothing is
-auto-enabled: `enabled` defaults `false` on create, and a server is only written to
-`.mcp.json` once the user flips it on and a session then spawns in the workspace. Reads =
-`ws viewer`, mutations = `ws editor`. Item routes resolve the workspace from the row.
+**reconciled** into the workspace's `.mcp.json` — alongside Otto's own managed entries (the
+browser server and the first-party `otto` tools server) — every time an agent session spawns
+or restarts there (see `otto-sessions::mcp`). A top-level `ottoManagedServers` marker in the
+file lists the names Otto wrote; each reconcile removes marker names no longer enabled (so a
+disable/delete propagates), upserts the current set, and never touches entries outside the
+marker (hand-added servers survive). Codex sessions receive the same enabled servers as
+per-spawn `-c mcp_servers.<name>.*` overrides (Codex doesn't read `.mcp.json`); grok sessions
+get `[mcp_servers.<name>]` tables in `<workspace>/.grok/config.toml`, tracked by an
+`otto_managed_servers` marker. The resolved managed name list is snapshotted into the
+session's meta as `mcp_servers` at each spawn. Nothing is auto-enabled: `enabled` defaults
+`false` on create, and a server is only written once the user flips it on and a session then
+spawns in the workspace. Reads = `ws viewer`, mutations = `ws editor`. Item routes resolve
+the workspace from the row.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -543,8 +551,9 @@ Notes:
   A key listed in both `env` and `secret_env` is stored as secret only.
 - Secret values are resolved exclusively when `.mcp.json` is rendered at agent spawn — the
   rendered file on disk contains real values (the agent CLI needs them; it is user-local and
-  out-of-tree), but Otto's DB does not. The merge preserves all other `.mcp.json` keys and
-  never overwrites Otto's `otto-browser` entry.
+  out-of-tree), but Otto's DB does not. The reconcile preserves all `.mcp.json` keys outside
+  the `ottoManagedServers` marker, and a user server named `otto` / `otto-browser` (reserved
+  for Otto's own entries) is skipped.
 
 ## SFTP file browser (`/connections/{id}/sftp/*`)
 

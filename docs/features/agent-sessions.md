@@ -118,9 +118,14 @@ full provider list in `providers`.
    (claude); for codex/agy/shell it stays `None`.
 3. Writes the session row, then `mkdir -p`s the cwd.
 4. **Pre-trusts** the folder for the provider (`trust::ensure_trusted`, §6).
-5. Merges MCP servers into the workspace `.mcp.json` (browser if opted in,
-   the user's enabled `mcp-servers`, and Otto's first-party `otto` tool server
-   when the workspace opted in via `otto_mcp_enabled`). All opt-in, best-effort,
+5. **Reconciles** MCP servers into the workspace `.mcp.json` in one guarded
+   read→write (browser if opted in, the user's enabled `mcp-servers`, and
+   Otto's first-party `otto` tool server when the workspace opted in via
+   `otto_mcp_enabled`). An `ottoManagedServers` marker tracks what Otto wrote:
+   disabled/deleted servers are removed on the next spawn or restart, while
+   hand-added entries are never touched. Codex gets the user servers as
+   per-spawn `-c` overrides; grok as `.grok/config.toml` tables. The resolved
+   name list is snapshotted into `meta.mcp_servers`. All opt-in, best-effort,
    never blocks the spawn.
 6. Runs the context pre-spawn hook (materializes skills/soul/context) — skipped
    for review sessions.
