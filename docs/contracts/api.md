@@ -2831,7 +2831,7 @@ denylist/fallback policy with `/page`. Broadcasts `browser_tab_updated`
 | GET /api/v1/workspaces/{wid}/browser/page?url=… | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS) |
 | GET /api/v1/workspaces/{wid}/browser/query?url=…&selector=… | ws editor · Browser Edit | — | `{matches: [{selector, outer_html, text}]}` — netguard-checked, same as `/page`; CSS-selector matches against the settled page |
 | GET /api/v1/workspaces/{wid}/browser/annotations | ws viewer · Browser View | query `url?` (filters to one page) | `BrowserAnnotation[]` |
-| POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt, text, comment?, color?, tab_id?}` (`color` defaults `"yellow"`) | `BrowserAnnotation` |
+| POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt?, text?, comment?, color?, tab_id?}` (`excerpt`/`text` default `""`, `color` defaults `"yellow"`) | `BrowserAnnotation` |
 | PATCH /api/v1/browser/annotations/{id} | ws editor · Browser Edit | `{comment}` | `BrowserAnnotation` |
 | DELETE /api/v1/browser/annotations/{id} | ws editor · Browser Edit | — | 204 |
 | POST /api/v1/workspaces/{wid}/browser/summarize | ws editor · Browser Edit | `{url}` | `{summary, engine, degraded}` |

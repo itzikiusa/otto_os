@@ -1184,7 +1184,7 @@ export interface NotificationSettings {
 // RBAC — features + capabilities
 // ---------------------------------------------------------------------------
 
-/** The 22 protected features (snake_case, mirrors Rust Feature enum). */
+/** The 25 protected features (snake_case, mirrors Rust Feature enum). */
 export type Feature =
   | 'agents'
   | 'connections'

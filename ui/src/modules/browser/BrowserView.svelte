@@ -182,7 +182,7 @@
             url,
             selector: m.selector,
             excerpt: (m.outerHtml || '').slice(0, 2000),
-            text: m.text || '',
+            text: (m.text || '').slice(0, 2000),
             comment: '',
           });
         } catch (e) {
