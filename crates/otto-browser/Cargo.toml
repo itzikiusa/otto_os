@@ -1,0 +1,24 @@
+[package]
+name = "otto-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-core = { workspace = true }
+otto-netguard = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+# HTML parsing for the extraction pipeline (readability pass + html->markdown).
+# MIT, pure Rust — no other crate in the workspace pulls in an HTML parser yet.
+scraper = "0.20"
+# Tree type scraper's `Html` is built on (transitive via scraper already, but
+# Rust requires a direct dependency to name `ego_tree::NodeRef` ourselves).
+ego-tree = "0.6"
+
+[dev-dependencies]
+tokio = { workspace = true }
