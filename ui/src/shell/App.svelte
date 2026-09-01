@@ -52,6 +52,7 @@
   import ScheduledTasksPage from '../modules/scheduled-tasks/ScheduledTasksPage.svelte';
   import RunWithOttoPage from '../modules/run-with-otto/RunWithOttoPage.svelte';
   import VaultPage from '../modules/vault/VaultPage.svelte';
+  import { BrowserView } from '../modules/browser';
   import SnipEditor from '../modules/snip/SnipEditor.svelte';
   import PluginFrame from '../modules/plugins/PluginFrame.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
@@ -430,6 +431,7 @@
       { id: 'core.go-proof', title: 'Go to Proof', group: 'Navigate', keywords: 'proof pack evidence badge verified tests ci approval audit', run: () => router.go('proof') },
       { id: 'core.go-brokers', title: 'Go to Message Brokers', group: 'Navigate', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf', run: () => router.go('brokers') },
       { id: 'core.go-mcp', title: 'Go to MCP Control Plane', group: 'Navigate', keywords: 'mcp model context protocol server tool governance allowlist policy approval audit injection risk', run: () => router.go('mcp') },
+      { id: 'core.go-browser', title: 'Go to Browser', group: 'Navigate', keywords: 'browser reader mode tabs annotate url fetch page', run: () => router.go('browser') },
       { id: 'core.toggle-rail', title: 'Toggle Sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: 'Toggle Right Panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
@@ -645,6 +647,8 @@
       <ProofPage />
     {:else if moduleName === 'vault'}
       <VaultPage />
+    {:else if moduleName === 'browser'}
+      <BrowserView />
     {:else if moduleName === 'plugin'}
       {#if router.parts[1]}
         {#key router.parts[1]}

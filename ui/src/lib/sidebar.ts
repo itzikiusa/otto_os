@@ -63,6 +63,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   // Vault v3 — the file-backed docs home (Obsidian-parity markdown vaults, OKF).
   { id: 'vault', icon: 'globe', label: 'Vault' },
   { id: 'canvas', icon: 'shapes', label: 'Canvas' },
+  { id: 'browser', label: 'Browser', icon: 'globe', feature: 'browser' },
   { id: 'api', icon: 'send', label: 'API', feature: 'api_client' },
   { id: 'mcp', icon: 'plug', label: 'MCP Control Plane', feature: 'mcp' },
   { id: 'workflows', icon: 'split', label: 'Workflows', feature: 'workflows' },

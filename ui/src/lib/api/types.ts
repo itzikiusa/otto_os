@@ -1209,7 +1209,8 @@ export type Feature =
   | 'mcp'
   | 'mission_control'
   | 'scheduled_tasks'
-  | 'run_with_otto';
+  | 'run_with_otto'
+  | 'browser';
 
 /** Capability ladder (None < View < Edit < Admin). */
 export type Capability = 'none' | 'view' | 'edit' | 'admin';

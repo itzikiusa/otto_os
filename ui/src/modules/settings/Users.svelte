@@ -145,7 +145,7 @@
     'agents', 'mission_control', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
     'api_client', 'workflows', 'channels', 'skill_eval', 'skills', 'insights',
     'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas',
-    'proof_pack', 'mcp', 'scheduled_tasks', 'run_with_otto',
+    'proof_pack', 'mcp', 'scheduled_tasks', 'run_with_otto', 'browser',
   ];
   const FEATURE_LABELS: Record<Feature, string> = {
     agents: 'Agents', mission_control: 'Mission Control', connections: 'Connections', database: 'Database',
@@ -155,7 +155,7 @@
     usage: 'Usage', self_improvement: 'Self-Improvement', context: 'Context',
     settings: 'Settings', users: 'Users', canvas: 'Canvas',
     proof_pack: 'Proof Packs', mcp: 'MCP Control Plane', scheduled_tasks: 'Scheduled Tasks',
-    run_with_otto: 'Run with Otto',
+    run_with_otto: 'Run with Otto', browser: 'Browser',
   };
   const CAP_OPTIONS: Capability[] = ['none', 'view', 'edit', 'admin'];
 

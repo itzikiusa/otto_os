@@ -16,6 +16,7 @@ import { database } from './stores/database.svelte';
 import { proof } from './stores/proof.svelte';
 import { scheduledTasks } from './stores/scheduledTasks.svelte';
 import { runWithOtto } from './stores/runWithOtto.svelte';
+import { browser } from './stores/browser.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -469,6 +470,12 @@ class EventsClient {
         } else if (parsed.type === 'otto_run_updated') {
           // Run with Otto page refreshes the affected run + the workspace list.
           runWithOtto.applyEvent(parsed);
+        } else if (
+          parsed.type === 'browser_tab_updated' ||
+          parsed.type === 'browser_annotation_added'
+        ) {
+          // Browser page: tab strip / annotation list refresh in place.
+          browser.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);
