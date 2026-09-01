@@ -31,12 +31,16 @@ impl Lightpanda {
     /// Resolve the `lightpanda` binary in priority order: an explicit
     /// configured path, then `PATH`, then well-known install locations
     /// (including the slot Otto would auto-download a binary into).
+    ///
+    /// An explicit `configured` path is authoritative: if it's set but does
+    /// not point at a real file, `locate` returns `None` rather than
+    /// silently falling through to autodetection — a misconfigured path
+    /// should surface as "not found", not paper over the mistake with
+    /// whatever happens to be on `PATH`.
     pub fn locate(configured: Option<&str>) -> Option<PathBuf> {
         if let Some(p) = configured.map(str::trim).filter(|s| !s.is_empty()) {
             let pb = PathBuf::from(p);
-            if pb.is_file() {
-                return Some(pb);
-            }
+            return pb.is_file().then_some(pb);
         }
         if let Ok(out) = std::process::Command::new("which")
             .arg("lightpanda")
@@ -243,6 +247,12 @@ fn spawn_supervisor(
 }
 
 /// Grab a free loopback TCP port by binding to `:0` and reading it back.
+/// TOCTOU: the listener is dropped before lightpanda binds the same port, so
+/// in principle another process could grab it first between the two — same
+/// risk `otto-usage::clickhouse`'s identical helper takes. Loopback-only,
+/// desktop-single-user, so accepted as-is; a lost race surfaces as
+/// `start`'s "did not open port in time" error (or the supervisor's
+/// restart-with-backoff retrying a fresh spawn on the same port later).
 fn free_loopback_port() -> std::io::Result<u16> {
     let l = std::net::TcpListener::bind("127.0.0.1:0")?;
     let port = l.local_addr()?.port();
@@ -256,9 +266,12 @@ mod tests {
 
     #[test]
     fn locate_rejects_missing_configured_path() {
-        assert!(
-            Lightpanda::locate(Some("/definitely/not/a/real/lightpanda/binary")).is_none()
-                || Lightpanda::locate(None).is_some()
+        // An explicit configured path is authoritative: an invalid one must
+        // return None, never fall through to PATH/well-known locations —
+        // deterministic regardless of what's installed on this machine.
+        assert_eq!(
+            Lightpanda::locate(Some("/definitely/not/a/real/lightpanda/binary")),
+            None
         );
     }
 
