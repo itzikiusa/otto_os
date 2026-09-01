@@ -2,14 +2,16 @@
 //! Nearly every tool here is **read-only**; the exceptions are
 //! `canvas_create_scene` / `canvas_update_scene` (Task B5), the Vault v3
 //! doc writers `otto_vault_write` / `otto_vault_rename` / `otto_vault_delete`,
-//! and the swarm board tools `swarm_create_task` / `swarm_update_task` /
-//! `swarm_run_task` / `swarm_stop_run` (the manager's utilization levers),
-//! which call the normal governed HTTP endpoints AS THE SESSION OWNER — the
+//! the swarm board tools `swarm_create_task` / `swarm_update_task` /
+//! `swarm_run_task` / `swarm_stop_run` (the manager's utilization levers), and
+//! `browser_navigate` (Task 6, opens a reader-mode browser tab) — which call
+//! the normal governed HTTP endpoints AS THE SESSION OWNER — the
 //! same workspace-role check (`Editor`) a human gets, no more. Canvas is meant
 //! to be agent-drawable, the vault is the agents' documentation home
-//! (delete is a soft move to `.trash/`), and the swarm board is how a manager
-//! agent keeps its team utilized; every other tool stays strictly read-only
-//! (see "Safety properties" below).
+//! (delete is a soft move to `.trash/`), the swarm board is how a manager
+//! agent keeps its team utilized, and a reader tab is the same one-URL "open
+//! a tab" action the Browser module UI does; every other tool stays strictly
+//! read-only (see "Safety properties" below).
 //!
 //! Otto exposes a slice of its own data to an agent session as MCP tools. When
 //! `otto_mcp_enabled` is on (default), `otto-sessions` injects an `otto` server
@@ -25,18 +27,20 @@
 //! database **connections**: schema introspection and **read-only** queries.
 //!
 //! Safety properties:
-//! - **Read-only, with two named exceptions** — all upstream calls are `GET`s, or
+//! - **Read-only, with named exceptions** — all upstream calls are `GET`s, or
 //!   `POST`s to a hard-coded allow-list of **read-only-enforced** endpoints. The
 //!   DB query path, `…/db/mcp-query`, refuses any write/DDL server-side
 //!   (`run_read_only`) before a driver runs, independent of the connection's
 //!   write-guard; the other read POSTs are `…/memory/search`, the vault
-//!   `…/vault/vaults/{id}/search` and `…/okf/validate` (Viewer-gated reads
-//!   that never mutate). `canvas_create_scene`/`canvas_update_scene` and
-//!   `otto_vault_write`/`otto_vault_rename`/`otto_vault_delete` are the ONLY
-//!   tools that mutate: they hit the normal governed HTTP routes, which apply
-//!   the same `WorkspaceRole::Editor` gate a human caller hits — the token can
-//!   only do what the session's owner is already allowed to do (and vault
-//!   delete only trashes, never destroys).
+//!   `…/vault/vaults/{id}/search` / `…/okf/validate`, and `…/browser/summarize`
+//!   (Editor-gated but doesn't persist anything — the summarize session is
+//!   ephemeral and never saved; see `routes/browser.rs`). `canvas_create_scene`/
+//!   `canvas_update_scene`, `otto_vault_write`/`otto_vault_rename`/
+//!   `otto_vault_delete`, and `browser_navigate` are the ONLY tools that
+//!   mutate persisted state: they hit the normal governed HTTP routes, which
+//!   apply the same `WorkspaceRole::Editor` gate a human caller hits — the
+//!   token can only do what the session's owner is already allowed to do
+//!   (and vault delete only trashes, never destroys).
 //! - **Capped** — each upstream call has a wall-clock timeout; the response body
 //!   is size-capped before parsing, and JSON arrays are row-capped.
 //! - **Redacted** — every tool result is passed through `otto_core::redact` so
@@ -700,6 +704,26 @@ fn tool_catalog() -> Value {
                 "name": "otto_vault_delete",
                 "description": "Soft-delete a note (Editor-gated): moves it into the vault's .trash/ folder — never destroys files. Prefer an OKF **Deprecation** log entry over deletion for knowledge that aged out.",
                 "inputSchema": { "type": "object", "properties": { "vault_id": { "type": "integer" }, "path": { "type": "string" } }, "required": ["vault_id", "path"] }
+            },
+            {
+                "name": "browser_navigate",
+                "description": "Open a reader-mode browser tab on `url` (fetches it, netguard-checked — loopback/private/metadata addresses are refused) and return its fetched title. The tab appears in this workspace's Browser module.",
+                "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }
+            },
+            {
+                "name": "browser_page",
+                "description": "Read-only: fetch a URL (netguard-checked) and return its extracted markdown, title, and which engine rendered it. `degraded:true` means the plain-fetch fallback ran (no JS execution).",
+                "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }
+            },
+            {
+                "name": "browser_query",
+                "description": "Read-only: fetch a URL (netguard-checked, same as browser_page) and return every node matching a CSS `selector` — outer HTML and text content per match.",
+                "inputSchema": { "type": "object", "properties": { "url": { "type": "string" }, "selector": { "type": "string" } }, "required": ["url", "selector"] }
+            },
+            {
+                "name": "browser_summarize",
+                "description": "Fetch a URL (netguard-checked) and run one short-lived agent turn to summarize its markdown (capped at 30k chars) for a developer notebook.",
+                "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }
             }
         ]
     })
@@ -1356,6 +1380,75 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             .await?;
             Ok(finalize(json!({ "ok": true, "trashed": args.get("path") })))
         }
+        // Browser tools — all call the governed browser routes with the
+        // session's own token (netguard + RBAC enforced there, same as the
+        // Browser module UI). `browser_navigate` is the only write: it opens
+        // a reader-mode tab (a genuine new `browser_tabs` row), so it's an
+        // explicit arm rather than a `FEATURE_READ_TOOLS` GET/POST mapping.
+        "browser_navigate" => {
+            let ws = ctx.workspace_id.clone().ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+            let url = arg_str(args, "url")?;
+            let tab = ctx
+                .post_json(&format!("/workspaces/{}/browser/tabs", seg(&ws)), &json!({ "url": url }))
+                .await?;
+            let tab_id = tab
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "daemon did not return a tab id".to_string())?
+                .to_string();
+            // The tab is created in mode:"reader" by construction (see
+            // `otto_state::browser::BrowserTabsRepo::create`), so this PATCH
+            // runs the fetch pipeline and adopts the fetched page's title.
+            let updated = ctx
+                .patch_json(&format!("/browser/tabs/{}", seg(&tab_id)), &json!({ "url": url }))
+                .await?;
+            let title = updated.get("title").cloned().unwrap_or(Value::String(String::new()));
+            Ok(finalize(json!({ "ok": true, "title": title })))
+        }
+        "browser_page" => {
+            let Some(ws) = ctx.workspace_id.as_deref() else {
+                return Err("no workspace context (OTTO_WORKSPACE_ID unset); cannot fetch a page".into());
+            };
+            let url = arg_str(args, "url")?;
+            let raw = ctx
+                .get_json(&format!("/workspaces/{}/browser/page?url={}", seg(ws), seg(&url)))
+                .await?;
+            // Drop `url` (the caller already has it) and `html` (raw markup —
+            // large, and `markdown` is the extracted content agents want) so
+            // the result stays small; keep the rest verbatim.
+            Ok(finalize(json!({
+                "markdown": raw.get("markdown").cloned().unwrap_or(Value::Null),
+                "title": raw.get("title").cloned().unwrap_or(Value::Null),
+                "engine": raw.get("engine").cloned().unwrap_or(Value::Null),
+                "degraded": raw.get("degraded").cloned().unwrap_or(Value::Null),
+            })))
+        }
+        "browser_query" => {
+            let Some(ws) = ctx.workspace_id.as_deref() else {
+                return Err("no workspace context (OTTO_WORKSPACE_ID unset); cannot query a page".into());
+            };
+            let url = arg_str(args, "url")?;
+            let selector = arg_str(args, "selector")?;
+            let raw = ctx
+                .get_json(&format!(
+                    "/workspaces/{}/browser/query?url={}&selector={}",
+                    seg(ws),
+                    seg(&url),
+                    seg(&selector)
+                ))
+                .await?;
+            Ok(finalize(raw))
+        }
+        "browser_summarize" => {
+            let Some(ws) = ctx.workspace_id.as_deref() else {
+                return Err("no workspace context (OTTO_WORKSPACE_ID unset); cannot summarize a page".into());
+            };
+            let url = arg_str(args, "url")?;
+            let raw = ctx
+                .post_json(&format!("/workspaces/{}/browser/summarize", seg(ws)), &json!({ "url": url }))
+                .await?;
+            Ok(finalize(raw))
+        }
         // First-party feature reads (workflows / brokers / issues / swarm / vault /
         // repos / sessions / product / findings / usage / self-improvement). All
         // route through the pure `read_route` and post-process identically: the raw
@@ -1944,6 +2037,110 @@ mod tests {
             .collect();
         assert!(names.contains(&"canvas_create_scene"), "catalog missing canvas_create_scene");
         assert!(names.contains(&"canvas_update_scene"), "catalog missing canvas_update_scene");
+    }
+
+    #[test]
+    fn catalog_lists_the_browser_tools() {
+        let cat = tool_catalog();
+        let names: Vec<&str> = cat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for t in ["browser_navigate", "browser_page", "browser_query", "browser_summarize"] {
+            assert!(names.contains(&t), "catalog missing {t}");
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_navigate_errors_without_url() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 20, "method": "tools/call",
+                    "params": { "name": "browser_navigate", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("url"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn browser_navigate_errors_without_workspace() {
+        let mut ctx = test_ctx();
+        ctx.workspace_id = None;
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                    "params": { "name": "browser_navigate", "arguments": { "url": "https://a.io" } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("workspace"));
+    }
+
+    #[tokio::test]
+    async fn browser_page_errors_without_url() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+                    "params": { "name": "browser_page", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("url"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn browser_page_errors_without_workspace() {
+        let mut ctx = test_ctx();
+        ctx.workspace_id = None;
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 23, "method": "tools/call",
+                    "params": { "name": "browser_page", "arguments": { "url": "https://a.io" } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("workspace"));
+    }
+
+    #[tokio::test]
+    async fn browser_query_errors_without_selector() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 24, "method": "tools/call",
+                    "params": { "name": "browser_query", "arguments": { "url": "https://a.io" } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("selector"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn browser_summarize_errors_without_url() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 25, "method": "tools/call",
+                    "params": { "name": "browser_summarize", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("url"), "got: {text}");
     }
 
     #[test]
