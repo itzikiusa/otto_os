@@ -906,6 +906,16 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     {
         return Require(Browser, Edit);
     }
+    // Site credentials: sensitive enough that even LISTING (which never
+    // returns a secret — the row type has no password field) requires Edit,
+    // not View, unlike tabs/annotations above. Create/patch/delete/reveal are
+    // Edit for the same reason the rest of the module's mutations are.
+    if p == "/workspaces/{wid}/browser/credentials" {
+        return Require(Browser, Edit);
+    }
+    if p == "/browser/credentials/{id}" || p == "/browser/credentials/{id}/reveal" {
+        return Require(Browser, Edit);
+    }
 
     // ----------------------------------------------------------------------
     // 4. Default — fail closed.
@@ -1809,6 +1819,32 @@ mod tests {
     fn browser_query_is_edit_like_page() {
         assert_eq!(
             pol(Method::GET, "/api/v1/workspaces/{wid}/browser/query"),
+            Require(Browser, Edit)
+        );
+    }
+
+    #[test]
+    fn browser_credentials_require_edit_even_to_list() {
+        // Unlike tabs/annotations (View to list), credentials require Edit
+        // for GET/list too — see the ruling in policy.rs's Browser block.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/browser/credentials"),
+            Require(Browser, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{wid}/browser/credentials"),
+            Require(Browser, Edit)
+        );
+        assert_eq!(
+            pol(Method::PATCH, "/api/v1/browser/credentials/{id}"),
+            Require(Browser, Edit)
+        );
+        assert_eq!(
+            pol(Method::DELETE, "/api/v1/browser/credentials/{id}"),
+            Require(Browser, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/browser/credentials/{id}/reveal"),
             Require(Browser, Edit)
         );
     }

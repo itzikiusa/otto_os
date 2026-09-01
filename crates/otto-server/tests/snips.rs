@@ -246,6 +246,7 @@ review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::
         runs_engine: otto_server::run_engine::RunEngine::new(),
         browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
         browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
+        browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
         browser: Arc::new(otto_server::routes::browser::BrowserEngineHandle::new(
             None,
             data_dir,

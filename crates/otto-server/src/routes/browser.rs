@@ -56,6 +56,18 @@ pub fn routes() -> Router<ServerCtx> {
         )
         .route("/workspaces/{wid}/browser/summarize", post(summarize_page))
         .route("/workspaces/{wid}/browser/vault-save", post(vault_save))
+        .route(
+            "/workspaces/{wid}/browser/credentials",
+            get(list_credentials).post(create_credential),
+        )
+        .route(
+            "/browser/credentials/{id}",
+            patch(update_credential).delete(delete_credential),
+        )
+        .route(
+            "/browser/credentials/{id}/reveal",
+            post(reveal_credential),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -941,6 +953,222 @@ fn build_vault_note(url: &str, title: &str, summary: &str, annotations: &[Browse
 }
 
 // ---------------------------------------------------------------------------
+// Credentials — keychain-backed site credentials for the in-app browser.
+// ---------------------------------------------------------------------------
+//
+// The password lives ONLY in the Keychain (`ctx.secrets`, an
+// `Arc<dyn SecretStore>` — real macOS Keychain in production, `OTTO_SECRETS=file`
+// in tests/dev, see `otto_keychain::from_env`); the DB row (`otto_state::
+// BrowserCredential`) stores only an opaque `keychain_ref` and has no password
+// field at all, so it can never be accidentally serialized into a list/get
+// response. `GET`/list and `PATCH` never touch the keychain (no secret lookup,
+// no secret in the response). `POST .../reveal` is the ONLY route that returns
+// the password, requires the caller to explicitly pass `{"confirm": true}`
+// (else 400 — a client-side "are you sure" dialog isn't enough on its own; the
+// server enforces the deliberate-action shape too), requires the same Editor
+// role/`Browser` `Edit` floor as every other credential route, and audit-logs
+// only the credential id — never the domain/username/password — via
+// `tracing::info!`.
+//
+// `allow_agent_use` defaults `false` at every layer (migration column
+// default, `NewBrowserCredential`/DTO field default, UI toggle default) —
+// autofill for an unattended agent session is opt-in per credential.
+
+/// `keychain_ref` naming convention for a credential's id — mirrors
+/// `otto_connections::service::secret_ref_for`.
+fn keychain_ref_for(id: &Id) -> String {
+    format!("browser-cred-{id}")
+}
+
+#[derive(Deserialize)]
+struct CreateCredentialReq {
+    domain: String,
+    username: String,
+    password: String,
+    #[serde(default)]
+    allow_agent_use: bool,
+    #[serde(default)]
+    notes: String,
+}
+
+#[derive(Deserialize)]
+struct PatchCredentialReq {
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    allow_agent_use: Option<bool>,
+    #[serde(default)]
+    notes: Option<String>,
+    /// Optional password rotation — when present, replaces the Keychain
+    /// value at the SAME `keychain_ref` (the DB row's `keychain_ref` never
+    /// changes after creation).
+    #[serde(default)]
+    password: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RevealCredentialReq {
+    /// Must be `true` or the request is rejected — see module docs.
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Serialize)]
+struct RevealCredentialResp {
+    password: String,
+}
+
+/// `GET /workspaces/{wid}/browser/credentials` — list omits secrets entirely
+/// (the row type has no password field); no keychain lookup happens here.
+async fn list_credentials(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<otto_state::BrowserCredential>>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    Ok(Json(ctx.browser_credentials.list(&wid).await.map_err(ApiError)?))
+}
+
+/// `POST /workspaces/{wid}/browser/credentials` — writes the password to the
+/// Keychain FIRST, then the row; if the row insert fails (e.g. the unique
+/// `(workspace_id, domain, username)` conflict), the just-written secret is
+/// deleted so a rejected create never leaves an orphaned Keychain entry.
+async fn create_credential(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<CreateCredentialReq>,
+) -> ApiResult<Json<otto_state::BrowserCredential>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    let domain = otto_state::normalize_domain(&req.domain);
+    let username = req.username.trim().to_string();
+    if domain.is_empty() {
+        return Err(ApiError(Error::Invalid("domain is required".into())));
+    }
+    if username.is_empty() {
+        return Err(ApiError(Error::Invalid("username is required".into())));
+    }
+    if req.password.is_empty() {
+        return Err(ApiError(Error::Invalid("password is required".into())));
+    }
+
+    let id = otto_core::new_id();
+    let keychain_ref = keychain_ref_for(&id);
+    ctx.secrets.put(&keychain_ref, &req.password).map_err(ApiError)?;
+
+    let created = ctx
+        .browser_credentials
+        .create(otto_state::NewBrowserCredential {
+            id,
+            workspace_id: wid,
+            domain,
+            username,
+            keychain_ref: keychain_ref.clone(),
+            allow_agent_use: req.allow_agent_use,
+            notes: req.notes,
+        })
+        .await;
+    match created {
+        Ok(cred) => Ok(Json(cred)),
+        Err(e) => {
+            if let Err(cleanup_err) = ctx.secrets.delete(&keychain_ref) {
+                tracing::warn!(
+                    "failed to clean up orphaned keychain entry after rejected browser credential create: {cleanup_err}"
+                );
+            }
+            Err(ApiError(e))
+        }
+    }
+}
+
+/// `PATCH /browser/credentials/{id}` — `{username?, allow_agent_use?, notes?, password?}`.
+async fn update_credential(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<PatchCredentialReq>,
+) -> ApiResult<Json<otto_state::BrowserCredential>> {
+    let existing = ctx
+        .browser_credentials
+        .get(&id)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound(format!("browser credential {id}"))))?;
+    require_ws_role(&ctx, &user, &existing.workspace_id, WorkspaceRole::Editor).await?;
+
+    if let Some(password) = &req.password {
+        if password.is_empty() {
+            return Err(ApiError(Error::Invalid("password cannot be empty".into())));
+        }
+        ctx.secrets.put(&existing.keychain_ref, password).map_err(ApiError)?;
+    }
+
+    let updated = ctx
+        .browser_credentials
+        .update(
+            &id,
+            otto_state::BrowserCredentialPatch {
+                username: req.username,
+                allow_agent_use: req.allow_agent_use,
+                notes: req.notes,
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
+}
+
+/// `DELETE /browser/credentials/{id}` — deletes the Keychain entry too.
+async fn delete_credential(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<StatusCode> {
+    let existing = ctx
+        .browser_credentials
+        .get(&id)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound(format!("browser credential {id}"))))?;
+    require_ws_role(&ctx, &user, &existing.workspace_id, WorkspaceRole::Editor).await?;
+    if let Err(e) = ctx.secrets.delete(&existing.keychain_ref) {
+        tracing::warn!(credential = %id, "failed to delete browser credential secret: {e}");
+    }
+    ctx.browser_credentials.delete(&id).await.map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /browser/credentials/{id}/reveal` — `{confirm: true}` required.
+/// Returns the plaintext password. Audit-logs the credential id only.
+async fn reveal_credential(
+    Path(id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<RevealCredentialReq>,
+) -> ApiResult<Json<RevealCredentialResp>> {
+    let existing = ctx
+        .browser_credentials
+        .get(&id)
+        .await
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound(format!("browser credential {id}"))))?;
+    require_ws_role(&ctx, &user, &existing.workspace_id, WorkspaceRole::Editor).await?;
+    if !req.confirm {
+        return Err(ApiError(Error::Invalid(
+            "reveal requires an explicit {\"confirm\": true} body".into(),
+        )));
+    }
+    let password = ctx
+        .secrets
+        .get(&existing.keychain_ref)
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(Error::NotFound(format!("secret for browser credential {id}"))))?;
+    let _ = ctx.browser_credentials.touch_last_used(&id).await;
+    tracing::info!(credential = %id, "browser credential revealed");
+    Ok(Json(RevealCredentialResp { password }))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -971,19 +1199,6 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::broadcast;
     use tower::ServiceExt; // for `oneshot`
-
-    struct NoopSecrets;
-    impl SecretStore for NoopSecrets {
-        fn put(&self, _key: &str, _value: &str) -> Result<()> {
-            Err(Error::Internal("noop secrets".into()))
-        }
-        fn get(&self, _key: &str) -> Result<Option<String>> {
-            Err(Error::Internal("noop secrets".into()))
-        }
-        fn delete(&self, _key: &str) -> Result<()> {
-            Err(Error::Internal("noop secrets".into()))
-        }
-    }
 
     struct NoopSpawner;
     impl otto_connections::Spawner for NoopSpawner {
@@ -1029,7 +1244,12 @@ mod tests {
 
     async fn test_ctx(pool: &SqlitePool, data_dir: PathBuf) -> ServerCtx {
         let (events, _rx) = broadcast::channel(64);
-        let secrets: Arc<dyn SecretStore> = Arc::new(NoopSecrets);
+        // Browser-credentials tests need a real (non-erroring) `SecretStore`
+        // to round-trip put/get/delete — `otto_keychain::FileStore` is exactly
+        // the `OTTO_SECRETS=file` dev/CI fallback the real daemon uses, backed
+        // here by this test's own tempdir so nothing touches the real macOS
+        // Keychain.
+        let secrets: Arc<dyn SecretStore> = Arc::new(otto_keychain::FileStore::new(&data_dir));
         let roles = Arc::new(RbacRoleChecker::new(pool.clone()));
         let repo = SessionsRepo::new(pool.clone());
         let providers = ProviderRegistry::new(None);
@@ -1150,6 +1370,7 @@ mod tests {
             runs_engine: crate::run_engine::RunEngine::new(),
             browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
             browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
+            browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
             browser: Arc::new(BrowserEngineHandle::new(
                 Some("/definitely/not/a/real/lightpanda/binary".into()),
                 data_dir,
@@ -2007,5 +2228,200 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&body));
+    }
+
+    // -----------------------------------------------------------------
+    // Credentials
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn credential_crud_via_http_and_list_never_leaks_secret() {
+        let (_tmp, app) = test_app().await;
+
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/credentials",
+            serde_json::json!({
+                "domain": "Example.COM", "username": "alice", "password": "s3cr3t!"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let cred = json(&body);
+        let id = cred["id"].as_str().unwrap().to_string();
+        assert_eq!(cred["domain"], "example.com", "domain must be normalized/lowercased");
+        assert_eq!(cred["username"], "alice");
+        assert_eq!(cred["allow_agent_use"], false, "must default false");
+        assert!(cred.get("password").is_none(), "create response must not echo the password");
+        let raw = String::from_utf8_lossy(&body);
+        assert!(!raw.contains("s3cr3t!"), "create response body must not contain the plaintext password");
+
+        // List: never a secret, never even a `password` key.
+        let (status, body) = get(&app, "/workspaces/ws1/browser/credentials").await;
+        assert_eq!(status, StatusCode::OK);
+        let raw = String::from_utf8_lossy(&body);
+        assert!(!raw.contains("s3cr3t!"));
+        assert!(!raw.to_lowercase().contains("\"password\""));
+        let list = json(&body);
+        assert_eq!(list.as_array().map(|a| a.len()), Some(1));
+
+        // Reveal without confirm:true is rejected.
+        let (status, body) = post_json(
+            &app,
+            &format!("/browser/credentials/{id}/reveal"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&body));
+
+        // Reveal with confirm:true returns the real password.
+        let (status, body) = post_json(
+            &app,
+            &format!("/browser/credentials/{id}/reveal"),
+            serde_json::json!({"confirm": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(json(&body)["password"], "s3cr3t!");
+
+        // Patch: username/allow_agent_use/notes.
+        let (status, body) = send(
+            &app,
+            Method::PATCH,
+            &format!("/browser/credentials/{id}"),
+            Some(serde_json::json!({"allow_agent_use": true, "notes": "rotate quarterly"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let patched = json(&body);
+        assert_eq!(patched["allow_agent_use"], true);
+        assert_eq!(patched["notes"], "rotate quarterly");
+
+        // Delete.
+        let (status, _) = send(&app, Method::DELETE, &format!("/browser/credentials/{id}"), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = get(&app, "/workspaces/ws1/browser/credentials").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json(&body).as_array().map(|a| a.len()), Some(0));
+
+        // Revealing the deleted credential 404s.
+        let (status, _) = post_json(
+            &app,
+            &format!("/browser/credentials/{id}/reveal"),
+            serde_json::json!({"confirm": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn credential_unique_constraint_via_http() {
+        let (_tmp, app) = test_app().await;
+        let body = serde_json::json!({"domain": "example.com", "username": "alice", "password": "p1"});
+        let (status, _) = post_json(&app, "/workspaces/ws1/browser/credentials", body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, resp_body) = post_json(&app, "/workspaces/ws1/browser/credentials", body).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "duplicate (workspace, domain, username) must 409, not silently succeed: {}",
+            String::from_utf8_lossy(&resp_body)
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_create_rejects_empty_fields() {
+        let (_tmp, app) = test_app().await;
+        for bad in [
+            serde_json::json!({"domain": "", "username": "a", "password": "p"}),
+            serde_json::json!({"domain": "d.com", "username": "", "password": "p"}),
+            serde_json::json!({"domain": "d.com", "username": "a", "password": ""}),
+        ] {
+            let (status, body) = post_json(&app, "/workspaces/ws1/browser/credentials", bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&body));
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_routes_require_editor_role() {
+        let (_tmp, pool, app) = test_app_with_pool().await;
+        seed_user(&pool, "viewer1").await;
+        seed_workspace(&pool, "ws1").await;
+        set_member(&pool, "ws1", "viewer1", "viewer").await;
+        let viewer = non_root_user("viewer1");
+
+        let (status, _) = send_as(
+            &app,
+            Method::GET,
+            "/workspaces/ws1/browser/credentials",
+            None,
+            &viewer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "even list requires Editor for credentials");
+
+        let (status, _) = send_as(
+            &app,
+            Method::POST,
+            "/workspaces/ws1/browser/credentials",
+            Some(serde_json::json!({"domain": "d.com", "username": "a", "password": "p"})),
+            &viewer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// A credential row loaded via a flat `/browser/credentials/{id}` route
+    /// must check the workspace membership on the row's OWN `workspace_id`
+    /// (the IDOR guard) — a workspace-2 editor must not be able to
+    /// patch/delete/reveal a workspace-1 credential just because they pass
+    /// `require_ws_role` for their own workspace elsewhere.
+    #[tokio::test]
+    async fn cross_workspace_credential_idor_is_blocked() {
+        let (_tmp, pool, app) = test_app_with_pool().await;
+        seed_workspace(&pool, "ws1").await;
+        seed_workspace(&pool, "ws2").await;
+        seed_user(&pool, "editor2").await;
+        set_member(&pool, "ws2", "editor2", "editor").await;
+        let editor2 = non_root_user("editor2");
+
+        let (_, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/credentials",
+            serde_json::json!({"domain": "d.com", "username": "a", "password": "p"}),
+        )
+        .await;
+        let id = json(&body)["id"].as_str().unwrap().to_string();
+
+        let (status, _) = send_as(
+            &app,
+            Method::PATCH,
+            &format!("/browser/credentials/{id}"),
+            Some(serde_json::json!({"notes": "hijacked"})),
+            &editor2,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = send_as(
+            &app,
+            Method::POST,
+            &format!("/browser/credentials/{id}/reveal"),
+            Some(serde_json::json!({"confirm": true})),
+            &editor2,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = send_as(
+            &app,
+            Method::DELETE,
+            &format!("/browser/credentials/{id}"),
+            None,
+            &editor2,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }

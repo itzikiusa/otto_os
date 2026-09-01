@@ -3750,6 +3750,7 @@ dependencies = [
  "otto-git",
  "otto-improve",
  "otto-issues",
+ "otto-keychain",
  "otto-mcp",
  "otto-memory",
  "otto-netguard",

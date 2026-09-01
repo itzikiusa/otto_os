@@ -6257,3 +6257,56 @@ export interface BrowserVaultSaveReq {
 export interface BrowserVaultSaveResp {
   note_path: string;
 }
+
+/** A stored site credential. Mirrors `otto_state::browser_credentials::
+ *  BrowserCredential` — deliberately has NO password field; the secret lives
+ *  only in the Keychain, keyed by the opaque `keychain_ref`. List/get
+ *  responses always look like this; only `POST .../reveal` returns a
+ *  password, as a separate `{password: string}` shape. */
+export interface BrowserCredential {
+  id: Id;
+  workspace_id: Id;
+  /** eTLD+1-ish, lowercased — see `match_domain` server-side doc comment. */
+  domain: string;
+  username: string;
+  /** Opaque Keychain key. Never the password. */
+  keychain_ref: string;
+  /** Defaults `false` — an unattended agent session only autofills a
+   *  credential the user has explicitly opted in. */
+  allow_agent_use: boolean;
+  notes: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+/** `POST /workspaces/{wid}/browser/credentials` request. */
+export interface BrowserCreateCredentialReq {
+  domain: string;
+  username: string;
+  password: string;
+  allow_agent_use?: boolean;
+  notes?: string;
+}
+
+/** `PATCH /browser/credentials/{id}` request. An included `password` rotates
+ *  the Keychain entry in place; the `keychain_ref` itself never changes. */
+export interface BrowserPatchCredentialReq {
+  username?: string;
+  allow_agent_use?: boolean;
+  notes?: string;
+  password?: string;
+}
+
+/** `POST /browser/credentials/{id}/reveal` request — `confirm` MUST be
+ *  `true` or the server rejects with 400. Gate this behind a UI confirm
+ *  dialog too; the server-side check is belt-and-suspenders, not a
+ *  substitute for it. */
+export interface BrowserRevealCredentialReq {
+  confirm: true;
+}
+
+/** `POST /browser/credentials/{id}/reveal` response — the only shape in this
+ *  module that ever carries a plaintext password. */
+export interface BrowserRevealCredentialResp {
+  password: string;
+}

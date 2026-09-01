@@ -2837,10 +2837,32 @@ denylist/fallback policy with `/page`. Broadcasts `browser_tab_updated`
 | POST /api/v1/workspaces/{wid}/browser/summarize | ws editor · Browser Edit | `{url}` | `{summary, engine, degraded}` |
 | POST /api/v1/workspaces/{wid}/browser/annotations/{id}/send | ws editor · Browser Edit | `{session_id}` | 200 |
 | POST /api/v1/workspaces/{wid}/browser/vault-save | ws editor · Browser Edit | `{url, vault_id, summary?}` | `{note_path}` |
+| GET /api/v1/workspaces/{wid}/browser/credentials | ws editor · Browser Edit | — | `BrowserCredential[]` — **never includes the password**; listing requires Edit (not View) since credentials are sensitive |
+| POST /api/v1/workspaces/{wid}/browser/credentials | ws editor · Browser Edit | `{domain, username, password, allow_agent_use?, notes?}` | `BrowserCredential` — writes the password to the Keychain (`secrets.put`), stores only the resulting `keychain_ref` |
+| PATCH /api/v1/browser/credentials/{id} | ws editor · Browser Edit | `{username?, allow_agent_use?, notes?, password?}` | `BrowserCredential` — an included `password` rotates the Keychain entry in place (same `keychain_ref`) |
+| DELETE /api/v1/browser/credentials/{id} | ws editor · Browser Edit | — | 204 — also deletes the Keychain entry |
+| POST /api/v1/browser/credentials/{id}/reveal | ws editor · Browser Edit | `{confirm: true}` (else 400) | `{password}` — the ONLY route that returns the plaintext password; audit-logs the credential id only (`tracing::info!`, never the domain/username/password) |
 
 `BrowserTab {id, workspace_id, url, title, mode, created_at}`.
 `BrowserAnnotation {id, workspace_id, tab_id, url, selector, excerpt, text,
 comment, color, created_at}`.
+`BrowserCredential {id, workspace_id, domain, username, keychain_ref,
+allow_agent_use, notes, created_at, last_used_at}` — deliberately has **no
+password field**, so it is structurally impossible for `serde_json::to_string`
+on this type to leak the secret; the password lives only in the Keychain
+(`otto_keychain`/`ctx.secrets`, an `Arc<dyn SecretStore>` — `OTTO_SECRETS=file`
+selects the plaintext-JSON dev/test fallback instead of the real macOS
+Keychain), keyed by the opaque `keychain_ref` (`browser-cred-{id}`).
+`allow_agent_use` defaults `false` everywhere (migration column default, the
+create DTO, and the UI toggle) — an unattended agent session only gets
+autofill access to a credential the user has explicitly opted in. `domain` is
+stored normalized (lowercased, trailing dot trimmed); `otto_state::
+browser_credentials::match_domain(host, domain)` (for the later autofill
+feature) matches an exact host or any subdomain of a stored domain — a
+documented conservative approximation of eTLD+1 (no public-suffix list is
+vendored in this workspace), not true registrable-domain matching, so e.g. it
+correctly widens `login.example.com` → a stored `example.com` but does not
+special-case multi-label public suffixes like `co.uk`.
 
 Both `/summarize` and `/annotations/{id}/send` embed attacker-controlled page
 content (the fetched markdown; the annotation's excerpt/comment) into text

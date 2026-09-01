@@ -10,8 +10,12 @@
 import { api } from './client';
 import type {
   BrowserAnnotation,
+  BrowserCreateCredentialReq,
+  BrowserCredential,
   BrowserPage,
+  BrowserPatchCredentialReq,
   BrowserQueryResp,
+  BrowserRevealCredentialResp,
   BrowserSummarizeResp,
   BrowserTab,
   BrowserVaultSaveResp,
@@ -87,4 +91,34 @@ export function sendAnnotation(ws: string, id: string, sessionId: string) {
 
 export function vaultSave(ws: string, body: { url: string; vault_id: number; summary?: string }) {
   return api.post<BrowserVaultSaveResp>(`${base(ws)}/vault-save`, body);
+}
+
+// ---------------------------------------------------------------------------
+// Credentials — keychain-backed site credentials. List/get NEVER carry a
+// password (the wire type has no such field); only `revealCredential` does.
+// ---------------------------------------------------------------------------
+
+export function listCredentials(ws: string) {
+  return api.get<BrowserCredential[]>(`${base(ws)}/credentials`);
+}
+
+export function createCredential(ws: string, body: BrowserCreateCredentialReq) {
+  return api.post<BrowserCredential>(`${base(ws)}/credentials`, body);
+}
+
+export function updateCredential(id: string, body: BrowserPatchCredentialReq) {
+  return api.patch<BrowserCredential>(`/browser/credentials/${id}`, body);
+}
+
+export function deleteCredential(id: string) {
+  return api.del<void>(`/browser/credentials/${id}`);
+}
+
+/** Caller must have already confirmed with the user (a confirm dialog) —
+ *  this always sends `confirm: true`, which is what makes the server return
+ *  the plaintext password instead of a 400. */
+export function revealCredential(id: string) {
+  return api.post<BrowserRevealCredentialResp>(`/browser/credentials/${id}/reveal`, {
+    confirm: true,
+  });
 }

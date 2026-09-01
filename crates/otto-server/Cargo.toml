@@ -74,3 +74,6 @@ tempfile.workspace = true
 # read the response body. Pinned to the versions axum 0.8 already resolves.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Browser-credentials route tests exercise the real `OTTO_SECRETS=file` keychain
+# fallback (not the noop test double) so the reveal round-trip is real.
+otto-keychain.workspace = true

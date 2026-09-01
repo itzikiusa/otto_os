@@ -168,6 +168,9 @@ pub struct ServerCtx {
     pub browser_tabs: otto_state::BrowserTabsRepo,
     /// DOM annotations, keyed on URL so they survive the tab that made them.
     pub browser_annotations: otto_state::BrowserAnnotationsRepo,
+    /// Keychain-backed site credentials (no password ever stored here — see
+    /// `crate::routes::browser`'s Credentials section).
+    pub browser_credentials: otto_state::BrowserCredentialsRepo,
     /// Lazily-started page-fetch engine (Lightpanda sidecar autodetect, else
     /// plain-fetch) — see `crate::routes::browser::BrowserEngineHandle`.
     pub browser: std::sync::Arc<crate::routes::browser::BrowserEngineHandle>,

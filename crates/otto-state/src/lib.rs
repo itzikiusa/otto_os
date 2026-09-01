@@ -6,6 +6,7 @@ pub mod activity;
 pub mod api_client;
 pub mod audit;
 pub mod browser;
+pub mod browser_credentials;
 pub mod canvas;
 pub mod broker_audit;
 pub mod broker_ops;
@@ -62,6 +63,10 @@ pub use audit::{AuditRepo, NewAuditEntry};
 pub use browser::{
     BrowserAnnotation, BrowserAnnotationsRepo, BrowserTab, BrowserTabsRepo, NewBrowserAnnotation,
     NewBrowserTab,
+};
+pub use browser_credentials::{
+    match_domain, normalize_domain, BrowserCredential, BrowserCredentialPatch,
+    BrowserCredentialsRepo, NewBrowserCredential,
 };
 pub use api_client::{
     ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,
