@@ -28,17 +28,29 @@ loopback, private, and cloud-metadata addresses are refused with a `400`.
 - **Save to Vault** — write an OKF-flavored note (front-matter, summary, one
   `## Mark N` section per annotation) into a doc vault.
 - **Agent MCP tools** — `browser_navigate` / `browser_page` / `browser_query` /
-  `browser_summarize`, so an agent session can drive the same fetch pipeline
-  without going through the UI.
+  `browser_summarize` / `browser_login`, so an agent session can drive the same
+  fetch pipeline (and, opt-in, sign in to a stored credential) without going
+  through the UI.
+- **Site Credentials** — save a domain/username/password Otto can autofill on
+  request; the password lives in the macOS Keychain, never in the database or a
+  log line, and an agent only gets to use one you've explicitly opted in
+  (`allow_agent_use`).
 
 ## Setup
 
 Nothing to configure to get plain-fetch browsing working — it's on by default.
-For JS-rendered pages, Otto looks for a `lightpanda` binary (configurable path) and
-starts it as a sidecar on first use; if it isn't found or fails to start, every
-fetch transparently falls back to a script-free plain fetch (`degraded:true` on the
-response) rather than failing. A host that fails against the primary engine three
-times in a row is skipped straight to the fallback until it next succeeds.
+For JS-rendered pages, install the [Lightpanda](https://github.com/lightpanda-io/browser)
+headless browser: `brew install lightpanda-io/tap/lightpanda`, or download a release
+binary. Otto locates it in priority order — an explicit `OTTO_LIGHTPANDA_BIN` path,
+then `PATH`, then well-known install locations (`/usr/local/bin`, `/opt/homebrew/bin`,
+`~/.local/bin`, the slot an auto-download would use) — and starts it as a managed
+sidecar (CDP over a loopback port) on first use. **Lightpanda is beta software**: it
+covers most JS-rendered pages, but isn't a full Chromium — treat `degraded:true`
+responses (see below) as expected on some sites, not necessarily a misconfiguration.
+If no binary is found or the sidecar fails to start, every fetch transparently falls
+back to a script-free plain fetch (`degraded:true` on the response) rather than
+failing outright. A host that fails against the primary engine three times in a row
+is skipped straight to the fallback until it next succeeds.
 
 RBAC: gated by `Feature::Browser` (`View` for reads, `Edit` for writes — including
 `/page` and `/query`, since they fetch on the caller's behalf) plus the normal
@@ -57,6 +69,9 @@ workspace-role axis. The flat by-id routes (`/browser/tabs/{id}`,
 4. **Send** an annotation into any live session in the same workspace — the target
    session receives a fenced `[Browser mark] …` block in its input, submitted like
    a normal message.
+5. Save a **Site Credential** (domain/username/password) and flip it to "allow
+   agent use" if you want an unattended agent session to be able to sign in to
+   that site with it. See "Site Credentials & agent login" below.
 
 ## API surface
 
@@ -74,13 +89,17 @@ fetch)" for the full request/response table. Summary:
 | `POST /workspaces/{wid}/browser/summarize` | fetch + one agent turn → `{summary,engine,degraded}` |
 | `POST /workspaces/{wid}/browser/annotations/{id}/send` | write the mark's context block into a session's input |
 | `POST /workspaces/{wid}/browser/vault-save` | write an OKF note for the page → `{note_path}` |
+| `GET/POST /workspaces/{wid}/browser/credentials` | list (password never included) / create a Site Credential — password goes straight to the Keychain |
+| `PATCH/DELETE /browser/credentials/{id}` | update (optionally rotate the password) / remove a credential (also deletes its Keychain entry) |
+| `POST /browser/credentials/{id}/reveal` | `{confirm:true}` → `{password}` — the only route that ever returns the plaintext password |
+| `POST /workspaces/{wid}/browser/login` | `{domain}` → `{logged_in,engine}` — governed agent sign-in, see below |
 
 WS events: `browser_tab_updated{tab}`, `browser_annotation_added{annotation}` (see
 `docs/contracts/ws.md`).
 
 ## Agent MCP tools
 
-Every tool-capable session gets four `browser_*` tools alongside the rest of
+Every tool-capable session gets five `browser_*` tools alongside the rest of
 Otto's first-party MCP surface (`crates/ottod/src/mcp_tools.rs`), authorizing as
 the session's own owner (the same `WorkspaceRole::Editor` gate a human hits — no
 more):
@@ -91,12 +110,39 @@ more):
 | `browser_page` | `url` | `{markdown,title,engine,degraded}` |
 | `browser_query` | `url, selector` | `{matches:[{selector,outer_html,text}]}` |
 | `browser_summarize` | `url` | `{summary,engine,degraded}` |
+| `browser_login` | `domain` | `{logged_in,engine}` — signs in with a stored credential the user marked "allow agent use"; the password never enters the tool call, its result, or the audit log |
 
 `browser_page` drops the route's `url`/`html` fields from what the agent sees — the
 caller already has the URL, and the raw markup is large relative to the extracted
 markdown most agents actually want. `browser_summarize` doesn't persist anything:
 the summarize turn runs in an ephemeral, unresumed session (same pattern as
 `db_assist`), so it's treated as a read even though it's a `POST`.
+
+## Site Credentials & agent login
+
+A **Site Credential** is a domain/username/password Otto can use to sign a
+browser session in. Creating or rotating one writes the password straight to
+the macOS Keychain (`otto-keychain`) and stores only the resulting
+`keychain_ref` in the database — a `BrowserCredential` row has **no password
+field at all**, so it's structurally impossible for the API to leak the secret
+by serializing the row. `allow_agent_use` defaults to `false` everywhere
+(migration column, create form, UI toggle): an unattended agent session only
+gets to use a credential you've explicitly opted in, one at a time, per
+domain.
+
+`POST /browser/login` (and the `browser_login` MCP tool) is the governed
+agent-facing sign-in path: the daemon resolves the password from the Keychain
+server-side and hands it directly to the fill-and-submit JS run inside the CDP
+session — it never appears in the request, the response, the MCP tool result,
+or a log line (only the domain and a `logged_in` boolean are logged). It's
+rate-limited to 3 attempts/minute per domain (429 `Retry-After` past that).
+
+**Known limitation:** the login flow always targets `https://{domain}/` — there
+is no separate stored "login page URL" field, so a site whose sign-in form
+lives at a different path (and doesn't redirect there from the domain root)
+isn't reachable via `browser_login` today; sign in manually in a reader/live
+tab instead. Login also requires the Lightpanda engine (`login()` runs JS) — a
+fallback-only daemon answers every `browser_login` call with a `502`.
 
 ## Prompt-injection defense
 
@@ -112,6 +158,14 @@ second, fabricated instruction line once inside the fence.
 
 ## Capabilities & limits
 
+- **Lightpanda is beta**: it's a real but young headless-browser project, not a
+  full Chromium — some JS-heavy or unusual pages will `degraded:true` (or
+  outright fail) even with a working sidecar. Treat reader mode as
+  best-effort JS rendering, not a guarantee.
+- **Live tabs are desktop-app only.** Reader mode (fetch → markdown) works
+  everywhere Otto's UI runs; a real embedded page (the Live toggle, the
+  element-picker overlay) needs a native Tauri child webview and simply stays
+  in reader mode outside the desktop app (plain browser, PWA, remote share).
 - Fetches are size-capped (`otto_browser::PAGE_BYTE_CAP`, streamed so a huge
   response is aborted mid-flight rather than buffered) and time-capped
   (`PAGE_TIMEOUT_SECS`).
@@ -204,3 +258,15 @@ rarely carries an id or test attribute from the original page).
 - **One host always comes back `degraded:true` even though others don't** — it
   failed against the primary engine 3 times in a row and is denylisted; it clears
   automatically on the next success.
+- **`browser_login` (or `POST /browser/login`) returns 502** — no working
+  Lightpanda sidecar: login needs JS execution, so a fallback-only daemon can
+  never satisfy it. Fix the engine per the `degraded:true` bullets above.
+- **`browser_login` returns 404 / 403** — 404 means no Site Credential exists
+  for that domain yet; 403 (`"credential not enabled for agents"`) means one
+  exists but `allow_agent_use` is still `false` — flip it on in the
+  Credentials panel first.
+- **`browser_login` returns 429** — the per-domain rate limit (3/min) tripped;
+  retry after the `Retry-After` window.
+- **Live tab / element picker does nothing** — both require the desktop app's
+  native Tauri webview; outside Tauri the Live toggle silently stays in
+  reader mode (see "Capabilities & limits").

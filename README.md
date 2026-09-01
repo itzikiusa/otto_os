@@ -141,6 +141,18 @@ bridges so an agent can work a ticket from a chat thread.
   (PLAIN/SCRAM) auth, prod/read-only guards, and an in-process Kafka-aware proxy
   so a private cluster is reachable through a single SSH tunnel (librdkafka can't
   SOCKS, so Otto rewrites the advertised broker addresses on the fly).
+- **Browser** — a workspace-scoped web browser inside Otto: reader tabs fetch a
+  URL and render it as clean markdown (JS-rendered pages via a
+  [Lightpanda](https://github.com/lightpanda-io/browser) sidecar, beta software,
+  with a transparent plain-fetch fallback when it's unavailable), DOM
+  annotations you can send into a live session or save as a Vault note, a
+  CSS-selector query, one-turn page summarize, and Keychain-backed **Site
+  Credentials** an agent can use to sign in only when you've explicitly opted
+  the credential in. Five `browser_*` MCP tools give agents the same
+  fetch/query/summarize/login pipeline. Every fetch is netguard-checked
+  (loopback/private/metadata addresses refused). In the desktop app, tabs can
+  flip to **Live** — a real embedded native webview with its own click-to-mark
+  overlay — instead of the fetched reader view.
 - **Vault — the docs home** — register a local folder of markdown files (even a
   live **Obsidian vault**) and get Obsidian-parity docs in Otto: file tree,
   editor ⇄ reading view with wikilinks/backlinks/tags, full-text search, quick
@@ -262,7 +274,8 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   `otto-orchestrator`, `otto-git`, `otto-issues` (Jira/Confluence),
   `otto-channels`, `otto-connections`, `otto-dbviewer` (Database Explorer),
   `otto-brokers` (Kafka viewer), `otto-ssh` (shared SSH-tunnel helper),
-  `otto-swarm` (Agent Swarm), `otto-vault` (the docs home — file-backed
+  `otto-browser` (in-app browser: reader/live tabs, annotations, Lightpanda
+  sidecar engine), `otto-swarm` (Agent Swarm), `otto-vault` (the docs home — file-backed
   markdown vaults + OKF), `otto-memory` (workspace memory layer),
   `otto-product` (Jira/Confluence story workflows), `otto-improve`
   (self-improvement), `otto-usage` (ClickHouse usage/metrics), `otto-skills`

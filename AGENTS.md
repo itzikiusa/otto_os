@@ -47,6 +47,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-ssh` | Shared SSH-tunnel helper (`-L`/SOCKS5 `-D`, SFTP, Kafka-aware proxy) |
 | `otto-dbviewer` | Database Explorer engine |
 | `otto-brokers` | Message Brokers (Kafka viewer) |
+| `otto-browser` | In-app browser — reader/live tabs, DOM annotations, Lightpanda-sidecar-or-plain-fetch fetch engine |
 | `otto-orchestrator` | Claude-PTY agent runner + ⌘K plan parsing (summaries, PR/commit drafts) |
 | `otto-git` | Repos, diffs, commits, PRs |
 | `otto-issues` | Jira / Confluence integration |
@@ -72,7 +73,7 @@ Otto.app (Tauri / otto-desktop)
 
 ### UI module areas (`ui/src/modules/`)
 
-`agents`, `api` (REST client), `brokers` (Kafka viewer), `canvas`,
+`agents`, `api` (REST client), `brokers` (Kafka viewer), `browser`, `canvas`,
 `connections`, `database` (Database Explorer), `git`, `help`, `insights`,
 `loops` (goal loops), `mcp` (MCP control plane), `mission-control`, `panels`,
 `plugins`, `product`, `proof` (proof packs), `run-with-otto`,
