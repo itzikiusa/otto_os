@@ -26,6 +26,12 @@ const OVERLAY_SRC = readFileSync(
   'utf8',
 );
 
+// An over-length id/data-testid — long enough to exceed overlay.js's
+// MAX_SELECTOR_LEN (300) once wrapped as `#…`/`[data-testid="…"]` — attacker
+// content a hostile page's own author fully controls.
+const LONG_ID = 'a'.repeat(310);
+const LONG_TESTID = 'b'.repeat(310);
+
 const FIXTURE_HTML = `<!doctype html><html><body>
   <div id="with-id">A</div>
   <div data-testid="my-test-id">B</div>
@@ -34,6 +40,8 @@ const FIXTURE_HTML = `<!doctype html><html><body>
     <p>two</p>
     <p>three</p>
   </div>
+  <div id="${LONG_ID}" data-testid="short-ok">C</div>
+  <div data-testid="${LONG_TESTID}">D</div>
 </body></html>`;
 
 test.beforeEach(async ({ page }, info) => {
@@ -80,6 +88,23 @@ test('the queue drains and does not repeat marks on the next tick', async ({ pag
   expect(first).toHaveLength(1);
   const second = await page.evaluate(() => (window as any).__ottoOverlay.tick('[]'));
   expect(second).toHaveLength(0);
+});
+
+test('an over-length id is skipped in favor of a short data-testid', async ({ page }) => {
+  await page.evaluate(() => (window as any).__ottoOverlay.setPicking(true));
+  await page.getByText('C', { exact: true }).click();
+  const [mark] = await page.evaluate(() => (window as any).__ottoOverlay.tick('[]'));
+  expect(mark.selector).toBe('[data-testid="short-ok"]');
+});
+
+test('an over-length data-testid with no id falls all the way through to nth-of-type', async ({ page }) => {
+  await page.evaluate(() => (window as any).__ottoOverlay.setPicking(true));
+  await page.getByText('D', { exact: true }).click();
+  const [mark] = await page.evaluate(() => (window as any).__ottoOverlay.tick('[]'));
+  expect(mark.selector).not.toContain('b'.repeat(310));
+  expect(mark.selector.length).toBeLessThanOrEqual(300);
+  // body's 5th child div.
+  expect(mark.selector).toBe('div:nth-of-type(5)');
 });
 
 test('tick highlights existing marks and un-highlights ones no longer passed', async ({ page }) => {

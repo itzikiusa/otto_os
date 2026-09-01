@@ -149,33 +149,45 @@
     }
   });
 
+  // Backpressure: a `browser_eval` round-trip can outlive a single 700ms
+  // tick (a slow/busy page, or `createAnnotation` calls piling up for a
+  // multi-mark drain) — skip starting a new poll while one's still in
+  // flight rather than letting them queue up and land out of order.
+  let pollInFlight = false;
+
   async function pollOverlay(id: string, url: string): Promise<void> {
-    const highlights = browser.annotations
-      .filter((a) => a.url === url)
-      .map((a) => ({ selector: a.selector, color: a.color || 'yellow' }));
-    const arg = JSON.stringify(JSON.stringify(highlights));
-    const raw = await nativeBrowser.eval(id, `window.__ottoOverlay && window.__ottoOverlay.tick(${arg})`);
-    if (!raw) return;
-    let drained: Array<{ selector: string; outerHtml: string; text: string }>;
+    if (pollInFlight) return;
+    pollInFlight = true;
     try {
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
-      drained = parsed;
-    } catch {
-      return;
-    }
-    for (const m of drained) {
+      const highlights = browser.annotations
+        .filter((a) => a.url === url)
+        .map((a) => ({ selector: a.selector, color: a.color || 'yellow' }));
+      const arg = JSON.stringify(JSON.stringify(highlights));
+      const raw = await nativeBrowser.eval(id, `window.__ottoOverlay && window.__ottoOverlay.tick(${arg})`);
+      if (!raw) return;
+      let drained: Array<{ selector: string; outerHtml: string; text: string }>;
       try {
-        await browser.createAnnotation({
-          url,
-          selector: m.selector,
-          excerpt: (m.outerHtml || '').slice(0, 2000),
-          text: m.text || '',
-          comment: '',
-        });
-      } catch (e) {
-        toasts.error('Failed to save mark', e instanceof Error ? e.message : undefined);
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return;
+        drained = parsed;
+      } catch {
+        return;
       }
+      for (const m of drained) {
+        try {
+          await browser.createAnnotation({
+            url,
+            selector: m.selector,
+            excerpt: (m.outerHtml || '').slice(0, 2000),
+            text: m.text || '',
+            comment: '',
+          });
+        } catch (e) {
+          toasts.error('Failed to save mark', e instanceof Error ? e.message : undefined);
+        }
+      }
+    } finally {
+      pollInFlight = false;
     }
   }
 

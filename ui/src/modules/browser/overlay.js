@@ -25,28 +25,56 @@
   if (window.__ottoOverlay) return; // idempotent — this file is re-injected on every nav
 
   var DATA_ATTRS = ['data-testid', 'data-test', 'data-id', 'data-qa'];
+  // Same cap as ui/src/modules/browser/selector.ts's MAX_SELECTOR_LEN. A
+  // hostile page's own id/data-* attribute VALUES are the real trust
+  // boundary here (unlike reader mode's always-structural selector), and the
+  // server (routes/browser.rs's SELECTOR_MAX_CHARS + build_context_block's
+  // fencing) is the actual enforcement point — this cap is defense-in-depth,
+  // skipping an over-length candidate in favor of the next priority tier
+  // rather than truncating it (a truncated attribute-selector string risks
+  // being syntactically broken).
+  var MAX_SELECTOR_LEN = 300;
   var picking = false;
   var queue = [];
   var hoverBox = null;
   var markBoxes = {}; // selector -> box element
 
+  // Escapes a value for a `[attr="…"]` selector STRING — not identifier
+  // position, so CSS.escape() (used below for #id) isn't reused here; it
+  // over-escapes a quoted-string value. Backslash-escaping `"`/`\` is correct
+  // and sufficient for a double-quoted CSS string.
   function escapeAttrValue(v) {
     return String(v).replace(/(["\\])/g, '\\$1');
   }
 
-  function isSimpleId(id) {
-    return /^[A-Za-z_][A-Za-z0-9_-]*$/.test(id);
+  // #id-shorthand for `id`, preferring the platform's own CSS.escape()
+  // (identifier-position escaping — handles a leading digit, a colon, etc.,
+  // always producing a valid bare selector) with a manual fallback for an
+  // older/embedded WebKit that lacks it.
+  function idSelector(id) {
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+      return '#' + CSS.escape(id);
+    }
+    return /^[A-Za-z_][A-Za-z0-9_-]*$/.test(id) ? '#' + id : '[id="' + escapeAttrValue(id) + '"]';
   }
 
   // Same priority as ui/src/modules/browser/selector.ts's buildSelector:
   // #id > data-* test attribute (on el only) > nth-of-type tag-path from
-  // document.body (exclusive) down to el.
+  // document.body (exclusive) down to el. A candidate over MAX_SELECTOR_LEN
+  // is skipped in favor of the next tier; the nth-of-type fallback (never
+  // attacker text, only tag names/counts) is hard-truncated as a last resort.
   function buildSelector(el) {
     var id = el.getAttribute('id');
-    if (id) return isSimpleId(id) ? '#' + id : '[id="' + escapeAttrValue(id) + '"]';
+    if (id) {
+      var idSel = idSelector(id);
+      if (idSel.length <= MAX_SELECTOR_LEN) return idSel;
+    }
     for (var i = 0; i < DATA_ATTRS.length; i++) {
       var v = el.getAttribute(DATA_ATTRS[i]);
-      if (v) return '[' + DATA_ATTRS[i] + '="' + escapeAttrValue(v) + '"]';
+      if (v) {
+        var dataSel = '[' + DATA_ATTRS[i] + '="' + escapeAttrValue(v) + '"]';
+        if (dataSel.length <= MAX_SELECTOR_LEN) return dataSel;
+      }
     }
     var steps = [];
     var cur = el;
@@ -63,7 +91,8 @@
       cur = parent === document.body ? null : parent;
     }
     if (!steps.length) steps.push(el.tagName.toLowerCase());
-    return steps.join(' > ');
+    var path = steps.join(' > ');
+    return path.length > MAX_SELECTOR_LEN ? path.slice(0, MAX_SELECTOR_LEN) : path;
   }
 
   function ensureStyle() {
