@@ -7,7 +7,10 @@ these are the real commands (mirrors `README.md` + `packaging/`).
 > **CI weekly DMG:** `.github/workflows/release-dmg.yml` runs this same build
 > (UI → `ottod --release --features embed-ui` → sidecar → `tauri build`) on a
 > macOS runner every Sunday 05:00 UTC (+ `workflow_dispatch`), and publishes
-> `Otto-macos-arm64.dmg` (+ sha256) to the rolling `weekly` GitHub Release. The
+> `Otto-macos-arm64.dmg` (+ a versioned copy and sha256) to the rolling `weekly`
+> GitHub Release. Weekly builds are versioned `YYYY.MM.DD-{buildnum}` (buildnum =
+> the workflow run number); the bundle itself is stamped with the semver-legal
+> unpadded form (e.g. `2026.9.7-3` — semver forbids leading zeros). The
 > CI bundle is ad-hoc signed unless the Apple Developer ID secrets
 > (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
 > and `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` for notarization) are added

@@ -62,6 +62,27 @@ jobs:
       - name: Ensure cmake
         run: command -v cmake || brew install cmake
 
+      # Weekly build version: YYYY.MM.DD-{buildnum} (buildnum = the workflow's
+      # monotonically-increasing run number). Tauri validates the bundle version
+      # as SEMVER, which forbids leading zeros — so the app itself is stamped
+      # with the unpadded equivalent (2026.9.7-3) while the release name and
+      # asset filenames carry the padded display form (2026.09.07-3).
+      - name: Compute build version
+        id: ver
+        run: |
+          display="$(date -u +%Y.%m.%d)-${GITHUB_RUN_NUMBER}"
+          semver="$(date -u +%Y.%m.%d | sed -E 's/\.0([0-9])/.\1/g')-${GITHUB_RUN_NUMBER}"
+          echo "display=$display" >> "$GITHUB_OUTPUT"
+          echo "semver=$semver"   >> "$GITHUB_OUTPUT"
+          echo "version: $display (bundle: $semver)"
+
+      - name: Stamp version into the bundle
+        run: |
+          conf=apps/desktop/src-tauri/tauri.conf.json
+          jq --arg v "${{ steps.ver.outputs.semver }}" '.version = $v' "$conf" > "$conf.tmp"
+          mv "$conf.tmp" "$conf"
+          jq -r .version "$conf"
+
       # 1. Frontend → ui/dist (must precede the daemon build: `embed-ui` bakes
       #    ui/dist into the binary at compile time via rust-embed).
       - name: Build UI
@@ -96,25 +117,36 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npx --yes @tauri-apps/cli@^2 build
 
-      # Stable-named copy so the download URL never changes week to week.
+      # Two copies: a STABLE-named one (the download URL never changes week to
+      # week) and a VERSIONED one (Otto-YYYY.MM.DD-{buildnum}-macos-arm64.dmg).
       - name: Collect artifacts
         id: collect
         run: |
           dmg=$(ls apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg | head -1)
           test -n "$dmg"
           cp "$dmg" Otto-macos-arm64.dmg
-          echo "versioned=$dmg" >> "$GITHUB_OUTPUT"
-          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-          shasum -a 256 Otto-macos-arm64.dmg | tee Otto-macos-arm64.dmg.sha256
+          cp "$dmg" "Otto-${{ steps.ver.outputs.display }}-macos-arm64.dmg"
+          shasum -a 256 Otto-macos-arm64.dmg "Otto-${{ steps.ver.outputs.display }}-macos-arm64.dmg" | tee Otto-macos-arm64.dmg.sha256
+
+      # The rolling release keeps ONE versioned dmg: drop last week's versioned
+      # assets so they don't accumulate (the stable alias is replaced in place).
+      - name: Prune previous versioned assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view weekly --json assets -q '.assets[].name' 2>/dev/null \
+            | grep -E '^Otto-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]+-macos-arm64\.dmg$' \
+            | grep -v "^Otto-${{ steps.ver.outputs.display }}-macos-arm64.dmg$" \
+            | while read -r a; do gh release delete-asset weekly "$a" -y; done || true
 
       # Keep a copy on the run itself too (survives even if the release upload
       # is edited away).
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Otto-macos-arm64-dmg
+          name: Otto-${{ steps.ver.outputs.display }}-macos-arm64-dmg
           path: |
-            Otto-macos-arm64.dmg
+            Otto-*macos-arm64.dmg
             Otto-macos-arm64.dmg.sha256
           retention-days: 30
 
@@ -123,17 +155,19 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: weekly
-          name: Otto Weekly Build
+          name: Otto Weekly ${{ steps.ver.outputs.display }}
           prerelease: true
           body: |
-            Automated weekly macOS build (Apple Silicon) — ${{ steps.collect.outputs.date }}, `${{ github.sha }}`.
+            Automated weekly macOS build (Apple Silicon) — version **${{ steps.ver.outputs.display }}**, `${{ github.sha }}`.
 
-            **Install / update:** download `Otto-macos-arm64.dmg`, open it, drag **Otto** to
-            `/Applications` (replace the existing app to update). The app deploys its bundled
-            daemon on launch.
+            **Install / update:** download `Otto-macos-arm64.dmg` (always the newest build; the
+            versioned copy `Otto-${{ steps.ver.outputs.display }}-macos-arm64.dmg` is identical),
+            open it, drag **Otto** to `/Applications` (replace the existing app to update). The
+            app deploys its bundled daemon on launch.
 
             This build is not notarized: on first launch use **right-click → Open**, or run
             `xattr -cr /Applications/Otto.app`.
           files: |
             Otto-macos-arm64.dmg
+            Otto-${{ steps.ver.outputs.display }}-macos-arm64.dmg
             Otto-macos-arm64.dmg.sha256
