@@ -11,9 +11,11 @@ loopback, private, and cloud-metadata addresses are refused with a `400`.
 ## What's in it
 
 - **Reader tabs** — open a URL, get back extracted markdown + title. A tab is
-  `mode:"reader"` (fetched/rendered) or `mode:"live"` (an embedded iframe the
-  daemon never fetches). Navigating a reader tab re-fetches and adopts the new
-  page's title.
+  `mode:"reader"` (fetched/rendered) or `mode:"live"` (a real embedded page the
+  daemon never fetches — a native Tauri child webview in the desktop app; off
+  Tauri the pane falls back to reader, since there's nothing to host it in).
+  Navigating a reader tab re-fetches and adopts the new page's title. See "Live
+  tabs (desktop app)" below for how live mode is driven.
 - **DOM annotations** — a mark on a URL (selector + excerpt + your comment), keyed
   on the URL rather than the tab id so it survives the tab being closed and
   reattaches to any tab that later opens the same page.
@@ -122,6 +124,35 @@ second, fabricated instruction line once inside the fence.
   so pages behind a login return their logged-out view (or fail).
 - `mode:"live"` tabs are never fetched by the daemon at all — they're a plain
   iframe URL/title record.
+
+## Live tabs (desktop app)
+
+Inside the Otto desktop app, flipping a tab to **Live** (the Reader/Live toggle
+next to the URL bar) hosts a real Tauri child webview over the pane instead of
+a fetched/rendered page — `window.__TAURI_INTERNALS__` gates this
+(`ui/src/lib/nativeBrowser.ts`); off Tauri (a plain browser / PWA / remote
+share) the same toggle simply keeps showing reader mode, since there's no
+native webview to host. The daemon never fetches a live tab at all — see
+"Capabilities & limits" above. The Tauri commands (`apps/desktop/src-tauri/src/
+browser.rs`: `browser_open/bounds/navigate/eval/reload/show/hide/close/…`) are
+shared with the right-panel Browser tab's own always-native tab strip
+(`ui/src/modules/panels/BrowserPanel.svelte`) — both host webviews under the
+same `otto-browser-<id>` label scheme, keyed by their own (non-overlapping) tab
+ids, so the two can be open at once without one's cleanup tearing down the
+other's tabs.
+
+**Manual checklist** (desktop app only — a plain `cargo build`/`npm run
+build` can't exercise the native webview itself):
+
+1. Open the Browser module, paste a URL, hit **Go** — a reader tab opens.
+2. Click the **Live** toggle — the pane switches to a real embedded page (no
+   reader markdown fetch fires for it).
+3. Resize the window / toggle the right panel / change app zoom — the live
+   pane's webview stays aligned to the pane's rect.
+4. Click a link inside the live page — the address bar tracks the in-page
+   navigation without a page reload.
+5. Close the tab (✕ in the tab strip) — the child webview is destroyed, not
+   just hidden.
 
 ## Troubleshooting
 

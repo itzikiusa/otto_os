@@ -64,6 +64,7 @@ fn main() {
             browser::browser_open,
             browser::browser_bounds,
             browser::browser_navigate,
+            browser::browser_eval,
             browser::browser_reload,
             browser::browser_show,
             browser::browser_hide,

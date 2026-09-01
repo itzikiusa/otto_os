@@ -3,10 +3,12 @@
   // shape of VaultPage/LoopsPage (a thin view over a $state store).
 
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
   import { vault } from '../vault/vault.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { nativeBrowser, nativeBrowserAvailable, type Rect } from '../../lib/nativeBrowser';
   import Icon from '../../lib/components/Icon.svelte';
   import TabStrip from './TabStrip.svelte';
   import ReaderView from './ReaderView.svelte';
@@ -16,6 +18,7 @@
   let summarizing = $state(false);
   let summary = $state('');
   let vaultSaving = $state(false);
+  let urlFocused = $state(false);
 
   // (Re)load the tab list when the workspace changes.
   $effect(() => {
@@ -23,9 +26,141 @@
     if (id) void browser.loadTabs(id);
   });
 
-  // Keep the URL bar in sync with the active tab.
+  // Keep the URL bar in sync with the active tab — unless the field is
+  // focused (typing a new URL) or a live tab's in-page navigation is
+  // updating it, handled by the onUrlChange listener below instead.
   $effect(() => {
-    urlInput = browser.activeTab?.url ?? urlInput;
+    if (!urlFocused) urlInput = browser.activeTab?.url ?? urlInput;
+  });
+
+  // ── Live tab: native (Tauri) child webview overlaid on `liveHostEl` ────────
+  // Off Tauri (remote/PWA), a tab flagged mode:"live" simply falls back to
+  // reader — `nativeBrowserAvailable` is false there so none of this fires.
+  let liveHostEl = $state<HTMLDivElement | null>(null);
+  const activeLive = $derived(
+    nativeBrowserAvailable && browser.activeTab?.mode === 'live' ? browser.activeTab : null,
+  );
+  // Per-tab last-navigated URL, so the driver effect only calls `open` (which
+  // re-navigates) when the URL actually changed — switching tabs just
+  // shows/hides, preserving each tab's scroll/form state.
+  const openedUrl: Record<string, string> = {};
+
+  function hostRect(): Rect | null {
+    if (!liveHostEl) return null;
+    const r = liveHostEl.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return null;
+    // The native WKWebView page-zoom magnifies the whole SPA from the
+    // window's top-left without reflowing, so getBoundingClientRect() (CSS
+    // px) must be scaled by the zoom factor to land in window-logical points,
+    // which is what the child webview is positioned in.
+    const z = ui.zoom || 1;
+    return { x: r.left * z, y: r.top * z, width: r.width * z, height: r.height * z };
+  }
+
+  // Show the active live tab's webview over the host rect; hide every other
+  // live tab this view has opened. A native webview always paints above the
+  // HTML, so it must also hide when an SPA overlay is open.
+  $effect(() => {
+    if (!nativeBrowserAvailable) return;
+    const tabs = browser.tabs; // reactive dep
+    const active = activeLive; // reactive dep
+    const overlay = ui.overlayOpen || ctxMenu.open;
+    for (const t of tabs) {
+      if (t.mode === 'live' && (!active || t.id !== active.id || overlay)) {
+        void nativeBrowser.hide(t.id);
+      }
+    }
+    if (!active || overlay) return;
+    const r = hostRect();
+    if (!r) return;
+    if (openedUrl[active.id] !== active.url) {
+      openedUrl[active.id] = active.url;
+      void nativeBrowser.open(active.id, active.url, r); // create-or-navigate + show
+    } else {
+      void nativeBrowser.bounds(active.id, r);
+      void nativeBrowser.show(active.id);
+    }
+  });
+
+  // Keep the active live tab's webview aligned with the pane as it resizes.
+  $effect(() => {
+    if (!nativeBrowserAvailable || !activeLive || !liveHostEl) return;
+    const id = activeLive.id;
+    const _z = ui.zoom; // re-align immediately when the page zoom changes
+    const sync = (): void => {
+      const r = hostRect();
+      if (r) void nativeBrowser.bounds(id, r);
+    };
+    const ro = new ResizeObserver(sync);
+    ro.observe(liveHostEl);
+    window.addEventListener('resize', sync);
+    sync();
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', sync);
+    };
+  });
+
+  // Reflect a live tab's in-page navigations into the store + address bar.
+  // Event-driven (wry on_navigation) — never polls url().
+  $effect(() => {
+    if (!nativeBrowserAvailable) return;
+    let unlisten = (): void => {};
+    let disposed = false;
+    void nativeBrowser
+      .onUrlChange((id, url) => {
+        openedUrl[id] = url; // keep the driver effect from re-navigating (loop)
+        browser.trackLiveNav(id, url);
+        if (!urlFocused && id === browser.activeId) urlInput = url;
+      })
+      .then((un) => (disposed ? un() : (unlisten = un)));
+    return () => {
+      disposed = true;
+      unlisten();
+    };
+  });
+
+  // A live tab asked to open a new tab (window.open / target=_blank) — open a
+  // real in-app live tab for it and focus it.
+  $effect(() => {
+    if (!nativeBrowserAvailable) return;
+    let unlisten = (): void => {};
+    let disposed = false;
+    void nativeBrowser
+      .onNewTab((url) => void browser.openLiveTab(url))
+      .then((un) => (disposed ? un() : (unlisten = un)));
+    return () => {
+      disposed = true;
+      unlisten();
+    };
+  });
+
+  // Destroy the native webview for any live tab this view previously knew
+  // about that's no longer in the tab list (closed via TabStrip's ✕). Never
+  // closeAll()/hideAll() here — this component may share the window with
+  // another native-browser host (e.g. the right-panel Browser tab), and those
+  // commands aren't scoped past the window, so they'd tear down its tabs too.
+  let knownLiveIds = new Set<string>();
+  $effect(() => {
+    if (!nativeBrowserAvailable) return;
+    const current = new Set(browser.tabs.filter((t) => t.mode === 'live').map((t) => t.id));
+    for (const id of knownLiveIds) {
+      if (!current.has(id)) {
+        void nativeBrowser.close(id);
+        delete openedUrl[id];
+      }
+    }
+    knownLiveIds = current;
+  });
+
+  // Hide (not close — this view doesn't own destroying a tab's session state)
+  // every live tab's webview when the module unmounts, so navigating away
+  // from Browser doesn't leave one floating over whatever's shown next.
+  $effect(() => () => {
+    if (!nativeBrowserAvailable) return;
+    for (const t of browser.tabs) {
+      if (t.mode === 'live') void nativeBrowser.hide(t.id);
+    }
   });
 
   function normalize(raw: string): string {
@@ -53,6 +188,11 @@
   function newTab(): void {
     urlInput = '';
     browser.deselect();
+  }
+
+  function toggleMode(mode: 'reader' | 'live'): void {
+    const tab = browser.activeTab;
+    if (tab) void browser.setMode(tab.id, mode);
   }
 
   async function doSummarize(): Promise<void> {
@@ -117,10 +257,34 @@
       placeholder="Enter URL"
       bind:value={urlInput}
       onkeydown={onkeydown}
+      onfocus={() => (urlFocused = true)}
+      onblur={() => (urlFocused = false)}
     />
     <button class="btn" onclick={go} title="Go">
       <Icon name="external" size={14} />
     </button>
+    {#if browser.activeTab}
+      <div class="mode-toggle" role="group" aria-label="Tab mode">
+        <button
+          class="seg"
+          class:active={browser.activeTab.mode === 'reader'}
+          onclick={() => toggleMode('reader')}
+          title="Reader mode — fetched and rendered as clean markdown"
+        >
+          <Icon name="file" size={13} />
+        </button>
+        <button
+          class="seg"
+          class:active={browser.activeTab.mode === 'live'}
+          onclick={() => toggleMode('live')}
+          title={nativeBrowserAvailable
+            ? 'Live mode — a real embedded browser'
+            : 'Live mode needs the Otto desktop app — falls back to reader here'}
+        >
+          <Icon name="globe" size={13} />
+        </button>
+      </div>
+    {/if}
     <button
       class="btn"
       onclick={doSummarize}
@@ -150,9 +314,15 @@
   {/if}
 
   <div class="body">
-    <ReaderView page={browser.page} loading={browser.loadingPage} error={browser.pageError} />
-    {#if browser.page}
-      <NotesRail annotations={browser.annotations} />
+    {#if activeLive}
+      <!-- The native child webview paints ABOVE this div's rect — the div
+           itself just holds the geometry the ResizeObserver above tracks. -->
+      <div class="live-host" bind:this={liveHostEl}></div>
+    {:else}
+      <ReaderView page={browser.page} loading={browser.loadingPage} error={browser.pageError} />
+      {#if browser.page}
+        <NotesRail annotations={browser.annotations} />
+      {/if}
     {/if}
   </div>
 </div>
@@ -168,6 +338,40 @@
     flex: 1;
     display: flex;
     min-height: 0;
+    position: relative;
+  }
+  .live-host {
+    flex: 1;
+    min-height: 0;
+    /* Empty on purpose — the Tauri child webview paints natively above this
+       rect; ResizeObserver above keeps its bounds synced to this div. */
+  }
+  .mode-toggle {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow: hidden;
+  }
+  .seg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 30px;
+    border: none;
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .seg + .seg {
+    border-left: 1px solid var(--border);
+  }
+  .seg:hover {
+    color: var(--text);
+  }
+  .seg.active {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
   }
   .urlbar {
     display: flex;

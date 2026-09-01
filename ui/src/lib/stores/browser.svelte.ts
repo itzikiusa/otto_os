@@ -5,7 +5,15 @@
 // `browser_annotation_added` WS event arrives.
 
 import * as browserApi from '../api/browser';
+import { nativeBrowserAvailable } from '../nativeBrowser';
 import type { BrowserAnnotation, BrowserPage, BrowserTab, OttoEvent } from '../api/types';
+
+/** A `mode:"live"` tab only skips the reader fetch where something actually
+ *  renders it live (a Tauri child webview) — off Tauri (remote/PWA), the view
+ *  falls back to reader, so the store must still fetch the page for it. */
+function isNativeLive(tab: BrowserTab): boolean {
+  return tab.mode === 'live' && nativeBrowserAvailable;
+}
 
 class BrowserStore {
   tabs: BrowserTab[] = $state([]);
@@ -62,7 +70,54 @@ class BrowserStore {
   select(id: string): void {
     this.activeId = id;
     const tab = this.activeTab;
-    if (tab) void this.loadPage(tab.url);
+    // A live tab that's actually rendered natively skips the reader fetch —
+    // off Tauri it still falls back to reader (isNativeLive is false there).
+    if (tab && !isNativeLive(tab)) {
+      void this.loadPage(tab.url);
+    } else {
+      this.page = null;
+      this.pageError = '';
+    }
+  }
+
+  /** Flip tab `id`'s mode. Switching to reader loads the reader-fetched page;
+   *  switching to live drops it (the view hosts a native/embedded webview
+   *  instead — see BrowserView). */
+  async setMode(id: string, mode: 'reader' | 'live'): Promise<void> {
+    const tab = this.tabs.find((t) => t.id === id);
+    if (!tab || tab.mode === mode) return;
+    const patched = await browserApi.navigateTab(id, { mode });
+    this.tabs = this.tabs.map((t) => (t.id === patched.id ? patched : t));
+    if (id !== this.activeId) return;
+    if (isNativeLive(patched)) {
+      this.page = null;
+      this.pageError = '';
+    } else {
+      void this.loadPage(patched.url);
+    }
+  }
+
+  /** Create a tab that opens directly in live mode (e.g. a `window.open()`
+   *  fired from inside another live tab) — skips the reader fetch entirely. */
+  async openLiveTab(url: string): Promise<BrowserTab> {
+    const tab = await browserApi.createTab(this.wsId, url);
+    const patched = await browserApi.navigateTab(tab.id, { mode: 'live' });
+    this.tabs = this.tabs.some((t) => t.id === patched.id)
+      ? this.tabs.map((t) => (t.id === patched.id ? patched : t))
+      : [...this.tabs, patched];
+    this.activeId = patched.id;
+    this.page = null;
+    this.pageError = '';
+    return patched;
+  }
+
+  /** Record a live tab's in-page navigation (from the native webview's
+   *  on-navigation event) locally — no server round-trip per keystroke-level
+   *  nav; `navigate()`/PATCH still persists explicit address-bar submits. */
+  trackLiveNav(id: string, url: string, title?: string): void {
+    this.tabs = this.tabs.map((t) =>
+      t.id === id && t.url !== url ? { ...t, url, title: title || t.title } : t,
+    );
   }
 
   async closeTab(id: string): Promise<void> {
@@ -72,7 +127,11 @@ class BrowserStore {
       this.activeId = this.tabs.length ? this.tabs[0].id : null;
       if (this.activeId) {
         const tab = this.activeTab;
-        if (tab) await this.loadPage(tab.url);
+        if (tab && !isNativeLive(tab)) await this.loadPage(tab.url);
+        else {
+          this.page = null;
+          this.pageError = '';
+        }
       } else {
         this.page = null;
         this.annotations = [];
@@ -86,6 +145,14 @@ class BrowserStore {
     const tab = this.activeTab;
     if (!tab) {
       await this.openTab(url);
+      return;
+    }
+    if (isNativeLive(tab)) {
+      // The native webview does the actual navigation (BrowserView's driver
+      // effect picks up the URL change below); just persist it so the tab
+      // strip and a future reload reflect it — no reader fetch.
+      const patched = await browserApi.navigateTab(tab.id, { url, title: url });
+      this.tabs = this.tabs.map((t) => (t.id === patched.id ? patched : t));
       return;
     }
     await this.loadPage(url);
@@ -170,7 +237,7 @@ class BrowserStore {
       const tab = ev.tab as BrowserTab;
       const exists = this.tabs.some((t) => t.id === tab.id);
       this.tabs = exists ? this.tabs.map((t) => (t.id === tab.id ? tab : t)) : [...this.tabs, tab];
-      if (tab.id === this.activeId) void this.loadPage(tab.url);
+      if (tab.id === this.activeId && !isNativeLive(tab)) void this.loadPage(tab.url);
     } else {
       const ann = ev.annotation as BrowserAnnotation;
       if (this.activeTab && ann.url === this.activeTab.url) {

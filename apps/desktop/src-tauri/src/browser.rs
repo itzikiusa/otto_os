@@ -116,6 +116,33 @@ pub fn browser_bounds(app: tauri::AppHandle, id: String, x: f64, y: f64, width: 
     }
 }
 
+/// Run `js` in tab `id`'s webview and resolve with its stringified result
+/// (JSON-encoded, matching wry's `eval_with_callback` contract). Used by the
+/// overlay-injection bridge (marks/notes over a live page) — the promise
+/// resolves once WebKit's `evaluateJavaScript` completion handler fires, so a
+/// caller can `await` a value straight out of the page.
+#[tauri::command]
+pub async fn browser_eval(app: tauri::AppHandle, id: String, js: String) -> Result<String, String> {
+    let Some(wv) = app.get_webview(&label(&id)) else {
+        return Err(format!("no live webview for tab {id}"));
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let tx = std::sync::Mutex::new(Some(tx));
+    let dispatch = catch_unwind(AssertUnwindSafe(|| {
+        wv.eval_with_callback(js, move |result: String| {
+            if let Some(tx) = tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = tx.send(result);
+            }
+        })
+    }));
+    match dispatch {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e.to_string()),
+        Err(_) => return Err("browser webview panicked while evaluating".into()),
+    }
+    rx.await.map_err(|_| "eval callback never fired".to_string())
+}
+
 /// Navigate tab `id`'s webview to a new URL.
 #[tauri::command]
 pub fn browser_navigate(app: tauri::AppHandle, id: String, url: String) -> Result<(), String> {

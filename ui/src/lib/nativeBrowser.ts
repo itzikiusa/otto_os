@@ -29,6 +29,9 @@ export const nativeBrowser = {
   /** Keep tab `id`'s webview aligned with the panel rect. */
   bounds: (id: string, r: Rect) => call('browser_bounds', { id, ...r }),
   navigate: (id: string, url: string) => call('browser_navigate', { id, url }),
+  /** Run `js` in tab `id`'s live webview; resolves with its stringified
+   *  result (or undefined off Tauri / on a dispatch failure). */
+  eval: (id: string, js: string) => call<string>('browser_eval', { id, js }),
   reload: (id: string) => call('browser_reload', { id }),
   show: (id: string) => call('browser_show', { id }),
   hide: (id: string) => call('browser_hide', { id }),
