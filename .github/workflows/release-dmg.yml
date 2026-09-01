@@ -32,8 +32,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Gate: the DMG is only built from a commit whose CI (lint/type-check/test)
+  # workflow SUCCEEDED. A schedule/dispatch can fire while CI for the head
+  # commit is still running (or after it failed) — wait for it, and fail this
+  # run instead of shipping an unverified build.
+  ci-gate:
+    name: Wait for CI on this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Require a successful CI run for ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 60); do
+            state=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=ci.yml \
+              --commit "$GITHUB_SHA" --json status,conclusion \
+              -q '.[0] | .status + " " + (.conclusion // "")' 2>/dev/null || true)
+            echo "CI for $GITHUB_SHA: ${state:-no run found} (poll $i)"
+            case "$state" in
+              "completed success") exit 0 ;;
+              completed*) echo "::error::CI concluded '${state#completed }' — not building the DMG"; exit 1 ;;
+              "") if [ "$i" -ge 5 ]; then echo "::error::no CI run found for $GITHUB_SHA"; exit 1; fi ;;
+            esac
+            sleep 60
+          done
+          echo "::error::timed out waiting for CI on $GITHUB_SHA"
+          exit 1
+
   dmg:
     name: Build + publish Otto.dmg (arm64)
+    needs: ci-gate
     runs-on: macos-latest # Apple Silicon
     timeout-minutes: 120
     steps:
