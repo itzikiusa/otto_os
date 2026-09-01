@@ -6203,6 +6203,21 @@ export interface BrowserPage {
   degraded: boolean;
 }
 
+/** One CSS-selector match returned by `GET /workspaces/{wid}/browser/query`.
+ *  Mirrors `otto_browser::MatchedNode`. */
+export interface BrowserMatchedNode {
+  selector: string;
+  outer_html: string;
+  text: string;
+}
+
+/** `GET /workspaces/{wid}/browser/query?url=…&selector=…` response —
+ *  netguard-checked and fetched the same way as `/page`, but returns only
+ *  the nodes matching `selector` instead of the whole page. */
+export interface BrowserQueryResp {
+  matches: BrowserMatchedNode[];
+}
+
 /** `POST /workspaces/{wid}/browser/summarize` request — `{url}`. The daemon
  *  fetches it (netguard-checked) and runs one short-lived agent turn to
  *  summarize the (server-side, 30k-char-capped) markdown. */

@@ -41,6 +41,7 @@ pub fn routes() -> Router<ServerCtx> {
         )
         .route("/browser/tabs/{id}", patch(update_tab).delete(delete_tab))
         .route("/workspaces/{wid}/browser/page", get(fetch_page))
+        .route("/workspaces/{wid}/browser/query", get(query_page))
         .route(
             "/workspaces/{wid}/browser/annotations",
             get(list_annotations).post(create_annotation),
@@ -98,6 +99,15 @@ impl BrowserEngineHandle {
     pub async fn page(&self, url: &str) -> Result<otto_browser::Page, otto_browser::EngineError> {
         self.service().await.page(url).await
     }
+
+    /// Caller must netguard-check `url` first — see module docs.
+    pub async fn query(
+        &self,
+        url: &str,
+        selector: &str,
+    ) -> Result<Vec<otto_browser::MatchedNode>, otto_browser::EngineError> {
+        self.service().await.query(url, selector).await
+    }
 }
 
 /// Map a browser-engine failure onto the shared `Error` → HTTP status convention.
@@ -142,6 +152,26 @@ struct BrowserPageResp {
     html: String,
     engine: String,
     degraded: bool,
+}
+
+#[derive(Deserialize)]
+struct SelectorQuery {
+    url: String,
+    selector: String,
+}
+
+/// `{selector,outer_html,text}` — mirrors `otto_browser::MatchedNode`
+/// field-for-field (that struct isn't `Serialize`, so this is the wire copy).
+#[derive(Serialize)]
+struct MatchedNodeResp {
+    selector: String,
+    outer_html: String,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct BrowserQueryResp {
+    matches: Vec<MatchedNodeResp>,
 }
 
 #[derive(Deserialize)]
@@ -442,6 +472,36 @@ async fn fetch_page(
         html: page.html,
         engine: page.engine,
         degraded: page.degraded,
+    }))
+}
+
+/// `GET /workspaces/{wid}/browser/query?url=…&selector=…` — fetch a URL on the
+/// caller's behalf (netguard-checked, same as `/page`) and return every node
+/// matching a CSS `selector`.
+async fn query_page(
+    Path(wid): Path<Id>,
+    Query(q): Query<SelectorQuery>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<BrowserQueryResp>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    otto_netguard::check_url(&q.url)
+        .await
+        .map_err(|m| ApiError(Error::Invalid(m)))?;
+    let matches = ctx
+        .browser
+        .query(&q.url, &q.selector)
+        .await
+        .map_err(engine_err)?;
+    Ok(Json(BrowserQueryResp {
+        matches: matches
+            .into_iter()
+            .map(|m| MatchedNodeResp {
+                selector: m.selector,
+                outer_html: m.outer_html,
+                text: m.text,
+            })
+            .collect(),
     }))
 }
 
@@ -1201,6 +1261,13 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "netguard must reject metadata IPs");
+
+        let (status, _) = get(
+            &app,
+            "/workspaces/ws1/browser/query?url=http://169.254.169.254/&selector=%23x",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "query netguard must reject metadata IPs too");
     }
 
     #[tokio::test]

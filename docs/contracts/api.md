@@ -2816,7 +2816,10 @@ blocked address (loopback/private/metadata) is a `400`. Navigating a
 reader-mode tab (`PATCH .../tabs/{id}` with a new `url` while `mode ==
 "reader"`) runs the same fetch pipeline and adopts the fetched page's title;
 navigating a non-reader-mode tab (`mode == "live"`, an embedded iframe) just
-records the given `url`/`title` with no fetch. Broadcasts `browser_tab_updated`
+records the given `url`/`title` with no fetch. `GET /browser/query` fetches
+the same way and runs a CSS-selector query against the settled page instead
+of returning the whole thing, sharing `BrowserService::query`'s
+denylist/fallback policy with `/page`. Broadcasts `browser_tab_updated`
 / `browser_annotation_added` (see `docs/contracts/ws.md`).
 
 | Method & path | Auth | Request | Response |
@@ -2826,6 +2829,7 @@ records the given `url`/`title` with no fetch. Broadcasts `browser_tab_updated`
 | PATCH /api/v1/browser/tabs/{id} | ws editor · Browser Edit | `{url?, title?, mode?}` (`mode` ∈ `reader`\|`live`) | `BrowserTab` |
 | DELETE /api/v1/browser/tabs/{id} | ws editor · Browser Edit | — | 204 |
 | GET /api/v1/workspaces/{wid}/browser/page?url=… | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS) |
+| GET /api/v1/workspaces/{wid}/browser/query?url=…&selector=… | ws editor · Browser Edit | — | `{matches: [{selector, outer_html, text}]}` — netguard-checked, same as `/page`; CSS-selector matches against the settled page |
 | GET /api/v1/workspaces/{wid}/browser/annotations | ws viewer · Browser View | query `url?` (filters to one page) | `BrowserAnnotation[]` |
 | POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt, text, comment?, color?, tab_id?}` (`color` defaults `"yellow"`) | `BrowserAnnotation` |
 | PATCH /api/v1/browser/annotations/{id} | ws editor · Browser Edit | `{comment}` | `BrowserAnnotation` |

@@ -894,7 +894,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/browser/tabs/{id}" || p == "/browser/annotations/{id}" {
         return Require(Browser, Edit);
     }
-    if p == "/workspaces/{wid}/browser/page" {
+    if p == "/workspaces/{wid}/browser/page" || p == "/workspaces/{wid}/browser/query" {
         return Require(Browser, Edit);
     }
     // Summarize (agent turn over a fetched page), send-to-session (writes into
@@ -1801,6 +1801,14 @@ mod tests {
                 Method::POST,
                 "/api/v1/workspaces/{wid}/browser/annotations/{id}/send"
             ),
+            Require(Browser, Edit)
+        );
+    }
+
+    #[test]
+    fn browser_query_is_edit_like_page() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/browser/query"),
             Require(Browser, Edit)
         );
     }
