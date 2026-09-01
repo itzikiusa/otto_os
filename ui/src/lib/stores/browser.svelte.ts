@@ -39,7 +39,13 @@ class BrowserStore {
 
   async openTab(url: string): Promise<BrowserTab> {
     const tab = await browserApi.createTab(this.wsId, url);
-    this.tabs = [...this.tabs, tab];
+    // The server's own `browser_tab_updated` broadcast for this exact create
+    // can beat the HTTP response back to the client (WS push vs. awaited
+    // fetch aren't ordered) — `applyEvent` may have already appended it. Dedupe
+    // by id, same as `applyEvent` does for the reverse race.
+    this.tabs = this.tabs.some((t) => t.id === tab.id)
+      ? this.tabs.map((t) => (t.id === tab.id ? tab : t))
+      : [...this.tabs, tab];
     this.activeId = tab.id;
     await this.loadPage(url);
     return tab;
@@ -114,6 +120,46 @@ class BrowserStore {
 
   async summarize(url: string) {
     return browserApi.summarize(this.wsId, url);
+  }
+
+  /** Create a DOM annotation (a "mark") against the active page's URL. Pushes
+   *  the created row into `annotations` immediately for instant feedback —
+   *  the later `browser_annotation_added` WS tick is a no-op dupe (see
+   *  `applyEvent`'s `exists` guard) since this device already has it. */
+  async createAnnotation(body: {
+    url: string;
+    selector: string;
+    excerpt: string;
+    text: string;
+    comment?: string;
+    color?: string;
+  }): Promise<BrowserAnnotation> {
+    const ann = await browserApi.createAnnotation(this.wsId, {
+      ...body,
+      tab_id: this.activeId ?? undefined,
+    });
+    if (!this.annotations.some((a) => a.id === ann.id)) {
+      this.annotations = [...this.annotations, ann];
+    }
+    return ann;
+  }
+
+  async updateAnnotationComment(id: string, comment: string): Promise<void> {
+    const ann = await browserApi.updateAnnotation(id, comment);
+    this.annotations = this.annotations.map((a) => (a.id === ann.id ? ann : a));
+  }
+
+  async deleteAnnotation(id: string): Promise<void> {
+    await browserApi.deleteAnnotation(id);
+    this.annotations = this.annotations.filter((a) => a.id !== id);
+  }
+
+  async sendAnnotation(id: string, sessionId: string): Promise<void> {
+    await browserApi.sendAnnotation(this.wsId, id, sessionId);
+  }
+
+  async vaultSave(url: string, vaultId: number, summary?: string) {
+    return browserApi.vaultSave(this.wsId, { url, vault_id: vaultId, summary });
   }
 
   /** Live WS tick: a tab was created/navigated elsewhere — refresh the strip

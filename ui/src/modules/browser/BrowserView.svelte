@@ -4,14 +4,18 @@
 
   import { ws } from '../../lib/stores/workspace.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
+  import { vault } from '../vault/vault.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import TabStrip from './TabStrip.svelte';
   import ReaderView from './ReaderView.svelte';
+  import NotesRail from './NotesRail.svelte';
 
   let urlInput = $state('');
   let summarizing = $state(false);
   let summary = $state('');
+  let vaultSaving = $state(false);
 
   // (Re)load the tab list when the workspace changes.
   $effect(() => {
@@ -64,6 +68,44 @@
       summarizing = false;
     }
   }
+
+  async function saveToVault(vaultId: number): Promise<void> {
+    const url = browser.activeTab?.url;
+    if (!url || vaultSaving) return;
+    vaultSaving = true;
+    try {
+      // Always pass a summary — the prior /summarize output when present,
+      // else a slice of the already-fetched page markdown. Either way this
+      // keeps the daemon on the caller-supplied-summary path (no second page
+      // fetch); omitting it would make vault-save re-fetch the URL server-side.
+      const derived = summary || browser.page?.markdown?.slice(0, 4000) || '';
+      const resp = await browser.vaultSave(url, vaultId, derived);
+      toasts.success('Saved to vault', resp.note_path);
+    } catch (e) {
+      toasts.error('Vault save failed', e instanceof Error ? e.message : undefined);
+    } finally {
+      vaultSaving = false;
+    }
+  }
+
+  async function doVaultSave(e: MouseEvent): Promise<void> {
+    if (!browser.activeTab?.url) return;
+    if (vault.vaults.length === 0) await vault.load();
+    if (vault.vaults.length === 0) {
+      toasts.warn('No vault registered', 'Open the Vault module and register one first.');
+      return;
+    }
+    if (vault.vaults.length === 1) {
+      await saveToVault(vault.vaults[0].id);
+      return;
+    }
+    const items: MenuItem[] = vault.vaults.map((v) => ({
+      label: v.name,
+      icon: 'note',
+      action: () => void saveToVault(v.id),
+    }));
+    ctxMenu.show(e, items);
+  }
 </script>
 
 <div class="browser">
@@ -72,7 +114,7 @@
   <div class="urlbar">
     <input
       type="text"
-      placeholder="Enter a URL and press Enter…"
+      placeholder="Enter URL"
       bind:value={urlInput}
       onkeydown={onkeydown}
     />
@@ -87,6 +129,14 @@
     >
       <Icon name="zap" size={14} />
     </button>
+    <button
+      class="btn"
+      onclick={doVaultSave}
+      disabled={!browser.activeTab || vaultSaving}
+      title="Save to vault"
+    >
+      <Icon name="folder" size={14} />
+    </button>
   </div>
 
   {#if summary}
@@ -99,7 +149,12 @@
     </div>
   {/if}
 
-  <ReaderView page={browser.page} loading={browser.loadingPage} error={browser.pageError} />
+  <div class="body">
+    <ReaderView page={browser.page} loading={browser.loadingPage} error={browser.pageError} />
+    {#if browser.page}
+      <NotesRail annotations={browser.annotations} />
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -107,6 +162,11 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    min-height: 0;
+  }
+  .body {
+    flex: 1;
+    display: flex;
     min-height: 0;
   }
   .urlbar {
