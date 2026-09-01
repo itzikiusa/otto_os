@@ -825,12 +825,19 @@ fn tmp_dir() -> PathBuf {
     PathBuf::from(std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string()))
 }
 
+/// Loop ids are daemon-generated ULIDs, but they also arrive as HTTP path
+/// params (retry), so re-validate before the tmp-dir join — a hostile id fails
+/// closed to a name that never exists instead of escaping the directory.
+fn safe_loop_id(loop_id: &str) -> &str {
+    otto_core::paths::safe_component(loop_id).unwrap_or("invalid")
+}
+
 fn executor_out_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
-    tmp_dir().join(format!("otto-goalloop-{loop_id}-{idx}-{exec}.json"))
+    tmp_dir().join(format!("otto-goalloop-{}-{idx}-{exec}.json", safe_loop_id(loop_id)))
 }
 
 fn prompt_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
-    tmp_dir().join(format!("otto-goalloop-{loop_id}-{idx}-{exec}.prompt"))
+    tmp_dir().join(format!("otto-goalloop-{}-{idx}-{exec}.prompt", safe_loop_id(loop_id)))
 }
 
 fn never(_: &str) -> bool {

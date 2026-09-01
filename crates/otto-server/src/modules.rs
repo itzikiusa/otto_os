@@ -1506,7 +1506,9 @@ fn append_skill_references(out: &mut String, skill_md: &std::path::Path) {
 /// skills dir (`~/.claude/skills/<name>/`) so skills authored there — e.g.
 /// `golang-feature-implementation` — work too. Empty/unknown → empty string.
 pub(crate) fn resolve_skill_inline(library: &otto_context::Library, name: &str) -> String {
-    if name.is_empty() {
+    // Skill names come from user-editable review configs and are used as path
+    // components below (the library lookups re-check, but fail closed here too).
+    if otto_core::paths::safe_component(name).is_none() {
         return String::new();
     }
     // 1. Otto Library (multi-file skills with references on disk).
@@ -4106,6 +4108,12 @@ async fn retry_review_agent(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> crate::error::ApiResult<Json<Review>> {
+    // The id is a route param used as a temp-file name component below
+    // (`otto-review-<id>.diff` + the legacy prompt file) — reject traversal
+    // before it can reach a path join.
+    if otto_core::paths::safe_component(&review_id).is_none() {
+        return Err(crate::error::ApiError(Error::NotFound("review".into())));
+    }
     let review = ctx
         .reviews_store
         .get_review(&review_id)

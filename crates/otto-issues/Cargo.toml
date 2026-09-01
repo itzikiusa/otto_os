@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 otto-core.workspace = true
+otto-netguard.workspace = true
 otto-state.workspace = true
 axum.workspace = true
 serde.workspace = true

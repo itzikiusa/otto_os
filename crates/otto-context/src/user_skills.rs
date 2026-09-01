@@ -85,6 +85,10 @@ pub fn uninstall(name: &str) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<()> {
+    // `name` arrives from the HTTP layer — refuse anything that is not a
+    // single path component before it is joined under the provider dirs.
+    let name = otto_core::paths::safe_component(name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
     for dir in dirs {
         let dest = dir.join(name);
         if dest.exists() {
@@ -103,6 +107,9 @@ fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<()>
 }
 
 fn uninstall_from_dirs(dirs: &[PathBuf], name: &str) -> io::Result<()> {
+    // Same gate as install: the name must be a single safe path component.
+    let name = otto_core::paths::safe_component(name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
     for dir in dirs {
         let mut owned = merge::read_manifest(dir);
         if !owned.iter().any(|n| n == name) {

@@ -34,6 +34,14 @@ impl SchemaRegistry {
             .redirect(otto_netguard::redirect_policy())
             .timeout(Duration::from_secs(10));
         let via_tunnel = socks_proxy.is_some();
+        // Basic-auth credentials ride every request: when the profile has
+        // them, require https for the registry (plain http stays allowed for
+        // loopback — local registries / port-forwards — and for tunneled
+        // targets, where the bastion carries the traffic).
+        if username.is_some() && !via_tunnel {
+            otto_netguard::require_tls_or_loopback(base)
+                .map_err(|m| Error::Invalid(format!("schema registry url: {m}")))?;
+        }
         if let Some(proxy) = socks_proxy {
             builder = builder.proxy(
                 reqwest::Proxy::all(&proxy)

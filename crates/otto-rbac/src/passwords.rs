@@ -43,17 +43,23 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
 mod tests {
     use super::*;
 
+    /// Random test password (never a hard-coded literal, so nothing in this
+    /// file can be mistaken for a real credential by scanners or readers).
+    fn random_pw() -> String {
+        SaltString::generate(&mut OsRng).to_string()
+    }
+
     #[test]
     fn roundtrip() {
-        let h = hash_password("correct horse battery").unwrap();
+        let pw = random_pw();
+        let h = hash_password(&pw).unwrap();
         assert!(h.starts_with("$argon2id$"));
-        assert!(verify_password("correct horse battery", &h).unwrap());
-        assert!(!verify_password("wrong", &h).unwrap());
+        assert!(verify_password(&pw, &h).unwrap());
+        assert!(!verify_password(&random_pw(), &h).unwrap());
     }
 
     #[test]
     fn password_policy() {
-        assert!(validate_password("short").is_err());
         // Exactly MIN_PASSWORD_LEN chars passes; one fewer fails.
         assert!(validate_password(&"a".repeat(MIN_PASSWORD_LEN)).is_ok());
         assert!(validate_password(&"a".repeat(MIN_PASSWORD_LEN - 1)).is_err());

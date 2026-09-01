@@ -148,6 +148,11 @@ fn prune_ignored(dir: &Path) {
 /// (`claude`/`codex`/`agy`) in `~/.<provider>/skills`. Bundled skills are
 /// embedded in the binary and cannot be edited.
 fn real_skill_dir(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<PathBuf> {
+    // Both branches below re-check the name, but fail closed here too — the
+    // name is caller-supplied and becomes a directory component.
+    if otto_core::paths::safe_component(skill_name).is_none() {
+        return Err(otto_core::Error::Invalid("unsafe skill name".into()));
+    }
     if source == "bundled" {
         return Err(otto_core::Error::Invalid(
             "bundled skills are read-only — install the skill to the library first".into(),
@@ -173,6 +178,11 @@ fn real_skill_dir(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<Pat
 /// Either way the copy excludes [`IGNORED_ENTRIES`], so reviews never scan
 /// local machine files like `.mcp.json`.
 fn stage_target(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<Staged> {
+    // The name is joined under the temp dir in both branches — reject
+    // traversal before any fs work.
+    if otto_core::paths::safe_component(skill_name).is_none() {
+        return Err(otto_core::Error::Invalid("unsafe skill name".into()));
+    }
     let tmp = tempfile::tempdir()
         .map_err(|e| otto_core::Error::Internal(format!("stage skill: {e}")))?;
     if source == "bundled" {

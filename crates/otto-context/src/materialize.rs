@@ -553,9 +553,11 @@ fn build_skill_artifacts(
     let mut skill_artifacts = Vec::new();
     for skill in skills {
         let dest_dir = skills_dir.join(&skill.name);
-        let lib_skill_dir = library.root.join("skills").join(&skill.name);
-        if lib_skill_dir.is_dir() {
-            skill_artifacts.push(SkillArtifact::CopyDir { lib_dir: lib_skill_dir, dest_dir });
+        // skill.name flows from workspace config — resolve the library dir via
+        // the validated/confined `skill_dir` join (None for an unsafe name).
+        let lib_skill_dir = library.skill_dir(&skill.name).filter(|d| d.is_dir());
+        if let Some(lib_dir) = lib_skill_dir {
+            skill_artifacts.push(SkillArtifact::CopyDir { lib_dir, dest_dir });
         } else {
             skill_artifacts.push(SkillArtifact::Body { dest_dir, body: skill.body.clone() });
         }

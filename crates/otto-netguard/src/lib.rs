@@ -16,6 +16,40 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 /// Max redirect hops we follow (matches reqwest's prior `Policy::limited(10)`).
 pub const MAX_REDIRECTS: usize = 10;
 
+/// Transport check for a CONFIGURED base URL that will carry credentials
+/// (basic auth, API tokens): require TLS (`https`/`wss`/`grpcs`), allowing
+/// plain `http`/`ws`/`grpc` only when the host is loopback — this is a local
+/// dev tool and localhost flows must keep working. Sync and DNS-free on
+/// purpose (config-time validation must not block); a hostname that RESOLVES
+/// to loopback still needs `https`, which fails safe.
+pub fn require_tls_or_loopback(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    match parsed.scheme() {
+        "https" | "wss" | "grpcs" => return Ok(()),
+        "http" | "ws" | "grpc" => {}
+        other => return Err(format!("blocked url scheme: {other}")),
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?;
+    // `host_str` keeps the brackets on an IPv6 literal — strip for parsing.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || bare
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    if loopback {
+        Ok(())
+    } else {
+        Err(format!(
+            "{host} is reached over plain {} — credentials would travel unencrypted; use https \
+             (plain http is allowed for localhost only)",
+            parsed.scheme()
+        ))
+    }
+}
+
 /// True when `ip` must never be reachable by a user-supplied fetch: any
 /// loopback, private (RFC1918 / ULA fc00::/7), link-local (incl. the
 /// 169.254.169.254 cloud-metadata address and fe80::/10), CGNAT
@@ -195,5 +229,20 @@ mod tests {
         assert!(check_url("http://[::1]/").await.is_err());
         // A public host should pass scheme/host classification (DNS allowing).
         assert!(check_url("http://8.8.8.8/").await.is_ok());
+    }
+
+    #[test]
+    fn tls_or_loopback_gate() {
+        // TLS anywhere is fine.
+        assert!(require_tls_or_loopback("https://site.atlassian.net").is_ok());
+        // Plain http only for loopback hosts (dev flows).
+        assert!(require_tls_or_loopback("http://localhost:8081").is_ok());
+        assert!(require_tls_or_loopback("http://127.0.0.1:8081/api").is_ok());
+        assert!(require_tls_or_loopback("http://[::1]:8081").is_ok());
+        // Plain http to anything else leaks credentials → rejected.
+        assert!(require_tls_or_loopback("http://registry.internal:8081").is_err());
+        assert!(require_tls_or_loopback("http://10.0.0.5").is_err());
+        // Non-http(s) schemes stay blocked.
+        assert!(require_tls_or_loopback("file:///etc/passwd").is_err());
     }
 }

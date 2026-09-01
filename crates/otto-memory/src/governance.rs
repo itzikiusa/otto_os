@@ -199,6 +199,14 @@ impl MemoryService {
                 "split requires at least 2 parts".into(),
             ));
         }
+        // Caller-controlled fan-out: bound it so one request can't mint an
+        // unbounded pile of memories (and so the allocation below stays sane).
+        const MAX_SPLIT_PARTS: usize = 100;
+        if req.parts.len() > MAX_SPLIT_PARTS {
+            return Err(Error::Invalid(format!(
+                "split supports at most {MAX_SPLIT_PARTS} parts"
+            )));
+        }
         let parent = self.repo().get(ws, mid).await?;
 
         let provenance = serde_json::json!({

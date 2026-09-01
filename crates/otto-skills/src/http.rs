@@ -265,6 +265,17 @@ async fn install_all<C: ContextCtx>(
 /// install the bundled tree. Returns the per-skill outcome. `installed` is
 /// `false` only when `name` is not a bundled skill.
 fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallResult, ApiErr> {
+    // `name` comes off the URL; a separator/`..` would aim the backup copy (and
+    // the install) outside the Library — same not-a-bundled-skill outcome as an
+    // unknown name, which the handler surfaces as 404.
+    let Some(name) = otto_core::paths::safe_component(name) else {
+        return Ok(InstallResult {
+            name: name.to_string(),
+            installed: false,
+            backed_up: false,
+            backup_path: None,
+        });
+    };
     let installed_dir = library.root.join("skills").join(name);
     let mut backup_path: Option<String> = None;
 

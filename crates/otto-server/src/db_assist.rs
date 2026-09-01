@@ -203,10 +203,14 @@ pub async fn assist(
         Some(_) => req.assist_id.clone().expect("resumed implies assist_id present"),
         None => otto_core::new_id(),
     };
-    let dir = resumed
-        .as_ref()
-        .map(|r| r.dir.clone())
-        .unwrap_or_else(|| ctx.data_dir.join("db_assist").join(&assist_id));
+    // A resumed dir comes from the registry (daemon-built); a fresh one embeds
+    // the assist id, which mirrors a user-suppliable field — confine the join
+    // under the db_assist root so it can't escape (rust/path-injection).
+    let dir = match resumed.as_ref() {
+        Some(r) => r.dir.clone(),
+        None => otto_core::paths::confine_join(&ctx.data_dir.join("db_assist"), &assist_id)
+            .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe assist id {assist_id}"))))?,
+    };
     let key = resumed
         .as_ref()
         .map(|r| r.key.clone())

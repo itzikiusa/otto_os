@@ -245,11 +245,15 @@ pub async fn upload_attachment(
     let id = otto_core::new_id();
     let ext = ext_for_mime(&req.mime);
     let rel = format!("{ATTACH_ROOT}/{sid}/{id}{ext}");
-    let dir = ctx.data_dir.join(ATTACH_ROOT).join(&sid);
+    // `sid` is a route param — confine both joins under the attachments root so
+    // a hostile id can't steer the writes (rust/path-injection).
+    let dir = otto_core::paths::confine_join(&ctx.data_dir.join(ATTACH_ROOT), &sid)
+        .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe story id {sid}"))))?;
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("create attachment dir: {e}"))))?;
-    let full = ctx.data_dir.join(&rel);
+    let full = otto_core::paths::confine_join(&ctx.data_dir, &rel)
+        .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe story id {sid}"))))?;
     tokio::fs::write(&full, &bytes)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("write attachment: {e}"))))?;
@@ -308,8 +312,10 @@ pub async fn serve_attachment(
     crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Viewer).await?;
 
     let root = ctx.data_dir.join(ATTACH_ROOT);
-    let full = ctx.data_dir.join(&att.storage_path);
-    // Path-sandbox: the resolved file MUST live under the attachments root.
+    // Confine the stored path's join under the data dir (rust/path-injection)…
+    let full = otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path)
+        .ok_or_else(|| ApiError(Error::Forbidden("attachment path escapes the data dir".into())))?;
+    // …then path-sandbox: the resolved file MUST live under the attachments root.
     if !path_within(&root, &full) {
         return Err(ApiError(Error::Forbidden(
             "attachment path escapes the attachments root".into(),
@@ -367,11 +373,13 @@ pub async fn delete_attachment(
     crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Editor).await?;
     ctx.attachment_repo.delete(&aid).await.map_err(ApiError)?;
     // Best-effort file removal (DB row is the source of truth).
-    // Path-sandbox: only unlink if the resolved path is within the attachments root.
+    // Path-sandbox: only unlink if the confined (rust/path-injection) resolved
+    // path is within the attachments root.
     let root = ctx.data_dir.join(ATTACH_ROOT);
-    let full = ctx.data_dir.join(&att.storage_path);
-    if path_within(&root, &full) {
-        let _ = tokio::fs::remove_file(&full).await;
+    if let Some(full) = otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path) {
+        if path_within(&root, &full) {
+            let _ = tokio::fs::remove_file(&full).await;
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }

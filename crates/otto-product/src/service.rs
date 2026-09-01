@@ -1888,10 +1888,11 @@ mod tests {
         assert_eq!(source_ver.kind, "source");
         assert_eq!(source_ver.version_no, 1);
         // ADF → markdown conversion should have produced the paragraph text.
+        // (message deliberately omits the body — it flows from account/token
+        // fixtures and must not end up in test logs)
         assert!(
             source_ver.body_md.contains("As a user I want to reset my password."),
-            "body_md did not contain expected text; got: {:?}",
-            source_ver.body_md
+            "body_md did not contain expected text"
         );
 
         // ---- Counts assertions ----
@@ -2046,8 +2047,7 @@ mod tests {
         let ver = detail2.source.as_ref().unwrap();
         assert!(
             ver.body_md.contains("Version 2 - updated"),
-            "expected updated body; got: {:?}",
-            ver.body_md
+            "expected updated body"
         );
 
         // A 'refreshed' event should exist.

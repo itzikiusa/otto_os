@@ -139,16 +139,28 @@ fn valid_id(id: &str) -> bool {
     (8..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
-fn png_path(ctx: &ServerCtx, id: &str) -> PathBuf {
-    snips_dir(ctx).join(format!("{id}.png"))
+/// Build `<snips_dir>/<id>.<ext>`, re-validating the id and confining the
+/// join under the snips dir (`otto_core::paths::confine_join`). Every path a
+/// route param can reach the filesystem through goes via here, so a hostile id
+/// fails closed as "no such snip" before any fs op sees it.
+fn snip_file(ctx: &ServerCtx, id: &str, ext: &str) -> Result<PathBuf, Error> {
+    if !valid_id(id) {
+        return Err(Error::NotFound(format!("snip {id}")));
+    }
+    otto_core::paths::confine_join(&snips_dir(ctx), &format!("{id}.{ext}"))
+        .ok_or_else(|| Error::NotFound(format!("snip {id}")))
 }
 
-fn annotated_path(ctx: &ServerCtx, id: &str) -> PathBuf {
-    snips_dir(ctx).join(format!("{id}.annotated.png"))
+fn png_path(ctx: &ServerCtx, id: &str) -> Result<PathBuf, Error> {
+    snip_file(ctx, id, "png")
 }
 
-fn sidecar_path(ctx: &ServerCtx, id: &str) -> PathBuf {
-    snips_dir(ctx).join(format!("{id}.json"))
+fn annotated_path(ctx: &ServerCtx, id: &str) -> Result<PathBuf, Error> {
+    snip_file(ctx, id, "annotated.png")
+}
+
+fn sidecar_path(ctx: &ServerCtx, id: &str) -> Result<PathBuf, Error> {
+    snip_file(ctx, id, "json")
 }
 
 /// Parse PNG dimensions straight from the IHDR chunk (signature + first chunk
@@ -180,16 +192,13 @@ fn decode_png(data_b64: &str) -> Result<Vec<u8>, Error> {
 }
 
 async fn load_snip(ctx: &ServerCtx, id: &str) -> Result<Snip, Error> {
-    if !valid_id(id) {
-        return Err(Error::NotFound(format!("snip {id}")));
-    }
-    let raw = tokio::fs::read(sidecar_path(ctx, id))
+    let raw = tokio::fs::read(sidecar_path(ctx, id)?)
         .await
         .map_err(|_| Error::NotFound(format!("snip {id}")))?;
     let mut snip: Snip =
         serde_json::from_slice(&raw).map_err(|e| Error::Internal(format!("snip sidecar: {e}")))?;
-    snip.has_annotated = annotated_path(ctx, id).exists();
-    snip.path = png_path(ctx, id).to_string_lossy().into_owned();
+    snip.has_annotated = annotated_path(ctx, id)?.exists();
+    snip.path = png_path(ctx, id)?.to_string_lossy().into_owned();
     Ok(snip)
 }
 
@@ -201,7 +210,7 @@ async fn store_snip(ctx: &ServerCtx, bytes: &[u8], source: &str) -> Result<Snip,
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| Error::Internal(format!("create snips dir: {e}")))?;
-    tokio::fs::write(png_path(ctx, &id), bytes)
+    tokio::fs::write(png_path(ctx, &id)?, bytes)
         .await
         .map_err(|e| Error::Internal(format!("write snip: {e}")))?;
     let snip = Snip {
@@ -211,11 +220,11 @@ async fn store_snip(ctx: &ServerCtx, bytes: &[u8], source: &str) -> Result<Snip,
         height,
         source: source.into(),
         has_annotated: false,
-        path: png_path(ctx, &id).to_string_lossy().into_owned(),
+        path: png_path(ctx, &id)?.to_string_lossy().into_owned(),
     };
     let sidecar = serde_json::to_vec(&snip)
         .map_err(|e| Error::Internal(format!("encode snip sidecar: {e}")))?;
-    tokio::fs::write(sidecar_path(ctx, &id), sidecar)
+    tokio::fs::write(sidecar_path(ctx, &id)?, sidecar)
         .await
         .map_err(|e| Error::Internal(format!("write snip sidecar: {e}")))?;
     prune_old(ctx).await;
@@ -266,7 +275,17 @@ async fn prune_old(ctx: &ServerCtx) {
         if created.with_timezone(&Utc) >= cutoff {
             continue;
         }
-        let recently_edited = tokio::fs::metadata(annotated_path(ctx, &id))
+        // Directory listings can hold names we didn't write (e.g. a stray
+        // `clipboard-last.json` would fail `valid_id`) — skip anything the
+        // confining builders reject rather than guessing at siblings.
+        let (Ok(png), Ok(annotated), Ok(sidecar)) = (
+            png_path(ctx, &id),
+            annotated_path(ctx, &id),
+            sidecar_path(ctx, &id),
+        ) else {
+            continue;
+        };
+        let recently_edited = tokio::fs::metadata(&annotated)
             .await
             .and_then(|m| m.modified())
             .map(|m| m >= cutoff_sys)
@@ -274,9 +293,9 @@ async fn prune_old(ctx: &ServerCtx) {
         if recently_edited {
             continue;
         }
-        let _ = tokio::fs::remove_file(png_path(ctx, &id)).await;
-        let _ = tokio::fs::remove_file(annotated_path(ctx, &id)).await;
-        let _ = tokio::fs::remove_file(sidecar_path(ctx, &id)).await;
+        let _ = tokio::fs::remove_file(png).await;
+        let _ = tokio::fs::remove_file(annotated).await;
+        let _ = tokio::fs::remove_file(sidecar).await;
     }
 }
 
@@ -423,7 +442,7 @@ pub async fn capture_snip(State(ctx): State<ServerCtx>) -> ApiResult<Json<Captur
         })),
         CaptureOutcome::Captured(bytes) => {
             let snip = store_snip(&ctx, &bytes, "capture").await.map_err(ApiError)?;
-            copy_png_to_clipboard(&ctx, &png_path(&ctx, &snip.id)).await;
+            copy_png_to_clipboard(&ctx, &png_path(&ctx, &snip.id).map_err(ApiError)?).await;
             Ok(Json(CaptureSnipResp {
                 cancelled: false,
                 snip: Some(snip),
@@ -441,7 +460,7 @@ pub async fn upload_snip(
     let _ = req.filename; // metadata-only today; the on-disk name is the id
     let bytes = decode_png(&req.data_b64).map_err(ApiError)?;
     let snip = store_snip(&ctx, &bytes, "upload").await.map_err(ApiError)?;
-    copy_png_to_clipboard(&ctx, &png_path(&ctx, &snip.id)).await;
+    copy_png_to_clipboard(&ctx, &png_path(&ctx, &snip.id).map_err(ApiError)?).await;
     Ok(Json(snip))
 }
 
@@ -480,7 +499,7 @@ pub async fn snip_image(
     State(ctx): State<ServerCtx>,
 ) -> ApiResult<Response> {
     let snip = load_snip(&ctx, &id).await.map_err(ApiError)?;
-    let bytes = tokio::fs::read(png_path(&ctx, &snip.id))
+    let bytes = tokio::fs::read(png_path(&ctx, &snip.id).map_err(ApiError)?)
         .await
         .map_err(|_| ApiError(Error::NotFound(format!("snip {id}"))))?;
     serve_png(bytes, &format!("{id}.png"))
@@ -493,7 +512,7 @@ pub async fn snip_annotated(
     State(ctx): State<ServerCtx>,
 ) -> ApiResult<Response> {
     let snip = load_snip(&ctx, &id).await.map_err(ApiError)?;
-    let bytes = tokio::fs::read(annotated_path(&ctx, &snip.id))
+    let bytes = tokio::fs::read(annotated_path(&ctx, &snip.id).map_err(ApiError)?)
         .await
         .map_err(|_| ApiError(Error::NotFound(format!("snip {id} has no annotated image"))))?;
     serve_png(bytes, &format!("{id}.annotated.png"))
@@ -508,7 +527,7 @@ pub async fn save_annotated(
 ) -> ApiResult<Json<SnipCopyResp>> {
     let snip = load_snip(&ctx, &id).await.map_err(ApiError)?;
     let bytes = decode_png(&req.data_b64).map_err(ApiError)?;
-    let path = annotated_path(&ctx, &snip.id);
+    let path = annotated_path(&ctx, &snip.id).map_err(ApiError)?;
     tokio::fs::write(&path, &bytes)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("write annotated snip: {e}"))))?;
@@ -527,7 +546,8 @@ pub async fn copy_snip(
         annotated_path(&ctx, &snip.id)
     } else {
         png_path(&ctx, &snip.id)
-    };
+    }
+    .map_err(ApiError)?;
     let copied = copy_png_to_clipboard(&ctx, &path).await;
     Ok(Json(SnipCopyResp { copied }))
 }
@@ -538,9 +558,9 @@ pub async fn delete_snip(
     State(ctx): State<ServerCtx>,
 ) -> ApiResult<StatusCode> {
     let snip = load_snip(&ctx, &id).await.map_err(ApiError)?;
-    let _ = tokio::fs::remove_file(png_path(&ctx, &snip.id)).await;
-    let _ = tokio::fs::remove_file(annotated_path(&ctx, &snip.id)).await;
-    tokio::fs::remove_file(sidecar_path(&ctx, &snip.id))
+    let _ = tokio::fs::remove_file(png_path(&ctx, &snip.id).map_err(ApiError)?).await;
+    let _ = tokio::fs::remove_file(annotated_path(&ctx, &snip.id).map_err(ApiError)?).await;
+    tokio::fs::remove_file(sidecar_path(&ctx, &snip.id).map_err(ApiError)?)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("delete snip: {e}"))))?;
     Ok(StatusCode::NO_CONTENT)

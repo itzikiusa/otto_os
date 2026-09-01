@@ -17,6 +17,7 @@
 
 import { test, expect, request, type APIRequestContext } from '@playwright/test';
 import { mkdtempSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
@@ -172,7 +173,7 @@ test('a token minted for a second user authenticates as that user + is listed', 
   const { ctx, base } = await apiCtx();
 
   // Create a second, non-root user.
-  const username = `mcp-user-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const username = `mcp-user-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const created = await ctx.post(`${base}/api/v1/users`, {
     data: { username, password: 'mcp-user-pw-123456', display_name: 'MCP User' },
   });

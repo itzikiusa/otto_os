@@ -146,17 +146,19 @@ fn strip_tags(s: &str) -> String {
 }
 
 async fn issue_account(ctx: &ServerCtx, created_by: &Id) -> Result<otto_core::domain::IssueAccount> {
-    if let Ok(mut a) = ctx.issues_store.list_accounts(created_by).await {
-        if !a.is_empty() {
-            return Ok(a.remove(0));
+    // `into_iter().next()` (not `remove(0)`) so no panic path can ever carry
+    // account data into a panic message / log.
+    if let Ok(a) = ctx.issues_store.list_accounts(created_by).await {
+        if let Some(first) = a.into_iter().next() {
+            return Ok(first);
         }
     }
-    let mut all = ctx.issues_store.list_all_accounts().await?;
-    if all.is_empty() {
-        Err(Error::Invalid("no Jira/Confluence account configured".into()))
-    } else {
-        Ok(all.remove(0))
-    }
+    ctx.issues_store
+        .list_all_accounts()
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Invalid("no Jira/Confluence account configured".into()))
 }
 
 async fn resolve_jira(ctx: &ServerCtx, run: &OttoRun) -> Result<ResolvedSource> {

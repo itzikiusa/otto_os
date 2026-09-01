@@ -11,11 +11,14 @@ use otto_core::{Error, Result};
 
 use crate::state::ServerCtx;
 
-/// Directory holding a loop's worktree.
+/// Directory holding a loop's worktree. Ids are daemon-generated ULIDs, but
+/// re-validate before joining under the data dir so a hostile id fails closed
+/// to a never-existing name instead of escaping it.
 fn worktree_dir(ctx: &ServerCtx, loop_id: &str) -> std::path::PathBuf {
+    let id = otto_core::paths::safe_component(loop_id).unwrap_or("invalid");
     ctx.data_dir
         .join("goal-loops")
-        .join(loop_id)
+        .join(id)
         .join("work")
 }
 

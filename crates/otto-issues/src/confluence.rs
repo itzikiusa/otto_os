@@ -93,6 +93,9 @@ pub struct ConfluenceClient {
     site_base: String,
     auth_header: String,
     http: reqwest::Client,
+    /// Set when the base URL fails the TLS-or-loopback gate; every request
+    /// then refuses to send the basic-auth header over the cleartext link.
+    transport_err: Option<String>,
 }
 
 impl ConfluenceClient {
@@ -111,10 +114,14 @@ impl ConfluenceClient {
         // Reuse a cached client keyed by site + credentials to avoid rebuilding the
         // connection pool on every request.
         let http = get_or_build_client(&format!("{site_base}\x00{auth_header}"));
+        // Credentials ride every request as a Basic header — require https for
+        // the site (plain http stays allowed for loopback dev servers only).
+        let transport_err = otto_netguard::require_tls_or_loopback(&site_base).err();
         Self {
             site_base,
             auth_header,
             http,
+            transport_err,
         }
     }
 
@@ -123,10 +130,20 @@ impl ConfluenceClient {
         format!("{}/wiki/rest/api{}", self.site_base, path)
     }
 
+    /// Fail before sending when the base URL would carry the auth header in
+    /// cleartext (see `transport_err`). Called at the top of every request.
+    fn ensure_tls(&self) -> Result<()> {
+        match &self.transport_err {
+            None => Ok(()),
+            Some(e) => Err(Error::Invalid(format!("confluence base url: {e}"))),
+        }
+    }
+
     /// Fetch a page by its numeric ID.
     ///
     /// Uses `?expand=body.storage,version,space`.
     pub async fn get_page(&self, id: &str) -> Result<ConfluencePage> {
+        self.ensure_tls()?;
         let url = self.api(&format!("/content/{id}"));
         let resp = self
             .http
@@ -164,6 +181,7 @@ impl ConfluenceClient {
         body_storage: &str,
         parent_id: Option<&str>,
     ) -> Result<ConfluencePage> {
+        self.ensure_tls()?;
         let url = self.api("/content");
 
         let mut payload = serde_json::json!({
@@ -242,6 +260,7 @@ impl ConfluenceClient {
         body_storage: &str,
         version: i64,
     ) -> Result<ConfluencePage> {
+        self.ensure_tls()?;
         let url = self.api(&format!("/content/{id}"));
         let payload = serde_json::json!({
             "version": { "number": version + 1 },
@@ -284,6 +303,7 @@ impl ConfluenceClient {
 
     /// Add a footer comment to a page.  Returns a [`CommentRef`] (reused from Jira).
     pub async fn add_comment(&self, page_id: &str, body_storage: &str) -> Result<CommentRef> {
+        self.ensure_tls()?;
         let url = self.api("/content");
         let payload = serde_json::json!({
             "type": "comment",
@@ -339,6 +359,7 @@ impl ConfluenceClient {
 
     /// List all current Confluence spaces (up to 200).
     pub async fn list_spaces(&self) -> Result<Vec<ConfluenceSpace>> {
+        self.ensure_tls()?;
         let url = self.api("/space");
 
         let resp = self
@@ -400,6 +421,7 @@ impl ConfluenceClient {
         space_key: Option<&str>,
         query: &str,
     ) -> Result<Vec<ConfluencePageSummary>> {
+        self.ensure_tls()?;
         let url = self.api("/content/search");
         let cql = build_page_cql(space_key, query);
 
@@ -492,6 +514,7 @@ impl ConfluenceClient {
     /// List footer comments on a page.  Each comment's body is converted from
     /// storage XHTML to Markdown via [`storage_to_markdown`].
     pub async fn list_comments(&self, page_id: &str) -> Result<Vec<PageComment>> {
+        self.ensure_tls()?;
         let url = self.api(&format!("/content/{page_id}/child/comment"));
 
         // Paginate with start/limit to the last page: the endpoint returns one

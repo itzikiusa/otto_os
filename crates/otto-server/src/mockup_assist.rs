@@ -101,7 +101,14 @@ pub async fn assist_mockup(
     let attachment_id = att.id.clone();
 
     // Working dir (isolated from sibling attachments) — the agent's cwd + file.
-    let dir = ctx.data_dir.join("product").join("mockup_assist").join(&attachment_id);
+    // Attachment ids are daemon-minted, but a refine's id arrived in the request
+    // body — confine the join under the mockup_assist root so a hostile id can't
+    // steer the fs ops (rust/path-injection).
+    let dir = otto_core::paths::confine_join(
+        &ctx.data_dir.join("product").join("mockup_assist"),
+        &attachment_id,
+    )
+    .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe mockup id {attachment_id}"))))?;
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         if created_now {
             cleanup(&ctx, &att).await;
@@ -170,7 +177,7 @@ pub async fn assist_mockup(
 
     // Write the committed bytes to the attachment's storage + record size + the
     // resumable session id and format in meta_json.
-    let full = ctx.data_dir.join(&att.storage_path);
+    let full = storage_full(&ctx, &att).map_err(ApiError)?;
     if let Some(parent) = full.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
@@ -235,7 +242,7 @@ async fn resolve_target(
             .filter(|s| !s.is_empty())
             .map(Id::from);
         // Current content from storage (so the agent refines, not restarts).
-        let full = ctx.data_dir.join(&att.storage_path);
+        let full = storage_full(ctx, &att).map_err(ApiError)?;
         let current = tokio::fs::read_to_string(&full)
             .await
             .ok()
@@ -253,7 +260,9 @@ async fn resolve_target(
         // row id (storage_path is authoritative for serving).
         let file_id = otto_core::new_id();
         let rel = format!("{ATTACH_ROOT}/{}/{}{}", story.id, file_id, ext_for(&format));
-        let full = ctx.data_dir.join(&rel);
+        // story.id echoes a route param — confine the join (rust/path-injection).
+        let full = otto_core::paths::confine_join(&ctx.data_dir, &rel)
+            .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe story id {}", story.id))))?;
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -284,8 +293,19 @@ async fn resolve_target(
 /// Best-effort removal of a just-minted attachment (row + its storage file) after
 /// the turn failed — so a failed "Create with AI" leaves nothing behind.
 async fn cleanup(ctx: &ServerCtx, att: &ProductAttachment) {
-    let _ = tokio::fs::remove_file(ctx.data_dir.join(&att.storage_path)).await;
+    if let Ok(full) = storage_full(ctx, att) {
+        let _ = tokio::fs::remove_file(full).await;
+    }
     let _ = ctx.attachment_repo.delete(&att.id).await;
+}
+
+/// Confine an attachment's stored `storage_path` under the data dir before any
+/// fs op. Rows are daemon-written, but the join must not trust them — a
+/// traversing path fails closed instead of escaping (rust/path-injection).
+fn storage_full(ctx: &ServerCtx, att: &ProductAttachment) -> Result<std::path::PathBuf, Error> {
+    otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path).ok_or_else(|| {
+        Error::Invalid(format!("attachment {} storage path escapes the data dir", att.id))
+    })
 }
 
 // ---------------------------------------------------------------------------

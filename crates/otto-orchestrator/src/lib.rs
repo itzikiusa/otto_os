@@ -326,7 +326,11 @@ pub struct ExecuteResp {
 /// Execute a confirmed plan deterministically, action by action. Failures
 /// are recorded per-action; execution continues with the next action.
 pub async fn execute(plan: &ActionPlan, spawner: &dyn PlanSpawner, io: &dyn PlanIo) -> ExecuteResp {
-    let mut results = Vec::with_capacity(plan.len());
+    // The plan arrives from the HTTP client, so its length is caller-controlled:
+    // cap the capacity HINT (allocation size) — the vec still grows if a plan
+    // legitimately exceeds it.
+    const CAPACITY_HINT_CAP: usize = 64;
+    let mut results = Vec::with_capacity(plan.len().min(CAPACITY_HINT_CAP));
     for (action_index, action) in plan.iter().enumerate() {
         let result = match action {
             Action::SpawnSessions { provider, count } => {

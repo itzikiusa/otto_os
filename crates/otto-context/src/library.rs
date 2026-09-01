@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use otto_core::api::{LibraryContext, LibrarySkill, LibrarySoul, SkillFileEntry};
+use otto_core::paths::confine_join;
 
 /// Largest single skill file read/written through the editor (2 MiB).
 const MAX_SKILL_FILE_BYTES: usize = 2 * 1024 * 1024;
@@ -87,6 +88,14 @@ pub(crate) fn safe_rel(rel: &str) -> Option<PathBuf> {
     } else {
         Some(out)
     }
+}
+
+/// Join a [`safe_rel`]-vetted relative path under `root` through the shared
+/// [`confine_join`] barrier. The charset policy stays ours (`safe_rel`); the
+/// confinement proof (no escape from `root`) comes from the shared helper.
+pub(crate) fn confined(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
+    safe_rel(rel)?;
+    confine_join(root, rel)
 }
 
 /// Best-effort binary sniff: a NUL byte in the leading window ⇒ binary.
@@ -203,10 +212,7 @@ impl Library {
     /// `None` for unsafe names. Used by the self-improvement repoint to target
     /// the library copy of a skill.
     pub fn skill_path(&self, name: &str) -> Option<PathBuf> {
-        if !is_safe_segment(name) {
-            return None;
-        }
-        Some(self.skills_dir().join(name).join("SKILL.md"))
+        Some(self.skill_dir(name)?.join("SKILL.md"))
     }
 
     pub fn list_skills(&self) -> Vec<LibrarySkill> {
@@ -274,10 +280,9 @@ impl Library {
     }
 
     pub fn delete_skill(&self, name: &str) -> io::Result<()> {
-        if !is_safe_segment(name) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"));
-        }
-        let dir = self.skills_dir().join(name);
+        let dir = self
+            .skill_dir(name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
         match fs::remove_dir_all(&dir) {
             Ok(()) => {
                 if let Ok(mut cache) = self.skill_cache.lock() {
@@ -298,7 +303,10 @@ impl Library {
         if !is_safe_segment(name) {
             return None;
         }
-        Some(self.skills_dir().join(name))
+        // The name is already a vetted single segment; the join still goes
+        // through the shared confine_join barrier so the result is provably
+        // under the skills dir.
+        confine_join(&self.skills_dir(), name)
     }
 
     /// List every file inside a library skill (recursively), relative to the
@@ -318,7 +326,7 @@ impl Library {
     /// most `MAX_SKILL_FILE_BYTES`.
     pub fn read_skill_file(&self, name: &str, rel: &str) -> Option<(String, bool)> {
         let root = self.skill_dir(name)?;
-        let target = root.join(safe_rel(rel)?);
+        let target = confined(&root, rel)?;
         let bytes = fs::read(&target).ok()?;
         let bytes = &bytes[..bytes.len().min(MAX_SKILL_FILE_BYTES)];
         let binary = is_binary(bytes);
@@ -332,12 +340,11 @@ impl Library {
         let root = self
             .skill_dir(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
-        let rel_path =
-            safe_rel(rel).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
+        let target =
+            confined(&root, rel).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
         if content.len() > MAX_SKILL_FILE_BYTES {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "file too large"));
         }
-        let target = root.join(rel_path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -360,7 +367,9 @@ impl Library {
                 "SKILL.md cannot be deleted",
             ));
         }
-        match fs::remove_file(root.join(rel_path)) {
+        let target =
+            confined(&root, rel).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
+        match fs::remove_file(target) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -430,10 +439,9 @@ impl Library {
             .or(derived)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cannot derive skill name"))?
             .to_string();
-        if !is_safe_segment(&name) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"));
-        }
-        let dest_root = self.skills_dir().join(&name);
+        let dest_root = self
+            .skill_dir(&name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
         // Strip the wrapping prefix so entries land at the skill root.
         let strip = if prefix.is_empty() {
             String::new()
@@ -456,14 +464,13 @@ impl Library {
             let Some(rel) = entry.strip_prefix(&strip) else {
                 continue; // outside the package root
             };
-            let Some(rel_path) = safe_rel(rel) else {
+            let Some(out) = confined(&dest_root, rel) else {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe zip entry"));
             };
             total += f.size();
             if total > MAX_SKILL_IMPORT_BYTES {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "zip too large"));
             }
-            let out = dest_root.join(rel_path);
             if let Some(parent) = out.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -501,10 +508,7 @@ impl Library {
     }
 
     pub fn get_soul(&self, name: &str) -> Option<LibrarySoul> {
-        if !is_safe_segment(name) {
-            return None;
-        }
-        let body = fs::read_to_string(self.souls_dir().join(format!("{name}.md"))).ok()?;
+        let body = fs::read_to_string(md_entry_path(&self.souls_dir(), name)?).ok()?;
         Some(LibrarySoul { name: name.to_string(), body })
     }
 
@@ -530,10 +534,7 @@ impl Library {
     }
 
     pub fn get_context(&self, name: &str) -> Option<LibraryContext> {
-        if !is_safe_segment(name) {
-            return None;
-        }
-        let body = fs::read_to_string(self.context_dir().join(format!("{name}.md"))).ok()?;
+        let body = fs::read_to_string(md_entry_path(&self.context_dir(), name)?).ok()?;
         Some(LibraryContext { name: name.to_string(), body })
     }
 
@@ -592,19 +593,27 @@ fn list_md_entries(dir: &std::path::Path) -> Vec<(String, String)> {
     out
 }
 
-fn write_md_entry(dir: &std::path::Path, name: &str, body: &str) -> io::Result<()> {
+/// The confined `<dir>/<name>.md` path for a soul/context entry, or `None`
+/// for an unsafe name. Validation is [`is_safe_segment`]; the join goes through
+/// the shared [`confine_join`] barrier.
+fn md_entry_path(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
     if !is_safe_segment(name) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe entry name"));
+        return None;
     }
+    confine_join(dir, &format!("{name}.md"))
+}
+
+fn write_md_entry(dir: &std::path::Path, name: &str, body: &str) -> io::Result<()> {
+    let path = md_entry_path(dir, name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe entry name"))?;
     fs::create_dir_all(dir)?;
-    fs::write(dir.join(format!("{name}.md")), body)
+    fs::write(path, body)
 }
 
 fn delete_md_entry(dir: &std::path::Path, name: &str) -> io::Result<()> {
-    if !is_safe_segment(name) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe entry name"));
-    }
-    match fs::remove_file(dir.join(format!("{name}.md"))) {
+    let path = md_entry_path(dir, name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe entry name"))?;
+    match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),

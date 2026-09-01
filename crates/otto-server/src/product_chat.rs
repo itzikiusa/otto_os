@@ -446,7 +446,12 @@ async fn assemble_context(ctx: &ServerCtx, story_id: &Id) -> String {
     let mut attachments: Vec<(String, String, String, Option<String>)> = Vec::new();
     if let Ok(atts) = ctx.attachment_repo.list_for_story(story_id).await {
         for a in atts {
-            let path = ctx.data_dir.join(&a.storage_path);
+            // Confine the stored path's join under the data dir — a traversing
+            // storage_path drops the attachment instead of reading outside it
+            // (rust/path-injection).
+            let Some(path) = otto_core::paths::confine_join(&ctx.data_dir, &a.storage_path) else {
+                continue;
+            };
             let inlined = if is_text_mockup(&a.mime, &a.filename) {
                 // Async read — don't block the tokio worker on disk I/O.
                 tokio::fs::read_to_string(&path)

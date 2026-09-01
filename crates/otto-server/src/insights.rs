@@ -340,7 +340,13 @@ fn parse_period_from_filename(name: &str, word: &str) -> Option<(String, String)
     // now: <word>-<start>_<end>
     let rest = stem.strip_prefix(word)?.strip_prefix('-')?;
     let (start, end) = rest.split_once('_')?;
-    if start.len() == 8 && end.len() == 8 && start.chars().all(|c| c.is_ascii_digit()) {
+    // Both halves must be pure YYYYMMDD digits — these strings are re-joined
+    // into on-disk paths by `list_reports`, so anything else is rejected here.
+    if start.len() == 8
+        && end.len() == 8
+        && start.chars().all(|c| c.is_ascii_digit())
+        && end.chars().all(|c| c.is_ascii_digit())
+    {
         Some((start.to_string(), end.to_string()))
     } else {
         None

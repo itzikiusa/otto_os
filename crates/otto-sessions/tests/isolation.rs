@@ -265,11 +265,12 @@ async fn admin_and_root_can_control_any_session() {
 
     for caller in [user("carol", false), user("root", true)] {
         let status = status_as(&app, &caller, Method::GET, &format!("/sessions/{sid}")).await;
+        // (assert messages deliberately omit the caller identity — usernames
+        // are credential-like and must not end up in test logs)
         assert_eq!(
             status,
             StatusCode::OK,
-            "{} must read alice's session, got {status}",
-            caller.username
+            "admin/root caller must read alice's session, got {status}"
         );
         let status = status_as(
             &app,
@@ -281,8 +282,7 @@ async fn admin_and_root_can_control_any_session() {
         assert_ne!(
             status,
             StatusCode::FORBIDDEN,
-            "{} must control alice's session",
-            caller.username
+            "admin/root caller must control alice's session"
         );
     }
 }
@@ -321,8 +321,7 @@ async fn list_is_owner_scoped_for_non_admin() {
         assert_eq!(
             list.len(),
             2,
-            "{} (admin/root) must see all sessions",
-            caller.username
+            "admin/root caller must see all sessions"
         );
     }
 }

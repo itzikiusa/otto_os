@@ -1397,9 +1397,24 @@ pub async fn retry_analysis_agent(
     }));
     otto_sessions::trust::ensure_trusted(&agent.provider, &cwd);
 
-    // 6. Rebuild context file (shared with this analysis's context path, or fresh).
-    let context_path = std::env::temp_dir()
-        .join(format!("otto-product-{analysis_id}-context.md"));
+    // 6. Rebuild context file (shared with this analysis's context path, or
+    // fresh). Unlike the fan-out (which embeds daemon-minted ids), the retry ids
+    // arrive as route params — confine the temp-dir joins so a hostile id can't
+    // steer the scratch files (rust/path-injection).
+    let context_path = match otto_core::paths::confine_join(
+        &std::env::temp_dir(),
+        &format!("otto-product-{analysis_id}-context.md"),
+    ) {
+        Some(p) => p,
+        None => {
+            warn!("product_run(retry): unsafe analysis id {analysis_id}");
+            let _ = ctx
+                .product_repo
+                .set_agent_status(&agent_id, "error", None, Some("retry: unsafe analysis id"), true)
+                .await;
+            return;
+        }
+    };
     if !context_path.exists() {
         // Context file was cleaned up; rebuild it.
         let context_md = match ctx.product.build_agent_context(&analysis.story_id, None).await {
@@ -1427,9 +1442,22 @@ pub async fn retry_analysis_agent(
         .or_else(|| otto_product::skill_body(&agent.skill).map(|s| s.to_string()))
         .unwrap_or_default();
 
-    // 8. Build prompt + unique out_path (use agent_id for uniqueness).
-    let out_path = std::env::temp_dir()
-        .join(format!("otto-product-{analysis_id}-retry-{agent_id}.json"));
+    // 8. Build prompt + unique out_path (use agent_id for uniqueness). Same
+    // route-param confinement as the context file above.
+    let out_path = match otto_core::paths::confine_join(
+        &std::env::temp_dir(),
+        &format!("otto-product-{analysis_id}-retry-{agent_id}.json"),
+    ) {
+        Some(p) => p,
+        None => {
+            warn!("product_run(retry): unsafe agent id {agent_id}");
+            let _ = ctx
+                .product_repo
+                .set_agent_status(&agent_id, "error", None, Some("retry: unsafe agent id"), true)
+                .await;
+            return;
+        }
+    };
     let base_prompt = build_analysis_prompt(&skill_body, &context_path_str, None);
     let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 

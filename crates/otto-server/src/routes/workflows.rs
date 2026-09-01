@@ -588,7 +588,13 @@ pub async fn list_runs(
 /// of the DB — run_id derives it — and out of list endpoints (one stat per
 /// run there is wasted work; the run VIEW is where the file browser lives).
 fn with_context_dir(ctx: &ServerCtx, mut run: WorkflowRun) -> WorkflowRun {
-    let dir = ctx.data_dir.join("workflow-context").join(&run.id);
+    // Run ids are daemon-generated ULIDs, but confine the join anyway so a
+    // hostile id can never stat outside the workflow-context tree.
+    let Some(dir) =
+        otto_core::paths::confine_join(&ctx.data_dir.join("workflow-context"), &run.id)
+    else {
+        return run;
+    };
     if dir.is_dir() {
         run.context_dir = Some(dir.to_string_lossy().into_owned());
     }

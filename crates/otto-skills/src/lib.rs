@@ -15,6 +15,7 @@ use std::path::Path;
 
 use include_dir::{include_dir, Dir};
 use otto_context::Library;
+use otto_core::paths::safe_component;
 
 pub mod http;
 
@@ -143,6 +144,9 @@ pub fn bundled_version(name: &str) -> Option<u32> {
 /// The installed version for `name` (parsed from `<library>/skills/<name>/SKILL.md`),
 /// if installed.
 pub fn installed_version(library: &Library, name: &str) -> Option<u32> {
+    // `name` can arrive off the wire; a separator/`..` would read outside the
+    // Library — treat it as not-installed.
+    let name = safe_component(name)?;
     let path = library.root.join("skills").join(name).join("SKILL.md");
     let body = std::fs::read_to_string(path).ok()?;
     frontmatter_version(&body).or(Some(1))
@@ -209,6 +213,11 @@ pub fn install_state(library: &Library, name: &str) -> Option<InstallState> {
 /// This OVERWRITES any existing installed copy — the Settings layer is responsible
 /// for getting user consent and offering a backup first (never override silently).
 pub fn install_into(library: &Library, name: &str) -> io::Result<bool> {
+    // A name with separators/`..` would aim the `remove_dir_all` below outside
+    // the Library — reject before any path is built (same `false` as unknown).
+    let Some(name) = safe_component(name) else {
+        return Ok(false);
+    };
     let Some((skill_dir, _cat)) = bundled_dir(name) else {
         return Ok(false);
     };

@@ -1,6 +1,7 @@
 import { test, expect, request, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 
 // End-to-end E2E for the MCP Control Plane. Drives the governed registry → tools →
 // governance pipeline entirely over the API against the isolated test daemon (which
@@ -57,7 +58,7 @@ test.beforeAll(async () => {
 async function approveAsSecondUser(approvalId: string): Promise<boolean> {
   const r = await root();
   try {
-    const username = `mcp-approver-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    const username = `mcp-approver-${Date.now()}-${randomUUID().slice(0, 8)}`;
     const password = 'mcp-approver-pw-123456';
     const cu = await r.post(`${base}/api/v1/users`, {
       data: { username, password, display_name: 'MCP Approver' },

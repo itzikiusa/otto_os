@@ -232,6 +232,12 @@ pub async fn ingest_mockup(
     // Mirror `product_media::upload_attachment`'s storage-path convention:
     // `data_dir/product/attachments/<story_id>/<id>.<ext>`, with `storage_path`
     // stored RELATIVE to `data_dir`.
+    // Story ids are daemon-generated, but they become a path component under
+    // the attachments root — re-validate before the joins below.
+    if otto_core::paths::safe_component(&run.story_id).is_none() {
+        tracing::warn!("swarm mockup ingest: unsafe story id {:?}", run.story_id);
+        return StatusCode::NO_CONTENT;
+    }
     let id = otto_core::new_id();
     let rel = format!("{ATTACH_ROOT}/{}/{}.{}", run.story_id, id, ext);
     let dir = ctx.data_dir.join(ATTACH_ROOT).join(&run.story_id);

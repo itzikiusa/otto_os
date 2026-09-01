@@ -150,6 +150,11 @@ impl PluginManager {
 
     /// Spawn one plugin's sidecar on a fresh loopback port. Replaces any existing.
     pub async fn spawn(&self, p: &PluginRecord) -> Result<u16, String> {
+        // Slugs are validated at install time, but re-check before the path
+        // join — the DB row is the only thing standing between this and the fs.
+        if !valid_slug(&p.slug) {
+            return Err(format!("invalid slug '{}'", p.slug));
+        }
         self.stop(&p.slug).await;
         let port = free_port().ok_or("no free loopback port")?;
         let data_dir = self.data_dir.join("plugins").join(&p.slug);
@@ -392,7 +397,11 @@ async fn install(
             .unwrap_or("plugin")
             .trim_end_matches(".git")
             .to_string();
-        let dest = home.join(&name);
+        // The name is derived from a caller-supplied URL and becomes a dir
+        // under the plugins home — reject `..`/separators before the join.
+        let name = otto_core::paths::safe_component(&name)
+            .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe repo name '{name}'"))))?;
+        let dest = home.join(name);
         let out = Command::new("git")
             .args(["clone", "--depth", "1", src])
             .arg(&dest)

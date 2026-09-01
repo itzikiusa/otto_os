@@ -184,7 +184,13 @@ function makeMarked(ctx: RenderCtx): Marked {
     renderer: {
       heading({ tokens, depth }) {
         const text = this.parser.parseInline(tokens);
-        const plain = text.replace(/<[^>]*>/g, '');
+        // Strip tags to a fixpoint — a single pass leaves nested remnants
+        // like `<scr<script>ipt>` behind (CodeQL js/incomplete-multi-character-sanitization).
+        let plain = text;
+        for (let prev = ''; prev !== plain; ) {
+          prev = plain;
+          plain = plain.replace(/<[^>]*>/g, '');
+        }
         return `<h${depth} id="h-${esc(slugifyHeading(plain))}">${text}</h${depth}>\n`;
       },
       code({ text, lang }) {

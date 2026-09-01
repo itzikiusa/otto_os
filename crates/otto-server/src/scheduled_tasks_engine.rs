@@ -304,6 +304,14 @@ fn build_prompt(ctx: &ServerCtx, task: &ScheduledTask) -> String {
     }
 }
 
+/// `<data_dir>/scheduled/<task_id>` — the per-task working area. Task ids are
+/// daemon-generated ULIDs, but re-validate before the join so a hostile id
+/// fails closed to a never-existing name instead of escaping the data dir.
+fn task_data_dir(ctx: &ServerCtx, task_id: &str) -> std::path::PathBuf {
+    let id = otto_core::paths::safe_component(task_id).unwrap_or("invalid");
+    ctx.data_dir.join("scheduled").join(id)
+}
+
 /// Run the task's agent. Under `OTTO_E2E` this uses the deterministic headless
 /// stub (no real CLI). Otherwise every run is a **real, openable session** of the
 /// task's provider (claude/codex/agy/custom), retried up to `1 + max_retries`
@@ -356,11 +364,10 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> R
     let ws = ctx.workspaces.get(&task.workspace_id).await?;
 
     // The agent writes its report here; the watcher returns its contents.
-    let out_path = ctx
-        .data_dir
-        .join("scheduled")
-        .join(&task.id)
-        .join(format!("{run_id}.report.md"));
+    // run_id is daemon-generated too, but it lands in a file name — same
+    // fail-closed re-validation as the task id.
+    let run_name = otto_core::paths::safe_component(run_id).unwrap_or("invalid");
+    let out_path = task_data_dir(ctx, &task.id).join(format!("{run_name}.report.md"));
     if let Some(p) = out_path.parent() {
         let _ = tokio::fs::create_dir_all(p).await;
     }
@@ -663,7 +670,7 @@ async fn resolve_cwd(ctx: &ServerCtx, task: &ScheduledTask) -> Result<String> {
         }
         CwdPlan::Scratch => {}
     }
-    let scratch = ctx.data_dir.join("scheduled").join(&task.id).join("work");
+    let scratch = task_data_dir(ctx, &task.id).join("work");
     tokio::fs::create_dir_all(&scratch)
         .await
         .map_err(|e| Error::Internal(format!("create scratch dir: {e}")))?;
@@ -695,11 +702,7 @@ async fn make_worktree(ctx: &ServerCtx, task: &ScheduledTask, repo_path: &str) -
     let base = git.current_branch().await.unwrap_or_else(|_| "HEAD".into());
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     let branch = format!("otto/scheduled/{}/{stamp}", short(&task.id));
-    let worktrees_dir = ctx
-        .data_dir
-        .join("scheduled")
-        .join(&task.id)
-        .join("worktrees");
+    let worktrees_dir = task_data_dir(ctx, &task.id).join("worktrees");
     let wt = worktrees_dir
         .join(stamp.to_string())
         .to_string_lossy()
@@ -740,6 +743,11 @@ async fn gc_old_worktrees(
     stamps.sort();
     stamps.reverse(); // newest first
     for stamp in stamps.into_iter().skip(keep) {
+        // Dir-entry names are single components by construction; keep the
+        // invariant explicit before the join feeds a recursive delete.
+        let Some(stamp) = otto_core::paths::safe_component(&stamp).map(str::to_owned) else {
+            continue;
+        };
         let path = worktrees_dir.join(&stamp);
         let branch = format!("otto/scheduled/{}/{stamp}", short(task_id));
         let _ = git.worktree_remove(&path.to_string_lossy()).await;

@@ -748,6 +748,11 @@ pub struct PostmanSyncResult {
 /// One authenticated GET against the Postman API, JSON-decoded. Errors carry
 /// the Postman error message when the body has one (their 4xx bodies do).
 async fn postman_get(client: &reqwest::Client, key: &str, url: &str) -> Result<Value, String> {
+    // The API key rides the request header — refuse anything but TLS so an
+    // interpolated uid can never downgrade the transport.
+    if !url.starts_with("https://") {
+        return Err("postman api url must be https".into());
+    }
     let resp = client
         .get(url)
         .header("x-api-key", key)

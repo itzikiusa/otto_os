@@ -109,8 +109,11 @@ pub async fn assist_scene(
     let current = current_source(&doc, &format);
 
     // Materialize the source into the scene's own directory (the agent's cwd, so
-    // a resumed session always finds the same file).
-    let dir = ctx.data_dir.join("canvas").join(&scene.id);
+    // a resumed session always finds the same file). Scene ids are daemon-minted,
+    // but the id arrived as a route param — confine the join under the canvas
+    // root so a hostile id can't steer the fs ops (rust/path-injection).
+    let dir = otto_core::paths::confine_join(&ctx.data_dir.join("canvas"), &scene.id)
+        .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe canvas scene id {}", scene.id))))?;
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return Err(ApiError(Error::Internal(format!(
             "canvas scratch dir: {e}"
