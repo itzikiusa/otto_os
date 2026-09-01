@@ -40,6 +40,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-rbac` | Auth, roles, API tokens |
 | `otto-keychain` | macOS Keychain secret storage |
 | `otto-netguard` | Outbound SSRF guard (blocks loopback/private/metadata) |
+| `otto-sandbox` | macOS Seatbelt (`sandbox-exec`) confinement for spawned agent/shell sessions |
 | `otto-pty` | PTY plumbing |
 | `otto-sessions` | Session manager + PTY + trust + prompt-guard |
 | `otto-connections` | SSH / MySQL / Redis / MongoDB / ClickHouse sessions |
@@ -52,7 +53,11 @@ Otto.app (Tauri / otto-desktop)
 | `otto-channels` | Slack / Telegram bridges |
 | `otto-improve` | Self-improvement engine |
 | `otto-context` | Context assembly |
-| `otto-memory` | Vault knowledge store (keyword + vector hybrid recall) |
+| `otto-memory` | Workspace-scoped agent knowledge store (keyword/FTS5 recall; no embeddings) |
+| `otto-vault` | Vault docs home — file-backed Obsidian-parity markdown vaults + OKF (derived SQLite index: notes, links, tags, FTS, graph) |
+| `otto-canvas` | Canvas scene CRUD (file-backed visual scenes; agent-assist endpoints live in `otto-server`) |
+| `otto-mcp` | MCP Control Plane — outbound MCP client + the governance pipeline every governed tool call funnels through |
+| `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
 | `otto-skills` | Bundled, versioned skill library |
 | `otto-product` | Jira/Confluence product workflows |
@@ -67,10 +72,13 @@ Otto.app (Tauri / otto-desktop)
 
 ### UI module areas (`ui/src/modules/`)
 
-`agents`, `api` (REST client), `brokers` (Kafka viewer), `connections`,
-`database` (Database Explorer), `git`, `help`, `insights`, `panels`, `plugins`,
-`product`, `settings`, `share` (remote/mobile), `skills-eval`, `swarm`, `usage`,
-`vault` (knowledge store), `workflows`. Shared code lives in `ui/src/lib/`
+`agents`, `api` (REST client), `brokers` (Kafka viewer), `canvas`,
+`connections`, `database` (Database Explorer), `git`, `help`, `insights`,
+`loops` (goal loops), `mcp` (MCP control plane), `mission-control`, `panels`,
+`plugins`, `product`, `proof` (proof packs), `run-with-otto`,
+`scheduled-tasks`, `settings`, `share` (remote/mobile), `skills-eval`,
+`skills-lab`, `snip` (snipping tool), `swarm`, `usage`, `vault` (docs home),
+`workflows`. Shared code lives in `ui/src/lib/`
 (`api/`, `components/`, `stores/`); the app shell is `ui/src/shell/` +
 `ui/src/App.svelte`.
 

@@ -33,18 +33,26 @@ bridges so an agent can work a ticket from a chat thread.
   call, or a key-guarded webhook (which can POST the result back to a
   `callback_url` at the gate + each terminal state). It never opens a PR without
   human approval **and** a passing/waived Proof Pack.
-- **Agent sessions** — run `claude`, `codex`, `agy` (and a plain shell) in real
-  PTY-backed terminals you can watch, split, and type into. Sessions survive
-  restarts (resumable), idle-suspend to save memory, and auto-trust their
-  workspace folder so they never stall on a permission prompt. By default agents
+- **Agent sessions** — run `claude`, `codex`, `agy`, a plain shell, or **any
+  custom agent CLI you register** (custom providers are first-class on every
+  agent surface, with per-surface provider/model pickers) in real PTY-backed
+  terminals you can watch, split, and type into. Sessions survive restarts
+  (resumable), idle-suspend to save memory, can be confined by an optional
+  macOS **Seatbelt sandbox** (`otto-sandbox`), and auto-trust their workspace
+  folder so they never stall on a permission prompt. By default agents
   launch in a **skip-permissions** mode (`--dangerously-skip-permissions`, or
   codex's `--dangerously-bypass-approvals-and-sandbox`) so tool use never blocks;
   a single **Settings → Providers → Permissions** checkbox opts out and falls back
   to each CLI's own ask / auto permission mode (tool use then prompts in the
   session terminal). Applies to new sessions.
-- **Git & Pull Requests** — browse repos, stage/commit/discard, view diffs,
-  resolve merge conflicts, and **create PRs** with an **agent-drafted title +
-  description** (it reads your branch diff), pushing the branch automatically.
+- **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
+  staging panel, per-file diffs, folder-level stage/discard, an interactive
+  **conflict resolver** (A/B line picking with live output), branch checkout
+  straight from the graph (stash · pull · pop), **worktrees & submodules** as
+  first-class tabs, auto-fetch, and a **Focus tab** (your PRs across repos +
+  your Jira work). **Create PRs** (draft toggle, reviewers at creation) with an
+  **agent-drafted title + description** (it reads your branch diff), pushing
+  the branch automatically; PR review threads support resolve/reply/reopen.
 - **AI code review** — fan out several review agents (one per provider/lens)
   over a PR *or* your local working tree. Each runs as an openable session with
   live progress, per-agent findings, retry, and a configurable grace period.
@@ -72,7 +80,9 @@ bridges so an agent can work a ticket from a chat thread.
   publish as an RFC or a Jira story); plus versioning, sectioned history, tags,
   a **Plan/Tasks** breakdown, and a recurring-patterns **learnings** base. A
   background watcher polls for new comments/updates, and you can inject a story's
-  full refined context into any running agent.
+  full refined context into any running agent. Story titles/descriptions are
+  editable inline, and Otto reads **and writes Confluence pages** directly
+  (rich HTML publishing — tables, task lists, panels, full-width layout).
 - **Canvas** — think visually. Each canvas scene is **file-backed** in one of two
   modes: **Excalidraw** (`canvas.json`, freeform shapes & arrows) or **Mermaid**
   (`canvas.mermaid`, diagram-as-code). An agent edits the underlying file while
@@ -114,7 +124,12 @@ bridges so an agent can work a ticket from a chat thread.
   (client-side filter/sort + approval-gated inline editing), a Navicat-style
   visual JOIN builder, Superset-style dashboards/widgets for ClickHouse, and
   "examine this schema with an agent". Read queries get an automatic row `LIMIT`
-  so a huge table is never fully scanned, and any running query is cancelable.
+  so a huge table is never fully scanned, any running query is cancelable, and
+  queries **survive navigation** (detached runs you can re-attach to). Also:
+  NL→SQL assistance, full **mongosh scripts** in the Mongo query tab, index
+  management (view/create/edit/drop from the Structure view), foreign-key
+  navigation, JSON cell/document editing, file import, and streaming CSV/format
+  export.
 - **Message Brokers (Kafka)** — connect Kafka clusters (incl. **AWS MSK over an
   SSH bastion**) to browse topics, **peek/produce** messages, inspect
   consumer-group lag, edit topic configs, and view a Schema Registry, with an
@@ -125,9 +140,13 @@ bridges so an agent can work a ticket from a chat thread.
 - **Vault — the docs home** — register a local folder of markdown files (even a
   live **Obsidian vault**) and get Obsidian-parity docs in Otto: file tree,
   editor ⇄ reading view with wikilinks/backlinks/tags, full-text search, quick
-  switcher, and a graph view built to scale — with **OKF** as the documentation
-  standard and every note readable/writable by agents over MCP. Files stay the
-  source of truth; Otto keeps only a derived index (`otto-vault`).
+  switcher, and a graph view built to scale (with focus filters by service,
+  type, tag, and hops) — with **OKF** as the documentation standard and every
+  note readable/writable by agents over MCP. **Docs agents** can write the docs
+  home *for* you: multi-agent create/refine runs over a repo, with a
+  summarizer, iterative reviewer rounds, actionable findings, and persistent
+  run history. Files stay the source of truth; Otto keeps only a derived index
+  (`otto-vault`).
 - **Multi-user, RBAC & sharing** — per-feature roles (None < View < Edit <
   Admin), per-session isolation, an admin overview + audited impersonation, and
   **session sharing** via scoped, expiring, revocable links gated by an
@@ -145,9 +164,13 @@ bridges so an agent can work a ticket from a chat thread.
   can browse and install/update from Settings; skills drive review lenses,
   product analysis, and insights, and the self-improvement engine refines them
   from your sessions.
-- **Skills evaluator** — benchmark a skill: run **implement → validate → score →
-  improve** across multiple iterations and providers, read a per-run report, and
-  compare runs side-by-side to see what actually got better.
+- **Skills Lab** — a three-tab workbench over your skills: a **viewer/editor**
+  (multi-file CRUD, zip import, provider skills from `.claude`/`.codex`/`.agy`),
+  a **multi-agent skills review** (with an apply-fixes agent and static checks
+  for dead citations/paths), and an **evaluator** that benchmarks a skill —
+  run **implement → validate → score → improve** across multiple iterations and
+  providers, read a per-run report, and compare runs side-by-side to see what
+  actually got better.
 - **Insights** — scheduled, multi-provider "catch-up" reports that turn recent
   activity into action-first summaries, generated on demand and cached.
 - **Usage & cost** — an embedded ClickHouse engine records real per-turn token
@@ -180,7 +203,10 @@ bridges so an agent can work a ticket from a chat thread.
   settings in **MCP → Otto Server**.
 - **Workflows** — a visual workflow engine that chains steps (agent prompts, HTTP
   requests, DB queries, broker peeks, channel notifications, human approvals,
-  swarm tasks, …) into runnable graphs. Manual, webhook, and event triggers fire
+  swarm tasks, …) into runnable graphs, with per-workflow instructions +
+  `prompt.md` context files, per-step retry / re-run-from-here, a stall
+  watchdog, and a concurrency cap with queueing. Manual, webhook, **chat**
+  (run a workflow from a bound Slack/Telegram channel), and event triggers fire
   today; scheduled triggers and a few Product/Review nodes are still being wired.
 - **Scheduled Tasks** — recurring agent jobs on an **interval / daily / weekly**
   schedule. Each run executes a prompt, writes a **Markdown report**, and
@@ -190,8 +216,19 @@ bridges so an agent can work a ticket from a chat thread.
   plugins** (any language) you install/enable/remove **without rebuilding**: the
   daemon supervises each plugin process, reverse-proxies its HTTP/UI into an
   iframe panel, exposes a small **scoped host API**, and gates each by slug-keyed
-  RBAC. Node and Rust examples ship in `examples/plugins/` (see
+  RBAC. Two real example plugins ship in `examples/plugins/` — **Team
+  Performance** (git-primary delivery analytics: per-dev/team reports,
+  AI scope estimates, goals) and **DORA metrics** (see
   `docs/plugins/AUTHORING.md`).
+- **Multi-window** — open any number of Otto windows (**⌘⇧N**), each an
+  independent workspace surface with its own module, tabs, and split panes;
+  quitting snapshots the whole window set (frames, screens, fullscreen) and the
+  next launch restores it. Sessions live in the daemon — windows only hold
+  references, so nothing restarts or duplicates.
+- **Snipping tool** — one-gesture screenshots for agent work: a system-wide
+  shortcut (default ⌘⌃⇧2) → native region select → an annotation editor
+  (boxes, arrows, text, pixelate, badges) — the image is on the clipboard at
+  every step, ready to paste into a session.
 
 ## Architecture
 
@@ -226,7 +263,8 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   `otto-product` (Jira/Confluence story workflows), `otto-improve`
   (self-improvement), `otto-usage` (ClickHouse usage/metrics), `otto-skills`
   (bundled skill library), `otto-context`, `otto-rbac`, `otto-netguard`
-  (SSRF guard), `otto-keychain` (macOS Keychain secret storage),
+  (SSRF guard), `otto-sandbox` (macOS Seatbelt confinement for spawned
+  agent/shell sessions), `otto-keychain` (macOS Keychain secret storage),
   `otto-canvas` (Canvas scenes), `otto-mcp` (MCP control plane + governance),
   `otto-workgraph` (Mission Control work graph), `otto-server` (routes),
   `ottod` (binary).
@@ -256,7 +294,7 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
 git clone <your-fork-url> otto && cd otto
 
 # 1. Frontend → ui/dist
-cd ui && npm install && npm run build && cd ..
+cd ui && npm ci && npm run build && cd ..
 
 # 2. Daemon (release)
 cargo build --release -p ottod
@@ -302,7 +340,9 @@ browser console with `localStorage.otto_base = 'http://127.0.0.1:7700'` if neede
 Useful checks:
 
 ```bash
-cargo build && cargo test          # Rust
+cargo build --workspace            # Rust build
+cargo test --workspace             # Rust tests
+cargo clippy --workspace --all-targets -- -D warnings   # lints (CI-enforced)
 cd ui && npm run check              # svelte-check + tsc (+ the e2e tsconfig)
 cd ui && npm run test:e2e          # Playwright mobile/tablet E2E
 ```
@@ -358,6 +398,7 @@ Where everything lives:
 | [`docs/RELEASE.md`](./docs/RELEASE.md) | The macOS packaging flow — sidecar copy, Tauri build, codesigning, DMG. |
 | [`docs/plugins/AUTHORING.md`](./docs/plugins/AUTHORING.md) | How to write a custom sidecar plugin (the host API, manifest, examples). |
 | [`marketing/videos/`](./marketing/videos/) | The Remotion source for the in-app **Walkthroughs** (rendered to `ui/public/walkthroughs/`). |
+| [`docs/sessions-overview-review-2026-09-01.md`](./docs/sessions-overview-review-2026-09-01.md) | Full sessions-overview review (server + UI + workflow restart-resilience): must-fix/must-add findings with `file:line` citations, incl. the tab-close/archive flow, PR-draft session embedding, and the workflow resume-on-restart design. |
 
 Design notes, implementation plans, and research write-ups live under
 [`docs/design/`](./docs/design/), [`docs/plans/`](./docs/plans/), and
@@ -366,7 +407,8 @@ and `docs/contracts/` are the sources of truth.
 
 ## Contributing
 
-Issues and PRs welcome. Please run `cargo test`, `cd ui && npm run check`, and
+Issues and PRs welcome. Please run `cargo test --workspace`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cd ui && npm run check`, and
 (for UI changes) `cd ui && npm run test:e2e` before opening a PR. The Rust API in
 `docs/contracts/` is authoritative — keep the TypeScript types in
 `ui/src/lib/api/types.ts` in lockstep.
