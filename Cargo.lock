@@ -3393,6 +3393,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ego-tree",
+ "futures-util",
  "otto-core",
  "otto-netguard",
  "reqwest",

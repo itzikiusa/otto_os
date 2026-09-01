@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use scraper::{Html, Selector};
 
 /// Consecutive engine failures for a host before we stop trying it and go
@@ -36,6 +37,7 @@ pub struct FallbackEngine {
 }
 
 impl FallbackEngine {
+    /// Caller must netguard-check `url` first — see crate docs.
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -51,6 +53,11 @@ impl FallbackEngine {
         }
     }
 
+    /// Caller must netguard-check `url` first — see crate docs.
+    ///
+    /// Streams the response body and aborts as soon as the running byte
+    /// count passes [`PAGE_BYTE_CAP`], so peak memory is actually bounded —
+    /// a hostile/huge response never gets fully buffered before we notice.
     async fn raw_html(&self, url: &str) -> Result<String, EngineError> {
         if let Some(body) = &self.static_body {
             return Ok(body.clone());
@@ -60,14 +67,22 @@ impl FallbackEngine {
             .await
             .map_err(|_| EngineError::Timeout(PAGE_TIMEOUT_SECS))?
             .map_err(|e| EngineError::Nav(e.to_string()))?;
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| EngineError::Nav(e.to_string()))?;
-        if bytes.len() > PAGE_BYTE_CAP {
-            return Err(EngineError::TooLarge(PAGE_BYTE_CAP));
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut stream = resp.bytes_stream();
+        let deadline = Duration::from_secs(PAGE_TIMEOUT_SECS);
+        loop {
+            let next = tokio::time::timeout(deadline, stream.next())
+                .await
+                .map_err(|_| EngineError::Timeout(PAGE_TIMEOUT_SECS))?;
+            let Some(chunk) = next else { break };
+            let chunk = chunk.map_err(|e| EngineError::Nav(e.to_string()))?;
+            if buf.len() + chunk.len() > PAGE_BYTE_CAP {
+                return Err(EngineError::TooLarge(PAGE_BYTE_CAP));
+            }
+            buf.extend_from_slice(&chunk);
         }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 }
 
@@ -79,6 +94,7 @@ impl Default for FallbackEngine {
 
 #[async_trait::async_trait]
 impl BrowserEngine for FallbackEngine {
+    /// Caller must netguard-check `url` first — see crate docs.
     async fn fetch_page(&self, url: &str) -> Result<Page, EngineError> {
         let html = self.raw_html(url).await?;
         if html.len() > PAGE_BYTE_CAP {
@@ -148,6 +164,8 @@ impl BrowserService {
 
     /// Navigate and return the settled page, falling back to plain-fetch
     /// when the primary engine is unavailable (or the host is denylisted).
+    ///
+    /// Caller must netguard-check `url` first — see crate docs.
     pub async fn page(&self, url: &str) -> Result<Page, EngineError> {
         let host = host_of(url);
         if self.is_denylisted(&host) {
@@ -237,6 +255,52 @@ mod tests {
         let svc = BrowserService::with_engines(Arc::new(AlwaysNav), FallbackEngine::from_static("<h1>Hi</h1>"));
         let err = svc.page("https://example.com").await.unwrap_err();
         assert!(matches!(err, EngineError::Nav(_)));
+    }
+
+    /// The 2 MB cap must be enforced while STREAMING the body, not only
+    /// after buffering it whole — spin up a tiny raw TCP/HTTP server that
+    /// chunks out well over the cap and confirm `FallbackEngine` aborts with
+    /// `TooLarge` (rather than OOMing on a fully-buffered multi-MB body).
+    #[tokio::test]
+    async fn raw_html_aborts_when_response_exceeds_byte_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await; // drain the request, don't care about it
+
+            let header =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+            if socket.write_all(header.as_bytes()).await.is_err() {
+                return;
+            }
+
+            // Stream well past PAGE_BYTE_CAP in small chunks so the server
+            // keeps writing after the client is expected to have aborted.
+            let chunk = vec![b'a'; 64 * 1024];
+            let mut sent = 0usize;
+            while sent < PAGE_BYTE_CAP * 2 {
+                let size_line = format!("{:x}\r\n", chunk.len());
+                if socket.write_all(size_line.as_bytes()).await.is_err()
+                    || socket.write_all(&chunk).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                {
+                    return; // client dropped the connection — expected once it aborts
+                }
+                sent += chunk.len();
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+
+        let engine = FallbackEngine::new();
+        let url = format!("http://{addr}/huge");
+        let err = engine.fetch_page(&url).await.unwrap_err();
+        assert!(matches!(err, EngineError::TooLarge(cap) if cap == PAGE_BYTE_CAP));
     }
 
     #[tokio::test]

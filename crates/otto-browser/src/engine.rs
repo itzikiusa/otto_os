@@ -48,6 +48,8 @@ pub enum EngineError {
 #[async_trait::async_trait]
 pub trait BrowserEngine: Send + Sync {
     /// Navigate and return the settled page.
+    ///
+    /// Caller must netguard-check `url` first — see crate docs.
     async fn fetch_page(&self, url: &str) -> Result<Page, EngineError>;
     async fn query(&self, url: &str, selector: &str) -> Result<Vec<MatchedNode>, EngineError>;
     /// Stable engine identifier: `"lightpanda"` | `"fallback"` | `"mock"`.

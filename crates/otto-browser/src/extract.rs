@@ -9,6 +9,12 @@ use scraper::{Html, Node};
 /// is never part of the article body.
 const NOISE_TAGS: &[&str] = &["script", "style", "nav", "footer", "header", "aside"];
 
+/// Depth cap on the recursive tag walk. Untrusted HTML can nest thousands of
+/// elements deep (accidentally or to attack a naive recursive parser); this
+/// bounds stack growth instead of trusting the input. Cheap insurance — real
+/// article markup never nests anywhere near this deep.
+const MAX_WALK_DEPTH: usize = 256;
+
 /// Convert HTML to a markdown-ish rendering: `<h1>`-`<h6>` become `#`..`######`
 /// headings, `<li>` becomes a `- ` bullet, block elements get their own line.
 /// `<script>`/`<style>` content is always dropped, independent of whether the
@@ -16,7 +22,7 @@ const NOISE_TAGS: &[&str] = &["script", "style", "nav", "footer", "header", "asi
 pub fn html_to_markdown(html: &str) -> String {
     let document = Html::parse_document(html);
     let mut out = String::new();
-    walk_markdown(document.tree.root(), &mut out, &["script", "style"]);
+    walk_markdown(document.tree.root(), &mut out, &["script", "style"], 0);
     normalize(&out)
 }
 
@@ -26,11 +32,14 @@ pub fn html_to_markdown(html: &str) -> String {
 pub fn readability(html: &str) -> String {
     let document = Html::parse_document(html);
     let mut out = String::new();
-    walk_html(document.tree.root(), &mut out, NOISE_TAGS);
+    walk_html(document.tree.root(), &mut out, NOISE_TAGS, 0);
     out.trim().to_string()
 }
 
-fn walk_markdown(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str]) {
+fn walk_markdown(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth: usize) {
+    if depth > MAX_WALK_DEPTH {
+        return;
+    }
     match node.value() {
         Node::Element(el) => {
             let tag = el.name();
@@ -54,7 +63,7 @@ fn walk_markdown(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str]) {
                 out.push_str("\n- ");
             }
             for child in node.children() {
-                walk_markdown(child, out, skip);
+                walk_markdown(child, out, skip, depth + 1);
             }
             if heading_level.is_some() || matches!(tag, "p" | "div" | "li" | "tr") {
                 out.push('\n');
@@ -66,13 +75,16 @@ fn walk_markdown(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str]) {
         Node::Text(text) => out.push_str(text),
         _ => {
             for child in node.children() {
-                walk_markdown(child, out, skip);
+                walk_markdown(child, out, skip, depth + 1);
             }
         }
     }
 }
 
-fn walk_html(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str]) {
+fn walk_html(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str], depth: usize) {
+    if depth > MAX_WALK_DEPTH {
+        return;
+    }
     match node.value() {
         Node::Element(el) => {
             let tag = el.name();
@@ -83,7 +95,7 @@ fn walk_html(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str]) {
             out.push_str(tag);
             out.push('>');
             for child in node.children() {
-                walk_html(child, out, skip);
+                walk_html(child, out, skip, depth + 1);
             }
             out.push_str("</");
             out.push_str(tag);
@@ -92,7 +104,7 @@ fn walk_html(node: NodeRef<'_, Node>, out: &mut String, skip: &[&str]) {
         Node::Text(text) => out.push_str(text),
         _ => {
             for child in node.children() {
-                walk_html(child, out, skip);
+                walk_html(child, out, skip, depth + 1);
             }
         }
     }
@@ -153,5 +165,23 @@ mod tests {
         let cleaned = readability(html);
         let md = html_to_markdown(&cleaned);
         assert!(md.contains("## Headline") && md.contains("Paragraph text") && !md.contains("Nav"));
+    }
+
+    #[test]
+    fn deeply_nested_html_does_not_blow_the_stack() {
+        // Well past MAX_WALK_DEPTH; both walks must bail out instead of
+        // recursing arbitrarily deep on untrusted input.
+        let mut html = String::from("<body>");
+        for _ in 0..5_000 {
+            html.push_str("<div>");
+        }
+        html.push_str("<h1>Deep</h1>");
+        for _ in 0..5_000 {
+            html.push_str("</div>");
+        }
+        html.push_str("</body>");
+        // Must simply return without panicking/overflowing the stack.
+        let _ = html_to_markdown(&html);
+        let _ = readability(&html);
     }
 }

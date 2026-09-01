@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
+futures-util = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 # HTML parsing for the extraction pipeline (readability pass + html->markdown).
