@@ -773,6 +773,8 @@
             <div class="kpi-tile"><div class="l">Deploy lead (merge→prod)</div><div class="v">${fmtD(sc.median_deploy_lead_days)}</div></div>
             <div class="kpi-tile"><div class="l">Fix rate</div><div class="v">${sc.fix_rate != null ? fmtPct(sc.fix_rate) : '—'}</div></div>
             <div class="kpi-tile"><div class="l">Throughput (est-d/wk)</div><div class="v">${sc.weighted_throughput_wk ?? '—'}</div></div>
+            ${o.est_basis && o.est_basis.pace != null ? `<div class="kpi-tile"><div class="l" title="Σactual ÷ Σestimate this period (AI-estimated tasks)">Team pace (vs est)</div><div class="v">×${o.est_basis.pace.toFixed(2)}</div></div>` : ''}
+            ${o.est_basis && o.est_basis.est_inflation != null ? `<div class="kpi-tile"><div class="l" title="This period's estimates vs the previous equal window, for comparable tasks (type+points). >1 = estimates inflated — trend the ADJUSTED pace (×${o.est_basis.pace_adjusted ?? '—'}, prev ×${o.est_basis.pace_ref ?? '—'}), not the raw one.">Est. inflation ${o.est_basis.pace_adjusted != null ? `<small>→ adj ×${o.est_basis.pace_adjusted.toFixed(2)} (prev ×${o.est_basis.pace_ref != null ? o.est_basis.pace_ref.toFixed(2) : '—'})</small>` : ''}</div><div class="v">×${o.est_basis.est_inflation.toFixed(2)}</div></div>` : ''}
           </div>`;
 
         const trendArrow = (t) => (t === 'improving' ? '▲' : t === 'worsening' ? '▼' : t === 'flat' ? '▶' : '—');

@@ -254,6 +254,7 @@ function buildIndex(repos, config = {}) {
         last_fix_at: null,
         fix_count: 0,
         deployed_at: null,
+        commit_ts: [], // sampled commit timestamps (capped) — the QA-rework check
         authors: new Map(), // "name\x1femail" -> count (converted to array at the end)
       };
       byKey.set(k, e);
@@ -322,6 +323,7 @@ function buildIndex(repos, config = {}) {
         }
         const e = entry(k);
         if (e.first_commit_at === null || ts < e.first_commit_at) e.first_commit_at = ts;
+        if (e.commit_ts.length < 200) e.commit_ts.push(ts);
         if (!merge) {
           const who = `${parts[2]}${US}${parts[3]}`;
           e.authors.set(who, (e.authors.get(who) || 0) + 1);
@@ -464,6 +466,7 @@ function buildIndex(repos, config = {}) {
 
   // Freeze author maps into plain arrays (records are JSON-persisted).
   for (const e of byKey.values()) {
+    e.commit_ts = [...new Set(e.commit_ts)].sort((a, b) => a - b);
     e.authors = [...e.authors.entries()]
       .map(([who, commits]) => {
         const [name, email] = who.split(US);

@@ -67,6 +67,9 @@ function addBusinessDays(fromMs, days, workweek = WORKWEEK) {
 
 const RE_DESIGN = /design|analys|refin|groom|spec|discover|shap|solution|architect/;
 const RE_IMPL = /progress|develop|implement|coding|code review|review|test|qa|verif|merge|doing|build|active/;
+// QA-class statuses (a subset of implementation): their time is capped in the
+// actual (QA queues idle for weeks) unless commits landed during the QA window.
+const RE_QA = /\bqa\b|quality|test|verif/;
 const RE_WAIT = /to do|todo|open|backlog|blocked|waiting|hold|ready|triage|new/;
 const RE_DONE = /done|closed|resolved|cancel|reject|complete|released|deploy/;
 
@@ -157,6 +160,29 @@ function phaseTotals(intervals, statusMap, workweek = WORKWEEK) {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_STALE_DAYS = 45;
+const DEFAULT_QA_CAP_DAYS = 10;
+
+/**
+ * QA time of a record from its stored (phase-classified) intervals, clipped to
+ * done: total business days in QA-class statuses + the raw windows (for the
+ * commits-during-QA check). Pure on the record — no statusMap needed, the
+ * intervals already carry their phase.
+ */
+function qaTime(record, workweek) {
+  const clipAt = record.done_at ?? null;
+  let qa = 0;
+  const windows = [];
+  for (const iv of record.intervals || []) {
+    const phase = iv.phase ?? classifyStatus(iv.status, {});
+    if (phase !== 'implementation' || !RE_QA.test(String(iv.status || '').toLowerCase())) continue;
+    if (clipAt !== null && iv.from >= clipAt) continue;
+    const to = clipAt !== null ? Math.min(iv.to, clipAt) : iv.to;
+    if (to <= iv.from) continue;
+    qa += businessDays(iv.from, to, workweek);
+    if (windows.length < 60) windows.push([iv.from, to]);
+  }
+  return { qa, windows };
+}
 
 /** True when the record counts as completed (Jira done OR merged to target). */
 function isDone(r) {
@@ -213,10 +239,26 @@ function deriveGit(record, gitEntry, opts) {
       ? 0
       : null;
 
+  // Active time: business days spent in working statuses (in progress / code
+  // review / QA …) — the wall-clock span (effCycle) counts idle queue time
+  // (backlog waits, forgotten tickets) as work. QA time is capped at
+  // `qaCapDays` UNLESS commits landed during a QA window (real rework —
+  // weight it fully then).
+  const qaCapDays = opts.qaCapDays ?? DEFAULT_QA_CAP_DAYS;
+  const commitTs = (Array.isArray(g.commit_ts) && g.commit_ts.length ? g.commit_ts : record.commit_ts) ||
+    [firstCommit, doneGit, lastFix].filter((t) => t !== null);
+  const { qa: qaRaw, windows: qaWindows } = qaTime(record, workweek);
+  const qaHasCommits = qaWindows.some(([from, to]) => commitTs.some((t) => t >= from && t < to));
+  const qaCappedDays = qaRaw > qaCapDays && !qaHasCommits ? qaCapDays : qaRaw;
+  const activeDays = record.impl_days !== null && record.impl_days !== undefined
+    ? round2(Math.max(0, record.impl_days - qaRaw + qaCappedDays))
+    : null;
+
   const done = record.done_at !== null || doneGit !== null;
   const flags = (record.flags || []).filter(
-    (f) => !['no_code', 'late_merge', 'unmerged_code', 'done_by_git_only', 'stale_timing', 'zero_time', 'multi_dev'].includes(f),
+    (f) => !['no_code', 'late_merge', 'unmerged_code', 'done_by_git_only', 'stale_timing', 'zero_time', 'multi_dev', 'qa_capped'].includes(f),
   );
+  if (qaCappedDays < qaRaw) flags.push('qa_capped');
   if (record.done_at !== null && opts.hasRepos && doneGit === null && firstCommit === null) flags.push('no_code');
   if (record.done_at !== null && opts.hasRepos && doneGit === null && firstCommit !== null) flags.push('unmerged_code');
   if (record.done_at !== null && doneGit !== null && businessDays(record.done_at, doneGit, workweek) > 2) flags.push('late_merge');
@@ -228,7 +270,11 @@ function deriveGit(record, gitEntry, opts) {
   // Resurrected ancients: a stray recent commit/close on a years-old key makes
   // the effective cycle span years — one such record can poison the TEAM's
   // pooled pace. Anything over a working year is timing garbage, git or not.
-  if (done && effCycle !== null && effCycle > 250) {
+  // The guard runs on the SAME base the actual uses (active-status time when
+  // present, wall span otherwise) so a 500-day span with sane status history
+  // isn't wrongly excluded, and a 500-day "In Progress" IS.
+  const actualBase = activeDays !== null && activeDays > 0 ? activeDays : effCycle;
+  if (done && actualBase !== null && actualBase > 250) {
     if (!flags.includes('stale_timing')) flags.push('stale_timing');
   }
 
@@ -249,7 +295,11 @@ function deriveGit(record, gitEntry, opts) {
     deployed_at: deployed,
     git_authors: authors,
     git_change: g.change ?? record.git_change ?? null,
+    commit_ts: Array.isArray(g.commit_ts) && g.commit_ts.length ? g.commit_ts : record.commit_ts ?? null,
     impl_days_git: implGit,
+    qa_days: round2(qaRaw),
+    qa_days_counted: round2(qaCappedDays),
+    active_days: activeDays,
     fix_days: fixDays,
     deploy_wait_days: deployWait,
     eff_done_at: effDone,
@@ -272,7 +322,12 @@ const rImpl = (r) => r.eff_impl_days ?? r.impl_days ?? null;
 // fixing effort does.
 const rCycle = (r) => {
   if (r.manual_days != null) return r.manual_days;
-  const base = r.eff_cycle_days ?? r.cycle_days ?? null;
+  // Status-based active time (in progress + code review + capped QA) wins when
+  // the issue has real status history — the wall-clock span counts idle time.
+  // Tasks with no active-status signal (bulk-moved, git-only features, pre-v3
+  // records) fall back to the effective (git-primary) span.
+  const active = r.active_days ?? null;
+  const base = active !== null && active > 0 ? active : r.eff_cycle_days ?? r.cycle_days ?? null;
   if (base == null) return base;
   // A lead-entered partial fix contribution wins over the full auto fix time —
   // fold in e.g. 10 of the 14 fix-days rather than all-or-nothing.
@@ -445,6 +500,7 @@ function analyzeIssue(raw, opts) {
     project: String(raw.key || '').split('-')[0] || null,
     parent_key: parentKey,
     subtask: isSubtask,
+    labels: Array.isArray(f.labels) ? f.labels : [],
     type: f.issuetype ? f.issuetype.name : 'Unknown',
     summary: f.summary || '',
     description_snippet: descText ? descText.replace(/\s+/g, ' ').trim().slice(0, 1500) : (raw.description_snippet || ''),
@@ -470,6 +526,7 @@ function analyzeIssue(raw, opts) {
     workweek: opts.workweek,
     hasRepos: Boolean(opts.gitIndex && opts.gitIndex.hasRepos),
     staleDays: opts.staleDays,
+    qaCapDays: opts.qaCapDays,
   });
 }
 
@@ -510,8 +567,9 @@ function reanalyzeRecord(record, opts) {
       fix_count: next.fix_count ?? 0,
       deployed_at: next.deployed_at ?? null,
       authors: next.git_authors || [],
+      commit_ts: next.commit_ts || [],
     },
-    { workweek: opts.workweek, hasRepos: opts.hasRepos ?? true, staleDays: opts.staleDays },
+    { workweek: opts.workweek, hasRepos: opts.hasRepos ?? true, staleDays: opts.staleDays, qaCapDays: opts.qaCapDays },
   );
 }
 
@@ -1164,6 +1222,83 @@ function scopeMetrics(records, base, workweek = WORKWEEK, nowMs = Date.now(), es
   };
 }
 
+// ---------------------------------------------------------------------------
+// Estimate-inflation index (period-over-period comparability of "vs estimate")
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare the ESTIMATE BASIS of two periods so pace-vs-estimate trends aren't
+ * manufactured by estimates drifting up: if this period's estimates for
+ * comparable tasks (same type+points bucket) are ×1.25 the reference period's,
+ * a pace that "improved" from ×2.0 to ×1.9 actually worsened (adjusted ×2.38).
+ *
+ * Buckets shared by both periods are compared by median AI estimate, weighted
+ * by min(n) per bucket; falls back to the overall medians when no bucket is
+ * shared. → {est_inflation, pace, pace_ref, pace_adjusted, n, n_ref} (nulls
+ * when a side has no estimated completions).
+ */
+function estimateBasis(records, estimates, cur, ref) {
+  const pick = (w) =>
+    records.filter((r) => {
+      if (!isDone(r) || isExcluded(r) || !isTimingSample(r) || !inPeriod(r, w.since, w.until)) return false;
+      const e = estimates[r.key];
+      return Boolean(e && e.days > 0) && rCycle(r) !== null && rCycle(r) > 0;
+    });
+  const curRecs = pick(cur);
+  const refRecs = pick(ref);
+  const pace = (recs) => {
+    let a = 0;
+    let e = 0;
+    for (const r of recs) {
+      a += rCycle(r);
+      e += estimates[r.key].days;
+    }
+    return e > 0 ? round2(a / e) : null;
+  };
+  const byBucket = (recs) => {
+    const m = new Map();
+    for (const r of recs) {
+      const k = `${r.type}|${r.points ?? 'unestimated'}`;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(estimates[r.key].days);
+    }
+    return m;
+  };
+  let inflation = null;
+  if (curRecs.length && refRecs.length) {
+    const curB = byBucket(curRecs);
+    const refB = byBucket(refRecs);
+    let num = 0;
+    let den = 0;
+    for (const [k, curEsts] of curB) {
+      const refEsts = refB.get(k);
+      if (!refEsts) continue;
+      const w = Math.min(curEsts.length, refEsts.length);
+      const refMed = median(refEsts);
+      if (refMed > 0) {
+        num += (median(curEsts) / refMed) * w;
+        den += w;
+      }
+    }
+    if (den > 0) inflation = round2(num / den);
+    else {
+      const refMed = median(refRecs.map((r) => estimates[r.key].days));
+      if (refMed > 0) inflation = round2(median(curRecs.map((r) => estimates[r.key].days)) / refMed);
+    }
+  }
+  const p = pace(curRecs);
+  return {
+    est_inflation: inflation,
+    pace: p,
+    pace_ref: pace(refRecs),
+    // Pace on the REFERENCE period's estimate basis — this is the number to
+    // trend, not the raw pace.
+    pace_adjusted: p !== null && inflation !== null ? round2(p * inflation) : null,
+    n: curRecs.length,
+    n_ref: refRecs.length,
+  };
+}
+
 /** Evaluate configured scope goals [{metric,target}] against metric values. */
 function evalScopeGoals(goals, values) {
   const out = [];
@@ -1212,6 +1347,8 @@ module.exports = {
   goalProgress,
   teamMedians,
   scopeMetrics,
+  estimateBasis,
+  qaTime,
   evalScopeGoals,
   scopeDays,
   routineSignature,

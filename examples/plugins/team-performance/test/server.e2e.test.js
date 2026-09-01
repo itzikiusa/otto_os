@@ -213,9 +213,10 @@ test('overview: assignees, baselines, open predictions, flags', async () => {
   assert.ok(alice && bob, 'both devs present');
   assert.equal(alice.completed, 3);
   assert.equal(bob.completed, 3);
-  // Git-primary timing: Alice's cycles shift to first-active/commit -> MERGE
-  // (TP-1 jira cycle was 4.0; eff runs to the merge commit an hour later).
-  assert.ok(alice.median_cycle > 3.5 && alice.median_cycle < 5.5, `alice median ${alice.median_cycle}`);
+  // Active-status timing (v0.6): the actual counts working statuses (in
+  // progress / review / QA), not the wall span to the merge — TP-1's active
+  // time is 3.0, the old span-based number was ~4.
+  assert.ok(alice.median_cycle > 2.5 && alice.median_cycle < 5.5, `alice median ${alice.median_cycle}`);
   // Scope-weighted stats came from the mock estimator (2d per task).
   assert.ok(alice.weighted_done > 0, `weighted ${alice.weighted_done}`);
   assert.ok(alice.efficiency !== null, 'efficiency computed');
@@ -289,7 +290,11 @@ test('goals PUT round-trips and overrides the suggestion', async () => {
 test('config: invalid rejected; status-map change recomputes locally (no Jira refetch)', async () => {
   const bad = await api('PUT', '/config', { max_issues: -5 });
   assert.equal(bad.status, 400);
-  const badWorker = await api('PUT', '/config', { estimate_workers: [{ provider: 'skynet' }] });
+  // Any non-empty provider slug is accepted (custom providers are validated by
+  // Otto's session API, not here) — only a MISSING provider is rejected.
+  const okWorker = await api('PUT', '/config', { estimate_workers: [{ provider: 'skynet' }] });
+  assert.equal(okWorker.status, 200);
+  const badWorker = await api('PUT', '/config', { estimate_workers: [{ provider: '' }] });
   assert.equal(badWorker.status, 400);
 
   const jiraHitsBefore = mockJira.hits.search + [...mockJira.hits.issue.values()].reduce((a, b) => a + b, 0);

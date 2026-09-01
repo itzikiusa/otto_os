@@ -729,7 +729,7 @@ test('feature pseudo-records credit weighted throughput to matched authors only'
 
 test('resurrected ancients: multi-year effective cycles are excluded even with git timing', () => {
   const r = A.deriveGit(
-    rec({ key: 'OLD-1', done_at: T('2026-06-20T00:00:00Z'), first_active_at: null, cycle_days: null }),
+    rec({ key: 'OLD-1', done_at: T('2026-06-20T00:00:00Z'), first_active_at: null, cycle_days: null, impl_days: 0 }),
     { first_commit_at: T('2020-01-06T00:00:00Z'), done_git_at: T('2026-06-19T00:00:00Z') },
     { hasRepos: true },
   );
@@ -738,7 +738,7 @@ test('resurrected ancients: multi-year effective cycles are excluded even with g
   assert.ok(!A.isExcluded({ ...r, manual_days: 5 }), 'manual time re-includes');
   // A genuinely long feature (~3 months) stays in.
   const big = A.deriveGit(
-    rec({ key: 'BIG-1', done_at: T('2026-06-20T00:00:00Z'), first_active_at: null, cycle_days: null }),
+    rec({ key: 'BIG-1', done_at: T('2026-06-20T00:00:00Z'), first_active_at: null, cycle_days: null, impl_days: 0 }),
     { first_commit_at: T('2026-03-02T00:00:00Z'), done_git_at: T('2026-06-19T00:00:00Z') },
     { hasRepos: true },
   );
@@ -776,4 +776,112 @@ test('fix_days_override folds in a partial fix amount (wins over include mode)',
   const manual = { ...partial, manual_days: 8 };
   s = A.assigneeStats([manual], A.baselines([manual]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
   assert.equal(s[0].median_cycle, 8);
+});
+
+// ---- v0.6: active-status actual, QA cap, estimate-inflation index ------------
+
+// Interval helper: [status, fromIso, toIso] with default phase classification.
+const iv = (status, from, to) => ({ status, from: T(from), to: T(to), phase: A.classifyStatus(status, {}) });
+
+test('active_days: sums working statuses, ignores idle span; actual prefers it', () => {
+  // Mon..Fri: 2d In Progress + 1d Code Review + 1d QA = 4 active days, but the
+  // record's wall span (eff cycle) is 20 days of mostly backlog idle.
+  const base = rec({
+    key: 'AC-1',
+    impl_days: 4,
+    cycle_days: 20,
+    done_at: T('2026-06-26T00:00:00Z'),
+    intervals: [
+      iv('To Do', '2026-06-01T00:00:00Z', '2026-06-22T00:00:00Z'),
+      iv('In Progress', '2026-06-22T00:00:00Z', '2026-06-24T00:00:00Z'),
+      iv('Code Review', '2026-06-24T00:00:00Z', '2026-06-25T00:00:00Z'),
+      iv('QA', '2026-06-25T00:00:00Z', '2026-06-26T00:00:00Z'),
+    ],
+  });
+  const r = A.deriveGit(base, undefined, { hasRepos: true });
+  assert.equal(r.active_days, 4);
+  assert.equal(A.actualDays(r), 4, 'actual = active status time, not the 20-day span');
+});
+
+test('QA cap: long idle QA is capped; commits during QA lift the cap', () => {
+  // 15 business days in QA (Jun 1 -> Jun 22, minus 3 weekends), 2 impl days before.
+  const mk = () =>
+    rec({
+      key: 'QA-1',
+      impl_days: 17,
+      cycle_days: 17,
+      done_at: T('2026-06-23T00:00:00Z'),
+      first_active_at: T('2026-05-28T00:00:00Z'),
+      intervals: [
+        iv('In Progress', '2026-05-28T00:00:00Z', '2026-06-01T00:00:00Z'),
+        iv('QA', '2026-06-01T00:00:00Z', '2026-06-22T00:00:00Z'),
+      ],
+    });
+  const capped = A.deriveGit(mk(), undefined, { hasRepos: true, qaCapDays: 10 });
+  assert.equal(capped.qa_days, 15);
+  assert.equal(capped.qa_days_counted, 10, 'idle QA capped at 10');
+  assert.ok(capped.flags.includes('qa_capped'));
+  assert.equal(capped.active_days, 12, '2 impl + 10 capped QA');
+  // The same task WITH a commit landing inside the QA window = real rework.
+  const rework = A.deriveGit(mk(), { commit_ts: [T('2026-06-10T12:00:00Z')] }, { hasRepos: true, qaCapDays: 10 });
+  assert.equal(rework.qa_days_counted, 15, 'commits during QA lift the cap');
+  assert.ok(!rework.flags.includes('qa_capped'));
+  assert.equal(rework.active_days, 17);
+});
+
+test('ancient span with sane active status time measures at active days, not the span', () => {
+  const r = A.deriveGit(
+    rec({
+      key: 'OLD-2',
+      done_at: T('2026-06-20T00:00:00Z'),
+      cycle_days: null,
+      impl_days: 3,
+      intervals: [iv('In Progress', '2026-06-15T00:00:00Z', '2026-06-18T00:00:00Z')],
+    }),
+    { first_commit_at: T('2020-01-06T00:00:00Z'), done_git_at: T('2026-06-19T00:00:00Z') },
+    { hasRepos: true },
+  );
+  assert.ok(!r.flags.includes('stale_timing'), r.flags.join(','));
+  assert.equal(A.actualDays(r), 3);
+});
+
+test('550 idle days in an active status is still timing garbage (stale)', () => {
+  const r = A.deriveGit(
+    rec({
+      key: 'OLD-3',
+      done_at: T('2026-06-20T00:00:00Z'),
+      cycle_days: 550,
+      impl_days: 550,
+      intervals: [iv('In Progress', '2024-01-01T00:00:00Z', '2026-06-10T00:00:00Z')],
+    }),
+    undefined,
+    { hasRepos: true },
+  );
+  assert.ok(r.flags.includes('stale_timing'), r.flags.join(','));
+  assert.ok(A.isExcluded(r));
+});
+
+test('estimateBasis: inflation index adjusts the pace trend', () => {
+  const done = (key, doneIso, actual, points = 3) =>
+    rec({ key, points, cycle_days: actual, eff_cycle_days: actual, done_at: T(doneIso), eff_done_at: T(doneIso) });
+  // Q1: three 3-point stories estimated 2d each, actual 4d → pace ×2.0
+  // Q2: three comparable stories estimated 2.5d each, actual 4.75d → raw ×1.9,
+  // but the estimates inflated ×1.25 → adjusted ×2.38 (a decline, not a win).
+  const recs = [
+    done('P1', '2026-01-15T00:00:00Z', 4), done('P2', '2026-02-15T00:00:00Z', 4), done('P3', '2026-03-10T00:00:00Z', 4),
+    done('C1', '2026-04-15T00:00:00Z', 4.75), done('C2', '2026-05-15T00:00:00Z', 4.75), done('C3', '2026-06-10T00:00:00Z', 4.75),
+  ];
+  const estimates = {
+    P1: { days: 2 }, P2: { days: 2 }, P3: { days: 2 },
+    C1: { days: 2.5 }, C2: { days: 2.5 }, C3: { days: 2.5 },
+  };
+  const b = A.estimateBasis(recs, estimates,
+    { since: T('2026-04-01T00:00:00Z'), until: T('2026-07-01T00:00:00Z') },
+    { since: T('2026-01-01T00:00:00Z'), until: T('2026-04-01T00:00:00Z') });
+  assert.equal(b.est_inflation, 1.25);
+  assert.equal(b.pace, 1.9);
+  assert.equal(b.pace_ref, 2);
+  assert.ok(Math.abs(b.pace_adjusted - 2.38) < 0.01, `adjusted ${b.pace_adjusted}`);
+  assert.equal(b.n, 3);
+  assert.equal(b.n_ref, 3);
 });

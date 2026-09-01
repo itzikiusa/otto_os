@@ -23,6 +23,12 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// A hung socket must NEVER wedge a scan: without an explicit timeout a request
+// whose connection dies silently (laptop sleep, VPN flip, a dropped NAT entry)
+// leaves this promise pending forever, and the scan job stays `running` — which
+// in turn makes the auto-scan cron bail on every tick, permanently.
+const REQUEST_TIMEOUT_MS = Number(process.env.OTTO_TP_HTTP_TIMEOUT_MS) || 60000;
+
 function request(urlStr, { method = 'GET', headers = {}, body = null } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
@@ -46,6 +52,9 @@ function request(urlStr, { method = 'GET', headers = {}, body = null } = {}) {
         res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: buf }));
       },
     );
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+      req.destroy(new Error(`timeout after ${REQUEST_TIMEOUT_MS}ms: ${u.pathname}`));
+    });
     req.on('error', reject);
     if (data) req.write(data);
     req.end();

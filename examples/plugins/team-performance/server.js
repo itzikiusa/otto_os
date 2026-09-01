@@ -137,6 +137,8 @@ const DEFAULT_CONFIG = {
   git_fetch: true,
   deploy_tag_pattern: 'deployed',
   stale_days: 45,
+  qa_cap_days: 10, // QA-status time counted per task caps here — unless commits landed during QA
+  project_label_filters: {}, // {PROJECT: [label, …]} — only issues carrying one of the labels count
   fix_window_days: 30, // commits after delivery beyond this aren't 'fixes'
   fix_include_min_commits: 3, // fixes with >= this many commits fold into the actual
   hours_per_day: 8, // working hours per business day (for the hours display)
@@ -199,6 +201,7 @@ function validateConfig(body) {
     ['git_depth', 0, 1000000],
     ['pace_ms', 0, 5000],
     ['stale_days', 5, 365],
+    ['qa_cap_days', 1, 365],
     ['estimate_window_months', 0, 60],
     ['estimate_max_batches', 1, 200],
     ['auto_scan_minutes', 0, 1440],
@@ -278,6 +281,20 @@ function validateConfig(body) {
     }
     c.roles = [...new Set(body.roles.map((r) => r.trim()))];
   }
+  if (body.project_label_filters !== undefined) {
+    if (typeof body.project_label_filters !== 'object' || body.project_label_filters === null) {
+      throw new Error('project_label_filters must be an object of {PROJECT: [labels]}');
+    }
+    const filters = {};
+    for (const [proj, labels] of Object.entries(body.project_label_filters)) {
+      if (!Array.isArray(labels) || !labels.every((l) => typeof l === 'string')) {
+        throw new Error(`project_label_filters.${proj} must be a string array`);
+      }
+      const clean = labels.map((l) => l.trim()).filter(Boolean).slice(0, 20);
+      if (clean.length) filters[String(proj).trim()] = clean;
+    }
+    c.project_label_filters = filters;
+  }
   if (body.status_map !== undefined) {
     if (typeof body.status_map !== 'object' || body.status_map === null) throw new Error('status_map must be an object');
     for (const [proj, map] of Object.entries(body.status_map)) {
@@ -316,6 +333,7 @@ function recomputeCorpora(config) {
         hasDesignStatuses: hasDesign,
         hasRepos,
         staleDays: config.stale_days,
+        qaCapDays: config.qa_cap_days,
       });
     }
     store.writeJsonAtomic(file, corpus);
@@ -362,10 +380,45 @@ function rememberScanParams(account, projects, assignees) {
   store.writeJsonAtomic(lastScanParamsPath(), { account, projects, assignees: assignees || null, at: Date.now() });
 }
 
+// A scan that stops making progress must not wedge the cron forever: we snapshot
+// a progress signature every tick and, once it has been identical for
+// STUCK_AFTER_MS, declare the job dead so the next tick can start a fresh scan.
+// (The 2026-08-22 incident: a Jira call hung on a dead socket with no timeout,
+// the job stayed `running` at step `fields`, and auto-scan bailed for 3 days.)
+const STUCK_AFTER_MS = Number(process.env.OTTO_TP_STUCK_MS) || 45 * 60000;
+
+// Kept OUT of the job object: `/scan/status` serializes the job verbatim and the
+// UI would render these internals.
+const progress = new WeakMap(); // job -> {sig, at}
+
+function progressSig(job) {
+  return [job.step, job.project_i, job.fetched, job.total, job.errors, job.retries, job.estimate_remaining].join('|');
+}
+
+function reapStuckJob(account, job) {
+  if (!job || job.state !== 'running') return false;
+  const sig = progressSig(job);
+  const seen = progress.get(job);
+  if (!seen || seen.sig !== sig) {
+    progress.set(job, { sig, at: Date.now() });
+    return false;
+  }
+  if (Date.now() - seen.at < STUCK_AFTER_MS) return false;
+  console.error(`scan for ${account} stuck at step "${job.step}" for ${Math.round((Date.now() - seen.at) / 60000)}m — reaping`);
+  job.state = 'error';
+  job.error = `stuck at "${job.step}" — abandoned by the watchdog`;
+  job.finished_at = Date.now();
+  return true;
+}
+
 function maybeAutoScan() {
   const config = loadConfig();
-  if (!config.auto_scan_minutes) return;
   const params = store.readJson(lastScanParamsPath(), null);
+  const running = params && params.account ? jobs.get(params.account) : null;
+  // Reap BEFORE the auto_scan_minutes gate — a wedged job should be cleared even
+  // when auto-scan is switched off, so a manual scan isn't blocked either.
+  if (running) reapStuckJob(params.account, running);
+  if (!config.auto_scan_minutes) return;
   if (!params || !params.account || !Array.isArray(params.projects) || !params.projects.length) return;
   const job = jobs.get(params.account);
   if (job && job.state === 'running') return;
@@ -385,7 +438,7 @@ function maybeAutoScan() {
 
 setInterval(maybeAutoScan, Number(process.env.OTTO_TP_AUTOSCAN_MS) ? 500 : 60000).unref();
 
-const SEARCH_FIELDS_BASE = ['summary', 'description', 'issuetype', 'status', 'assignee', 'created', 'resolutiondate', 'updated', 'timeoriginalestimate', 'parent'];
+const SEARCH_FIELDS_BASE = ['summary', 'description', 'issuetype', 'status', 'assignee', 'created', 'resolutiondate', 'updated', 'timeoriginalestimate', 'parent', 'labels'];
 
 function fmtJqlUtc(ms) {
   const d = new Date(ms);
@@ -406,6 +459,12 @@ async function scanProject(client, account, project, full, assignees, config, gi
   let jql = `project = "${esc(project)}"`;
   if (config.issue_types.length) {
     jql += ` AND issuetype IN (${config.issue_types.map((t) => `"${esc(t)}"`).join(', ')})`;
+  }
+  // Per-project label scoping (e.g. GS1 → only 'platform'-labeled issues are
+  // this team's work). Applied in JQL so out-of-scope issues never fetch.
+  const labelFilter = (config.project_label_filters || {})[project];
+  if (labelFilter && labelFilter.length) {
+    jql += ` AND labels IN (${labelFilter.map((l) => `"${esc(l)}"`).join(', ')})`;
   }
   if (assignees && assignees.length) {
     jql += ` AND assignee IN (${assignees.map((a) => `"${esc(a)}"`).join(', ')})`;
@@ -473,9 +532,19 @@ async function scanProject(client, account, project, full, assignees, config, gi
       gitIndex,
       hasDesignStatuses: true,
       staleDays: config.stale_days,
+      qaCapDays: config.qa_cap_days,
       nowMs,
       descText: adfToText,
     });
+  }
+  // Prune out-of-scope labeled issues that predate the filter (their labels are
+  // known — issues scanned before `labels` was fetched keep matching until a
+  // full rescan refreshes them).
+  if (labelFilter && labelFilter.length) {
+    const want = new Set(labelFilter.map((l) => l.toLowerCase()));
+    for (const [key, r] of Object.entries(corpus.issues)) {
+      if (Array.isArray(r.labels) && !r.labels.some((l) => want.has(String(l).toLowerCase()))) delete corpus.issues[key];
+    }
   }
   const records = Object.values(corpus.issues);
   const hasDesign = projectHasDesign(records, statusMap);
@@ -486,6 +555,7 @@ async function scanProject(client, account, project, full, assignees, config, gi
       workweek: config.workweek,
       hasRepos: gitIndex.hasRepos,
       staleDays: config.stale_days,
+      qaCapDays: config.qa_cap_days,
     });
     if (!hasDesign) rec = { ...rec, flags: rec.flags.filter((f) => f !== 'skipped_design') };
     corpus.issues[rec.key] = rec;
@@ -738,7 +808,15 @@ function loadScope(account, projectsParam) {
     capped = capped || Boolean(corpus.capped);
     Object.assign(targetUsed, corpus.target_used || {});
     const overrides = store.readJson(store.overridesPath(DATA_DIR, account, p), null);
-    records = records.concat(applyOverrides(Object.values(corpus.issues), overrides, config.fix_include_min_commits));
+    // Per-project label scope (mirrors the scan JQL): labeled-out issues from
+    // pre-filter scans must not count while they wait for the prune/rescan.
+    const labelFilter = (config.project_label_filters || {})[p];
+    let projRecords = Object.values(corpus.issues);
+    if (labelFilter && labelFilter.length) {
+      const want = new Set(labelFilter.map((l) => l.toLowerCase()));
+      projRecords = projRecords.filter((r) => !Array.isArray(r.labels) || r.labels.some((l) => want.has(String(l).toLowerCase())));
+    }
+    records = records.concat(applyOverrides(projRecords, overrides, config.fix_include_min_commits));
     Object.assign(estimates, loadEstimates(account, p));
     // A lead-corrected agnostic estimate replaces the AI value everywhere.
     for (const [k, o] of Object.entries((overrides && overrides.issues) || {})) {
@@ -1002,6 +1080,11 @@ function overview(account, projectsParam, sinceMs = 0) {
 
   const team = A.teamMedians(stats);
   const scopeValues = A.scopeMetrics(records, base, config.workweek, Date.now(), estimates, sinceMs);
+  // Estimate-basis drift vs the previous equal-length window: raw "vs estimate"
+  // trends are meaningless when the estimates themselves inflated.
+  const estBasis = sinceMs
+    ? A.estimateBasis(records, estimates, { since: sinceMs, until: 0 }, { since: sinceMs - (Date.now() - sinceMs), until: sinceMs })
+    : null;
   const scopeGoals = loadScopeGoals(account);
   const roleOf = (id) => {
     const cid = canonical(id);
@@ -1087,6 +1170,7 @@ function overview(account, projectsParam, sinceMs = 0) {
     assignees: withGoals,
     team,
     scope: scopeValues,
+    est_basis: estBasis,
     scope_goals: { team: A.evalScopeGoals(scopeGoals.team, scopeValues), roles: roleGoals },
     baseline: base.buckets.filter((b) => b.n >= 2),
     flags,
@@ -1307,7 +1391,9 @@ function periodSummary(scope, assigneeId, start, end) {
       (r.eff_done_at ?? r.done_at ?? 0) < end,
   );
   const tasks = mine
-    .filter((r) => !r.rollup)
+    // Excluded records (stale timing, outliers, rollups) carry garbage actuals
+    // — a resurrected 500-day ancient must not top a report's task list.
+    .filter((r) => !r.rollup && !A.isExcluded(r))
     .sort((a, b) => (A.actualDays(b) ?? 0) - (A.actualDays(a) ?? 0))
     .slice(0, 40)
     .map((r) => {
@@ -1360,8 +1446,8 @@ function teamPeriodSummary(account, scope, start, end) {
 /** Strip a saved HTML report to text for prompt context. */
 function htmlToText(html, cap = 1600) {
   return String(html)
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style\b[^>]*>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script\b[^>]*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -1396,7 +1482,7 @@ const DEFAULT_COMBINED_REPORT_INSTRUCTIONS =
 function reportPrompt(headline, dataBlock, instructions) {
   return `You are writing ${headline}. Write a COMPLETE, SELF-CONTAINED HTML document (inline CSS, presentation-friendly, works in light and dark, no external assets, no javascript) — respond with ONLY the HTML, starting with <!doctype html>.
 
-Data (business days; weighted_done = dev-agnostic AI-estimated days delivered, credited by commit share — the fair volume measure; output_wk/vs_team_output = delivered scope per week vs team; vs_est = actual÷estimate, >1 = slower than the estimate):
+Data (business days; actuals count ACTIVE status time — in progress / code review / QA (QA capped unless rework commits landed) — not idle calendar span; weighted_done = dev-agnostic AI-estimated days delivered, credited by commit share — the fair volume measure; output_wk/vs_team_output = delivered scope per week vs team; vs_est = actual÷estimate, >1 = slower than the estimate. IMPORTANT: estimate_basis.est_inflation compares the two periods' estimate levels for comparable tasks — when it is >1 the estimates inflated, so trend pace_adjusted (= pace × est_inflation, i.e. on the comparison period's estimate basis) against pace_ref, NOT the raw vs_est; a raw "improvement" with inflated estimates is a decline and must be reported as such):
 
 ${dataBlock}
 
@@ -1457,6 +1543,7 @@ async function runReport(account, opts) {
         comparison: pb.label,
         this_period: { team: cur.scope, goals: cur.team_goals, role_goals: cur.role_goals, developers: maskDevs(cur.devs) },
         comparison_period: { team: prev.scope, developers: maskDevs(prev.devs) },
+        estimate_basis: A.estimateBasis(scope.records, scope.estimates, { since: start, until: end }, { since: pb.start, until: pb.end }),
       };
       // Combined: also embed a per-developer detail block for EVERY included
       // dev (stats + biggest tasks + goals) so one report holds the team
@@ -1523,6 +1610,7 @@ async function runReport(account, opts) {
         team_medians: team,
         goals,
         prior_reports: priors,
+        estimate_basis: A.estimateBasis(scope.records, scope.estimates, { since: start, until: end }, { since: pb.start, until: pb.end }),
       };
       dataBlock = fmtNum(data);
       headline = `a ${label} performance report about developer "${maskName(name)}"${mask ? ' (name ANONYMIZED)' : ''}`;
