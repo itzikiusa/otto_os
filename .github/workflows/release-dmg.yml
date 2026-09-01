@@ -135,8 +135,12 @@ jobs:
       # automatically: APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
       # APPLE_SIGNING_IDENTITY, and for notarization APPLE_ID, APPLE_PASSWORD
       # (app-specific), APPLE_TEAM_ID.
-      - name: Build desktop app (Tauri)
-        working-directory: apps/desktop/src-tauri
+      # Export the Apple signing env vars ONLY when the secrets actually exist:
+      # a set-but-EMPTY APPLE_CERTIFICATE makes Tauri attempt `security import`
+      # with no data and the bundle step dies ("SecKeychainItemImport: … not
+      # valid"). Absent vars = ad-hoc signing, which is what we want until the
+      # Developer ID secrets are configured.
+      - name: Export Apple signing env (when secrets configured)
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -144,6 +148,21 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            val="${!v}"
+            if [ -n "$val" ]; then
+              {
+                echo "$v<<__OTTO_EOF__"
+                echo "$val"
+                echo "__OTTO_EOF__"
+              } >> "$GITHUB_ENV"
+              echo "exported $v"
+            fi
+          done
+
+      - name: Build desktop app (Tauri)
+        working-directory: apps/desktop/src-tauri
         run: npx --yes @tauri-apps/cli@^2 build
 
       # Two copies: a STABLE-named one (the download URL never changes week to
