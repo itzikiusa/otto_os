@@ -134,7 +134,7 @@ impl Http {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
-        Err(provider_status_err(&self.provider, status, &body))
+        Err(provider_status_err(self.provider, status, &body))
     }
 
     /// Send and parse a JSON body.
@@ -251,7 +251,7 @@ impl Http {
 
                 let status = resp.status();
                 let err_body = resp.text().await.unwrap_or_default();
-                return Err(provider_status_err(&self.provider, status, &err_body));
+                return Err(provider_status_err(self.provider, status, &err_body));
             }
 
             // TTL elapsed, no ETag → unconditional GET (fall through).
@@ -273,7 +273,7 @@ impl Http {
         let status = resp.status();
         if !status.is_success() {
             let err_body = resp.text().await.unwrap_or_default();
-            return Err(provider_status_err(&self.provider, status, &err_body));
+            return Err(provider_status_err(self.provider, status, &err_body));
         }
 
         let new_etag = resp
@@ -346,7 +346,7 @@ impl Http {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
-        Err(provider_status_err(&self.provider, status, &body))
+        Err(provider_status_err(self.provider, status, &body))
     }
 }
 
