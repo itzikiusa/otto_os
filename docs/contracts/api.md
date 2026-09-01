@@ -2830,7 +2830,51 @@ records the given `url`/`title` with no fetch. Broadcasts `browser_tab_updated`
 | POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt, text, comment?, color?, tab_id?}` (`color` defaults `"yellow"`) | `BrowserAnnotation` |
 | PATCH /api/v1/browser/annotations/{id} | ws editor · Browser Edit | `{comment}` | `BrowserAnnotation` |
 | DELETE /api/v1/browser/annotations/{id} | ws editor · Browser Edit | — | 204 |
+| POST /api/v1/workspaces/{wid}/browser/summarize | ws editor · Browser Edit | `{url}` | `{summary, engine, degraded}` |
+| POST /api/v1/workspaces/{wid}/browser/annotations/{id}/send | ws editor · Browser Edit | `{session_id}` | 200 |
+| POST /api/v1/workspaces/{wid}/browser/vault-save | ws editor · Browser Edit | `{url, vault_id, summary?}` | `{note_path}` |
 
 `BrowserTab {id, workspace_id, url, title, mode, created_at}`.
 `BrowserAnnotation {id, workspace_id, tab_id, url, selector, excerpt, text,
 comment, color, created_at}`.
+
+**`POST /browser/summarize`** fetches the URL (netguard-checked, same as
+`/browser/page`) and runs ONE turn of a short-lived, unresumed agent session —
+mirroring `db_assist.rs`'s ephemeral-working-dir pattern, not the
+resumable-registry part — asking it to summarize the page's markdown (capped
+at 30,000 chars before it reaches the prompt) for a developer notebook. The
+session's `meta.source = "browser_summarize"` hides it from the Agents list
+(`monitor::BACKGROUND_SOURCES`), like `db_assist`.
+
+**`POST /browser/annotations/{id}/send`** builds a `[Browser mark] …` text
+block from the annotation and writes it into the target session's input via
+`SessionManager::input` directly (the same call `POST /sessions/{id}/input`
+uses internally, appending `"\n"` — `docs/contracts/api.md`'s Sessions
+section). `session_id` must belong to the SAME workspace as `{wid}` (and thus
+the annotation) — a `404` otherwise, so this can't be used to inject input
+into a session in a workspace the caller isn't scoped to via this route. The
+excerpt is capped at 2,000 chars. Block shape:
+
+```text
+[Browser mark] {url} — "{title}"
+Selector: {selector}
+Excerpt:
+{excerpt (HTML, ≤2k chars)}
+Note from user: {comment}
+```
+
+`{title}` is the owning tab's title when the annotation's `tab_id` still
+resolves to a live tab, else the annotation's own `url` (annotations carry no
+title field of their own).
+
+**`POST /browser/vault-save`** writes an OKF-flavored note through the vault
+engine's `write_note` (the same call `otto_vault_write` lands on —
+`crates/otto-server/src/mcp_outward.rs`): YAML front-matter (`url`, `saved`
+date, `tags: [browser]`), a `## Summary` section, then one `## Mark N` section
+per annotation on that URL (selector, excerpt, comment). The note path is
+derived from the URL under `browser/` (e.g. `browser/example-com-page.md`).
+The request's `summary` field is optional and NOT in the original spec's
+literal `{url, vault_id}` body — when omitted, the summary section is derived
+from a fresh (netguard-checked) page fetch instead of a separately-generated
+AI summary; when the caller already has one (e.g. from `/summarize`), passing
+it here skips the extra fetch and uses it verbatim.

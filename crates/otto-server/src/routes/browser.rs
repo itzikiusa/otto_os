@@ -19,8 +19,9 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, patch};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use otto_core::domain::WorkspaceRole;
@@ -48,6 +49,12 @@ pub fn routes() -> Router<ServerCtx> {
             "/browser/annotations/{id}",
             patch(update_annotation).delete(delete_annotation),
         )
+        .route(
+            "/workspaces/{wid}/browser/annotations/{id}/send",
+            post(send_annotation),
+        )
+        .route("/workspaces/{wid}/browser/summarize", post(summarize_page))
+        .route("/workspaces/{wid}/browser/vault-save", post(vault_save))
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +169,47 @@ struct CreateAnnotationReq {
 struct PatchAnnotationReq {
     comment: String,
 }
+
+#[derive(Deserialize)]
+struct SendAnnotationReq {
+    session_id: Id,
+}
+
+#[derive(Deserialize)]
+struct SummarizeReq {
+    url: String,
+}
+
+#[derive(Serialize)]
+struct SummarizeResp {
+    summary: String,
+    engine: String,
+    degraded: bool,
+}
+
+#[derive(Deserialize)]
+struct VaultSaveReq {
+    url: String,
+    vault_id: i64,
+    /// Optional — when the caller already has a summary (e.g. from
+    /// `/summarize`), it is used verbatim instead of re-deriving one from a
+    /// fresh page fetch. Not in the brief's literal `{url, vault_id}` body;
+    /// see module docs / task-5 report for why it was added.
+    #[serde(default)]
+    summary: Option<String>,
+}
+
+#[derive(Serialize)]
+struct VaultSaveResp {
+    note_path: String,
+}
+
+/// Cap on the page markdown handed to the summarize prompt — bounds the agent
+/// turn's input size regardless of how large the fetched page is.
+const SUMMARIZE_MAX_CHARS: usize = 30_000;
+/// Cap on an annotation excerpt (HTML) inlined into a send-to-session context
+/// block — bounds what gets pasted into the target session's input.
+const SEND_EXCERPT_MAX_CHARS: usize = 2_000;
 
 // ---------------------------------------------------------------------------
 // WS event publishing
@@ -416,6 +464,253 @@ async fn delete_annotation(
 }
 
 // ---------------------------------------------------------------------------
+// Summarize / send-to-session / vault-save
+// ---------------------------------------------------------------------------
+
+/// `POST /workspaces/{wid}/browser/summarize` — `{url}` -> `{summary, engine,
+/// degraded}`. Fetches the page (netguard-checked, same as `/browser/page`)
+/// and runs ONE turn of a short-lived, unresumed agent session (mirrors
+/// `db_assist.rs`'s ephemeral-dir pattern) asking it to summarize the
+/// (char-capped) markdown for a developer notebook. The session carries
+/// `meta.source = "browser_summarize"`, which hides it from the Agents list
+/// (see `monitor::BACKGROUND_SOURCES`) — like `db_assist`, it's throwaway.
+async fn summarize_page(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<SummarizeReq>,
+) -> ApiResult<Json<SummarizeResp>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    otto_netguard::check_url(&req.url)
+        .await
+        .map_err(|m| ApiError(Error::Invalid(m)))?;
+    let page = ctx.browser.page(&req.url).await.map_err(engine_err)?;
+    let ws = ctx.workspaces.get(&wid).await.map_err(ApiError)?;
+
+    let capped: String = page.markdown.chars().take(SUMMARIZE_MAX_CHARS).collect();
+
+    // Ephemeral working dir (never persisted/resumed) — same confine-under-root
+    // pattern as db_assist's per-assist dir, keyed on a fresh id since a
+    // summarize turn has no caller-suppliable identifier to reuse.
+    let dir = otto_core::paths::confine_join(&ctx.data_dir.join("browser_summarize"), &otto_core::new_id())
+        .ok_or_else(|| ApiError(Error::Internal("browser summarize dir".into())))?;
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return Err(ApiError(Error::Internal(format!("browser summarize dir: {e}"))));
+    }
+    let dir_str = dir.to_string_lossy().to_string();
+    let provider = crate::db_assist::resolve_provider(&ctx, &ws, None).await;
+    otto_sessions::trust::ensure_trusted(&provider, &dir_str);
+
+    let prompt = build_summarize_prompt(&page.url, &page.title, &capped);
+    let meta = serde_json::json!({ "source": "browser_summarize", "url": page.url });
+    let turn = crate::agent_session::run_session_turn(
+        &ctx,
+        &ws,
+        &user,
+        None,
+        &format!("Browser summary: {}", page.title),
+        &dir_str,
+        &provider,
+        meta,
+        &prompt,
+        crate::agent_session::STUCK_IDLE,
+        |_| {},
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    let (raw, _sid) = turn?;
+
+    Ok(Json(SummarizeResp {
+        summary: raw.trim().to_string(),
+        engine: page.engine,
+        degraded: page.degraded,
+    }))
+}
+
+/// The summarize-turn prompt. `capped_markdown` is already truncated to
+/// [`SUMMARIZE_MAX_CHARS`] by the caller.
+fn build_summarize_prompt(url: &str, title: &str, capped_markdown: &str) -> String {
+    format!(
+        "Summarize this page for a developer notebook: {title} ({url})\n\n{capped_markdown}\n\n\
+         Write a concise summary (a few sentences to a short paragraph) capturing what the page is \
+         about and any key facts a developer would want to remember. Reply with the summary text \
+         only — no preamble, no headers, no code fences.",
+    )
+}
+
+/// `POST /workspaces/{wid}/browser/annotations/{id}/send` — `{session_id}` ->
+/// 200. Writes the annotation's context block into the target session via the
+/// same manager call `POST /sessions/{id}/input` uses (`SendInputReq{text,
+/// submit:true}`'s effect — append `"\n"` and write, `modules.rs::send_input`),
+/// called directly rather than over HTTP. The target session must belong to
+/// the SAME workspace as the route's `{wid}` (and thus the annotation) — an
+/// Editor of `wid` cannot use this to inject text into a session in a
+/// workspace they don't have access to.
+async fn send_annotation(
+    Path((wid, id)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<SendAnnotationReq>,
+) -> ApiResult<StatusCode> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+
+    let annotation = ctx
+        .browser_annotations
+        .get(&id)
+        .await
+        .map_err(ApiError)?
+        .filter(|a| a.workspace_id == wid)
+        .ok_or_else(|| ApiError(Error::NotFound(format!("browser annotation {id}"))))?;
+
+    let session = ctx
+        .manager
+        .get(&req.session_id)
+        .await
+        .map_err(ApiError)?;
+    if session.workspace_id != wid {
+        return Err(ApiError(Error::NotFound(format!("session {}", req.session_id))));
+    }
+
+    // The mark's title: the owning tab's title when it still exists, else the
+    // annotation's URL (annotations carry no title of their own).
+    let title = match &annotation.tab_id {
+        Some(tid) => ctx
+            .browser_tabs
+            .get(tid)
+            .await
+            .map_err(ApiError)?
+            .map(|t| t.title)
+            .filter(|t| !t.is_empty()),
+        None => None,
+    }
+    .unwrap_or_else(|| annotation.url.clone());
+
+    let block = build_context_block(&annotation, &title);
+    ctx.manager
+        .input(&req.session_id, format!("{block}\n").as_bytes())
+        .await
+        .map_err(ApiError)?;
+    Ok(StatusCode::OK)
+}
+
+/// The `[Browser mark] …` context block sent into a session's input.
+fn build_context_block(annotation: &BrowserAnnotation, title: &str) -> String {
+    let excerpt: String = annotation.excerpt.chars().take(SEND_EXCERPT_MAX_CHARS).collect();
+    format!(
+        "[Browser mark] {url} — \"{title}\"\nSelector: {selector}\nExcerpt:\n{excerpt}\nNote from user: {comment}",
+        url = annotation.url,
+        title = title,
+        selector = annotation.selector,
+        excerpt = excerpt,
+        comment = annotation.comment,
+    )
+}
+
+/// `POST /workspaces/{wid}/browser/vault-save` — `{url, vault_id}` ->
+/// `{note_path}`. Writes an OKF-flavored note (front-matter + summary + one
+/// `## Mark N` section per annotation on the URL) through the vault engine's
+/// own `write_note` — the same call `otto_vault_write` lands on
+/// (`crates/otto-server/src/mcp_outward.rs`).
+async fn vault_save(
+    Path(wid): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<VaultSaveReq>,
+) -> ApiResult<Json<VaultSaveResp>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    if req.url.trim().is_empty() {
+        return Err(ApiError(Error::Invalid("url is required".into())));
+    }
+
+    // The note's title + summary section: the caller's own summary when given
+    // (e.g. already produced via /summarize), else derived from a fresh fetch.
+    let (title, summary) = match &req.summary {
+        Some(s) => {
+            let t = ctx
+                .browser_tabs
+                .list(&wid)
+                .await
+                .map_err(ApiError)?
+                .into_iter()
+                .find(|t| t.url == req.url)
+                .map(|t| t.title)
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| req.url.clone());
+            (t, s.clone())
+        }
+        None => {
+            otto_netguard::check_url(&req.url)
+                .await
+                .map_err(|m| ApiError(Error::Invalid(m)))?;
+            let page = ctx.browser.page(&req.url).await.map_err(engine_err)?;
+            let capped: String = page.markdown.chars().take(SUMMARIZE_MAX_CHARS).collect();
+            (page.title, capped)
+        }
+    };
+
+    let annotations = ctx
+        .browser_annotations
+        .list_for_url(&wid, &req.url)
+        .await
+        .map_err(ApiError)?;
+
+    let path = vault_note_path(&req.url);
+    let content = build_vault_note(&req.url, &title, &summary, &annotations);
+    let meta = ctx
+        .vault
+        .write_note(&wid, req.vault_id, &path, &content, None)
+        .await
+        .map_err(ApiError)?;
+
+    Ok(Json(VaultSaveResp { note_path: meta.path }))
+}
+
+/// Derive a stable, filesystem-safe note path under `browser/` from a URL.
+fn vault_note_path(url: &str) -> String {
+    let slug: String = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let mut collapsed = String::with_capacity(slug.len());
+    let mut last_dash = false;
+    for c in slug.chars() {
+        if c == '-' {
+            if !last_dash {
+                collapsed.push(c);
+            }
+            last_dash = true;
+        } else {
+            collapsed.push(c);
+            last_dash = false;
+        }
+    }
+    let trimmed = collapsed.trim_matches('-');
+    let trimmed = if trimmed.len() > 80 { &trimmed[..80] } else { trimmed };
+    format!("browser/{}.md", if trimmed.is_empty() { "page" } else { trimmed })
+}
+
+/// Build the OKF-flavored note body: front-matter, a `## Summary` section,
+/// then one `## Mark N` section per annotation (selector + excerpt + comment).
+fn build_vault_note(url: &str, title: &str, summary: &str, annotations: &[BrowserAnnotation]) -> String {
+    let saved = Utc::now().format("%Y-%m-%d").to_string();
+    let mut out = format!(
+        "---\nurl: {url}\nsaved: {saved}\ntags: [browser]\n---\n\n# {title}\n\n## Summary\n\n{summary}\n",
+    );
+    for (i, a) in annotations.iter().enumerate() {
+        out.push_str(&format!(
+            "\n## Mark {n}\n\n- Selector: `{selector}`\n- Excerpt: {excerpt}\n- Note: {comment}\n",
+            n = i + 1,
+            selector = a.selector,
+            excerpt = a.excerpt,
+            comment = a.comment,
+        ));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -650,6 +945,18 @@ mod tests {
     async fn test_app() -> (TempDir, Router) {
         let (tmp, _pool, app) = test_app_with_pool().await;
         (tmp, app)
+    }
+
+    /// Like `test_app_with_pool`, but also hands back the `ServerCtx` itself
+    /// (cheap to `Clone`) — needed by tests that must reach the manager/vault
+    /// directly (spawning a real live PTY session; seeding a vault row), which
+    /// the HTTP surface alone can't do.
+    async fn test_ctx_and_app() -> (TempDir, SqlitePool, ServerCtx, Router) {
+        let tmp = TempDir::new().expect("tempdir");
+        let pool = mem_pool().await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let app = browser_router(ctx.clone());
+        (tmp, pool.clone(), ctx, app)
     }
 
     /// Non-root fixture user (root would bypass `require_ws_role` via
@@ -956,5 +1263,306 @@ mod tests {
         let (status, body) = get(&app, "/workspaces/ws2/browser/tabs").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json(&body).as_array().map(|a| a.len()), Some(1));
+    }
+
+    // -----------------------------------------------------------------
+    // build_context_block / build_vault_note / vault_note_path (pure)
+    // -----------------------------------------------------------------
+
+    fn sample_annotation(excerpt: &str, comment: &str) -> BrowserAnnotation {
+        BrowserAnnotation {
+            id: "ann1".into(),
+            workspace_id: "ws1".into(),
+            tab_id: None,
+            url: "https://a.io/page".into(),
+            selector: "#x".into(),
+            excerpt: excerpt.into(),
+            text: "x".into(),
+            comment: comment.into(),
+            color: "yellow".into(),
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn context_block_has_exact_shape() {
+        let ann = sample_annotation("<b>x</b>", "note");
+        let block = build_context_block(&ann, "Page Title");
+        assert_eq!(
+            block,
+            "[Browser mark] https://a.io/page — \"Page Title\"\n\
+             Selector: #x\n\
+             Excerpt:\n\
+             <b>x</b>\n\
+             Note from user: note"
+        );
+    }
+
+    #[test]
+    fn context_block_caps_excerpt() {
+        let long = "x".repeat(SEND_EXCERPT_MAX_CHARS + 500);
+        let ann = sample_annotation(&long, "note");
+        let block = build_context_block(&ann, "T");
+        // The excerpt itself is capped; the rest of the block still follows it.
+        assert!(block.contains(&"x".repeat(SEND_EXCERPT_MAX_CHARS)));
+        assert!(!block.contains(&"x".repeat(SEND_EXCERPT_MAX_CHARS + 1)));
+        assert!(block.ends_with("Note from user: note"));
+    }
+
+    #[test]
+    fn vault_note_path_slugifies_url() {
+        assert_eq!(
+            vault_note_path("https://Example.com/Some/Path?q=1"),
+            "browser/example-com-some-path-q-1.md"
+        );
+        assert_eq!(vault_note_path("http://a.io/"), "browser/a-io.md");
+    }
+
+    #[test]
+    fn vault_note_has_frontmatter_summary_and_marks() {
+        let anns = vec![
+            sample_annotation("<b>one</b>", "first note"),
+            sample_annotation("<i>two</i>", "second note"),
+        ];
+        let note = build_vault_note("https://a.io/page", "A Page", "a short summary", &anns);
+        assert!(note.starts_with("---\nurl: https://a.io/page\n"));
+        assert!(note.contains("tags: [browser]"));
+        assert!(note.contains("# A Page"));
+        assert!(note.contains("## Summary\n\na short summary"));
+        assert!(note.contains("## Mark 1"));
+        assert!(note.contains("Excerpt: <b>one</b>"));
+        assert!(note.contains("Note: first note"));
+        assert!(note.contains("## Mark 2"));
+        assert!(note.contains("Excerpt: <i>two</i>"));
+        assert!(note.contains("Note: second note"));
+    }
+
+    #[test]
+    fn summarize_prompt_carries_sentinel_free_capped_markdown() {
+        let p = build_summarize_prompt("https://a.io", "A Page", "some markdown body");
+        assert!(p.contains("Summarize this page for a developer notebook: A Page (https://a.io)"));
+        assert!(p.contains("some markdown body"));
+    }
+
+    // -----------------------------------------------------------------
+    // send: writes the context block into a REAL live session
+    // -----------------------------------------------------------------
+
+    /// `manager.input()` requires an already-live PTY handle (`Error::
+    /// Conflict("session is not live")` otherwise) and `SessionManager`'s
+    /// `live` map is private to `otto-sessions` — so, unlike the in-crate
+    /// `input_records_capture_probe` test that inserts a handle directly, an
+    /// otto-server test must spawn a REAL session through `manager.create`
+    /// to get one. `sh -c exec cat` echoes whatever is written to its stdin
+    /// straight back out through the pty, so the target session's scrollback
+    /// is exactly what `manager.input` wrote — the same test double / pattern
+    /// the existing agent-session tests rely on for observing PTY input.
+    #[tokio::test]
+    async fn send_writes_context_block_into_live_session() {
+        let (_tmp, pool, ctx, app) = test_ctx_and_app().await;
+        // `sessions.created_by` FKs to `users.id` — root_user() is a synthetic
+        // fixture never written to the table, so a real spawn (unlike the
+        // other tests here, which never touch the `sessions` table) needs it
+        // seeded.
+        seed_user(&pool, "root").await;
+        seed_workspace(&pool, "ws1").await;
+        let ws = ctx.workspaces.get(&"ws1".to_string()).await.expect("ws1");
+
+        let session_dir = TempDir::new().expect("session dir");
+        let spec = otto_pty::CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec cat".into()],
+            cwd: Some(session_dir.path().to_string_lossy().to_string()),
+            env: vec![],
+        };
+        let session = ctx
+            .manager
+            .create(
+                &ws,
+                &"root".to_string(),
+                otto_core::api::CreateSessionReq {
+                    kind: otto_core::domain::SessionKind::Connection,
+                    provider: Some("shell".into()),
+                    title: Some("browser-send-test".into()),
+                    cwd: Some(session_dir.path().to_string_lossy().to_string()),
+                    connection_id: None,
+                    meta: None,
+                },
+                Some(spec),
+            )
+            .await
+            .expect("spawn live test session");
+
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/annotations",
+            serde_json::json!({
+                "url": "https://a.io", "selector": "#x", "excerpt": "<b>x</b>",
+                "text": "x", "comment": "note"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let ann_id = json(&body)["id"].as_str().unwrap().to_string();
+
+        let (status, body) = post_json(
+            &app,
+            &format!("/workspaces/ws1/browser/annotations/{ann_id}/send"),
+            serde_json::json!({"session_id": session.id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+        // Poll the pty's scrollback until `cat` has echoed the write back.
+        let mut seen = String::new();
+        for _ in 0..100 {
+            if let Some(handle) = ctx.manager.live_handle(&session.id) {
+                seen = String::from_utf8_lossy(&handle.scrollback(10_000)).to_string();
+                if seen.contains("Browser mark") {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(seen.contains("[Browser mark] https://a.io"), "got: {seen:?}");
+        assert!(seen.contains("Selector: #x"), "got: {seen:?}");
+        assert!(seen.contains("Note from user: note"), "got: {seen:?}");
+
+        let _ = ctx.manager.kill_session(&session.id).await;
+    }
+
+    #[tokio::test]
+    async fn send_rejects_cross_workspace_session() {
+        let (_tmp, pool, ctx, app) = test_ctx_and_app().await;
+        seed_user(&pool, "root").await;
+        seed_workspace(&pool, "ws1").await;
+        seed_workspace(&pool, "ws2").await;
+        let ws2 = ctx.workspaces.get(&"ws2".to_string()).await.expect("ws2");
+
+        // A live session that belongs to ws2, not ws1.
+        let session_dir = TempDir::new().expect("session dir");
+        let spec = otto_pty::CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec cat".into()],
+            cwd: Some(session_dir.path().to_string_lossy().to_string()),
+            env: vec![],
+        };
+        let session = ctx
+            .manager
+            .create(
+                &ws2,
+                &"root".to_string(),
+                otto_core::api::CreateSessionReq {
+                    kind: otto_core::domain::SessionKind::Connection,
+                    provider: Some("shell".into()),
+                    title: Some("browser-send-test-ws2".into()),
+                    cwd: Some(session_dir.path().to_string_lossy().to_string()),
+                    connection_id: None,
+                    meta: None,
+                },
+                Some(spec),
+            )
+            .await
+            .expect("spawn live test session");
+
+        let (_, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/annotations",
+            serde_json::json!({
+                "url": "https://a.io", "selector": "#x", "excerpt": "e", "text": "t", "comment": "c"
+            }),
+        )
+        .await;
+        let ann_id = json(&body)["id"].as_str().unwrap().to_string();
+
+        let (status, _) = post_json(
+            &app,
+            &format!("/workspaces/ws1/browser/annotations/{ann_id}/send"),
+            serde_json::json!({"session_id": session.id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "session in a different workspace must not be reachable");
+
+        let _ = ctx.manager.kill_session(&session.id).await;
+    }
+
+    // -----------------------------------------------------------------
+    // vault-save: writes a real note file under the test vault
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn vault_save_writes_note_with_mark_section() {
+        let (tmp, pool, ctx, app) = test_ctx_and_app().await;
+        seed_workspace(&pool, "ws1").await;
+        let vault_root = tmp.path().join("vault1");
+        tokio::fs::create_dir_all(&vault_root).await.unwrap();
+        let vault_id = ctx
+            .vault
+            .store()
+            .create_vault("ws1", "v1", &vault_root.to_string_lossy(), true)
+            .await
+            .expect("create vault");
+
+        let (_, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/annotations",
+            serde_json::json!({
+                "url": "https://a.io/page", "selector": "#x", "excerpt": "<b>x</b>",
+                "text": "x", "comment": "worth remembering"
+            }),
+        )
+        .await;
+        assert_eq!(json(&body)["url"], "https://a.io/page");
+
+        let (status, body) = post_json(
+            &app,
+            "/workspaces/ws1/browser/vault-save",
+            serde_json::json!({
+                "url": "https://a.io/page",
+                "vault_id": vault_id,
+                "summary": "a hand-provided summary"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let resp = json(&body);
+        let note_path = resp["note_path"].as_str().unwrap().to_string();
+        assert_eq!(note_path, "browser/a-io-page.md");
+
+        let on_disk = tokio::fs::read_to_string(vault_root.join(&note_path))
+            .await
+            .expect("note written to disk");
+        assert!(on_disk.contains("url: https://a.io/page"));
+        assert!(on_disk.contains("tags: [browser]"));
+        assert!(on_disk.contains("## Summary"));
+        assert!(on_disk.contains("a hand-provided summary"));
+        assert!(on_disk.contains("## Mark 1"));
+        assert!(on_disk.contains("worth remembering"));
+    }
+
+    #[tokio::test]
+    async fn vault_save_requires_editor_role() {
+        let (_tmp, pool, ctx, app) = test_ctx_and_app().await;
+        seed_user(&pool, "viewer1").await;
+        seed_workspace(&pool, "ws1").await;
+        set_member(&pool, "ws1", "viewer1", "viewer").await;
+        let viewer = non_root_user("viewer1");
+
+        let vault_id = ctx
+            .vault
+            .store()
+            .create_vault("ws1", "v1", "/tmp/otto-test-vault-browser-role", true)
+            .await
+            .expect("create vault");
+
+        let (status, _) = send_as(
+            &app,
+            Method::POST,
+            "/workspaces/ws1/browser/vault-save",
+            Some(serde_json::json!({"url": "https://a.io/page", "vault_id": vault_id})),
+            &viewer,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }

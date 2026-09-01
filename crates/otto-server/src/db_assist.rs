@@ -495,7 +495,9 @@ pub async fn query_tool(
 
 /// Resolve the agent provider: explicit body value wins, else the workspace
 /// default, else the global default, else `claude` (mirrors `db_explain_with_agent`).
-async fn resolve_provider(ctx: &ServerCtx, ws: &otto_core::domain::Workspace, body: Option<&str>) -> String {
+/// `pub(crate)` — reused by `routes::browser`'s summarize handler, which needs
+/// the identical resolution order but has no per-call provider override field.
+pub(crate) async fn resolve_provider(ctx: &ServerCtx, ws: &otto_core::domain::Workspace, body: Option<&str>) -> String {
     if let Some(p) = body.map(str::trim).filter(|p| !p.is_empty()) {
         return p.to_string();
     }

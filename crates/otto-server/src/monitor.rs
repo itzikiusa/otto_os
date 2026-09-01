@@ -552,6 +552,7 @@ const BACKGROUND_SOURCES: &[&str] = &[
     "canvas_assist",
     "mockup_assist",
     "db_assist",
+    "browser_summarize",
 ];
 
 /// True when the session was spawned by a background runner (see

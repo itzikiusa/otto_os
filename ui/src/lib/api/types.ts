@@ -6202,3 +6202,42 @@ export interface BrowserPage {
   /** `true` when the plain-fetch fallback ran (no JS execution). */
   degraded: boolean;
 }
+
+/** `POST /workspaces/{wid}/browser/summarize` request — `{url}`. The daemon
+ *  fetches it (netguard-checked) and runs one short-lived agent turn to
+ *  summarize the (server-side, 30k-char-capped) markdown. */
+export interface BrowserSummarizeReq {
+  url: string;
+}
+
+/** `POST /workspaces/{wid}/browser/summarize` response. */
+export interface BrowserSummarizeResp {
+  summary: string;
+  /** Which engine produced the underlying page fetch — see `BrowserPage.engine`. */
+  engine: string;
+  degraded: boolean;
+}
+
+/** `POST /workspaces/{wid}/browser/annotations/{id}/send` request. `session_id`
+ *  must be a session in the SAME workspace as the route's `{wid}` — a 404
+ *  otherwise. Writes a `[Browser mark] …` context block into that session's
+ *  input (same effect as `POST /sessions/{id}/input` with `submit:true`). */
+export interface BrowserSendAnnotationReq {
+  session_id: Id;
+}
+
+/** `POST /workspaces/{wid}/browser/vault-save` request — `{url, vault_id}`.
+ *  `summary` is optional: pass it (e.g. from a prior `/summarize` call) to
+ *  skip a second page fetch; omitted, the daemon derives the note's summary
+ *  section from a fresh fetch of `url`. */
+export interface BrowserVaultSaveReq {
+  url: string;
+  vault_id: number;
+  summary?: string;
+}
+
+/** `POST /workspaces/{wid}/browser/vault-save` response — the vault-relative
+ *  path the note was written to (e.g. `browser/example-com-page.md`). */
+export interface BrowserVaultSaveResp {
+  note_path: string;
+}

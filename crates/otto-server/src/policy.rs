@@ -897,6 +897,15 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{wid}/browser/page" {
         return Require(Browser, Edit);
     }
+    // Summarize (agent turn over a fetched page), send-to-session (writes into
+    // a managed session's input), and vault-save (writes a note) are all
+    // mutations gated the same as the rest of the module.
+    if p == "/workspaces/{wid}/browser/summarize"
+        || p == "/workspaces/{wid}/browser/vault-save"
+        || p == "/workspaces/{wid}/browser/annotations/{id}/send"
+    {
+        return Require(Browser, Edit);
+    }
 
     // ----------------------------------------------------------------------
     // 4. Default — fail closed.
@@ -1774,6 +1783,25 @@ mod tests {
         assert_eq!(
             pol(Method::POST, "/api/v1/app/kill-sessions"),
             Require(Agents, Edit)
+        );
+    }
+
+    #[test]
+    fn browser_summarize_send_and_vault_save_are_edit() {
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{wid}/browser/summarize"),
+            Require(Browser, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{wid}/browser/vault-save"),
+            Require(Browser, Edit)
+        );
+        assert_eq!(
+            pol(
+                Method::POST,
+                "/api/v1/workspaces/{wid}/browser/annotations/{id}/send"
+            ),
+            Require(Browser, Edit)
         );
     }
 }
