@@ -2795,3 +2795,42 @@ machine** — what an agent CLI needs to open it, and why the terminal's
 image-paste flow uploads through `POST /snips` before typing the path into the
 PTY: the browser may be on a different machine entirely.
 Clipboard failure degrades to `copied:false` (the snip itself is always saved).
+
+## Browser (reader/annotate tabs + on-demand page fetch)
+
+In-app reader tabs (workspace-scoped) plus DOM annotations, backed by
+`otto-browser`'s Lightpanda-sidecar-or-plain-fetch engine (`BrowserService`,
+lazily started on the first page fetch — see `crate::routes::browser::
+BrowserEngineHandle`). Annotations key on URL rather than tab id, so a mark
+survives the tab that made it being closed — it reattaches to any tab that
+later opens the same URL (`tab_id` is a best-effort origin hint only).
+Feature-gated by `Feature::Browser` (read=View, write=Edit incl. `/page`);
+every handler additionally enforces the workspace-role axis, and the flat
+by-id routes load the row first and check the role on its `workspace_id` (the
+IDOR guard, like Scheduled Tasks). Persistence: `otto_state::browser`
+(`BrowserTab`, `BrowserAnnotation`).
+
+`GET /browser/page` fetches a caller-supplied URL **on the daemon's behalf**,
+so it netguard-checks it (`otto_netguard::check_url`) before the fetch — a
+blocked address (loopback/private/metadata) is a `400`. Navigating a
+reader-mode tab (`PATCH .../tabs/{id}` with a new `url` while `mode ==
+"reader"`) runs the same fetch pipeline and adopts the fetched page's title;
+navigating a non-reader-mode tab (`mode == "live"`, an embedded iframe) just
+records the given `url`/`title` with no fetch. Broadcasts `browser_tab_updated`
+/ `browser_annotation_added` (see `docs/contracts/ws.md`).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /api/v1/workspaces/{wid}/browser/tabs | ws viewer · Browser View | — | `BrowserTab[]` |
+| POST /api/v1/workspaces/{wid}/browser/tabs | ws editor · Browser Edit | `{url}` | `BrowserTab` (created in `mode:"reader"`) |
+| PATCH /api/v1/browser/tabs/{id} | ws editor · Browser Edit | `{url?, title?, mode?}` (`mode` ∈ `reader`\|`live`) | `BrowserTab` |
+| DELETE /api/v1/browser/tabs/{id} | ws editor · Browser Edit | — | 204 |
+| GET /api/v1/workspaces/{wid}/browser/page?url=… | ws editor · Browser Edit | — | `{url, title, markdown, html, engine, degraded}` — netguard-checked; `degraded:true` means the plain-fetch fallback ran (no JS) |
+| GET /api/v1/workspaces/{wid}/browser/annotations | ws viewer · Browser View | query `url?` (filters to one page) | `BrowserAnnotation[]` |
+| POST /api/v1/workspaces/{wid}/browser/annotations | ws editor · Browser Edit | `{url, selector, excerpt, text, comment?, color?, tab_id?}` (`color` defaults `"yellow"`) | `BrowserAnnotation` |
+| PATCH /api/v1/browser/annotations/{id} | ws editor · Browser Edit | `{comment}` | `BrowserAnnotation` |
+| DELETE /api/v1/browser/annotations/{id} | ws editor · Browser Edit | — | 204 |
+
+`BrowserTab {id, workspace_id, url, title, mode, created_at}`.
+`BrowserAnnotation {id, workspace_id, tab_id, url, selector, excerpt, text,
+comment, color, created_at}`.

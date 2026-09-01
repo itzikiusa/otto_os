@@ -4,6 +4,7 @@ pub mod activity;
 pub mod admin_sessions;
 pub mod api_client;
 pub mod backup;
+pub mod browser;
 pub mod capabilities;
 pub mod channel_webhook;
 pub mod swarm_webhook;
@@ -461,4 +462,6 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/workflow-runs/{id}/approve", post(workflows::approve_run))
         // --- Snips (screenshot → annotate → clipboard) -------------------
         .merge(snips::snips_routes())
+        // --- Browser (reader/annotate tabs + on-demand page fetch) -------
+        .merge(browser::routes())
 }

@@ -530,6 +530,15 @@ async fn run(cfg: Config) -> Result<(), String> {
         proof_locks: otto_server::proof::new_locks(),
         runs: otto_state::RunsRepo::new(pool.clone()),
         runs_engine: otto_server::run_engine::RunEngine::new(),
+        browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
+        browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
+        // Config is captured now; the Lightpanda sidecar itself is only
+        // located/started on the first `/browser/page` request (see
+        // `BrowserEngineHandle`) so daemon boot never waits on it.
+        browser: Arc::new(otto_server::routes::browser::BrowserEngineHandle::new(
+            std::env::var("OTTO_LIGHTPANDA_BIN").ok(),
+            cfg.data_dir.clone(),
+        )),
     };
 
     // Spawn enabled runtime plugins (sidecar processes Otto supervises + proxies).

@@ -136,7 +136,7 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `admin`, or root — and only after the `viewer`+ membership gate on the event's
 `workspace_id`; other **workspace-scoped events** (improvement, swarm) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**broadcast events** (`Notice`) reach every authenticated client. There are 42
+**broadcast events** (`Notice`) reach every authenticated client. There are 44
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -747,3 +747,26 @@ Canvas scene is attached to or detached from an agent session.
   panel (`CanvasPanel.svelte`) re-fetches `GET /sessions/{id}/canvas-refs` when
   the event's `session_id` matches the open session.
 - TypeScript type: `{ type: 'canvas_refs_changed'; workspace_id: Id; session_id: Id }`.
+
+### `browser_tab_updated` / `browser_annotation_added`
+
+Workspace-scoped. Emitted by `crates/otto-server/src/routes/browser.rs` when a
+browser tab is created or navigated (including the reader-mode fetch pipeline
+adopting the fetched page's title) and when a DOM annotation is created. `tab`
+and `annotation` are the serialized `otto_state::browser::{BrowserTab,
+BrowserAnnotation}` rows (opaque here — otto-core can't depend on otto-state,
+like `canvas_updated`'s `doc`).
+
+```json
+{ "type": "browser_tab_updated", "workspace_id": "<Id>", "tab": {"id":"…","workspace_id":"…","url":"…","title":"…","mode":"reader","created_at":"…"} }
+{ "type": "browser_annotation_added", "workspace_id": "<Id>", "annotation": {"id":"…","workspace_id":"…","tab_id":"…","url":"…","selector":"…","excerpt":"…","text":"…","comment":"…","color":"…","created_at":"…"} }
+```
+
+- `browser_tab_updated` — emitted after `POST /workspaces/{wid}/browser/tabs`
+  and `PATCH /browser/tabs/{id}` (a mode change and/or navigation).
+- `browser_annotation_added` — emitted after
+  `POST /workspaces/{wid}/browser/annotations`.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`), like
+  the other canvas-family live-edit events.
+- TypeScript types: `{ type: 'browser_tab_updated'; workspace_id: Id; tab: unknown }`
+  and `{ type: 'browser_annotation_added'; workspace_id: Id; annotation: unknown }`.

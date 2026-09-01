@@ -881,6 +881,23 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(RunWithOtto, Edit);
     }
 
+    // ---- Browser (reader/annotate tabs + on-demand page fetch) ---------------
+    // Workspace-axis list/create + the page fetch; flat by-id routes read/mutate
+    // a tab or annotation. `/page` fetches a caller-supplied URL on the daemon's
+    // behalf (netguard-checked in the handler), so it's gated Edit like the other
+    // mutations, not View. The handler does the orthogonal workspace-membership
+    // check (flat routes load the row and `require_ws_role` on its
+    // workspace_id — the IDOR guard, same as Scheduled Tasks above).
+    if p == "/workspaces/{wid}/browser/tabs" || p == "/workspaces/{wid}/browser/annotations" {
+        return Require(Browser, if get { View } else { Edit });
+    }
+    if p == "/browser/tabs/{id}" || p == "/browser/annotations/{id}" {
+        return Require(Browser, Edit);
+    }
+    if p == "/workspaces/{wid}/browser/page" {
+        return Require(Browser, Edit);
+    }
+
     // ----------------------------------------------------------------------
     // 4. Default — fail closed.
     // ----------------------------------------------------------------------

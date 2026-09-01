@@ -163,6 +163,14 @@ pub struct ServerCtx {
     /// Per-run in-flight guard so a racing reaper / double-approve can't
     /// double-advance a run.
     pub runs_engine: std::sync::Arc<crate::run_engine::RunEngine>,
+    // -- Browser -------------------------------------------------------
+    /// In-app reader/annotate tabs (workspace-scoped).
+    pub browser_tabs: otto_state::BrowserTabsRepo,
+    /// DOM annotations, keyed on URL so they survive the tab that made them.
+    pub browser_annotations: otto_state::BrowserAnnotationsRepo,
+    /// Lazily-started page-fetch engine (Lightpanda sidecar autodetect, else
+    /// plain-fetch) — see `crate::routes::browser::BrowserEngineHandle`.
+    pub browser: std::sync::Arc<crate::routes::browser::BrowserEngineHandle>,
 }
 
 impl ServerCtx {

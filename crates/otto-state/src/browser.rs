@@ -95,6 +95,19 @@ impl BrowserTabsRepo {
         .map_err(dberr("browser tabs"))
     }
 
+    /// Load one tab by id — the flat `/browser/tabs/{id}` routes need this to
+    /// resolve `workspace_id` for the IDOR guard (`require_ws_role`) before
+    /// mutating, mirroring `BrowserAnnotationsRepo::get`.
+    pub async fn get(&self, id: &Id) -> Result<Option<BrowserTab>> {
+        sqlx::query_as::<_, BrowserTab>(
+            "SELECT id, workspace_id, url, title, mode, created_at FROM browser_tabs WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("browser tab"))
+    }
+
     pub async fn update_nav(&self, id: &Id, url: &str, title: &str) -> Result<()> {
         sqlx::query("UPDATE browser_tabs SET url = ?, title = ? WHERE id = ?")
             .bind(url)
@@ -250,8 +263,12 @@ mod tests {
         let listed = repo.list("ws1").await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].title, "Example A");
+        let got = repo.get(&tab.id).await.unwrap().expect("tab found");
+        assert_eq!(got.workspace_id, "ws1");
+        assert_eq!(got.title, "Example A");
         repo.delete(&tab.id).await.unwrap();
         assert!(repo.list("ws1").await.unwrap().is_empty());
+        assert!(repo.get(&tab.id).await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -2401,6 +2401,8 @@ pub enum Feature {
     ScheduledTasks,
     /// Run with Otto — the one-button source→PR-draft pipeline.
     RunWithOtto,
+    /// Browser — in-app reader/annotate tabs + on-demand page fetch.
+    Browser,
 }
 
 impl Feature {
@@ -2431,6 +2433,7 @@ impl Feature {
             "mission_control" => Some(Self::MissionControl),
             "scheduled_tasks" => Some(Self::ScheduledTasks),
             "run_with_otto" => Some(Self::RunWithOtto),
+            "browser" => Some(Self::Browser),
             _ => None,
         }
     }
@@ -2462,6 +2465,7 @@ impl Feature {
             Self::MissionControl => "mission_control",
             Self::ScheduledTasks => "scheduled_tasks",
             Self::RunWithOtto => "run_with_otto",
+            Self::Browser => "browser",
         }
     }
 }
@@ -2480,6 +2484,8 @@ mod tests {
         assert_eq!(Feature::ScheduledTasks.as_str(), "scheduled_tasks");
         assert_eq!(Feature::parse("run_with_otto"), Some(Feature::RunWithOtto));
         assert_eq!(Feature::RunWithOtto.as_str(), "run_with_otto");
+        assert_eq!(Feature::parse("browser"), Some(Feature::Browser));
+        assert_eq!(Feature::Browser.as_str(), "browser");
     }
 
     #[test]

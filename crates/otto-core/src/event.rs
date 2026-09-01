@@ -387,6 +387,21 @@ pub enum Event {
         workspace_id: Id,
         session_id: Id,
     },
+    /// A browser tab was created, navigated, or had its mode changed. The open
+    /// Browser page re-fetches (or applies in place) the matching tab. `tab` is
+    /// the serialized `otto_state::browser::BrowserTab` (opaque here — otto-core
+    /// can't depend on otto-state, like `CanvasUpdated`'s `doc`).
+    BrowserTabUpdated {
+        workspace_id: Id,
+        tab: serde_json::Value,
+    },
+    /// A DOM annotation was added to a page. The open Browser page appends it
+    /// for the matching tab/URL. `annotation` is the serialized
+    /// `otto_state::browser::BrowserAnnotation`.
+    BrowserAnnotationAdded {
+        workspace_id: Id,
+        annotation: serde_json::Value,
+    },
 }
 
 #[cfg(test)]

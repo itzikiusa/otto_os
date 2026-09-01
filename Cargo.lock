@@ -3740,6 +3740,7 @@ dependencies = [
  "http-body-util",
  "mime_guess",
  "otto-brokers",
+ "otto-browser",
  "otto-canvas",
  "otto-channels",
  "otto-connections",

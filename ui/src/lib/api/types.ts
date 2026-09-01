@@ -1131,6 +1131,20 @@ export type OttoEvent =
       type: 'canvas_refs_changed';
       workspace_id: Id;
       session_id: Id;
+    }
+  | {
+      /** A browser tab was created or navigated (a reader-mode navigation
+       *  adopts the fetched page's title). `tab` is the full `BrowserTab`. */
+      type: 'browser_tab_updated';
+      workspace_id: Id;
+      tab: unknown;
+    }
+  | {
+      /** A DOM annotation was added to a page. `annotation` is the full
+       *  `BrowserAnnotation`. */
+      type: 'browser_annotation_added';
+      workspace_id: Id;
+      annotation: unknown;
     };
 
 // ---------------------------------------------------------------------------
@@ -6145,4 +6159,46 @@ export interface UploadSnipReq {
  *  is a degraded success — the snip itself is saved). */
 export interface SnipCopyResp {
   copied: boolean;
+}
+
+// ── Browser (reader/annotate tabs + on-demand page fetch) ───────────────────
+
+/** A workspace-scoped browser tab. Mirrors `otto_state::browser::BrowserTab`. */
+export interface BrowserTab {
+  id: Id;
+  workspace_id: Id;
+  url: string;
+  title: string;
+  /** `"reader"` (fetched + rendered as markdown/HTML) or `"live"` (embedded
+   *  iframe; the daemon never fetches it). */
+  mode: 'reader' | 'live';
+  created_at: string;
+}
+
+/** A DOM annotation, keyed on URL (survives the tab that made it being
+ *  closed). Mirrors `otto_state::browser::BrowserAnnotation`. */
+export interface BrowserAnnotation {
+  id: Id;
+  workspace_id: Id;
+  tab_id: Id | null;
+  url: string;
+  selector: string;
+  excerpt: string;
+  text: string;
+  comment: string;
+  color: string;
+  created_at: string;
+}
+
+/** `GET /workspaces/{wid}/browser/page?url=…` response — a fetched page,
+ *  netguard-checked server-side before the fetch. */
+export interface BrowserPage {
+  url: string;
+  title: string;
+  markdown: string;
+  html: string;
+  /** `"lightpanda"` | `"fallback"` | `"mock"` — which engine produced this page. */
+  engine: string;
+  /** `true` when the plain-fetch fallback ran (no JS execution). */
+  degraded: boolean;
 }

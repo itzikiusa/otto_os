@@ -183,7 +183,7 @@ async fn test_ctx(pool: &SqlitePool, data_dir: PathBuf) -> ServerCtx {
         plugins: Arc::new(otto_server::plugins::PluginManager::new(
             otto_state::PluginsRepo::new(pool.clone()),
             PathBuf::from("/tmp/otto-test-plugins-snips"),
-            data_dir,
+            data_dir.clone(),
             "http://127.0.0.1:7700/api/v1/plugin-host".into(),
         )),
         manager,
@@ -244,6 +244,12 @@ review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::
         proof_locks: otto_server::proof::new_locks(),
         runs: otto_state::RunsRepo::new(pool.clone()),
         runs_engine: otto_server::run_engine::RunEngine::new(),
+        browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
+        browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
+        browser: Arc::new(otto_server::routes::browser::BrowserEngineHandle::new(
+            None,
+            data_dir,
+        )),
     }
 }
 

@@ -251,6 +251,10 @@ fn scope_of(event: &Event) -> Scope<'_> {
         // A session's referenced-scenes set changed — workspace-member scoped like
         // the other canvas events (Canvas is a workspace-shared tool).
         | Event::CanvasRefsChanged { workspace_id, .. }
+        // Browser tab/annotation updates go to the workspace's members, like
+        // the other canvas-family live-edit events.
+        | Event::BrowserTabUpdated { workspace_id, .. }
+        | Event::BrowserAnnotationAdded { workspace_id, .. }
         // Live mockup-source edits + the mockup-agent-started signal go to the
         // story's workspace members (same delivery as canvas).
         | Event::MockupUpdated { workspace_id, .. }
