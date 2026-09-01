@@ -1,8 +1,9 @@
 <script lang="ts">
   // Explicit merge approval. Opened by dropping one local branch onto another in
   // the graph's refs panel — NOTHING merges until the user clicks Merge here.
-  // Shows source → target, a strategy picker, and a dirty-tree warning that
-  // DISABLES merging when the working tree has uncommitted changes.
+  // Shows source → target, a strategy picker, a dry-run conflict preview, and a
+  // dirty-tree notice: the merge proceeds via stash → merge → pop (auto_stash),
+  // it is NOT blocked. A predicted conflict warns and routes into the resolver.
   import type {
     LocalMergeStrategy,
     MergePreview,
@@ -37,6 +38,8 @@
   let strategy = $state<LocalMergeStrategy>('merge_commit');
   let merging = $state(false);
   let error = $state<string | null>(null);
+  /** A next-step hint under the raw error, when we recognize the failure. */
+  let errorHint = $state<string | null>(null);
 
   // Read the current repo status for the dirty-tree check. Seed from the store
   // (fast, avoids a flash) and always refresh from the daemon so we never merge
@@ -89,6 +92,7 @@
     if (!canMerge) return;
     merging = true;
     error = null;
+    errorHint = null;
     try {
       // On a dirty tree, stash → merge → pop (the dry-run already cleared conflicts).
       const result = await git.mergeBranch(repoId, {
@@ -114,6 +118,16 @@
       onmerged(result);
     } catch (e) {
       error = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
+      // Turn the daemon's message into a next step where we recognize it,
+      // instead of leaving the raw git line as a dead end.
+      if (/already in progress/i.test(error)) {
+        errorHint =
+          'Finish or abort the in-progress operation first — open the "Resolve conflicts" tab.';
+      } else if (/commit your changes|stash|overwritten/i.test(error)) {
+        errorHint = 'Commit or stash your working changes, then retry the merge.';
+      } else if (/ff-only|fast-forward/i.test(error)) {
+        errorHint = 'A fast-forward isn’t possible — pick another strategy and retry.';
+      }
     } finally {
       merging = false;
     }
@@ -197,7 +211,10 @@
     {#if error}
       <div class="err">
         <Icon name="x" size={13} />
-        <span>{error}</span>
+        <span>
+          {error}
+          {#if errorHint}<br /><strong>{errorHint}</strong>{/if}
+        </span>
       </div>
     {/if}
   </div>

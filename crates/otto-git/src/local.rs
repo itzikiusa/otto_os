@@ -101,6 +101,10 @@ impl LocalGit {
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.repo_path)
             .env("GIT_TERMINAL_PROMPT", "0")
+            // Force English output: every error classification here
+            // (`local_refusal`, "CONFLICT", "has no upstream branch", …) matches
+            // git's English wording, which a non-English LANG silently breaks.
+            .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -206,7 +210,62 @@ impl LocalGit {
         let out = self
             .run(&["status", "--porcelain=v2", "--branch", "--untracked-files=all"])
             .await?;
-        Ok(crate::parse::parse_status(&out))
+        let mut st = crate::parse::parse_status(&out);
+        st.op_in_progress = self.op_in_progress().await.map(str::to_string);
+        Ok(st)
+    }
+
+    /// Absolute path of this worktree's git dir: `.git` when it's a directory,
+    /// or the `gitdir:` target when `.git` is a file (linked worktree /
+    /// submodule). Pure filesystem — called on every `status()`, so it must not
+    /// cost a git process.
+    async fn git_dir(&self) -> Option<PathBuf> {
+        let dot = self.repo_path.join(".git");
+        match tokio::fs::metadata(&dot).await {
+            Ok(m) if m.is_dir() => Some(dot),
+            Ok(_) => {
+                let text = tokio::fs::read_to_string(&dot).await.ok()?;
+                let rel = text.strip_prefix("gitdir:")?.trim();
+                let p = Path::new(rel);
+                Some(if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.repo_path.join(p)
+                })
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Which multi-step git operation is underway in this worktree, if any:
+    /// "rebase" | "merge" | "cherry_pick" | "revert". Presence-of-state-file
+    /// checks mirroring git's own wt-status logic. Rebase is checked FIRST —
+    /// `rebase -r` can hold a MERGE_HEAD mid-rebase, and "rebase" is the label
+    /// whose abort/continue actually applies then.
+    pub async fn op_in_progress(&self) -> Option<&'static str> {
+        let gd = self.git_dir().await?;
+        for (file, op) in [
+            ("rebase-merge", "rebase"),
+            ("rebase-apply", "rebase"),
+            ("MERGE_HEAD", "merge"),
+            ("CHERRY_PICK_HEAD", "cherry_pick"),
+            ("REVERT_HEAD", "revert"),
+        ] {
+            if tokio::fs::metadata(gd.join(file)).await.is_ok() {
+                return Some(op);
+            }
+        }
+        None
+    }
+
+    /// True when a `merge --squash` left its staged result pending (the state
+    /// `merge_abort` may discard with `reset --hard`). SQUASH_MSG is the only
+    /// marker git leaves for it.
+    async fn squash_pending(&self) -> bool {
+        match self.git_dir().await {
+            Some(gd) => tokio::fs::metadata(gd.join("SQUASH_MSG")).await.is_ok(),
+            None => false,
+        }
     }
 
     pub async fn branches(&self) -> Result<Vec<BranchInfo>> {
@@ -911,7 +970,7 @@ impl LocalGit {
                 self.run(&["checkout", "-b", branch]).await?;
             }
         } else {
-            self.run(&["checkout", branch]).await?;
+            self.run(&["checkout", "--end-of-options", branch]).await?;
         }
         Ok(())
     }
@@ -931,8 +990,18 @@ impl LocalGit {
         let mut steps: Vec<String> = Vec::new();
         let dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
         if dirty {
-            self.run(&["stash", "push", "-m", "otto: auto-stash for branch switch"])
-                .await?;
+            // `--include-untracked`: without it new files survive the stash and
+            // the pull below can still die with "untracked working tree files
+            // would be overwritten by merge" — the exact failure this stash
+            // exists to prevent.
+            self.run(&[
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                "otto: auto-stash for branch switch",
+            ])
+            .await?;
             steps.push("stashed local changes".to_string());
         }
         let local = self
@@ -962,7 +1031,18 @@ impl LocalGit {
                     } else {
                         ""
                     };
-                    return Err(Error::Upstream(format!("pull failed: {e}{kept}")));
+                    // Preserve the classification `pull()` already computed: a
+                    // 409-able local refusal or conflicted merge must NOT come
+                    // back as Upstream/502 — the UI reads a 502 as a provider
+                    // outage and raises the global banner (the original
+                    // "pull failed → 502" bug lived exactly here).
+                    let msg = format!("pull failed: {e}{kept}");
+                    return Err(match e {
+                        Error::Conflict(_) => Error::Conflict(msg),
+                        Error::Invalid(_) => Error::Invalid(msg),
+                        Error::NotFound(_) => Error::NotFound(msg),
+                        _ => Error::Upstream(msg),
+                    });
                 }
             }
         }
@@ -1221,6 +1301,42 @@ impl LocalGit {
         Ok(out.output)
     }
 
+    /// Pull with an automatic stash → pull → pop around a dirty tree (the
+    /// opt-in `auto_stash` pull the UI offers when a plain pull is refused with
+    /// "commit or stash first"). Returns the pull outcome plus a human note
+    /// about what happened to the stashed changes.
+    ///
+    /// Contract mirrors [`Self::merge_branch`]'s auto-stash: a pull that merges
+    /// with CONFLICTS leaves the changes STASHED (popping onto a half-merged
+    /// tree would bury them) and says so; a failed pull pops the stash back so
+    /// the tree is exactly as it was.
+    pub async fn pull_autostash(&self, token: Option<String>) -> Result<(PullOutcome, Option<String>)> {
+        let dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
+        if !dirty {
+            return Ok((self.pull_outcome(token).await?, None));
+        }
+        self.stash_save().await?;
+        match self.pull_outcome(token).await {
+            Ok(out) if out.conflicted_files.is_empty() => {
+                let note = self.pop_after_merge().await;
+                Ok((out, note))
+            }
+            Ok(out) => Ok((
+                out,
+                Some(
+                    "The pull merged with conflicts. Your uncommitted changes stay stashed — \
+                     resolve the conflicts and commit, then run `git stash pop` to restore them."
+                        .into(),
+                ),
+            )),
+            Err(e) => {
+                // The refused pull never touched the tree — restore it.
+                let _ = self.stash_pop().await;
+                Err(e)
+            }
+        }
+    }
+
     pub async fn fetch(&self, token: Option<String>) -> Result<String> {
         self.run_remote(&["fetch", "--prune"], token).await
     }
@@ -1264,19 +1380,41 @@ impl LocalGit {
 
     // -- graph context-menu ops (commit / branch / tag) ---------------------
 
-    /// Cherry-pick a single commit onto the current branch. A conflicting pick
-    /// exits non-zero → `Err` with git's stderr (the caller surfaces it; the
-    /// graph UI does NOT auto-open the conflict resolver).
+    /// Cherry-pick a single commit onto the current branch. A CONFLICTING pick
+    /// is a normal outcome, not an error: git leaves CHERRY_PICK_HEAD + the
+    /// unmerged paths, `status()` reports `op_in_progress:"cherry_pick"` with
+    /// the conflicted files, and the UI routes into the resolver. (Previously a
+    /// conflicting pick surfaced as a bare 502 AND stranded the sequencer state
+    /// with no way to continue or abort it from the app.)
     pub async fn cherry_pick(&self, sha: &str) -> Result<()> {
-        self.run(&["cherry-pick", sha]).await?;
-        Ok(())
+        self.op_conflict_as_result(&["cherry-pick", "--end-of-options", sha])
+            .await
     }
 
     /// Revert a single commit, committing the inverse with `--no-edit`. A
-    /// conflicting revert exits non-zero → `Err` with git's stderr.
+    /// conflicting revert is a normal outcome (see [`Self::cherry_pick`]).
     pub async fn revert(&self, sha: &str) -> Result<()> {
-        self.run(&["revert", "--no-edit", sha]).await?;
-        Ok(())
+        self.op_conflict_as_result(&["revert", "--no-edit", "--end-of-options", sha])
+            .await
+    }
+
+    /// Run a sequencer op (cherry-pick/revert) treating a conflict as success —
+    /// the caller returns the fresh status, which now carries the op + the
+    /// conflicted paths. Anything else non-zero is a classified error.
+    async fn op_conflict_as_result(&self, args: &[&str]) -> Result<()> {
+        let (ok, stdout, stderr, code) = self.run_raw(args, &[]).await?;
+        if ok {
+            return Ok(());
+        }
+        let combined = format!("{stdout}\n{stderr}");
+        let conflicted = combined.contains("CONFLICT")
+            || combined.contains("could not apply")
+            || combined.contains("could not revert")
+            || !self.conflicted_paths().await.unwrap_or_default().is_empty();
+        if conflicted {
+            return Ok(());
+        }
+        Err(upstream_err(&stderr, &stdout, code))
     }
 
     /// Create a branch `name`, optionally based at `start_point` (a commit/branch
@@ -1305,9 +1443,9 @@ impl LocalGit {
             return Ok(());
         }
         let mut args: Vec<&str> = if checkout {
-            vec!["checkout", "-b", name]
+            vec!["checkout", "-b", name, "--end-of-options"]
         } else {
-            vec!["branch", name]
+            vec!["branch", "--end-of-options", name]
         };
         if let Some(sp) = sp {
             args.push(sp);
@@ -1319,7 +1457,7 @@ impl LocalGit {
     /// Delete a local branch. `force=true` → `-D` (drops unmerged work), else
     /// `-d` (refuses to delete an unmerged branch).
     pub async fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
-        self.run(&["branch", if force { "-D" } else { "-d" }, name])
+        self.run(&["branch", if force { "-D" } else { "-d" }, "--end-of-options", name])
             .await?;
         Ok(())
     }
@@ -1372,7 +1510,7 @@ impl LocalGit {
 
     /// Rename local branch `from` → `to` (`git branch -m`).
     pub async fn rename_branch(&self, from: &str, to: &str) -> Result<()> {
-        self.run(&["branch", "-m", from, to]).await?;
+        self.run(&["branch", "-m", "--end-of-options", from, to]).await?;
         Ok(())
     }
 
@@ -1381,10 +1519,11 @@ impl LocalGit {
     pub async fn create_tag(&self, name: &str, sha: &str, message: Option<&str>) -> Result<()> {
         match message.filter(|m| !m.is_empty()) {
             Some(msg) => {
-                self.run(&["tag", "-a", name, "-m", msg, sha]).await?;
+                self.run(&["tag", "-a", "-m", msg, "--end-of-options", name, sha])
+                    .await?;
             }
             None => {
-                self.run(&["tag", name, sha]).await?;
+                self.run(&["tag", "--end-of-options", name, sha]).await?;
             }
         }
         Ok(())
@@ -1399,7 +1538,7 @@ impl LocalGit {
 
     /// Delete a local tag (`git tag -d <name>`).
     pub async fn delete_tag(&self, name: &str) -> Result<()> {
-        self.run(&["tag", "-d", name]).await?;
+        self.run(&["tag", "-d", "--end-of-options", name]).await?;
         Ok(())
     }
 
@@ -1617,12 +1756,21 @@ impl LocalGit {
         strategy: LocalMergeStrategy,
         auto_stash: bool,
     ) -> Result<MergeResult> {
-        let already_merging = self.is_merging().await;
+        // Refuse to START a merge over an unfinished one (or a rebase /
+        // cherry-pick / revert). The old "already merging" exemption then
+        // checked out `target`, which git refuses with "you need to resolve
+        // your current index first" — surfaced as a raw 502. Continuing an
+        // in-progress merge goes through merge/commit, never through here.
+        if let Some(op) = self.op_in_progress().await {
+            return Err(Error::Conflict(format!(
+                "a {} is already in progress — resolve its conflicts or abort it first",
+                op.replace('_', "-"),
+            )));
+        }
 
-        // Dirty-tree handling (continuing an in-progress merge is exempt — its
-        // working-tree conflicts are expected). Either auto-stash, or refuse.
+        // Dirty-tree handling: either auto-stash, or refuse.
         let mut stashed = false;
-        if !already_merging && self.working_dirty().await? {
+        if self.working_dirty().await? {
             if auto_stash {
                 self.stash_save().await?;
                 stashed = true;
@@ -1652,16 +1800,17 @@ impl LocalGit {
                 "merge",
                 "--no-ff",
                 "--no-edit",
+                "--end-of-options",
                 source,
             ],
             LocalMergeStrategy::Ff => {
-                vec!["-c", "merge.conflictStyle=diff3", "merge", "--no-edit", source]
+                vec!["-c", "merge.conflictStyle=diff3", "merge", "--no-edit", "--end-of-options", source]
             }
             LocalMergeStrategy::FfOnly => {
-                vec!["-c", "merge.conflictStyle=diff3", "merge", "--ff-only", source]
+                vec!["-c", "merge.conflictStyle=diff3", "merge", "--ff-only", "--end-of-options", source]
             }
             LocalMergeStrategy::Squash => {
-                vec!["-c", "merge.conflictStyle=diff3", "merge", "--squash", source]
+                vec!["-c", "merge.conflictStyle=diff3", "merge", "--squash", "--end-of-options", source]
             }
         };
         let envs = vec![("GIT_TERMINAL_PROMPT".to_string(), "0".to_string())];
@@ -1760,21 +1909,40 @@ impl LocalGit {
         Err(upstream_err(&stderr, &stdout, code))
     }
 
-    /// Current merge-in-progress status: whether a merge is underway, the
-    /// best-effort source ref, and the conflicted file list.
+    /// Current resolvable-operation status: which op is underway (merge /
+    /// rebase / cherry-pick / revert), the best-effort source ref, and the
+    /// conflicted file list. Conflicted files with NO op (a conflicting
+    /// `stash pop`, a conflicted `merge --squash`) still report `merging:true`
+    /// so the resolver opens for them too — they used to be invisible.
     pub async fn merge_status(&self) -> Result<MergeConflictStatus> {
-        let merging = self.is_merging().await;
-        if !merging {
+        let op = self.op_in_progress().await.map(str::to_string);
+        let conflicted_files = self.conflicted_paths().await?;
+        if op.is_none() && conflicted_files.is_empty() {
             return Ok(MergeConflictStatus {
                 merging: false,
+                op: None,
                 source: None,
                 conflicted_files: Vec::new(),
             });
         }
-        let conflicted_files = self.conflicted_paths().await?;
-        let source = self.merge_source().await;
+        let source = match op.as_deref() {
+            Some("merge") => self.merge_source().await,
+            Some("cherry_pick") => self
+                .run(&["rev-parse", "--short", "CHERRY_PICK_HEAD"])
+                .await
+                .ok()
+                .map(|s| format!("cherry-pick {}", s.trim())),
+            Some("revert") => self
+                .run(&["rev-parse", "--short", "REVERT_HEAD"])
+                .await
+                .ok()
+                .map(|s| format!("revert {}", s.trim())),
+            Some("rebase") => Some("rebase".to_string()),
+            _ => None,
+        };
         Ok(MergeConflictStatus {
-            merging,
+            merging: true,
+            op,
             source,
             conflicted_files,
         })
@@ -1819,6 +1987,20 @@ impl LocalGit {
         })
     }
 
+    /// Resolve `path` by taking one side wholesale (`git checkout --ours` /
+    /// `--theirs`) and staging it — the WIP panel's quick actions on a
+    /// conflicted row. Only meaningful while the file is actually unmerged.
+    pub async fn resolve_take_side(&self, path: &str, side: &str) -> Result<()> {
+        let flag = match side {
+            "ours" => "--ours",
+            "theirs" => "--theirs",
+            other => return Err(Error::Invalid(format!("bad side: {other} (ours|theirs)"))),
+        };
+        self.run(&["checkout", flag, "--", path]).await?;
+        self.run(&["add", "--", path]).await?;
+        Ok(())
+    }
+
     /// Write the fully-resolved content of `path` and stage it.
     pub async fn write_resolution(&self, path: &str, content: &str) -> Result<()> {
         let abs = self.safe_join(path)?;
@@ -1834,18 +2016,54 @@ impl LocalGit {
         Ok(())
     }
 
-    /// Finish an in-progress merge (real merge OR staged squash). Fails when
-    /// conflicts remain unresolved.
+    /// Conclude the in-progress operation: commit a merge, `--continue` a
+    /// rebase / cherry-pick / revert, or commit a staged squash. Fails with a
+    /// 409 when conflicts remain, and when there is nothing to conclude —
+    /// `git commit --no-edit` on a clean tree used to fall through here and
+    /// surface "nothing to commit" as a 502.
     pub async fn merge_commit(&self, message: Option<String>) -> Result<MergeResult> {
         if !self.conflicted_paths().await?.is_empty() {
             return Err(Error::Conflict("unresolved conflicts remain".into()));
         }
-        match message {
-            Some(m) if !m.trim().is_empty() => {
-                self.run(&["commit", "-m", &m]).await?;
+        // GIT_EDITOR=true: `--continue` opens an editor for the commit message;
+        // headless here, so accept the prepared message as-is.
+        let noedit = [("GIT_EDITOR".to_string(), "true".to_string())];
+        match self.op_in_progress().await {
+            Some("merge") | None => {
+                // None = a staged squash (or nothing): require actual staged
+                // changes so this can't produce a confusing git error.
+                if self.op_in_progress().await.is_none() {
+                    let (staged_empty, ..) =
+                        self.run_raw(&["diff", "--cached", "--quiet"], &[]).await?;
+                    if staged_empty {
+                        return Err(Error::Conflict(
+                            "no merge in progress and nothing staged — there is nothing to conclude"
+                                .into(),
+                        ));
+                    }
+                }
+                match message {
+                    Some(m) if !m.trim().is_empty() => {
+                        self.run(&["commit", "-m", &m]).await?;
+                    }
+                    _ => {
+                        self.run(&["commit", "--no-edit"]).await?;
+                    }
+                }
             }
-            _ => {
-                self.run(&["commit", "--no-edit"]).await?;
+            Some("rebase") => {
+                self.run_env(&["rebase", "--continue"], &noedit).await?;
+            }
+            Some("cherry_pick") => {
+                self.run_env(&["cherry-pick", "--continue"], &noedit).await?;
+            }
+            Some("revert") => {
+                self.run_env(&["revert", "--continue"], &noedit).await?;
+            }
+            Some(other) => {
+                return Err(Error::Conflict(format!(
+                    "cannot conclude an in-progress {other} here"
+                )));
             }
         }
         let commit = self.run(&["rev-parse", "HEAD"]).await?.trim().to_string();
@@ -1858,13 +2076,40 @@ impl LocalGit {
         })
     }
 
-    /// Abort an in-progress merge (`git merge --abort`) or, for a staged squash
-    /// with no MERGE_HEAD, discard the staged changes (`git reset --hard HEAD`).
+    /// Abort the in-progress operation with its own abort verb (merge / rebase
+    /// / cherry-pick / revert), or discard a staged squash (`reset --hard`,
+    /// only when SQUASH_MSG proves a squash is actually pending). With NOTHING
+    /// in progress this is a 409 — the old fallback hard-reset the working
+    /// tree, so a stale "Abort" click could destroy all uncommitted work.
     pub async fn merge_abort(&self) -> Result<RepoStatusResp> {
-        if self.is_merging().await {
-            self.run(&["merge", "--abort"]).await?;
-        } else {
-            self.run(&["reset", "--hard", "HEAD"]).await?;
+        match self.op_in_progress().await {
+            Some("merge") => {
+                self.run(&["merge", "--abort"]).await?;
+            }
+            Some("rebase") => {
+                self.run(&["rebase", "--abort"]).await?;
+            }
+            Some("cherry_pick") => {
+                self.run(&["cherry-pick", "--abort"]).await?;
+            }
+            Some("revert") => {
+                self.run(&["revert", "--abort"]).await?;
+            }
+            _ => {
+                if self.squash_pending().await {
+                    self.run(&["reset", "--hard", "HEAD"]).await?;
+                    // git leaves SQUASH_MSG behind; clear it so a SECOND abort
+                    // can't take this destructive branch again.
+                    if let Some(gd) = self.git_dir().await {
+                        let _ = tokio::fs::remove_file(gd.join("SQUASH_MSG")).await;
+                        let _ = tokio::fs::remove_file(gd.join("MERGE_MSG")).await;
+                    }
+                } else {
+                    return Err(Error::Conflict(
+                        "no merge in progress — nothing to abort".into(),
+                    ));
+                }
+            }
         }
         self.status().await
     }
@@ -1966,7 +2211,7 @@ fn remote_ref_absent(stderr: &str) -> bool {
 /// Matched on git's stable porcelain wording; anything unrecognised keeps the
 /// conservative 502 (a genuine network/auth failure looks like nothing here).
 fn local_refusal(msg: &str) -> bool {
-    const MARKERS: [&str; 12] = [
+    const MARKERS: [&str; 22] = [
         "local changes to the following files would be overwritten",
         "would be overwritten by",
         "please commit your changes or stash them",
@@ -1979,6 +2224,21 @@ fn local_refusal(msg: &str) -> bool {
         "refusing to merge unrelated histories",
         "not something we can merge",
         "no such ref was fetched",
+        // Unresolved index / mid-operation refusals (merge onto a conflicted
+        // index, a second cherry-pick, …).
+        "you need to resolve your current index first",
+        "you have unmerged files",
+        "unmerged files",
+        "cherry-pick or revert is already in progress",
+        "a rebase is in progress",
+        "no rebase in progress",
+        // A bad/unknown ref is the caller's input, not a provider outage.
+        "did not match any file",
+        // Nothing to do — e.g. `commit` with an empty index.
+        "nothing to commit",
+        // A concurrent git process holds the index lock — transient, retryable.
+        "index.lock",
+        "another git process seems to be running",
     ];
     let lc = msg.to_ascii_lowercase();
     MARKERS.iter().any(|m| lc.contains(m))
@@ -2416,13 +2676,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_failure_maps_to_upstream() {
+    async fn checkout_of_unknown_branch_is_a_conflict_not_an_outage() {
         let (_tmp, dir) = fixture();
         let git = LocalGit::new(&dir);
+        // A bad ref is the caller's input — a 409 with git's own message, never
+        // the 502 that raises the provider-outage banner.
         match git.checkout("no-such-branch", false).await {
-            Err(Error::Upstream(msg)) => assert!(msg.contains("git exited")),
-            other => panic!("expected Upstream, got {other:?}"),
+            Err(Error::Conflict(msg)) => assert!(msg.contains("did not match")),
+            other => panic!("expected Conflict, got {other:?}"),
         }
+    }
+
+    /// Abort with NOTHING in progress must refuse — the old fallback ran
+    /// `reset --hard HEAD`, so a stale/double "Abort" click destroyed every
+    /// uncommitted change in the tree.
+    #[tokio::test]
+    async fn merge_abort_with_nothing_in_progress_refuses_and_keeps_work() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        match git.merge_abort().await {
+            Err(Error::Conflict(_)) => {}
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        // The fixture's dirty working tree survived untouched.
+        let st = git.status().await.unwrap();
+        assert!(st.changes.iter().any(|c| c.path == "a.txt" && c.unstaged));
+        assert!(st.changes.iter().any(|c| c.path == "e.txt"));
+    }
+
+    /// A conflicting cherry-pick is a normal outcome: status reports the op +
+    /// conflicted files, merge/status opens the resolver, and abort uses
+    /// `cherry-pick --abort` (not a hard reset).
+    #[tokio::test]
+    async fn conflicting_cherry_pick_is_visible_and_abortable() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "clean slate"]);
+        sh_git(&dir, &["checkout", "-b", "side"]);
+        write(&dir, "a.txt", "side version\n");
+        sh_git(&dir, &["commit", "-am", "side change"]);
+        sh_git(&dir, &["checkout", "main"]);
+        write(&dir, "a.txt", "main version\n");
+        sh_git(&dir, &["commit", "-am", "main change"]);
+        let side_sha = git.rev_parse("side").await.unwrap();
+
+        git.cherry_pick(&side_sha).await.unwrap();
+        let st = git.status().await.unwrap();
+        assert_eq!(st.op_in_progress.as_deref(), Some("cherry_pick"));
+        assert!(st.changes.iter().any(|c| c.kind == "conflicted"));
+        let ms = git.merge_status().await.unwrap();
+        assert!(ms.merging);
+        assert_eq!(ms.op.as_deref(), Some("cherry_pick"));
+        assert!(!ms.conflicted_files.is_empty());
+
+        let st = git.merge_abort().await.unwrap();
+        assert_eq!(st.op_in_progress, None);
+        assert!(st.changes.is_empty());
+    }
+
+    /// Starting a merge over an unfinished merge is refused with a 409 — the
+    /// old path checked out `target` and died with git's "resolve your current
+    /// index first" as a 502.
+    #[tokio::test]
+    async fn merge_over_an_unfinished_merge_is_refused() {
+        let (_tmp, dir) = fixture();
+        let git = LocalGit::new(&dir);
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "clean slate"]);
+        sh_git(&dir, &["checkout", "-b", "side"]);
+        write(&dir, "a.txt", "side version\n");
+        sh_git(&dir, &["commit", "-am", "side change"]);
+        sh_git(&dir, &["checkout", "main"]);
+        write(&dir, "a.txt", "main version\n");
+        sh_git(&dir, &["commit", "-am", "main change"]);
+
+        let r = git
+            .merge_branch("side", "main", LocalMergeStrategy::MergeCommit, false)
+            .await
+            .unwrap();
+        assert_eq!(r.status, "conflicts");
+        match git
+            .merge_branch("side", "main", LocalMergeStrategy::MergeCommit, false)
+            .await
+        {
+            Err(Error::Conflict(msg)) => assert!(msg.contains("already in progress")),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        git.merge_abort().await.unwrap();
     }
 
     /// A LOCAL refusal (dirty tree, no upstream, divergent branches) is a 409,
@@ -2436,6 +2777,10 @@ mod tests {
             "fatal: There is no tracking information for the current branch.",
             "error: You have not concluded your merge (MERGE_HEAD exists).",
             "fatal: refusing to merge unrelated histories",
+            "error: you need to resolve your current index first",
+            "error: Merging is not possible because you have unmerged files.",
+            "error: pathspec 'no-such-branch' did not match any file(s) known to git",
+            "fatal: Unable to create '/r/.git/index.lock': File exists.\nAnother git process seems to be running",
         ];
         for msg in local {
             match upstream_err(msg, "", Some(1)) {
@@ -2446,7 +2791,6 @@ mod tests {
         let remote = [
             "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
             "ssh: connect to host github.com port 22: Connection timed out",
-            "error: pathspec 'no-such-branch' did not match any file(s) known to git",
         ];
         for msg in remote {
             match upstream_err(msg, "", Some(1)) {

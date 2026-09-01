@@ -134,12 +134,7 @@ impl Http {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
-        Err(Error::Upstream(format!(
-            "{} {}: {}",
-            self.provider,
-            status.as_u16(),
-            extract_message(&body)
-        )))
+        Err(provider_status_err(&self.provider, status, &body))
     }
 
     /// Send and parse a JSON body.
@@ -256,12 +251,7 @@ impl Http {
 
                 let status = resp.status();
                 let err_body = resp.text().await.unwrap_or_default();
-                return Err(Error::Upstream(format!(
-                    "{} {}: {}",
-                    self.provider,
-                    status.as_u16(),
-                    extract_message(&err_body)
-                )));
+                return Err(provider_status_err(&self.provider, status, &err_body));
             }
 
             // TTL elapsed, no ETag → unconditional GET (fall through).
@@ -283,12 +273,7 @@ impl Http {
         let status = resp.status();
         if !status.is_success() {
             let err_body = resp.text().await.unwrap_or_default();
-            return Err(Error::Upstream(format!(
-                "{} {}: {}",
-                self.provider,
-                status.as_u16(),
-                extract_message(&err_body)
-            )));
+            return Err(provider_status_err(&self.provider, status, &err_body));
         }
 
         let new_etag = resp
@@ -361,12 +346,25 @@ impl Http {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
-        Err(Error::Upstream(format!(
-            "{} {}: {}",
-            self.provider,
-            status.as_u16(),
-            extract_message(&body)
-        )))
+        Err(provider_status_err(&self.provider, status, &body))
+    }
+}
+
+/// Classify a forge's non-2xx by status instead of collapsing everything into
+/// `Error::Upstream`/502 (which the UI reads as "the provider is DOWN" and
+/// turns into a global outage banner — untrue for a revoked token or a 404):
+/// 401/403 → 403 with a check-your-token hint, 404 → 404, and the
+/// state-conflict family (405/409/422, e.g. "PR is not mergeable") → 409.
+/// Real 5xx/429/transport failures stay Upstream.
+fn provider_status_err(provider: &str, status: reqwest::StatusCode, body: &str) -> Error {
+    let msg = format!("{} {}: {}", provider, status.as_u16(), extract_message(body));
+    match status.as_u16() {
+        401 | 403 => Error::Forbidden(format!(
+            "{msg} — the {provider} credential was rejected; check the git account's token/scopes"
+        )),
+        404 => Error::NotFound(msg),
+        405 | 409 | 422 => Error::Conflict(msg),
+        _ => Error::Upstream(msg),
     }
 }
 

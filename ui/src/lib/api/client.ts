@@ -34,18 +34,15 @@ export class ApiError extends Error {
   }
 }
 
-/** Infra endpoints whose 5xx means the connected target (Kafka/DB/SSH) is
- *  unreachable, not a git-provider outage — excluded from the outage banner. */
-function isInfraPath(path: string): boolean {
-  return (
-    path.includes('/brokers') ||
-    path.includes('/connections') ||
-    path.startsWith('/db') ||
-    // Swarm planner/recruiter run an LLM agent and return 502 (Error::Upstream)
-    // when that agent times out — that is NOT a git-provider outage, so it must
-    // not trigger the "remote git provider returned 502" banner.
-    (path.includes('/swarm/') && (path.endsWith('/plan') || path.endsWith('/recruit')))
-  );
+/** Endpoints whose 5xx actually means "a remote git PROVIDER (GitHub /
+ *  Bitbucket / GitLab) failed" — the only ones allowed to raise the global
+ *  provider-outage banner. Everything else (local git ops like pull/merge/
+ *  checkout, Kafka/DB/SSH infra, LLM-agent endpoints) reports its failure in
+ *  its own error toast; a 502 there is NOT a provider outage, and the old
+ *  any-path rule made "commit your changes before you merge" announce a
+ *  GitHub outage. */
+function isProviderPath(path: string): boolean {
+  return /\/repos\/[^/]+\/(prs|collaborators)([/?]|$)/.test(path);
 }
 
 export function baseUrl(): string {
@@ -89,12 +86,11 @@ async function request<T>(
     signal,
   });
 
-  // Surface git-provider/upstream outages (daemon maps provider failures to a
-  // 502). Skip infra endpoints (Kafka brokers, DB connections, DB Explorer):
-  // a 5xx there means *that* target is unreachable — shown as a real error
-  // toast by the caller — not a Bitbucket/GitHub outage, so the global banner
-  // would be misleading.
-  if (!isInfraPath(path)) serviceHealth.report(resp.status);
+  // Surface git-provider outages (the daemon maps provider failures to a 502)
+  // — but ONLY from provider-backed endpoints. A 5xx anywhere else (local git,
+  // Kafka/DB infra, agent endpoints) is that call's own failure, reported by
+  // its caller's error toast, never a GitHub/Bitbucket outage.
+  if (isProviderPath(path)) serviceHealth.report(resp.status);
 
   // No-content responses: 204, async-accepted 202, or any explicitly empty body.
   // (Avoids resp.json() throwing on bodyless endpoints like rewrite/testcase-generate.)
@@ -123,6 +119,18 @@ export const api = {
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   del: <T>(path: string) => request<T>('DELETE', path),
 };
+
+/** True for the daemon's 409 "the working tree is in the way" git refusals —
+ *  the ones a stash can fix (dirty tree blocking a pull/checkout/merge), as
+ *  opposed to auth/network failures. Shared by the git views that offer a
+ *  "stash & retry" follow-up on exactly these. */
+export function isDirtyGitRefusal(e: unknown): boolean {
+  return (
+    e instanceof ApiError &&
+    e.status === 409 &&
+    /overwritten|commit your changes|stash|unstaged changes/i.test(e.message)
+  );
+}
 
 /** True when an error is a fetch abort (caller cancelled via AbortSignal). */
 export function isAbortError(e: unknown): boolean {

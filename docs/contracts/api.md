@@ -63,7 +63,7 @@ connection library unusable for every non-root account.)
 | 35 | POST /api/v1/workspaces/{id}/repos | ws editor | AddRepoReq | Repo (clone runs async; Notice events report progress/done) |
 | 36 | DELETE /api/v1/repos/{id} | ws editor | — | 204 (unregisters; never deletes files) |
 | 36b | PATCH /api/v1/repos/{id} | ws editor (+ account owner, S4) | UpdateRepoReq | Repo — (re)bind the repo's hosting account (see the extended row below) |
-| 37 | GET /api/v1/repos/{id}/status | ws viewer | — | RepoStatusResp |
+| 37 | GET /api/v1/repos/{id}/status | ws viewer | — | RepoStatusResp — includes `op_in_progress` (`"merge"\|"rebase"\|"cherry_pick"\|"revert"`, absent when none), detected from the git dir's state files; conflicted files can exist without it (a conflicting stash pop). Local git refusals across the git routes (dirty tree, unresolved index, bad ref, index.lock, …) map to 409 with git's own message; 502 is reserved for genuine remote/auth failures, and forge HTTP errors map by status (401/403 → 403 credential-rejected, 404 → 404, 405/409/422 → 409). |
 | 38 | GET /api/v1/repos/{id}/branches | ws viewer | — | `BranchInfo[]` |
 | 39 | GET /api/v1/repos/{id}/log?limit=50&skip=0&all=false | ws viewer | — | `CommitInfo[]` — `limit` defaults to 50 and is **uncapped**; `limit=0` means the whole reachable history (no `-n`). Page with `skip` + `limit`; ordering is stable across pages for a fixed set of refs. |
 | 40 | GET /api/v1/repos/{id}/diff?target=worktree\|staged\|commit:<sha>\|range:<a>..<b> | ws viewer | — | DiffResp |
@@ -71,7 +71,7 @@ connection library unusable for every non-root account.)
 | 42 | POST /api/v1/repos/{id}/unstage | ws editor | StagePathsReq | RepoStatusResp |
 | 43 | POST /api/v1/repos/{id}/commit | ws editor | CommitReq | `{"sha":"..."}` |
 | 44 | POST /api/v1/repos/{id}/push | ws editor | `{branch?}` (optional; pushes THAT branch explicitly — Create-PR passes its source branch; absent = current branch) | RepoStatusResp |
-| 45 | POST /api/v1/repos/{id}/pull | ws editor | — | RepoStatusResp — a pull whose merge CONFLICTS is a normal 200: the fetch landed and a merge is left in progress, with the unmerged paths returned as `changes[].kind="conflicted"` (clients route to the conflict resolver). Only real failures (auth, network, no upstream, dirty-tree refusal) are errors. |
+| 45 | POST /api/v1/repos/{id}/pull | ws editor | `{auto_stash?}` (optional) | `{status: RepoStatusResp, note?}` — a pull whose merge CONFLICTS is a normal 200: the fetch landed and a merge is left in progress, with the unmerged paths returned as `status.changes[].kind="conflicted"` (clients route to the conflict resolver). `auto_stash:true` wraps a dirty tree in stash → pull → pop (`note` says what happened to the stash: restored, kept because the pull conflicted, or pop conflicted); a refused auto-stash pull pops the stash back. Local refusals (dirty tree, no upstream, divergent branches, unfinished merge) are 409 with git's own line; only genuine network/auth failures are 502. |
 | 46 | POST /api/v1/repos/{id}/checkout | ws editor | CheckoutReq | RepoStatusResp |
 | 47 | POST /api/v1/repos/{id}/stash | ws editor | `{"op":"save"\|"pop"\|"apply"\|"drop","sha"?:"..."}` (`sha` required for apply/drop — SHA-anchored, resolved to the live `stash@{N}`; conflicts on pop/apply return 200 with the tree left for resolution) | RepoStatusResp |
 | 48 | GET /api/v1/repos/{id}/prs?state=open\|merged\|declined\|all | ws viewer | — | `PrSummary[]` |
@@ -817,19 +817,19 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | PUT /repos/{id}/cleanup-base | ws editor | `SetCleanupBaseReq {base_branch?}` | `CleanupBaseResp` — set/clear (empty/null clears) the per-repo cleanup base override. Indicator-only: never deletes or moves any branch. |
 | POST /repos/{id}/fetch | ws editor | — | RepoStatusResp |
 | POST /repos/{id}/discard | ws editor | StagePathsReq | RepoStatusResp |
-| POST /repos/{id}/merge | ws editor | MergeBranchReq (`auto_stash` → stash→merge→pop on a dirty tree) | MergeResult (`note` carries auto-stash outcome) |
+| POST /repos/{id}/merge | ws editor | MergeBranchReq (`auto_stash` → stash→merge→pop on a dirty tree) | MergeResult (`note` carries auto-stash outcome). 409 when ANY operation (merge/rebase/cherry-pick/revert) is already in progress — resolve or abort it first. |
 | POST /repos/{id}/merge/preview | ws viewer | MergePreviewReq | MergePreview (dry-run via `git merge-tree`; no tree mutation) |
-| GET /repos/{id}/merge/status | ws viewer | — | in-progress merge state |
-| POST /repos/{id}/merge/abort | ws editor | — | RepoStatusResp |
-| POST /repos/{id}/merge/commit | ws editor | — | `{sha}` |
+| GET /repos/{id}/merge/status | ws viewer | — | `MergeConflictStatus` — in-progress RESOLVABLE state: `merging` is true for any op (merge/rebase/cherry-pick/revert, named in `op`) AND for conflicted files with no state file (`op` absent — a conflicting stash pop / squash); `conflicted_files` lists the unmerged paths. |
+| POST /repos/{id}/merge/abort | ws editor | — | RepoStatusResp — aborts with the op's own verb (`merge/rebase/cherry-pick/revert --abort`); a staged squash (SQUASH_MSG present) is discarded with `reset --hard`. With NOTHING in progress → 409 (never a fallback hard-reset: a stale Abort must not destroy uncommitted work). |
+| POST /repos/{id}/merge/commit | ws editor | MergeCommitReq | MergeResult — concludes the in-progress op: commits a merge/squash, `--continue`s a rebase/cherry-pick/revert. 409 while conflicts remain, and when there is nothing to conclude. |
 | GET /repos/{id}/conflict | ws viewer | — | conflict listing |
-| POST /repos/{id}/conflict/resolve | ws editor | ResolveConflictReq | RepoStatusResp |
-| POST /repos/{id}/cherry-pick | ws editor | `{sha}` | RepoStatusResp (cherry-pick the commit onto the current branch; conflict → 502 with git stderr) |
-| POST /repos/{id}/revert | ws editor | `{sha}` | RepoStatusResp (revert the commit with `--no-edit`; conflict → 502 with git stderr) |
+| POST /repos/{id}/conflict/resolve | ws editor | ResolveConflictReq (`content`, or `side:"ours"\|"theirs"` to take a whole side via `git checkout --ours/--theirs` + stage) | RepoStatusResp |
+| POST /repos/{id}/cherry-pick | ws editor | `{sha}` | RepoStatusResp — a CONFLICTING pick is a normal 200: CHERRY_PICK_HEAD is left in place and the status carries `op_in_progress:"cherry_pick"` + the conflicted paths (finish via merge/commit, abort via merge/abort) |
+| POST /repos/{id}/revert | ws editor | `{sha}` | RepoStatusResp — a conflicting revert is a normal 200 (see cherry-pick; `op_in_progress:"revert"`) |
 | POST /repos/{id}/checkout-update | ws editor | `{branch}` | `{status: RepoStatusResp, summary}` — the graph's "check out branch" gesture: stash local changes when dirty → checkout (creating a tracking branch from origin when the name only exists remotely) → pull the upstream (merge) → pop the stash. `summary` lists the steps that ran; a failed switch pops the stash back, a failed pull leaves changes stashed (said in the error), a conflicted pop keeps the stash entry. |
 | POST /repos/{id}/branch | ws editor | `{name, start_point?, checkout?}` | RepoStatusResp (create a branch, optionally from `start_point` and checking it out) |
 | POST /repos/{id}/branch/rename | ws editor | `{from, to}` | RepoStatusResp (rename a local branch) |
-| POST /repos/{id}/branch/delete | ws editor | `{name, remote?, local?, force?}` | RepoStatusResp (delete the local branch (`local` default true); `remote:true` also deletes `origin/<name>`; `local:false` = remote-only; never the checked-out branch — 400) |
+| POST /repos/{id}/branch/delete | ws editor | `{name, remote?, local?, force?}` | RepoStatusResp (delete the local branch (`local` default true); `remote:true` also deletes `origin/<name>`; `local:false` = remote-only; never the checked-out branch — 400). `force` defaults FALSE (safe `-d`, refuses an unmerged branch with 409 "not fully merged"); clients escalate to `force:true` (`-D`) only after their own explicit confirm. |
 | POST /repos/{id}/tag | ws editor | `{name, sha, message?, push?}` | RepoStatusResp (create a tag at `sha`; annotated when `message`; pushes the new tag when `push:true`) |
 | POST /repos/{id}/tag/push | ws editor | `{name}` | RepoStatusResp (push an existing tag to origin) |
 | POST /repos/{id}/tag/delete | ws editor | `{name, remote?}` | RepoStatusResp (delete the local tag; `remote:true` also deletes it on origin) |

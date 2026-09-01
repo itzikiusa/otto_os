@@ -2048,12 +2048,25 @@ export interface FileChange {
   unstaged: boolean;
 }
 
+/** Multi-step git operation a worktree can be in the middle of. */
+export type GitOpInProgress = 'merge' | 'rebase' | 'cherry_pick' | 'revert';
+
 export interface RepoStatusResp {
   branch: string;
   upstream: string | null;
   ahead: number;
   behind: number;
   changes: FileChange[];
+  /** Operation currently in progress (from the git dir's state files); absent/
+   *  undefined when none. Conflicted files can exist without one (stash pop). */
+  op_in_progress?: GitOpInProgress | null;
+}
+
+/** `POST /repos/{id}/pull` response: the fresh status plus an optional human
+ *  note (what happened to auto-stashed changes). */
+export interface PullResp {
+  status: RepoStatusResp;
+  note?: string | null;
 }
 
 export interface BranchInfo {
@@ -2246,7 +2259,11 @@ export interface MergePreview {
 
 /** `GET /repos/{id}/merge/status` */
 export interface MergeConflictStatus {
+  /** True when any resolvable operation is underway OR conflicted files exist. */
   merging: boolean;
+  /** Which operation; absent/undefined for conflicts with no state file
+   *  (a conflicting stash pop / squash). */
+  op?: GitOpInProgress | null;
   source: string | null;
   conflicted_files: string[];
 }
@@ -2263,10 +2280,12 @@ export interface ConflictFile {
   segments: ConflictSegment[];
 }
 
-/** `POST /repos/{id}/conflict/resolve` */
+/** `POST /repos/{id}/conflict/resolve` — send `content` (the rebuilt file), or
+ *  `side` to take one side wholesale (`content` is ignored then). */
 export interface ResolveConflictReq {
   path: string;
   content: string;
+  side?: 'ours' | 'theirs';
 }
 
 /** `POST /repos/{id}/merge/commit` */

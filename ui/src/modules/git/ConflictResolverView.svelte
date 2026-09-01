@@ -3,7 +3,7 @@
   // unresolved indicator; RIGHT: the ConflictFilePane for the selected file.
   // Footer: Abort merge (confirm) and Complete merge (enabled once every file
   // is resolved). Leaving the view (abort/complete) is reported via `onleave`.
-  import type { MergeConflictStatus } from '../../lib/api/types';
+  import type { GitOpInProgress, MergeConflictStatus } from '../../lib/api/types';
   import { git } from '../../lib/stores/git.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -16,13 +16,30 @@
     /** Optional seed list so the view shows files immediately after a merge. */
     initialFiles?: string[];
     initialSource?: string | null;
+    /** Which operation the conflicts belong to (merge / rebase / cherry-pick /
+     *  revert); null for conflicts with no state file (a stash pop). Refined
+     *  from the daemon's merge status once loaded. */
+    initialOp?: GitOpInProgress | null;
     /** Called after the merge is completed or aborted (or there's nothing to do). */
     onleave: () => void;
   }
-  let { repoId, initialFiles = [], initialSource = null, onleave }: Props = $props();
+  let { repoId, initialFiles = [], initialSource = null, initialOp = null, onleave }: Props = $props();
 
   let status = $state<MergeConflictStatus | null>(null);
   let loading = $state(true);
+  // Deliberately seeded from the prop's INITIAL value — refined from the
+  // daemon's merge status as soon as it loads.
+  // svelte-ignore state_referenced_locally
+  let op = $state<GitOpInProgress | null>(initialOp);
+
+  /** Human name of the operation, for titles/buttons ("merge", "rebase", …). */
+  const opName = $derived(
+    op === 'rebase' ? 'rebase'
+    : op === 'cherry_pick' ? 'cherry-pick'
+    : op === 'revert' ? 'revert'
+    : op === 'merge' ? 'merge'
+    : null,
+  );
 
   // Files still conflicted (pulled from merge status). When a file is resolved
   // we move it from `pending` to `resolved` locally so the user sees progress
@@ -60,6 +77,7 @@
       .getMergeStatus(id)
       .then((s) => {
         status = s;
+        op = s.op ?? null;
         // Prefer the daemon's authoritative list; fall back to the seed.
         const files = s.conflicted_files.length > 0 ? s.conflicted_files : initialFiles;
         pending = [...files];
@@ -100,19 +118,46 @@
     // Auto-advance to the next unresolved file for a smoother flow.
     const next = pending.find((f) => !resolved.has(f) && f !== path);
     if (next) selected = next;
+    // Quietly reconcile against the daemon: a second pull / an agent / the CLI
+    // may have added or resolved conflicts since this view seeded its list.
+    void reconcile();
+  }
+
+  /** Re-read merge status and fold changes into the local lists: newly
+   *  conflicted files are appended as pending; files no longer conflicted (and
+   *  not resolved through this view) are marked resolved. Never removes rows —
+   *  progress display stays stable. */
+  async function reconcile(): Promise<void> {
+    try {
+      const s = await git.getMergeStatus(repoId);
+      op = s.op ?? op;
+      const live = new Set(s.conflicted_files);
+      const known = new Set(pending);
+      const added = s.conflicted_files.filter((f) => !known.has(f));
+      if (added.length > 0) pending = [...pending, ...added];
+      const externallyResolved = pending.filter((f) => !live.has(f) && !resolved.has(f));
+      if (externallyResolved.length > 0) {
+        const next = new Set(resolved);
+        for (const f of externallyResolved) next.add(f);
+        resolved = next;
+      }
+    } catch {
+      /* best-effort — keep local state */
+    }
   }
 
   async function abort(): Promise<void> {
+    const label = opName ?? 'merge';
     const ok = await confirmer.ask(
-      'Abort the merge and discard any resolutions made so far?',
-      { title: 'Abort merge', confirmLabel: 'Abort merge', danger: true }
+      `Abort the ${label} and discard any resolutions made so far?`,
+      { title: `Abort ${label}`, confirmLabel: `Abort ${label}`, danger: true }
     );
     if (!ok) return;
     busy = 'abort';
     try {
       const s = await git.abortMerge(repoId);
       if (git.primary?.id === repoId) git.primaryStatus = s;
-      toasts.info('Merge aborted');
+      toasts.info(`${label[0].toUpperCase()}${label.slice(1)} aborted`);
       onleave();
     } catch (e) {
       toasts.error('Abort failed', e instanceof Error ? e.message : String(e));
@@ -123,6 +168,12 @@
 
   async function complete(): Promise<void> {
     if (!allResolved || busy) return;
+    // No operation to conclude (stash-pop conflicts): the resolutions are
+    // already written + staged — there's nothing to commit here, just leave.
+    if (op === null) {
+      onleave();
+      return;
+    }
     busy = 'complete';
     try {
       const result = await git.completeMerge(repoId);
@@ -148,9 +199,11 @@
 <div class="resolver" class:mobile={isMobile}>
   <header class="resolver-head">
     <Icon name="merge" size={14} />
-    <span class="head-title">Resolve merge conflicts</span>
+    <span class="head-title">Resolve {opName ?? 'file'} conflicts</span>
     {#if sourceLabel}
-      <span class="head-source">merging <span class="mono chip">{sourceLabel}</span></span>
+      <span class="head-source">{opName === 'merge' ? 'merging' : 'from'} <span class="mono chip">{sourceLabel}</span></span>
+    {:else if op === null}
+      <span class="head-source">from a stash pop or squash — resolutions are staged as you go</span>
     {/if}
     <span class="grow"></span>
     {#if allFiles.length > 0}
@@ -243,15 +296,17 @@
   </div>
 
   <footer class="resolver-foot">
-    <button class="btn danger" disabled={busy !== ''} onclick={abort}>
-      {busy === 'abort' ? 'Aborting…' : 'Abort merge'}
-    </button>
+    {#if op !== null}
+      <button class="btn danger" disabled={busy !== ''} onclick={abort}>
+        {busy === 'abort' ? 'Aborting…' : `Abort ${opName}`}
+      </button>
+    {/if}
     <span class="grow"></span>
     {#if !allResolved && allFiles.length > 0}
-      <span class="dim foot-hint">Resolve every file to complete the merge.</span>
+      <span class="dim foot-hint">Resolve every file to {op === null ? 'finish' : `complete the ${opName}`}.</span>
     {/if}
     <button class="btn primary" disabled={!allResolved || busy !== ''} onclick={complete}>
-      {busy === 'complete' ? 'Completing…' : 'Complete merge'}
+      {busy === 'complete' ? 'Completing…' : op === null ? 'Done' : `Complete ${opName}`}
     </button>
   </footer>
 </div>

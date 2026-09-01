@@ -1,7 +1,7 @@
 <script lang="ts">
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { untrack } from 'svelte';
-  import { api } from '../../lib/api/client';
+  import { api, isDirtyGitRefusal } from '../../lib/api/client';
   import type {
     CommitInfo,
     RefsResp,
@@ -47,8 +47,18 @@
      *  `target` asks the parent to open the merge approval modal. Nothing merges
      *  here — the parent owns the modal + conflict-resolver routing. */
     onmergerequest?: (source: string, target: string) => void;
+    /** Open the parent's conflict-resolver view (WIP panel's conflicted rows). */
+    onresolveconflicts?: () => void;
   }
-  let { repoId, repoPath = '', workspaceId = '', status, onstatus, onmergerequest }: Props = $props();
+  let {
+    repoId,
+    repoPath = '',
+    workspaceId = '',
+    status,
+    onstatus,
+    onmergerequest,
+    onresolveconflicts,
+  }: Props = $props();
 
   // ── Drag-to-merge state ─────────────────────────────────────────────────────
   // The branch currently being dragged ({ name, remote }), and the local branch
@@ -488,7 +498,16 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}${path}`, body);
       await refreshAfter(s);
-      toasts.success(okTitle, okDetail);
+      // A 200 that left an operation mid-flight (a conflicting cherry-pick /
+      // revert) is NOT a success — say what happened and where to finish it.
+      if (s.op_in_progress) {
+        toasts.warn(
+          `${okTitle} — conflicts`,
+          'Unresolved conflicts remain. Open "Resolve conflicts" to finish or abort.',
+        );
+      } else {
+        toasts.success(okTitle, okDetail);
+      }
     } catch (e) {
       toasts.error(`${okTitle} failed`, e instanceof Error ? e.message : String(e));
       // A failed mutation can still have partially landed — most notably a
@@ -887,12 +906,32 @@
       { title: 'Delete branch', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
-    await mutate(
-      '/branch/delete',
-      { name, remote: alsoRemote },
-      alsoRemote ? 'Branch deleted (local + remote)' : 'Branch deleted',
-      name,
-    );
+    const okTitle = alsoRemote ? 'Branch deleted (local + remote)' : 'Branch deleted';
+    // Safe delete first (`-d`): git refuses when the branch holds unmerged
+    // commits. Only then ask again, explicitly, before escalating to `-D` —
+    // deleting unmerged work deserves its own consent, not a blanket force.
+    try {
+      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/branch/delete`, {
+        name,
+        remote: alsoRemote,
+      });
+      await refreshAfter(s);
+      toasts.success(okTitle, name);
+      return;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/not fully merged/i.test(msg)) {
+        toasts.error(`${okTitle} failed`, msg);
+        await refreshAfter().catch(() => {});
+        return;
+      }
+      const force = await confirmer.ask(
+        `"${name}" has commits that aren't merged anywhere else. Force-delete it and DROP those commits? This cannot be undone.`,
+        { title: 'Branch not fully merged', confirmLabel: 'Force delete', danger: true },
+      );
+      if (!force) return;
+      await mutate('/branch/delete', { name, remote: alsoRemote, force: true }, okTitle, name);
+    }
   }
 
   async function deleteRemoteBranch(name: string): Promise<void> {
@@ -1151,7 +1190,21 @@
       // Refresh refs after checkout
       refs = await api.get<RefsResp>(`/repos/${repoId}/refs`);
     } catch (e) {
-      toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
+      // A dirty tree blocked the plain switch — offer the stash → switch →
+      // pull → pop gesture (the daemon's checkout-update) instead of a dead end.
+      if (!create && isDirtyGitRefusal(e)) {
+        const ok = await confirmer.ask(
+          `Your uncommitted changes are in the way of switching to "${branch}". Stash them, switch (pulling the upstream), then restore them?`,
+          { title: 'Stash & switch', confirmLabel: 'Stash & switch' },
+        );
+        if (ok) {
+          checkoutBusy = '';
+          await checkoutBranchUpdate(branch);
+          return;
+        }
+      } else {
+        toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
+      }
     } finally {
       checkoutBusy = '';
     }
@@ -1475,6 +1528,7 @@
   // off the checked-out branch (falls back to lane 0 while the log loads).
   const wipCol = $derived(laneRows.find((r) => isHeadCommit(r.commit))?.col ?? 0);
   const wipStagedCount = $derived(status.changes.filter((c) => c.staged).length);
+  const wipConflictCount = $derived(status.changes.filter((c) => c.kind === 'conflicted').length);
 
   // Gutter width shared by every row so lane dots line up vertically. Sized to
   // the widest lane count actually reached (plus a half-lane for the node
@@ -2599,6 +2653,11 @@
                     ? ` · ${wipStagedCount} staged`
                     : ''}
                 </span>
+                {#if wipConflictCount > 0}
+                  <span class="wip-conflicts" title="{wipConflictCount} conflicted file{wipConflictCount === 1 ? '' : 's'} — open the WIP panel to resolve">
+                    ⚠ {wipConflictCount} conflicted
+                  </span>
+                {/if}
               </div>
             </div>
           </button>
@@ -2840,6 +2899,7 @@
         {onstatus}
         oncommitted={() => void refreshAfter()}
         onclose={clearSelection}
+        onresolve={onresolveconflicts}
       />
     {:else if selectedSha === null}
       <div class="detail-empty">
@@ -3492,6 +3552,17 @@
     border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  /* Conflicted-files chip on the WIP row — conflicts must be visible from the
+     graph itself, not only after opening the WIP panel. */
+  .wip-conflicts {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 0 5px;
+    border-radius: 3px;
+    color: var(--status-warn);
+    background: var(--status-warn-soft);
   }
 
   /* The HEAD commit ("you are here") — a leading accent rail + faint wash so the

@@ -1,8 +1,9 @@
 <script lang="ts">
   // Branch dropdown (switch/create) + push/pull/fetch + ahead/behind.
-  import { api } from '../../lib/api/client';
-  import type { BranchInfo, RepoStatusResp } from '../../lib/api/types';
+  import { api, isDirtyGitRefusal } from '../../lib/api/client';
+  import type { BranchInfo, PullResp, RepoStatusResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
@@ -44,34 +45,81 @@
       open = false;
       toasts.success(create ? 'Branch created' : 'Switched branch', branch);
     } catch (e) {
-      toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
+      // A dirty tree blocked the switch — offer the daemon's stash → switch →
+      // pull → pop gesture instead of dead-ending on the git message.
+      if (!create && isDirtyGitRefusal(e)) {
+        const ok = await confirmer.ask(
+          `Your uncommitted changes are in the way of switching to "${branch}". Stash them, switch (pulling the upstream), then restore them?`,
+          { title: 'Stash & switch', confirmLabel: 'Stash & switch' },
+        );
+        if (ok) {
+          try {
+            const resp = await api.post<{ status: RepoStatusResp; summary: string }>(
+              `/repos/${repoId}/checkout-update`,
+              { branch },
+            );
+            onstatus(resp.status);
+            open = false;
+            toasts.success(`Switched to ${branch}`, resp.summary);
+          } catch (e2) {
+            toasts.error('Stash & switch failed', e2 instanceof Error ? e2.message : String(e2));
+          }
+        }
+      } else {
+        toasts.error('Checkout failed', e instanceof Error ? e.message : String(e));
+      }
     } finally {
       busy = '';
+    }
+  }
+
+  function reportPull(s: RepoStatusResp, note?: string | null): void {
+    onstatus(s);
+    // A pull whose merge conflicted comes back 200 with unmerged paths — that
+    // is not a failure, it needs the conflict resolver (same wording as the
+    // graph toolbar).
+    const conflicts = s.changes.filter((c) => c.kind === 'conflicted').length;
+    if (conflicts > 0) {
+      toasts.warn(
+        'Pulled with conflicts',
+        note ??
+          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts"`,
+      );
+    } else {
+      toasts.success('Pulled', note ?? undefined);
     }
   }
 
   async function gitOp(op: 'push' | 'pull'): Promise<void> {
     busy = op;
     try {
-      // Both endpoints return the FRESH RepoStatusResp (they used to return
-      // `{output}` — reading `.output` here threw a TypeError that the catch
-      // below reported as "pull failed" on a pull that had actually SUCCEEDED).
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/${op}`);
-      onstatus(s);
-      // A pull whose merge conflicted comes back 200 with unmerged paths — that
-      // is not a failure, it needs the conflict resolver (same wording as the
-      // graph toolbar).
-      const conflicts = s.changes.filter((c) => c.kind === 'conflicted').length;
-      if (op === 'pull' && conflicts > 0) {
-        toasts.warn(
-          'Pulled with conflicts',
-          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts"`,
-        );
+      if (op === 'pull') {
+        // Pull returns { status, note }; push returns the status itself.
+        const r = await api.post<PullResp>(`/repos/${repoId}/pull`);
+        reportPull(r.status, r.note);
       } else {
-        toasts.success(op === 'pull' ? 'Pulled' : 'Pushed');
+        const s = await api.post<RepoStatusResp>(`/repos/${repoId}/push`);
+        onstatus(s);
+        toasts.success('Pushed');
       }
     } catch (e) {
-      toasts.error(`${op} failed`, e instanceof Error ? e.message : String(e));
+      // Dirty-tree pull refusal (409) → offer stash → pull → restore.
+      if (op === 'pull' && isDirtyGitRefusal(e)) {
+        const ok = await confirmer.ask(
+          'Your uncommitted changes are in the way of the pull. Stash them, pull, then restore them?',
+          { title: 'Stash, pull & restore', confirmLabel: 'Stash & pull' },
+        );
+        if (ok) {
+          try {
+            const r = await api.post<PullResp>(`/repos/${repoId}/pull`, { auto_stash: true });
+            reportPull(r.status, r.note);
+          } catch (e2) {
+            toasts.error('Pull failed', e2 instanceof Error ? e2.message : String(e2));
+          }
+        }
+      } else {
+        toasts.error(`${op} failed`, e instanceof Error ? e.message : String(e));
+      }
     } finally {
       busy = '';
     }

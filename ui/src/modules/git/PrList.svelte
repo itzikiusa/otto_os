@@ -1,6 +1,6 @@
 <script lang="ts">
   // PR list with state filter chips. Click → PrDetail route.
-  import { api } from '../../lib/api/client';
+  import { api, ApiError } from '../../lib/api/client';
   import type { PrState, PrSummary } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -18,11 +18,17 @@
   let prs: PrSummary[] = $state([]);
   let loading = $state(true);
   let error = $state('');
+  /** Headline for the error state — distinguishes "your token is bad" from
+   *  "the provider is down" instead of labelling every failure "unreachable". */
+  let errorTitle = $state('Provider unreachable');
   let createOpen = $state(false);
+  // Bumped by the Retry button to re-run the load effect.
+  let retryRev = $state(0);
 
   $effect(() => {
     const id = repoId;
     const st = stateFilter;
+    void retryRev;
     loading = true;
     error = '';
     void api
@@ -31,6 +37,12 @@
       .catch((e) => {
         prs = [];
         error = e instanceof Error ? e.message : 'failed to load PRs';
+        errorTitle =
+          e instanceof ApiError && (e.status === 401 || e.status === 403)
+            ? 'Provider rejected the credentials'
+            : e instanceof ApiError && e.status === 404
+              ? 'Repository not found on the provider'
+              : 'Provider unreachable';
       })
       .finally(() => (loading = false));
   });
@@ -66,8 +78,10 @@
   {:else if error}
     <EmptyState
       icon="pr"
-      title="Provider unreachable"
+      title={errorTitle}
       body={error}
+      actionLabel="Retry"
+      onaction={() => retryRev++}
     />
   {:else if prs.length === 0}
     <EmptyState

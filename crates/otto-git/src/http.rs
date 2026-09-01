@@ -1254,6 +1254,8 @@ async fn repo_discard<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<StagePathsReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.discard(&req.paths).await?;
     Ok(Json(git.status().await?))
@@ -1265,6 +1267,8 @@ async fn repo_commit<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<CommitReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let sha = git.commit(&req.message, req.amend).await?;
     Ok(Json(serde_json::json!({ "sha": sha })))
@@ -1294,11 +1298,23 @@ async fn repo_push<S: GitCtx>(
     Ok(Json(git.status().await?))
 }
 
+/// Optional pull body: `auto_stash` wraps the pull in stash → pull → pop when
+/// the tree is dirty (the retry the UI offers after a 409 "commit or stash
+/// first" refusal). Absent/empty body keeps the plain-pull behavior.
+#[derive(Debug, Default, serde::Deserialize)]
+struct PullReq {
+    #[serde(default)]
+    auto_stash: bool,
+}
+
 async fn repo_pull<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
-) -> ApiResult<Json<RepoStatusResp>> {
+    body: Option<Json<PullReq>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     // Pull, then return the FRESH status so the UI's branch chip clears its
@@ -1311,8 +1327,17 @@ async fn repo_pull<S: GitCtx>(
     // unmerged paths are in `changes` as kind="conflicted") so the UI can route
     // the user into the conflict resolver instead of showing "Pull failed" and
     // leaving the incoming files looking like mystery WIP changes.
-    git.pull_outcome(token).await?;
-    Ok(Json(git.status().await?))
+    let note = if body.map(|Json(b)| b.auto_stash).unwrap_or(false) {
+        let (_, note) = git.pull_autostash(token).await?;
+        note
+    } else {
+        git.pull_outcome(token).await?;
+        None
+    };
+    Ok(Json(serde_json::json!({
+        "status": git.status().await?,
+        "note": note,
+    })))
 }
 
 /// `POST /repos/{id}/api-collections/pull` — pull the repo, then read every
@@ -1328,11 +1353,11 @@ async fn repo_collections_pull<S: GitCtx>(
     let _ = git.pull(token).await; // best-effort; report read result regardless
     let dir = std::path::Path::new(&repo.path).join("collections");
     let mut files: Vec<serde_json::Value> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
+    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let p = entry.path();
             if p.extension().and_then(|x| x.to_str()) == Some("json") {
-                if let Ok(content) = std::fs::read_to_string(&p) {
+                if let Ok(content) = tokio::fs::read_to_string(&p).await {
                     files.push(serde_json::json!({
                         "name": p.file_name().and_then(|n| n.to_str()).unwrap_or(""),
                         "content": content,
@@ -1372,15 +1397,19 @@ async fn repo_collections_push<S: GitCtx>(
         git.checkout(branch, true).await?;
     }
     let base = std::path::Path::new(&repo.path);
-    std::fs::create_dir_all(base.join("collections"))
-        .map_err(|e| otto_core::Error::Upstream(format!("create collections dir: {e}")))?;
+    // Local disk IO failing is OUR failure (500), not an upstream outage (502)
+    // — a full disk must not raise the "git provider is down" banner.
+    tokio::fs::create_dir_all(base.join("collections"))
+        .await
+        .map_err(|e| otto_core::Error::Internal(format!("create collections dir: {e}")))?;
     let mut staged: Vec<String> = Vec::new();
     for f in &req.files {
         let safe = f.name.replace(['/', '\\'], "_");
         let safe = if safe.ends_with(".json") { safe } else { format!("{safe}.json") };
         let rel = format!("collections/{safe}");
-        std::fs::write(base.join(&rel), &f.content)
-            .map_err(|e| otto_core::Error::Upstream(format!("write {rel}: {e}")))?;
+        tokio::fs::write(base.join(&rel), &f.content)
+            .await
+            .map_err(|e| otto_core::Error::Internal(format!("write {rel}: {e}")))?;
         staged.push(rel);
     }
     git.stage(&staged).await?;
@@ -1396,6 +1425,8 @@ async fn repo_checkout<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<CheckoutReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     git.checkout(&req.branch, req.create).await?;
     Ok(Json(git.status().await?))
@@ -1421,6 +1452,8 @@ async fn repo_checkout_update<S: GitCtx>(
     if branch.is_empty() {
         return Err(Error::Invalid("branch must not be empty".into()).into());
     }
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (repo, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let token = optional_token(&s, &user, &repo).await?;
     let summary = git.checkout_update(branch, token).await?;
@@ -1536,7 +1569,9 @@ struct DeleteBranchReq {
     /// origin/<name>" sends `local:false` so only the origin copy is removed.
     #[serde(default)]
     local: Option<bool>,
-    /// `-D` (drop unmerged) instead of `-d`. The UI confirms first.
+    /// `-D` (drop unmerged) instead of `-d`. The UI escalates to this only
+    /// after its own "not fully merged" confirm — the default is the SAFE
+    /// `-d`, which refuses to drop unmerged work.
     #[serde(default)]
     force: Option<bool>,
 }
@@ -1566,7 +1601,7 @@ async fn repo_branch_delete<S: GitCtx>(
             ))
             .into());
         }
-        git.delete_branch(name, req.force.unwrap_or(true)).await?;
+        git.delete_branch(name, req.force.unwrap_or(false)).await?;
     }
     if want_remote {
         let token = optional_token(&s, &user, &repo).await?;
@@ -1784,6 +1819,8 @@ async fn repo_stash<S: GitCtx>(
     Path(id): Path<Id>,
     Json(req): Json<StashReq>,
 ) -> ApiResult<Json<RepoStatusResp>> {
+    let lock = repo_lock(&id);
+    let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     match req.op.as_str() {
         "save" => {
@@ -1900,7 +1937,10 @@ async fn repo_conflict_resolve<S: GitCtx>(
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    git.write_resolution(&req.path, &req.content).await?;
+    match req.side.as_deref() {
+        Some(side) => git.resolve_take_side(&req.path, side).await?,
+        None => git.write_resolution(&req.path, &req.content).await?,
+    }
     Ok(Json(git.status().await?))
 }
 

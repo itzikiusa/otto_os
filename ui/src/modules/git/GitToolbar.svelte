@@ -1,8 +1,9 @@
 <script lang="ts">
   // Toolbar row: Fetch / Pull / Push / Branch / Stash / Pop + current branch chip.
-  import { api } from '../../lib/api/client';
-  import type { RepoStatusResp } from '../../lib/api/types';
+  import { api, isDirtyGitRefusal } from '../../lib/api/client';
+  import type { PullResp, RepoStatusResp } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
   interface Props {
@@ -39,27 +40,47 @@
     }
   }
 
+  function reportPull(r: PullResp): void {
+    onstatus(r.status);
+    onrefresh?.();
+    // A pull whose merge conflicted comes back 200 with unmerged paths in the
+    // status (the daemon leaves the merge in progress). Say so — otherwise the
+    // incoming files just appear as WIP changes with no explanation. RepoView
+    // watches the same status and raises the "Resolve conflicts" banner.
+    const conflicts = r.status.changes.filter((c) => c.kind === 'conflicted').length;
+    if (conflicts > 0) {
+      toasts.warn(
+        'Pulled with conflicts',
+        r.note ??
+          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts"`,
+      );
+    } else {
+      toasts.success('Pulled', r.note ?? undefined);
+    }
+  }
+
   async function doPull(): Promise<void> {
     busy = 'pull';
     try {
-      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/pull`);
-      onstatus(s);
-      onrefresh?.();
-      // A pull whose merge conflicted comes back 200 with unmerged paths in the
-      // status (the daemon leaves the merge in progress). Say so — otherwise the
-      // incoming files just appear as WIP changes with no explanation. RepoView
-      // watches the same status and raises the "Resolve conflicts" banner.
-      const conflicts = s.changes.filter((c) => c.kind === 'conflicted').length;
-      if (conflicts > 0) {
-        toasts.warn(
-          'Pulled with conflicts',
-          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts"`,
-        );
-      } else {
-        toasts.success('Pulled');
-      }
+      reportPull(await api.post<PullResp>(`/repos/${repoId}/pull`));
     } catch (e) {
-      toasts.error('Pull failed', e instanceof Error ? e.message : String(e));
+      // Dirty-tree refusal (409) → offer the stash → pull → restore retry
+      // instead of dead-ending on git's message.
+      if (isDirtyGitRefusal(e)) {
+        const ok = await confirmer.ask(
+          'Your uncommitted changes are in the way of the pull. Stash them, pull, then restore them?',
+          { title: 'Stash, pull & restore', confirmLabel: 'Stash & pull' },
+        );
+        if (ok) {
+          try {
+            reportPull(await api.post<PullResp>(`/repos/${repoId}/pull`, { auto_stash: true }));
+          } catch (e2) {
+            toasts.error('Pull failed', e2 instanceof Error ? e2.message : String(e2));
+          }
+        }
+      } else {
+        toasts.error('Pull failed', e instanceof Error ? e.message : String(e));
+      }
     } finally {
       busy = '';
     }
@@ -115,7 +136,17 @@
     try {
       const s = await api.post<RepoStatusResp>(`/repos/${repoId}/stash`, { op: 'pop' });
       onstatus(s);
-      toasts.success('Stash popped');
+      // A conflicting pop is a 200 with unmerged paths (git keeps the stash
+      // entry) — guide the user into the resolver instead of claiming success.
+      const conflicts = s.changes.filter((c) => c.kind === 'conflicted').length;
+      if (conflicts > 0) {
+        toasts.warn(
+          'Stash popped with conflicts',
+          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts". The stash entry was kept.`,
+        );
+      } else {
+        toasts.success('Stash popped');
+      }
     } catch (e) {
       toasts.error('Pop failed', e instanceof Error ? e.message : String(e));
     } finally {

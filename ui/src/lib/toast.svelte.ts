@@ -28,7 +28,10 @@ class ToastStore {
     this.push('warn', title, body);
   }
   error(title: string, body?: string): void {
-    this.push('error', title, body, 7000);
+    // Errors linger longer than the 4.5s default: git failures are often
+    // multi-line instructions ("your changes remain stashed — …") that 7s
+    // wasn't enough to actually read.
+    this.push('error', title, body, 12000);
   }
 
   dismiss(id: number): void {

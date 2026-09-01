@@ -47,7 +47,11 @@ bridges so an agent can work a ticket from a chat thread.
   session terminal). Applies to new sessions.
 - **Git & Pull Requests** — a GitKraken-style **commit graph** with a WIP row +
   staging panel, per-file diffs, folder-level stage/discard, an interactive
-  **conflict resolver** (A/B line picking with live output), branch checkout
+  **conflict resolver** (A/B line picking with live output) that covers merge,
+  **rebase, cherry-pick, revert and stash-pop conflicts** alike — conflicted
+  files get their own WIP section with ours/theirs quick-resolves, and a dirty
+  tree blocking a pull or branch switch offers a one-click
+  **stash → pull/switch → restore** instead of a raw git error — branch checkout
   straight from the graph (stash · pull · pop), **worktrees & submodules** as
   first-class tabs, auto-fetch, and a **Focus tab** (your PRs across repos +
   your Jira work). **Create PRs** (draft toggle, reviewers at creation) with an

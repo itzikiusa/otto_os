@@ -25,11 +25,38 @@
     /** Called after a successful commit so the graph can reload its log. */
     oncommitted: () => void;
     onclose: () => void;
+    /** Open the conflict resolver (RepoView's tab) for a conflicted file. */
+    onresolve?: () => void;
   }
-  let { repoId, status, onstatus, oncommitted, onclose }: Props = $props();
+  let { repoId, status, onstatus, oncommitted, onclose, onresolve }: Props = $props();
 
-  const unstaged = $derived(status.changes.filter((c) => !c.staged));
-  const staged = $derived(status.changes.filter((c) => c.staged));
+  // Conflicted files get their OWN section with resolve actions — they must
+  // not sit in the stage/unstage trees, where the checkbox would `git add`
+  // a file that still contains conflict markers and silently mark it resolved.
+  const conflicted = $derived(status.changes.filter((c) => c.kind === 'conflicted'));
+  const unstaged = $derived(status.changes.filter((c) => !c.staged && c.kind !== 'conflicted'));
+  const staged = $derived(status.changes.filter((c) => c.staged && c.kind !== 'conflicted'));
+
+  /** Resolve one conflicted file by taking a whole side (`git checkout
+   *  --ours/--theirs` + stage). Confirmed — it discards the other side. */
+  async function takeSide(path: string, side: 'ours' | 'theirs'): Promise<void> {
+    const ok = await confirmer.ask(
+      `Resolve ${path} by keeping ${side === 'ours' ? 'YOUR version (ours)' : 'THEIR version (theirs)'}? The other side's changes to this file are discarded.`,
+      { title: `Take ${side}`, confirmLabel: `Take ${side}` },
+    );
+    if (!ok) return;
+    try {
+      const s = await api.post<RepoStatusResp>(`/repos/${repoId}/conflict/resolve`, {
+        path,
+        content: '',
+        side,
+      });
+      onstatus(s);
+      toasts.success('Resolved', `${path} — kept ${side}`);
+    } catch (e) {
+      toasts.error('Resolve failed', e instanceof Error ? e.message : String(e));
+    }
+  }
 
   // ── Commit composer (Summary + Description, joined "subject\n\nbody") ──────
   let subject = $state('');
@@ -46,18 +73,26 @@
   let selectedPath = $state<string | null>(null);
   let diff = $state<DiffResp | null>(null);
   let diffLoading = $state(false);
+  /** Non-null when the diff LOAD failed — rendered as an error, not as the
+   *  "no textual diff" empty state (an error masquerading as emptiness). */
+  let diffError = $state<string | null>(null);
 
   $effect(() => {
     const path = selectedPath;
     if (path === null) {
       diff = null;
+      diffError = null;
       return;
     }
     diffLoading = true;
+    diffError = null;
     void api
       .get<DiffResp>(`/repos/${repoId}/diff?target=working&path=${encodeURIComponent(path)}`)
       .then((d) => (diff = d))
-      .catch(() => (diff = { files: [] }))
+      .catch((e) => {
+        diff = { files: [] };
+        diffError = e instanceof Error ? e.message : String(e);
+      })
       .finally(() => (diffLoading = false));
   });
 
@@ -374,6 +409,51 @@
   </div>
 
   <div class="wp-scroll" class:has-diff={selectedPath !== null}>
+    <!-- Conflicts (own section, resolve actions instead of stage checkboxes) -->
+    {#if conflicted.length > 0}
+      <div class="wp-section wp-conflicts">
+        <div class="wp-sec-head wp-conflict-head">
+          <Icon name="merge" size={12} />
+          <span>Conflicts</span>
+          <span class="wp-sec-count">{conflicted.length}</span>
+          <span class="grow"></span>
+          {#if onresolve}
+            <span
+              class="wp-sec-action"
+              role="button"
+              tabindex="-1"
+              onclick={(e) => {
+                e.stopPropagation();
+                onresolve?.();
+              }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.stopPropagation();
+                  onresolve?.();
+                }
+              }}
+            >Open resolver</span>
+          {/if}
+        </div>
+        <div class="wp-list">
+          {#each conflicted as c (c.path)}
+            <div class="wp-file wp-conflict-row">
+              <span class="kind k-conflicted">!</span>
+              <button
+                class="wp-name"
+                onclick={() => onresolve?.()}
+                title="Resolve {c.path} in the conflict resolver"
+              >
+                <span class="mono wp-fname">{c.path}</span>
+              </button>
+              <button class="wp-side" title="Keep your version (ours)" onclick={() => void takeSide(c.path, 'ours')}>Ours</button>
+              <button class="wp-side" title="Keep their version (theirs)" onclick={() => void takeSide(c.path, 'theirs')}>Theirs</button>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <!-- Unstaged -->
     <div class="wp-section">
       <button class="wp-sec-head" onclick={() => (unstagedOpen = !unstagedOpen)} aria-expanded={unstagedOpen}>
@@ -498,6 +578,8 @@
           <div style="padding: 10px"><Skeleton rows={5} height={20} /></div>
         {:else if diff && diff.files.length > 0}
           <DiffViewer {diff} />
+        {:else if diffError}
+          <div class="dim wp-empty">Couldn't load the diff: {diffError}</div>
         {:else}
           <div class="dim wp-empty">No textual diff for this file.</div>
         {/if}
@@ -748,6 +830,33 @@
     padding: 0 6px;
     line-height: 15px;
     flex-shrink: 0;
+  }
+
+  /* Conflicts section: warn-tinted header, side-pick buttons instead of the
+     stage checkbox (staging an unresolved file would bury its markers). */
+  .wp-conflict-head {
+    background: var(--status-warn-soft);
+    color: var(--status-warn);
+    cursor: default;
+  }
+  .wp-conflict-row {
+    padding-inline-start: 8px;
+    height: 26px;
+  }
+  .wp-side {
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: var(--radius-s);
+  }
+  .wp-side:hover {
+    color: var(--text);
+    background: var(--surface-2);
   }
 
   .kind {

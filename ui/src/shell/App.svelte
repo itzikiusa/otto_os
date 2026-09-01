@@ -583,8 +583,9 @@
   {#if serviceHealth.visible}
     <div class="provider-banner" role="alert">
       <span>
-        ⚠ A remote git provider returned <strong>502 Bad Gateway</strong> — it may be down or
-        under maintenance. Your local work is unaffected; retries will resume automatically.
+        ⚠ A remote git provider (GitHub / Bitbucket / GitLab) is failing with a
+        <strong>gateway error</strong> — it may be down or under maintenance. Your local work is
+        unaffected; retries will resume automatically.
       </span>
       <span class="grow"></span>
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice">✕</button>

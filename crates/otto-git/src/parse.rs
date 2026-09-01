@@ -48,6 +48,9 @@ pub fn parse_status(out: &str) -> RepoStatusResp {
         ahead,
         behind,
         changes,
+        // Filled by LocalGit::status from the git dir's state files — the
+        // porcelain output alone can't tell a merge from a rebase.
+        op_in_progress: None,
     }
 }
 

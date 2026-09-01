@@ -1160,6 +1160,13 @@ pub struct RepoStatusResp {
     pub ahead: u32,
     pub behind: u32,
     pub changes: Vec<FileChange>,
+    /// Multi-step git operation currently in progress in this worktree:
+    /// "merge" | "rebase" | "cherry_pick" | "revert" — detected from the git
+    /// dir's state files (MERGE_HEAD, rebase-merge/, CHERRY_PICK_HEAD, …).
+    /// `None` when no operation is underway. Conflicted files can still exist
+    /// with `None` (e.g. a conflicting `stash pop` leaves no state file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_in_progress: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1465,8 +1472,15 @@ pub struct MergeResult {
 /// `GET /repos/{id}/merge/status`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergeConflictStatus {
-    /// True when a merge is in progress (`MERGE_HEAD` present).
+    /// True when ANY resolvable operation is underway or conflicted files
+    /// exist — the signal for "the resolver has work to do". (Historically
+    /// merge-only; now also rebase/cherry-pick/revert and a conflicted
+    /// stash-pop, so those stopped being invisible dead ends.)
     pub merging: bool,
+    /// Which operation: "merge" | "rebase" | "cherry_pick" | "revert", or
+    /// `None` for conflicts with no state file (stash pop / squash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
     /// Best-effort source branch/ref being merged, when known.
     pub source: Option<String>,
     #[serde(default)]
@@ -1498,12 +1512,17 @@ pub struct ConflictFile {
     pub segments: Vec<ConflictSegment>,
 }
 
-/// `POST /repos/{id}/conflict/resolve` — write the fully-resolved file content
-/// (markers removed) and stage it.
+/// `POST /repos/{id}/conflict/resolve` — resolve one conflicted file and stage
+/// it: either write `content` (the fully-rebuilt file, markers removed), or
+/// take a whole side with `side: "ours" | "theirs"` (`git checkout --ours/
+/// --theirs` + `add`; `content` is ignored then).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveConflictReq {
     pub path: String,
+    #[serde(default)]
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
 }
 
 /// `POST /repos/{id}/merge/commit` — finish an in-progress merge.

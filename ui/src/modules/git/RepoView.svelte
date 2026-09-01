@@ -2,7 +2,7 @@
   // One repo: toolbar header + tabs (Graph / Pull Requests / Review). Staging
   // and history both live on the graph now (WIP row + detail panel), so there
   // are no separate Changes/History tabs.
-  import type { MergeResult, Repo, RepoStatusResp } from '../../lib/api/types';
+  import type { GitOpInProgress, MergeResult, Repo, RepoStatusResp } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -42,13 +42,31 @@
   let resolving = $state(false);
   // Seed data carried from a conflicting merge into the resolver.
   let conflictSeed = $state<{ files: string[]; source: string | null }>({ files: [], source: null });
-  // True when a merge is in progress (surfaces the "Resolve conflicts" banner).
+  // True when ANY resolvable operation is in progress (merge / rebase /
+  // cherry-pick / revert, or conflicted files with no state file, e.g. a
+  // conflicting stash pop) — surfaces the "Resolve conflicts" banner.
   let merging = $state(false);
+  // Which operation it is; null for state-file-less conflicts (stash pop).
+  let mergeOp = $state<GitOpInProgress | null>(null);
+
+  /** Human label for the in-progress operation, banner + resolver wording. */
+  const opLabel = $derived(
+    mergeOp === 'rebase'
+      ? 'rebase'
+      : mergeOp === 'cherry_pick'
+        ? 'cherry-pick'
+        : mergeOp === 'revert'
+          ? 'revert'
+          : mergeOp === 'merge'
+            ? 'merge'
+            : null,
+  );
 
   $effect(() => {
     const id = repo.id;
     resolving = false;
     merging = false;
+    mergeOp = null;
     mergeReq = null;
     // Status lives in the store; (re)load it for this repo. The auto-fetch loop
     // keeps it fresh thereafter, and the tab strip shares the same value.
@@ -76,6 +94,7 @@
       .getMergeStatus(id)
       .then((m) => {
         merging = m.merging;
+        mergeOp = m.op ?? null;
         if (m.merging) {
           conflictSeed = {
             files: m.conflicted_files.length > 0 ? m.conflicted_files : conflictedPaths,
@@ -89,6 +108,7 @@
         // Fall back to what the status already told us rather than hiding a
         // merge the user is standing in.
         merging = conflictedPaths.length > 0;
+        mergeOp = status?.op_in_progress ?? null;
       });
   });
 
@@ -225,6 +245,9 @@
         {#if t.id === 'graph' && status && status.changes.length > 0}
           <span class="count" title="{status.changes.length} uncommitted change{status.changes.length === 1 ? '' : 's'} (WIP)">{status.changes.length}</span>
         {/if}
+        {#if t.id === 'graph' && conflictedPaths.length > 0}
+          <span class="count conflict-count" title="{conflictedPaths.length} conflicted file{conflictedPaths.length === 1 ? '' : 's'}">⚠ {conflictedPaths.length}</span>
+        {/if}
       </button>
     {/each}
     {#if merging}
@@ -243,8 +266,12 @@
     <div class="merge-banner">
       <Icon name="merge" size={13} />
       <span>
-        A merge is in progress{#if conflictSeed.source}
-          (merging <span class="mono">{conflictSeed.source}</span>){/if}.
+        {#if opLabel}
+          A {opLabel} is in progress{#if conflictSeed.source}
+            (<span class="mono">{conflictSeed.source}</span>){/if}.
+        {:else}
+          Conflicted files need resolution (e.g. from a stash pop).
+        {/if}
         {#if conflictSeed.files.length > 0}
           {conflictSeed.files.length} file{conflictSeed.files.length === 1 ? '' : 's'} need resolution.
         {/if}
@@ -260,6 +287,7 @@
         repoId={repo.id}
         initialFiles={conflictSeed.files}
         initialSource={conflictSeed.source}
+        initialOp={mergeOp}
         onleave={leaveResolver}
       />
     {:else if effTab === 'prs'}
@@ -291,6 +319,7 @@
           {status}
           onstatus={setStatus}
           onmergerequest={requestMerge}
+          onresolveconflicts={openResolver}
         />
       {/key}
     {:else}

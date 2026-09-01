@@ -260,7 +260,12 @@ The **Changes** tab is the working-tree view, backed by `git status`:
   isn't installed, drafting behaves exactly as before.
 - **Push / pull / fetch** (`/push`, `/pull`, `/fetch`) — push auto-sets upstream
   for a branch that has none; each returns fresh status so the ahead/behind chip
-  updates.
+  updates. A pull refused by a **dirty tree** comes back as a 409 with git's own
+  message, and the UI offers **"Stash, pull & restore"** — a retry with
+  `{auto_stash:true}` that stashes (untracked included), pulls, and pops,
+  reporting what happened to the stash in the response `note`. The same offer
+  appears when a dirty tree blocks a branch **switch** ("Stash & switch", via
+  `/checkout-update`).
 
 ### Diffs
 
@@ -279,27 +284,40 @@ The diff is parsed into a structured `DiffResp` and rendered by `DiffViewer`.
 
 ## 6. Merge-conflict resolution
 
-Otto resolves conflicts entirely in-app, without dropping to a terminal.
+Otto resolves conflicts entirely in-app, without dropping to a terminal — and
+not just merge conflicts: **rebase, cherry-pick, revert, and stash-pop
+conflicts** get the same first-class treatment. The repo status carries
+`op_in_progress` (`merge` / `rebase` / `cherry_pick` / `revert`), the graph's
+WIP row and the Graph tab badge show a ⚠ conflicted count, and the WIP panel
+lists conflicted files in their own **Conflicts** section (with "Ours"/"Theirs"
+whole-file quick-resolves and an "Open resolver" entry) instead of mixing them
+into the stage/unstage trees — staging a file that still contains conflict
+markers is no longer one careless checkbox away.
 
 1. **Start a local merge** — `POST /repos/{id}/merge` with a source/target branch
    and optional `auto_stash` (stash → merge → pop when the tree is dirty). A clean
-   merge completes immediately; conflicts open the resolver.
+   merge completes immediately; conflicts open the resolver. Starting a merge
+   while another operation is unfinished is refused with a 409.
    - **Preview first (no mutation):** `POST /repos/{id}/merge/preview` does a
      dry-run via `git merge-tree` and reports whether the merge would conflict —
      no tree changes.
 2. **Resolver view** (`ConflictResolverView.svelte`): left pane lists conflicted
    files with a resolved/unresolved indicator; right pane shows the selected
-   file's hunks (`ConflictFilePane` / `ConflictHunk`).
+   file's hunks (`ConflictFilePane` / `ConflictHunk`). Its title and buttons name
+   the actual operation (merge / rebase / cherry-pick / revert; stash-pop
+   conflicts have nothing to abort or commit — resolutions are staged as you go).
    - `GET /repos/{id}/conflict?path=…` returns one file's conflict content;
    - `POST /repos/{id}/conflict/resolve` writes your chosen resolution for a path
-     and re-stages it.
+     and re-stages it — or takes a whole side with `side: "ours" | "theirs"`.
 3. **Complete or abort:**
-   - **Complete merge** (enabled once every file is resolved) →
-     `POST /repos/{id}/merge/commit` creates the merge commit.
-   - **Abort merge** → `POST /repos/{id}/merge/abort` restores the pre-merge
-     state.
-   - `GET /repos/{id}/merge/status` reports in-progress merge state (used to
-     restore the resolver after a reload).
+   - **Complete** (enabled once every file is resolved) →
+     `POST /repos/{id}/merge/commit` commits the merge/squash or `--continue`s
+     the rebase / cherry-pick / revert.
+   - **Abort** → `POST /repos/{id}/merge/abort` aborts with the operation's own
+     verb. With nothing in progress it refuses (409) — it never falls back to a
+     hard reset that could destroy uncommitted work.
+   - `GET /repos/{id}/merge/status` reports the in-progress state (`merging`,
+     `op`, `conflicted_files`; used to restore the resolver after a reload).
 
 > All mutating merge/conflict operations on a given repo are **serialized** by a
 > per-repo lock in the daemon, so concurrent requests can't corrupt an in-progress
@@ -427,7 +445,8 @@ distinction from the **"Draft message with agent"** button, which drafts the
 | `GET /repos/{id}/diff?target=worktree\|staged\|commit:<sha>\|range:<a>..<b>` | ws viewer | `DiffResp` |
 | `POST /repos/{id}/stage` · `/unstage` · `/discard` | ws editor | `StagePathsReq` → `RepoStatusResp` |
 | `POST /repos/{id}/commit` | ws editor | `CommitReq` (`amend`) → `{sha}` |
-| `POST /repos/{id}/push` · `/pull` · `/fetch` | ws editor | Returns fresh `RepoStatusResp` |
+| `POST /repos/{id}/push` · `/fetch` | ws editor | Returns fresh `RepoStatusResp` |
+| `POST /repos/{id}/pull` | ws editor | Optional `{auto_stash}` → `{status, note?}` (stash → pull → pop on a dirty tree; `note` reports the stash outcome) |
 
 > **Why a failed pull isn't a 502.** Git failures used to map wholesale to
 > `Error::Upstream` → **502**, and the UI reads a 502 as "the git provider is
@@ -437,10 +456,13 @@ distinction from the **"Draft message with agent"** button, which drafts the
 > (matched on git's stable wording, `local_refusal` in `otto-git/src/local.rs`)
 > now return **409** with git's own line, so you get "Please commit your changes
 > or stash them before you merge" instead of a false provider outage. A real
-> network/auth failure is still a 502.
+> network/auth failure is still a 502 — and the UI's outage banner now listens
+> only to provider-backed endpoints (PRs, collaborators), never to local git
+> routes. Forge HTTP errors are classified by status too: 401/403 → 403 with a
+> check-your-token hint, 404 → 404, "not mergeable"-style 405/409/422 → 409.
 
 | `POST /repos/{id}/checkout` | ws editor | `CheckoutReq` (`create`) |
-| `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; conflict → 502 with git stderr |
+| `POST /repos/{id}/cherry-pick` · `/revert` | ws editor | `{sha}`; a conflicting pick/revert is a normal 200 — status carries `op_in_progress` + conflicted paths, resolved/aborted via the merge lifecycle routes |
 | `POST /repos/{id}/branch` · `/branch/rename` · `/branch/delete` | ws editor | Create / rename / delete branch |
 | `POST /repos/{id}/tag` · `/tag/push` · `/tag/delete` | ws editor | Create / push / delete tags |
 | `POST /repos/{id}/stash` | ws editor | `{op: save\|pop\|apply\|drop, sha?}` — `save` runs `git stash push -u` (untracked included) and 400s with "nothing to stash" on a clean tree; mutating ops retry briefly on a concurrent `index.lock` |

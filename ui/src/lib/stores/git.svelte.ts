@@ -11,6 +11,7 @@ import type {
   MergePreview,
   MergeResult,
   PrSummary,
+  PullResp,
   Repo,
   RepoStatusResp,
 } from '../api/types';
@@ -74,6 +75,7 @@ function statusEq(a: RepoStatusResp, b: RepoStatusResp): boolean {
     a.upstream !== b.upstream ||
     a.ahead !== b.ahead ||
     a.behind !== b.behind ||
+    (a.op_in_progress ?? null) !== (b.op_in_progress ?? null) ||
     a.changes.length !== b.changes.length
   ) {
     return false;
@@ -81,7 +83,13 @@ function statusEq(a: RepoStatusResp, b: RepoStatusResp): boolean {
   for (let i = 0; i < a.changes.length; i++) {
     const x = a.changes[i];
     const y = b.changes[i];
-    if (x.path !== y.path || x.kind !== y.kind || x.staged !== y.staged || x.unstaged !== y.unstaged) {
+    if (
+      x.path !== y.path ||
+      x.orig_path !== y.orig_path ||
+      x.kind !== y.kind ||
+      x.staged !== y.staged ||
+      x.unstaged !== y.unstaged
+    ) {
       return false;
     }
   }
@@ -482,6 +490,12 @@ class GitStore {
   // Thin wrappers over the daemon's merge/conflict endpoints. Conflicts come
   // back from `mergeBranch`/`completeMerge` as a NORMAL result (status:
   // 'conflicts'), not an error — callers branch on `result.status`.
+
+  /** Pull the repo. `autoStash` wraps a dirty tree in stash → pull → pop (the
+   *  retry offered after a 409 "commit or stash first" refusal). */
+  pull(repoId: Id, autoStash = false): Promise<PullResp> {
+    return api.post<PullResp>(`/repos/${repoId}/pull`, autoStash ? { auto_stash: true } : undefined);
+  }
 
   /** Merge `req.source` into `req.target`. Conflicts are a normal 200 result. */
   mergeBranch(repoId: Id, req: MergeBranchReq): Promise<MergeResult> {
