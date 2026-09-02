@@ -726,6 +726,11 @@ fn tool_catalog() -> Value {
                 "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }
             },
             {
+                "name": "browser_marks",
+                "description": "Read-only: list the DOM marks (annotations) the user picked in this workspace's Browser — selector, visible text, an HTML excerpt, and the user's note per mark, oldest first. Pass `url` to limit to one page. When the user says \"the element I marked\", this is where to look.",
+                "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } } }
+            },
+            {
                 "name": "browser_login",
                 "description": "Sign in to a stored site credential for `domain` (a Site Credential the user created and explicitly marked \"allow agent use\" — otherwise this is refused). The daemon resolves the credential server-side, drives the fill+submit over CDP, and returns only whether it worked — the password never enters this tool's arguments, result, or the audit log.",
                 "inputSchema": { "type": "object", "properties": { "domain": { "type": "string" } }, "required": ["domain"] }
@@ -1501,6 +1506,49 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                 .await?;
             Ok(finalize(raw))
         }
+        // Read-only list of the user's marks — the Browser page's ask bar
+        // also inlines the current page's marks into the turn it submits,
+        // so this is the agent's own way to look them up later (a follow-up
+        // question, or a mark made after the ask).
+        "browser_marks" => {
+            let Some(ws) = ctx.workspace_id.as_deref() else {
+                return Err("no workspace context (OTTO_WORKSPACE_ID unset); cannot list marks".into());
+            };
+            let url = args.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty());
+            let path = match url {
+                Some(u) => format!("/workspaces/{}/browser/annotations?url={}", seg(ws), seg(u)),
+                None => format!("/workspaces/{}/browser/annotations", seg(ws)),
+            };
+            let raw = ctx.get_json(&path).await?;
+            // Trim each row to what an agent acts on; the excerpt is raw page
+            // HTML and can be large, so cap it per mark.
+            let marks: Vec<Value> = raw
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|a| {
+                            let excerpt: String = a
+                                .get("excerpt")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .chars()
+                                .take(1_000)
+                                .collect();
+                            json!({
+                                "id": a.get("id").cloned().unwrap_or(Value::Null),
+                                "url": a.get("url").cloned().unwrap_or(Value::Null),
+                                "selector": a.get("selector").cloned().unwrap_or(Value::Null),
+                                "text": a.get("text").cloned().unwrap_or(Value::Null),
+                                "excerpt": excerpt,
+                                "comment": a.get("comment").cloned().unwrap_or(Value::Null),
+                                "created_at": a.get("created_at").cloned().unwrap_or(Value::Null),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(finalize(json!({ "marks": marks })))
+        }
         // The daemon resolves the credential (`allow_agent_use` required,
         // else a typed 403) and drives the fill+submit itself — this arm only
         // ever sends/receives `domain`/`logged_in`/`engine`; the password
@@ -2120,10 +2168,26 @@ mod tests {
             "browser_page",
             "browser_query",
             "browser_summarize",
+            "browser_marks",
             "browser_login",
         ] {
             assert!(names.contains(&t), "catalog missing {t}");
         }
+    }
+
+    #[tokio::test]
+    async fn browser_marks_errors_without_workspace() {
+        let mut ctx = test_ctx();
+        ctx.workspace_id = None;
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "id": 26, "method": "tools/call",
+                    "params": { "name": "browser_marks", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], json!(true));
+        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("workspace"));
     }
 
     #[tokio::test]
