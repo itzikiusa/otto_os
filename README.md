@@ -46,6 +46,9 @@ bridges so an agent can work a ticket from a chat thread.
   mean — keep it running in the background or **archive** it (stops the
   process, keeps the full history, resumable later) — with bulk close/archive,
   reopen-closed-tab (⌘⇧T), and an opt-in auto-archive for long-idle sessions.
+  A **tiled grid view** shows every session at once (up to 15 live terminals),
+  sessions are auto-titled from what the agent is doing, and a pane-level
+  **restart** respawns a stuck session in place, resuming the same conversation.
   Sessions can be confined by an optional macOS **Seatbelt sandbox**
   (`otto-sandbox`) and auto-trust their workspace folder so they never stall
   on a permission prompt. By default agents
@@ -69,7 +72,9 @@ bridges so an agent can work a ticket from a chat thread.
   automatically; PR review threads support resolve/reply/reopen.
 - **AI code review** — fan out several review agents (one per provider/lens)
   over a PR *or* your local working tree. Each runs as an openable session with
-  live progress, per-agent findings, retry, and a configurable grace period.
+  live progress, per-agent findings, per-agent stop / retry, and a configurable
+  grace period; lenses are **per-repo presets** built from your installed
+  `review` skills.
   Findings become **tracked items** — a review-findings workflow with statuses
   and fix / verify / open-Jira / false-positive / regression-test actions — and
   can be **ingested into a Proof Pack** or saved to workspace memory.
@@ -131,7 +136,10 @@ bridges so an agent can work a ticket from a chat thread.
   daemon's event bus, so every workstream shows up as a node with a live status —
   click one to jump straight to the work behind it.
 - **Connections** — open SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse
-  sessions side-by-side with agents. The SSH username is optional everywhere
+  sessions side-by-side with agents. One sidebar entry holds the **unified
+  hub**: every connection and Kafka cluster in one folder tree with per-kind
+  glyphs and type-filter chips — DB kinds open in the workbench, SSH and Kafka
+  as seamless workbench tabs. The SSH username is optional everywhere
   (terminals, DB tunnels, Kafka tunnels): leave it empty and ssh resolves it the
   way your terminal does — `~/.ssh/config` `User`, else your local login name.
 - **Database Explorer** — a TablePlus-class browser for MySQL, PostgreSQL, Redis,
@@ -175,14 +183,16 @@ bridges so an agent can work a ticket from a chat thread.
 - **Kubernetes console** — a k9s-like cluster workspace over `kubectl` (installed
   on demand; kubeconfigs picked from `~/.kube/config`, pasted, or imported from
   EKS into Otto-owned files — your kubeconfig is never modified). Namespace
-  filter, health-colored resource tables with live CPU/MEM when metrics-server
-  exists, a detail drawer with manifest (secrets redacted) / describe / events /
-  streaming **logs** / an inline **exec** terminal, and row actions — restart,
-  scale, rollout undo/pause/resume, **Argo Rollouts** promote/abort/retry and
-  **ArgoCD** sync/refresh/redeploy, all via the CRDs (no extra CLIs). One-click
-  **k9s** tab. Gated by the `kubernetes` RBAC key (View/Edit/Admin); agents get
-  `k8s_get_resources` / `k8s_describe` / `k8s_logs` / `k8s_top` and the
-  Edit-gated `k8s_action` over MCP.
+  filter, health-colored tables over 16 resource kinds with live CPU/MEM when
+  metrics-server exists, a detail drawer with manifest (secrets redacted) /
+  describe / events / streaming **logs** / an inline **exec** terminal, and
+  audited row actions — restart, scale, rollout undo/pause/resume, CronJob
+  trigger/suspend, **Argo Rollouts** promote/abort/retry and **ArgoCD**
+  sync/refresh/redeploy, all via the CRDs (no extra CLIs); destructive ones
+  need a typed confirm. One-click **k9s** tab. Gated by the `kubernetes` RBAC
+  key (View/Edit/Admin); agents get `k8s_list_clusters` / `k8s_get_resources` /
+  `k8s_describe` / `k8s_logs` / `k8s_top` and the Edit-gated `k8s_action` over
+  MCP.
 - **Browser** — a workspace-scoped web browser inside Otto: reader tabs fetch a
   URL and render it as clean markdown (JS-rendered pages via a
   [Lightpanda](https://github.com/lightpanda-io/browser) sidecar, beta software,
@@ -206,10 +216,13 @@ bridges so an agent can work a ticket from a chat thread.
   run history. Files stay the source of truth; Otto keeps only a derived index
   (`otto-vault`).
 - **Multi-user, RBAC & sharing** — per-feature roles (None < View < Edit <
-  Admin), per-session isolation, an admin overview + audited impersonation, and
-  **session sharing** via scoped, expiring, revocable links gated by an
-  email-OTP access code. Optional **remote/mobile access** (Cloudflare tunnel +
-  installable PWA) keeps the daemon loopback-only by default. The shell is fully
+  Admin), per-workspace membership (grant one account several workspaces from
+  a single **By user** screen), per-session isolation, an admin overview +
+  audited impersonation, and **session sharing** via scoped, expiring,
+  revocable links gated by an email-OTP access code. Optional **remote/mobile
+  access** (Cloudflare tunnel + installable PWA) keeps the daemon loopback-only
+  by default; copy, paste and keyboard shortcuts work from a remote browser
+  even on the self-signed listener. The shell is fully
   **responsive (phone + iPad, portrait & landscape)** with collapsible,
   independently-scrollable sections, **light/dark + RTL**, and an opt-in
   **per-device session view** (show only sessions started on this device). See
@@ -235,8 +248,11 @@ bridges so an agent can work a ticket from a chat thread.
   usage and cost by tailing Claude and Codex transcripts (no manual
   instrumentation), with per-provider / day / session rollups and configurable
   retention.
-- **API client** — a built-in REST workbench (collections, environments, history),
-  with import/export (Postman / OpenAPI / HAR) and an SSRF-guarded executor.
+- **API client** — a built-in REST workbench (collections, environments, history,
+  automations) that also speaks **GraphQL, SSE, WebSocket and gRPC**, with
+  import/export (Postman / OpenAPI / HAR), git sync of Postman collection files,
+  a per-workspace cookie jar, Keychain-backed secret variables, open tabs that
+  survive app restarts, and an SSRF-guarded executor.
 - **MCP Control Plane** — two-way Model Context Protocol. **Inbound:** every agent
   session gets a first-party `otto` MCP server (`ottod mcp-tools`) with read-only
   tools over Otto's own data — including your **database connections**:
@@ -248,8 +264,9 @@ bridges so an agent can work a ticket from a chat thread.
   tool your agents call passes a governance pipeline (allowlist → policy →
   single-use approval → dry-run → fail-closed audit → stats). **Outward:** Otto
   exposes its own `otto.*` tools — across every feature (codebase search, context
-  packets, workflows, git/PRs, issues, brokers, swarm, vault, read-only DB, proof
-  packs, scheduled tasks, …) — to external MCP clients **over HTTP, not only
+  packets, workflows, git/PRs incl. inline + threaded `comment_pr`, issues,
+  brokers, swarm, vault, read-only DB, proof packs, scheduled tasks, AWS,
+  Kubernetes, …) — to external MCP clients **over HTTP, not only
   locally**: a **Streamable-HTTP** endpoint (`POST /api/v1/mcp/http`) a client
   connects to with a bearer token, no local subprocess (the `ottod mcp-server`
   stdio bridge still works too). You can mint **multiple scoped tokens** — each
@@ -266,9 +283,10 @@ bridges so an agent can work a ticket from a chat thread.
   watchdog, and a concurrency cap with queueing. Runs **survive daemon
   restarts**: finished steps are adopted from the persisted per-node state and
   the interrupted step resumes (side-effect steps are never blindly re-fired;
-  a per-workflow toggle opts out). Manual, webhook, **chat**
-  (run a workflow from a bound Slack/Telegram channel), and event triggers fire
-  today; scheduled triggers and a few Product/Review nodes are still being wired.
+  a per-workflow toggle opts out). A comma-separated Working Directory declares
+  a **multi-repo run**. Manual, webhook, **chat** (run a workflow from a bound
+  Slack/Telegram channel), **schedule** (interval / daily / weekly / cron) and
+  event triggers fire today; a few Product/Review nodes are still being wired.
 - **Scheduled Tasks** — recurring agent jobs on an **interval / daily / weekly**
   schedule. Each run executes a prompt, writes a **Markdown report**, and
   **delivers** it to Slack, Telegram, email, or a webhook (secrets redacted) —
@@ -316,7 +334,7 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
 │  └───────────────┘  +WS └──────────────────┘  │
 └──────────────────────────────────────────────┘
                               │ spawns
-                  claude / codex / shell (PTY),  git, providers
+        claude / codex / shell (PTY),  git, providers,  aws / kubectl CLIs
 ```
 
 - **`ottod`** — the daemon: an Axum HTTP+WebSocket server on `127.0.0.1:7700`
@@ -332,7 +350,9 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   `otto-channels`, `otto-connections`, `otto-dbviewer` (Database Explorer),
   `otto-brokers` (Kafka viewer), `otto-ssh` (shared SSH-tunnel helper),
   `otto-browser` (in-app browser: reader/live tabs, annotations, Lightpanda
-  sidecar engine), `otto-swarm` (Agent Swarm), `otto-vault` (the docs home — file-backed
+  sidecar engine), `otto-aws` (AWS console — `aws` CLI v2 runner, accounts,
+  S3/SQS/EC2/Athena/EKS), `otto-k8s` (Kubernetes console — `kubectl` runner,
+  clusters, resources/logs/exec/actions), `otto-swarm` (Agent Swarm), `otto-vault` (the docs home — file-backed
   markdown vaults + OKF), `otto-memory` (workspace memory layer),
   `otto-product` (Jira/Confluence story workflows), `otto-improve`
   (self-improvement), `otto-usage` (ClickHouse usage/metrics), `otto-skills`
@@ -345,14 +365,18 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
 
 ## Download (prebuilt DMG)
 
-A GitHub Actions workflow builds the Apple-Silicon `.dmg` **every Sunday
-morning** (and on demand) and publishes it to the rolling
-[`weekly` release](../../releases/tag/weekly) — the newest build is always at
-the same URL: `releases/download/weekly/Otto-macos-arm64.dmg`. Download, open,
-drag **Otto** to `/Applications`; to **update**, download it again and replace
-the app (the bundled daemon self-deploys on launch). The CI build isn't
-notarized, so on first launch use **right-click → Open** or run
-`xattr -cr /Applications/Otto.app`.
+A GitHub Actions workflow builds the Apple-Silicon `.dmg` **monthly** (on the
+1st, 05:00 UTC; maintainers can also run it on demand via `workflow_dispatch`)
+and publishes it to the rolling [`latest` release](../../releases/tag/latest) —
+the newest build is always at the same URL:
+<https://github.com/itzikiusa/otto_os/releases/download/latest/Otto-macos-arm64.dmg>
+(alongside a versioned copy, `Otto-YYYY.MM.DD-<build>-macos-arm64.dmg`, and a
+`.sha256` file; the release is flagged pre-release). Download, open, drag
+**Otto** to `/Applications`; to **update**, download it again and replace the
+app (the bundled daemon self-deploys on launch). The CI build isn't notarized,
+so on first launch use **right-click → Open** or run
+`xattr -cr /Applications/Otto.app`. The DMG does not bundle the in-app
+walkthrough videos — they stream from the `walkthroughs` GitHub release.
 
 ## Prerequisites
 
@@ -372,6 +396,10 @@ notarized, so on first launch use **right-click → Open** or run
 
   Otto detects which are installed and lets you pick a default; you don't need
   all of them.
+- **Optional tools install on demand from inside the app** — ClickHouse
+  (Usage & cost), Lightpanda (JS-rendered Browser pages), the `aws` CLI v2
+  (AWS console) and `kubectl` / `k9s` (Kubernetes console). None are needed to
+  build or to launch Otto.
 
 ## Build from source
 
@@ -459,9 +487,14 @@ touch-readable.
 crates/         Rust workspace (daemon + libraries)
 apps/desktop/   Tauri desktop shell (otto-desktop)
 ui/             Svelte 5 + Vite frontend
-packaging/      sign.sh, dmg.sh, make-cert.sh, launchd plist
+packaging/      sign.sh, dmg.sh, make-cert.sh, deploy.sh, launchd plist
+examples/plugins/ Example sidecar plugins (Team Performance, DORA)
 docs/contracts/ API + WebSocket contracts (source of truth for the TS types)
 docs/features/  Per-feature guides (setup, walkthrough, API, limits)
+docs/design/    Build contracts for in-flight modules (AWS + Kubernetes consoles)
+docs/plugins/   Plugin authoring guide
+marketing/      Remotion sources for the in-app walkthrough videos
+.github/workflows/ CI gates + the monthly DMG release (`latest` tag)
 ```
 
 ## Documentation
@@ -482,6 +515,7 @@ Where everything lives:
 | [`docs/remote-access-runbook.md`](./docs/remote-access-runbook.md) | Operator runbook: reaching Otto from a phone/iPad — Cloudflare tunnel, PWA, share links, email-OTP. |
 | [`docs/RELEASE.md`](./docs/RELEASE.md) | The macOS packaging flow — sidecar copy, Tauri build, codesigning, DMG. |
 | [`docs/plugins/AUTHORING.md`](./docs/plugins/AUTHORING.md) | How to write a custom sidecar plugin (the host API, manifest, examples). |
+| [`docs/design/aws-k8s-consoles.md`](./docs/design/aws-k8s-consoles.md) | The build contract the AWS + Kubernetes consoles were implemented against (engines, RBAC grid, routes, MCP tools). |
 | [`marketing/videos/`](./marketing/videos/) | The Remotion source for the in-app **Walkthroughs** (rendered to `marketing/videos/out/`, published to the `walkthroughs` GitHub release by `packaging/publish-walkthroughs.sh` — not bundled). |
 
 The architecture overview lives in the [Architecture](#architecture) section
