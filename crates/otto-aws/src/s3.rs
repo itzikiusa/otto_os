@@ -433,6 +433,7 @@ pub async fn download(
     let uri = format!("s3://{bucket}/{key}");
     let mut child = tokio::process::Command::new(&bin)
         .args(["s3", "cp", &uri, "-", "--no-progress"])
+        .env_remove("AWS_PROFILE") // same rule as `cli::run_raw`
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

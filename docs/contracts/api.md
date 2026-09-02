@@ -3086,21 +3086,25 @@ missing credentials are `400 invalid` whose message starts with
 | GET /aws/discover | Aws:View | — | `{ profiles: DiscoveredProfile[] }` parsed from `~/.aws/config` + `~/.aws/credentials` — names/metadata only, **never key values** |
 | GET /aws/regions | Aws:View | — | `{ regions: { code, name }[] }` (static, 32 regions) |
 | GET /aws/accounts | Aws:View | — | `AwsAccount[]` |
-| POST /aws/accounts | Aws:Admin | `UpsertAwsAccountReq` | 201 `AwsAccount` — profile mode needs `profile`; keys mode needs `access_key_id` + `secret_access_key`; `region` defaults to `us-east-1`. Runs `sts get-caller-identity` best-effort and stores `identity`. |
+| POST /aws/accounts | Aws:Admin | `UpsertAwsAccountReq` | 201 `AwsAccount` — profile mode needs `profile`; keys mode needs `access_key_id` + `secret_access_key`; `region` defaults to `us-east-1`; `endpoint_url` (optional) must be an `http://`/`https://` URL and plain `http` is accepted for **loopback hosts only** (400 `invalid` otherwise). Runs `sts get-caller-identity` best-effort and stores `identity`. |
 | GET /aws/accounts/{id} | Aws:View | — | `AwsAccount` |
-| PATCH /aws/accounts/{id} | Aws:Admin | partial `UpsertAwsAccountReq` — omitted secret fields keep the stored secret; `session_token: ""` clears it | `AwsAccount` |
+| PATCH /aws/accounts/{id} | Aws:Admin | partial `UpsertAwsAccountReq` — omitted secret fields keep the stored secret; `session_token: ""` clears it; `endpoint_url: ""` clears the custom endpoint | `AwsAccount` |
 | DELETE /aws/accounts/{id} | Aws:Admin | — | 204 — deletes the Keychain secret; linked `k8s_clusters.aws_account_id` is set NULL by the FK |
 | POST /aws/accounts/{id}/test | Aws:View | — | `AwsTestResp { ok, latency_ms, message, identity?, login_required }` (`sts get-caller-identity`) |
 | GET /aws/accounts/{id}/permissions?refresh= | Aws:View | — | `AwsPermissions { checked_at, identity?, services: { s3, sqs, ec2, athena, eks }: "allowed"\|"denied"\|"unknown", login_required }` — six parallel 8 s probes, cached 10 min in `permissions_json` (`refresh=true` bypasses; a `login_required` snapshot is never cached) |
 | POST /aws/accounts/{id}/login | Aws:Edit | `{ workspace_id }` | `Session` — spawns `aws sso login --profile <p>` in a PTY (`Spawner::spawn_command`, provider `aws`); 400 for `access_keys` accounts |
 
 `AwsAccount { id, name, auth_mode: "profile"|"access_keys", profile?, region,
-access_key_id?, role_arn?, environment: "dev"|"staging"|"prod", color?,
-identity?: AwsIdentity { account, arn, user_id }, permissions?: AwsPermissions,
-created_by?, created_at, updated_at, last_used_at? }` — **never** includes
-secrets. `UpsertAwsAccountReq { name, auth_mode, profile?, region?,
-access_key_id?, secret_access_key?, session_token?, role_arn?, environment?,
-color? }` (`role_arn` ⇒ `sts assume-role` once per ~55 min, cached in memory).
+access_key_id?, role_arn?, endpoint_url?, environment: "dev"|"staging"|"prod",
+color?, identity?: AwsIdentity { account, arn, user_id },
+permissions?: AwsPermissions, created_by?, created_at, updated_at,
+last_used_at? }` — **never** includes secrets. `UpsertAwsAccountReq { name,
+auth_mode, profile?, region?, access_key_id?, secret_access_key?,
+session_token?, role_arn?, endpoint_url?, environment?, color? }` (`role_arn`
+⇒ `sts assume-role` once per ~55 min, cached in memory; `endpoint_url` ⇒
+`AWS_ENDPOINT_URL=<url>` + `AWS_EC2_METADATA_DISABLED=true` in the env of
+**every** `aws` subprocess for that account, both auth modes — LocalStack,
+VPC interface endpoints, S3-compatible stores).
 `InstallJob { tool: "aws", state: "idle"|"running"|"done"|"failed", log_tail,
 started_at?, finished_at?, error? }`. `DiscoveredProfile { name, region?,
 sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.

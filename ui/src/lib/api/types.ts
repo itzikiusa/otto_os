@@ -6617,6 +6617,9 @@ export interface AwsAccount {
   region: string;
   access_key_id?: string | null;
   role_arn?: string | null;
+  /** Custom service endpoint (LocalStack, VPC endpoints, S3-compatible stores);
+   *  injected as `AWS_ENDPOINT_URL` into every CLI subprocess when set. */
+  endpoint_url?: string | null;
   environment: Environment;
   color?: string | null;
   identity?: AwsIdentity | null;
@@ -6637,6 +6640,9 @@ export interface UpsertAwsAccountReq {
   secret_access_key?: string | null;
   session_token?: string | null;
   role_arn?: string | null;
+  /** `http(s)://…` — plain `http` only for loopback hosts (400 otherwise).
+   *  On `PATCH`, `""` clears it; omitted keeps it. */
+  endpoint_url?: string | null;
   environment?: Environment;
   color?: string | null;
 }

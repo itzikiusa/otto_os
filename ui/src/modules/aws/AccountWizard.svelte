@@ -46,6 +46,10 @@
   let secret = $state('');
   let sessionToken = $state('');
   let roleArn = $state(init?.role_arn ?? '');
+  // Advanced: custom endpoint (LocalStack / VPC endpoints / S3-compatible).
+  // Sent as a plain string so an emptied field CLEARS it on PATCH.
+  let endpointUrl = $state(init?.endpoint_url ?? '');
+  let advancedOpen = $state(Boolean(init?.endpoint_url));
   let name = $state(init?.name ?? '');
   let environment = $state<Environment>(init?.environment ?? 'dev');
   let color = $state(init?.color ?? COLORS[0]);
@@ -112,6 +116,7 @@
       environment,
       color,
       role_arn: roleArn.trim() || null,
+      endpoint_url: endpointUrl.trim(),
     };
     if (mode === 'profile') {
       b.profile = profile.trim();
@@ -224,6 +229,22 @@
           <input class="in mono" type="password" bind:value={sessionToken} autocomplete="off" />
         </label>
         <p class="hint">Secrets go to the macOS Keychain; the row stores only the key id.</p>
+        <details class="adv" bind:open={advancedOpen}>
+          <summary>Advanced</summary>
+          <label class="field">
+            <span>Endpoint URL <em>(optional)</em></span>
+            <input
+              class="in mono"
+              type="url"
+              bind:value={endpointUrl}
+              placeholder="https://…"
+              spellcheck="false"
+              autocomplete="off"
+              data-testid="aws-wizard-endpoint"
+            />
+            <span class="hint">e.g. <code>http://localhost:4566</code> for LocalStack. Also for VPC interface endpoints and S3-compatible stores. Plain <code>http</code> is accepted for localhost only.</span>
+          </label>
+        </details>
       {/if}
 
       <div class="row2">
@@ -307,6 +328,7 @@
               <label class="field"><span>New session token</span><input class="in mono" type="password" bind:value={sessionToken} /></label>
             {/if}
             <label class="field"><span>Assume role ARN</span><input class="in mono" bind:value={roleArn} /></label>
+            <label class="field"><span>Endpoint URL <em>(blank = AWS default)</em></span><input class="in mono" type="url" bind:value={endpointUrl} placeholder="http://localhost:4566" spellcheck="false" data-testid="aws-wizard-endpoint" /></label>
           </div>
         </details>
       {/if}
@@ -315,6 +337,7 @@
         <strong>{name || 'Unnamed'}</strong>
         <EnvPill env={environment} />
         <span class="mono dim">{mode === 'profile' ? `profile ${profile}` : `keys ${accessKeyId}`} · {region}</span>
+        {#if endpointUrl.trim()}<span class="mono dim">→ {endpointUrl.trim()}</span>{/if}
       </div>
     {:else}
       <div class="test" aria-live="polite">
@@ -534,7 +557,8 @@
     font-size: 12px;
     color: var(--text-dim);
   }
-  .adv .row2 {
+  .adv .row2,
+  .adv .field {
     margin-top: 8px;
   }
   .summary {

@@ -167,7 +167,11 @@ pub async fn run_raw(
 ) -> Result<CliOutput> {
     let started = Instant::now();
     let mut cmd = Command::new(program);
+    // The child never inherits the daemon's own AWS_PROFILE: keys-mode accounts
+    // would otherwise be resolved through it (and blanking it instead makes
+    // the CLI look for a profile named ""). Profile mode re-adds it via `env`.
     cmd.args(args)
+        .env_remove("AWS_PROFILE")
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(if stdin.is_some() {
             Stdio::piped()

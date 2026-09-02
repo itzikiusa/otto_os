@@ -106,6 +106,11 @@ pub struct AwsAccount {
     pub access_key_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_arn: Option<String>,
+    /// Custom service endpoint (`params_json.endpoint_url`) — LocalStack, VPC
+    /// interface endpoints, S3-compatible stores. Injected as
+    /// `AWS_ENDPOINT_URL` into every subprocess when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_url: Option<String>,
     pub environment: Environment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
@@ -136,6 +141,7 @@ impl AwsAccount {
             region: r.region.clone(),
             access_key_id: str_param("access_key_id"),
             role_arn: str_param("role_arn"),
+            endpoint_url: str_param("endpoint_url"),
             environment: r.environment,
             color: str_param("color"),
             identity: r
@@ -166,6 +172,9 @@ pub struct UpsertAwsAccountReq {
     pub secret_access_key: Option<String>,
     pub session_token: Option<String>,
     pub role_arn: Option<String>,
+    /// Optional custom endpoint (`http(s)://…`; plain `http` only for loopback
+    /// hosts). On PATCH an empty string clears it, omitted keeps it.
+    pub endpoint_url: Option<String>,
     pub environment: Option<Environment>,
     pub color: Option<String>,
 }
@@ -209,15 +218,46 @@ pub struct StaticCreds {
     pub session_token: Option<String>,
 }
 
+/// Validate a caller-supplied custom endpoint: `http://` / `https://` only
+/// (no `ws`/`grpc`/`file`), plain `http` only for loopback hosts (the same
+/// rule as `otto_netguard::require_tls_or_loopback` — credentials would
+/// otherwise travel unencrypted), no whitespace / control characters.
+/// Returns the normalised URL (trimmed, trailing `/` dropped).
+pub fn validate_endpoint_url(raw: &str) -> Result<String> {
+    let s = raw.trim().trim_end_matches('/').to_string();
+    if s.len() > 512 {
+        return Err(Error::Invalid("endpoint_url is too long (max 512)".into()));
+    }
+    if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(Error::Invalid(
+            "endpoint_url must not contain whitespace".into(),
+        ));
+    }
+    let lower = s.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err(Error::Invalid(
+            "endpoint_url must be an http:// or https:// URL (e.g. http://localhost:4566)".into(),
+        ));
+    }
+    otto_netguard::require_tls_or_loopback(&s)
+        .map_err(|e| Error::Invalid(format!("endpoint_url: {e}")))?;
+    Ok(s)
+}
+
 /// The env every `aws` subprocess gets (§1 "Auth injection"). `profile` mode
 /// sets `AWS_PROFILE`; keys mode sets the three `AWS_*` credential vars.
 /// Both set the region (+ `AWS_DEFAULT_REGION` for older code paths), disable
-/// the pager and the v2 auto-prompt.
+/// the pager and the v2 auto-prompt. A custom `endpoint_url` (LocalStack, VPC
+/// endpoints, S3-compatible stores) becomes `AWS_ENDPOINT_URL` — honoured by
+/// every CLI v2 ≥ 2.13 command, `s3 cp` included — plus
+/// `AWS_EC2_METADATA_DISABLED=true` so the CLI never stalls on the IMDS
+/// credential provider when pointed at a non-AWS host.
 pub fn build_env(
     mode: AuthMode,
     profile: Option<&str>,
     region: &str,
     creds: Option<&StaticCreds>,
+    endpoint_url: Option<&str>,
 ) -> Vec<(String, String)> {
     let mut env = vec![
         ("AWS_REGION".to_string(), region.to_string()),
@@ -225,6 +265,10 @@ pub fn build_env(
         ("AWS_PAGER".to_string(), String::new()),
         ("AWS_CLI_AUTO_PROMPT".to_string(), "off".to_string()),
     ];
+    if let Some(u) = endpoint_url.map(str::trim).filter(|u| !u.is_empty()) {
+        env.push(("AWS_ENDPOINT_URL".into(), u.to_string()));
+        env.push(("AWS_EC2_METADATA_DISABLED".into(), "true".into()));
+    }
     match mode {
         AuthMode::Profile => {
             if let Some(p) = profile {
@@ -239,8 +283,11 @@ pub fn build_env(
                     env.push(("AWS_SESSION_TOKEN".into(), t.clone()));
                 }
             }
-            // A stray AWS_PROFILE in the daemon env must not override the keys.
-            env.push(("AWS_PROFILE".into(), String::new()));
+            // A stray AWS_PROFILE in the daemon env must not override the keys —
+            // but it must be REMOVED, not blanked: CLI v2 treats `AWS_PROFILE=""`
+            // as a profile literally named "" and fails every call with
+            // `The config profile () could not be found`. `cli::run_raw` and the
+            // S3 download spawn strip it before applying this env.
         }
     }
     env
@@ -458,6 +505,14 @@ impl AwsService {
         {
             params.insert("role_arn".into(), r.into());
         }
+        if let Some(u) = req
+            .endpoint_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            params.insert("endpoint_url".into(), validate_endpoint_url(u)?.into());
+        }
         if let Some(c) = req
             .color
             .as_deref()
@@ -540,6 +595,15 @@ impl AwsService {
             } else {
                 params.insert("role_arn".into(), r.trim().into());
             }
+            assume_cache_evict(id);
+        }
+        if let Some(u) = &req.endpoint_url {
+            if u.trim().is_empty() {
+                params.remove("endpoint_url");
+            } else {
+                params.insert("endpoint_url".into(), validate_endpoint_url(u)?.into());
+            }
+            // Assumed creds were minted against the old endpoint's STS.
             assume_cache_evict(id);
         }
         match mode {
@@ -667,11 +731,13 @@ impl AwsService {
             AuthMode::Profile => None,
             AuthMode::AccessKeys => Some(self.static_creds(account)?),
         };
+        let endpoint = endpoint_url_of(account);
         let base = build_env(
             mode,
             account.profile.as_deref(),
             region,
             base_creds.as_ref(),
+            endpoint,
         );
         let role_arn = account
             .params
@@ -710,7 +776,13 @@ impl AwsService {
                 c
             }
         };
-        Ok(build_env(AuthMode::AccessKeys, None, region, Some(&creds)))
+        Ok(build_env(
+            AuthMode::AccessKeys,
+            None,
+            region,
+            Some(&creds),
+            endpoint,
+        ))
     }
 
     /// Run `aws <args> --output json` for `account` and return the raw output
@@ -903,7 +975,13 @@ impl AwsService {
             .ok_or_else(|| Error::Invalid("account has no profile".into()))?;
         let bin = self.bin()?;
         // No assume-role here: the login is for the base profile.
-        let env = build_env(AuthMode::Profile, Some(&profile), &account.region, None);
+        let env = build_env(
+            AuthMode::Profile,
+            Some(&profile),
+            &account.region,
+            None,
+            endpoint_url_of(&account),
+        );
         let spec = CommandSpec {
             program: bin.to_string_lossy().into_owned(),
             args: vec![
@@ -921,6 +999,16 @@ impl AwsService {
             .spawn_command(ws_id, user_id, "aws", spec, title, Some(meta))
             .await
     }
+}
+
+/// `params_json.endpoint_url` of a row, if set and non-empty.
+pub fn endpoint_url_of(account: &AwsAccountRow) -> Option<&str> {
+    account
+        .params
+        .get("endpoint_url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// Append `--output json` unless the caller already chose an output mode
@@ -950,6 +1038,7 @@ mod tests {
             Some("dev-sso"),
             "eu-west-1",
             None,
+            None,
         ));
         assert_eq!(e["AWS_PROFILE"], "dev-sso");
         assert_eq!(e["AWS_REGION"], "eu-west-1");
@@ -972,6 +1061,7 @@ mod tests {
             None,
             "us-west-2",
             Some(&creds),
+            None,
         ));
         assert_eq!(e["AWS_ACCESS_KEY_ID"], "AKIAIOSFODNN7EXAMPLE");
         assert_eq!(
@@ -980,8 +1070,9 @@ mod tests {
         );
         assert_eq!(e["AWS_SESSION_TOKEN"], "tok");
         assert_eq!(e["AWS_REGION"], "us-west-2");
-        // A daemon-level AWS_PROFILE must be neutralised.
-        assert_eq!(e["AWS_PROFILE"], "");
+        // A daemon-level AWS_PROFILE is stripped by the spawner, never blanked
+        // (`AWS_PROFILE=""` breaks the CLI: "config profile () could not be found").
+        assert!(!e.contains_key("AWS_PROFILE"));
 
         let no_tok = StaticCreds {
             session_token: None,
@@ -992,8 +1083,105 @@ mod tests {
             None,
             "us-west-2",
             Some(&no_tok),
+            None,
         ));
         assert!(!e.contains_key("AWS_SESSION_TOKEN"));
+        assert!(!e.contains_key("AWS_ENDPOINT_URL"));
+        assert!(!e.contains_key("AWS_EC2_METADATA_DISABLED"));
+    }
+
+    #[test]
+    fn endpoint_url_is_injected_in_both_auth_modes() {
+        let e = env_map(build_env(
+            AuthMode::Profile,
+            Some("p"),
+            "us-east-1",
+            None,
+            Some("http://localhost:4566"),
+        ));
+        assert_eq!(e["AWS_ENDPOINT_URL"], "http://localhost:4566");
+        assert_eq!(e["AWS_EC2_METADATA_DISABLED"], "true");
+        assert_eq!(e["AWS_PROFILE"], "p");
+
+        let creds = StaticCreds {
+            access_key_id: "test".into(),
+            secret_access_key: "test".into(),
+            session_token: None,
+        };
+        let e = env_map(build_env(
+            AuthMode::AccessKeys,
+            None,
+            "us-east-1",
+            Some(&creds),
+            Some("http://127.0.0.1:4566"),
+        ));
+        assert_eq!(e["AWS_ENDPOINT_URL"], "http://127.0.0.1:4566");
+        assert_eq!(e["AWS_EC2_METADATA_DISABLED"], "true");
+        assert_eq!(e["AWS_ACCESS_KEY_ID"], "test");
+        // Blank / whitespace endpoint ⇒ nothing injected.
+        let e = env_map(build_env(AuthMode::Profile, Some("p"), "us-east-1", None, Some("  ")));
+        assert!(!e.contains_key("AWS_ENDPOINT_URL"));
+    }
+
+    #[test]
+    fn endpoint_url_validation() {
+        assert_eq!(
+            validate_endpoint_url(" http://localhost:4566/ ").unwrap(),
+            "http://localhost:4566"
+        );
+        assert_eq!(
+            validate_endpoint_url("http://127.0.0.1:4566").unwrap(),
+            "http://127.0.0.1:4566"
+        );
+        assert_eq!(
+            validate_endpoint_url("http://[::1]:4566").unwrap(),
+            "http://[::1]:4566"
+        );
+        assert_eq!(
+            validate_endpoint_url("https://vpce-0abc.s3.eu-west-1.vpce.amazonaws.com").unwrap(),
+            "https://vpce-0abc.s3.eu-west-1.vpce.amazonaws.com"
+        );
+        // Plain http to a non-loopback host leaks credentials.
+        assert!(matches!(
+            validate_endpoint_url("http://minio.internal:9000"),
+            Err(Error::Invalid(m)) if m.contains("https")
+        ));
+        assert!(validate_endpoint_url("http://10.0.0.5:4566").is_err());
+        // Non-http(s) schemes and junk are rejected up front.
+        assert!(validate_endpoint_url("ws://localhost:4566").is_err());
+        assert!(validate_endpoint_url("file:///etc/passwd").is_err());
+        assert!(validate_endpoint_url("localhost:4566").is_err());
+        assert!(validate_endpoint_url("http://localhost:4566 --debug").is_err());
+        assert!(validate_endpoint_url("").is_err());
+    }
+
+    #[test]
+    fn endpoint_url_of_reads_params() {
+        let mut row = AwsAccountRow {
+            id: "01J".into(),
+            name: "n".into(),
+            auth_mode: "access_keys".into(),
+            profile: None,
+            region: "us-east-1".into(),
+            params: serde_json::json!({"access_key_id": "test", "endpoint_url": "http://localhost:4566"}),
+            secret_ref: None,
+            identity: None,
+            permissions: None,
+            permissions_checked_at: None,
+            environment: Environment::Dev,
+            created_by: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_used_at: None,
+        };
+        assert_eq!(endpoint_url_of(&row), Some("http://localhost:4566"));
+        assert_eq!(
+            AwsAccount::from_row(&row).endpoint_url.as_deref(),
+            Some("http://localhost:4566")
+        );
+        row.params = serde_json::json!({"access_key_id": "test", "endpoint_url": ""});
+        assert_eq!(endpoint_url_of(&row), None);
+        assert!(AwsAccount::from_row(&row).endpoint_url.is_none());
     }
 
     #[test]

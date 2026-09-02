@@ -132,7 +132,7 @@ shell crates `crates/otto-aws` + `crates/otto-k8s` (ctx trait + empty
 | `GET /aws/discover` | → `{ profiles: DiscoveredProfile[] }` parsed from `~/.aws/config` + `~/.aws/credentials`: `{ name, region?, sso_start_url?, sso_session?, role_arn?, source: 'config'\|'credentials' }`. **Never** returns key values. |
 | `GET /aws/regions` | → `{ regions: { code, name }[] }` (static list, 30+ regions) |
 | `GET /aws/accounts` | → `AwsAccount[]` |
-| `POST /aws/accounts` | `UpsertAwsAccountReq { name, auth_mode: 'profile'\|'access_keys', profile?, region, access_key_id?, secret_access_key?, session_token?, role_arn?, environment?, color? }` → `AwsAccount` (201). Validates: profile mode needs `profile`; keys mode needs id+secret. Runs `sts get-caller-identity` best-effort and stores `identity`. |
+| `POST /aws/accounts` | `UpsertAwsAccountReq { name, auth_mode: 'profile'\|'access_keys', profile?, region, access_key_id?, secret_access_key?, session_token?, role_arn?, endpoint_url?, environment?, color? }` → `AwsAccount` (201). Validates: profile mode needs `profile`; keys mode needs id+secret; `endpoint_url` must be `http(s)://` (plain `http` only for loopback hosts). Runs `sts get-caller-identity` best-effort and stores `identity`. |
 | `GET /aws/accounts/{id}` | → `AwsAccount` |
 | `PATCH /aws/accounts/{id}` | partial `UpsertAwsAccountReq` (secret fields optional = keep) → `AwsAccount` |
 | `DELETE /aws/accounts/{id}` | → 204 (deletes Keychain secret; k8s clusters linked via `aws_account_id` are kept, FK sets NULL) |
@@ -140,7 +140,7 @@ shell crates `crates/otto-aws` + `crates/otto-k8s` (ctx trait + empty
 | `GET /aws/accounts/{id}/permissions?refresh=` | → `AwsPermissions { checked_at, identity?, services: { s3, sqs, ec2, athena, eks }: 'allowed'\|'denied'\|'unknown', login_required: bool }` |
 | `POST /aws/accounts/{id}/login` | `{ workspace_id }` → `Session` — spawns `aws sso login --profile <p>` (profile mode) in a PTY via `Spawner::spawn_command(provider="aws")`; for `access_keys` returns 400. |
 
-`AwsAccount { id, name, auth_mode, profile, region, access_key_id?, role_arn?, environment, color?, identity?: AwsIdentity { account, arn, user_id }, permissions?: AwsPermissions, created_by, created_at, updated_at, last_used_at }` — **never** includes secrets.
+`AwsAccount { id, name, auth_mode, profile, region, access_key_id?, role_arn?, endpoint_url?, environment, color?, identity?: AwsIdentity { account, arn, user_id }, permissions?: AwsPermissions, created_by, created_at, updated_at, last_used_at }` — **never** includes secrets.
 `InstallJob { tool: 'aws'|'kubectl'|'k9s', state: 'idle'|'running'|'done'|'failed', log_tail: string, started_at?, finished_at?, error? }`.
 
 ### 2.2 S3 (all View)
@@ -203,6 +203,23 @@ shell crates `crates/otto-aws` + `crates/otto-k8s` (ctx trait + empty
   override at the top of the ladder (tests / power users).
 - **`POST /aws/accounts`** defaults `region` to `us-east-1` when omitted;
   `created_by` is nullable in the DTO (FK `ON DELETE SET NULL`).
+- **`AWS_PROFILE` handling (as built)**: the daemon's own `AWS_PROFILE` is
+  removed from every child env (`Command::env_remove` in `cli::run_raw` and
+  the S3 download spawn); profile-mode accounts add it back explicitly. It is
+  never set to `""` — CLI v2 reads that as a profile literally named `""` and
+  fails every call with `The config profile () could not be found` (found by
+  the LocalStack e2e; it broke all access-keys accounts).
+- **Custom endpoint (as built, §2.1)**: `params_json.endpoint_url` /
+  `UpsertAwsAccountReq.endpoint_url` / `AwsAccount.endpoint_url` (optional,
+  PATCH-able — `""` clears, omitted keeps). Validated by
+  `accounts::validate_endpoint_url`: `http://` or `https://` only, no
+  whitespace, and plain `http` only for loopback hosts
+  (`otto_netguard::require_tls_or_loopback`). When set, `build_env` injects
+  `AWS_ENDPOINT_URL=<url>` + `AWS_EC2_METADATA_DISABLED=true` into **every**
+  `aws` subprocess in both auth modes (assume-role, probes, `s3 cp` download
+  stream, `sso login` included) — no per-command `--endpoint-url` flags. This
+  is what the LocalStack e2e (`ui/e2e/desktop-aws-localstack.spec.ts`) and
+  VPC-endpoint / S3-compatible setups rely on.
 - **Audit** adds `aws.sqs.delete_message`, `aws.sqs.redrive` and
   `aws.eks.import_kubeconfig` to the listed actions.
 - **`import-kubeconfig`** returns **201**, emits `k8s_cluster_updated`, and

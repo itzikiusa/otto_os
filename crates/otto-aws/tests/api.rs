@@ -393,10 +393,12 @@ async fn access_keys_account_keeps_secret_in_keychain_and_injects_env() {
     assert_eq!(row.0.as_deref(), Some(format!("aws-{id}").as_str()));
     assert!(!row.1.contains("wJalrXUtnFEMI"));
 
-    // Env injection: keys, token, region, and AWS_PROFILE neutralised.
+    // Env injection: keys, token, region — and AWS_PROFILE UNSET (never `""`:
+    // CLI v2 reads an empty AWS_PROFILE as a profile named "" and fails every
+    // call with `The config profile () could not be found`).
     let log = calls_log();
     assert!(
-        log.lines().any(|l| l.contains("PROFILE= REGION=us-east-1 AKID=AKIAIOSFODNN7EXAMPLE SECRET=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY TOKEN=FQoGZXIvYXdzTOKEN")),
+        log.lines().any(|l| l.contains("PROFILE=<unset> REGION=us-east-1 AKID=AKIAIOSFODNN7EXAMPLE SECRET=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY TOKEN=FQoGZXIvYXdzTOKEN")),
         "{log}"
     );
 

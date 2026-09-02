@@ -56,6 +56,19 @@
   function chipState(a: AwsAccount, svc: (typeof AWS_SERVICES)[number]['id']): 'allowed' | 'denied' | 'unknown' {
     return aws.perms(a.id)?.services[svc] ?? 'unknown';
   }
+
+  // First paint of a card whose row carries no cached probe (accounts created
+  // through the API / MCP, or whose 10-min snapshot expired server-side and
+  // was never re-requested) used to show five hollow "unknown" chips until
+  // someone clicked re-check. Probe such accounts once per mount instead.
+  const probed = new Set<string>();
+  $effect(() => {
+    for (const a of aws.accounts) {
+      if (probed.has(a.id) || aws.perms(a.id) || aws.permLoading[a.id]) continue;
+      probed.add(a.id);
+      void aws.loadPermissions(a.id);
+    }
+  });
 </script>
 
 <div class="ov">
@@ -125,6 +138,10 @@
             </dd>
             <dt>Region</dt>
             <dd class="mono">{a.region}</dd>
+            {#if a.endpoint_url}
+              <dt>Endpoint</dt>
+              <dd class="mono ep" title={a.endpoint_url} data-testid="aws-account-endpoint">{a.endpoint_url}</dd>
+            {/if}
             {#if p}
               <dt>Checked</dt>
               <dd class="dim">{fmtAgo(p.checked_at)}</dd>
@@ -316,6 +333,11 @@
     gap: 3px 10px;
     margin: 0;
     font-size: 12px;
+  }
+  .meta .ep {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   dt {
     color: var(--text-dim);

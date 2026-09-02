@@ -92,6 +92,26 @@ does **not** block saving; the card simply shows **Sign in** / the error.
 Kubernetes clusters imported from this account keep working but lose the link
 (`aws_account_id` → NULL).
 
+**Advanced: custom endpoint (LocalStack / VPC endpoints / S3-compatible).**
+Step 1 of the wizard (access-keys mode) has an **Advanced** disclosure with an
+**Endpoint URL (optional)** field — e.g. `http://localhost:4566` for
+[LocalStack](https://localstack.cloud), a VPC interface endpoint
+(`https://vpce-….s3.eu-west-1.vpce.amazonaws.com`), or an S3-compatible store
+(MinIO, Ceph RGW). It is stored as `params_json.endpoint_url`
+(`endpoint_url` on `AwsAccount` / `UpsertAwsAccountReq`, PATCH-able —
+`""` clears it) and shown on the account card. When set, the daemon injects
+`AWS_ENDPOINT_URL=<url>` **and** `AWS_EC2_METADATA_DISABLED=true` into the
+environment of **every** `aws` subprocess for that account, in both auth
+modes — the permission probes, assume-role, the streamed `s3 cp` download and
+`sso login` included (CLI v2 ≥ 2.13 honours the variable for every command,
+so no per-call `--endpoint-url` flags are needed). Validation: the value must
+be an `http://` or `https://` URL without whitespace, and plain `http` is
+accepted for **loopback hosts only** (`localhost`, `127.0.0.1`, `[::1]`) —
+the same rule as `otto_netguard::require_tls_or_loopback`, because static
+keys would otherwise travel unencrypted; anything else is a `400`. Profile
+accounts can set it too (the wizard exposes it under **Credentials & region**
+when editing).
+
 ### 2.3 Sign in (SSO expiry)
 
 Every CLI failure is classified. stderr containing `ExpiredToken`,
@@ -284,6 +304,8 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
   CSV / YAML.
 - ✅ Athena results drop straight into the DB Explorer grid.
 - ✅ One-click EKS → Kubernetes console import.
+- ✅ Custom endpoints per account (`endpoint_url`) — LocalStack, VPC interface
+  endpoints, S3-compatible stores — via `AWS_ENDPOINT_URL` on every call.
 - ⚠️ **S3 is read-only** (no upload / delete / presign) — a product decision.
 - ⚠️ Every call is a subprocess: expect ~200–600 ms per request (the CLI's
   Python start-up), and 30 s hard timeouts (8 s per permission probe).
@@ -306,8 +328,10 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
   temp credentials live in daemon memory only.
 - **Credentials via env, never argv.** Every subprocess gets
   `AWS_ACCESS_KEY_ID/…` or `AWS_PROFILE` in its environment; `AWS_PAGER=""` and
-  `AWS_CLI_AUTO_PROMPT=off` keep the CLI non-interactive. Keys-mode accounts
-  explicitly blank `AWS_PROFILE` so a daemon-level profile can't override them.
+  `AWS_CLI_AUTO_PROMPT=off` keep the CLI non-interactive. The daemon's own
+  `AWS_PROFILE` is **stripped** from every child (`env_remove`, never blanked —
+  `AWS_PROFILE=""` makes CLI v2 fail with `The config profile () could not be
+  found`); profile-mode accounts set it explicitly.
 - **No writes to `~/.aws`.** Discovery is read-only and returns names /
   regions / SSO metadata only.
 - **stderr redaction** before anything reaches the client (AKIA ids,
@@ -338,10 +362,58 @@ writes an `audit_log` row: `aws.sqs.send`, `aws.sqs.delete_message`,
 | **S3 download stops mid-way** | The client disconnected (the daemon kills `aws s3 cp` on disconnect) or the object exceeds 2 GiB (refused up front with 413). |
 | **EC2 stop/reboot → 400 "confirm_id must equal the instance id"** | The typed confirmation didn't match. This is enforced server-side on purpose. |
 | **Calls are slow (~0.5 s each)** | Each request is a fresh `aws` process (Python start-up). Auto-refresh lists at 10 s, not 1 s. |
+| **400 "endpoint_url: … is reached over plain http"** | A custom endpoint on a non-loopback host must be `https://`. Plain `http` is only accepted for `localhost` / `127.0.0.1` / `[::1]` (LocalStack). |
+| **Custom endpoint: chips `unknown`, `Could not connect to the endpoint URL`** | The endpoint is down or the port is wrong (`curl <url>/_localstack/health` for LocalStack). Athena / EKS chips stay non-green against LocalStack Community — those APIs are not emulated. |
 
 ---
 
-## 9. Related docs
+## 9. Testing
+
+Unit tests live next to the code (`cargo test -p otto-aws`): stderr
+classification / redaction (`cli.rs`), env building incl. `endpoint_url`
+injection and validation (`accounts.rs`), and every CLI-JSON normalizer.
+
+**Real end-to-end with LocalStack** — `ui/e2e/desktop-aws-localstack.spec.ts`
+drives the actual UI against the actual `aws` CLI against a LocalStack
+container. It self-skips (with the reason) when Docker is not running, when
+`aws` is not on `PATH`, or when the test daemon has no `/aws/*` routes.
+
+```bash
+# prerequisites: Docker running, `brew install awscli`, a worktree build
+cargo build -p ottod
+cd ui
+OTTO_E2E_BIN=$PWD/../target/debug/ottod \
+  npx playwright test desktop-aws-localstack desktop-aws --project=desktop-browser --reporter=line
+# parallel-safe: add OTTO_E2E_SLOT=4 OTTO_E2E_PORT=7824 OTTO_E2E_PW_PORT=5184
+```
+
+What it does: starts `localstack/localstack:4.14.0` (the last Community
+release that runs without a licence — `latest` exits 55 with "License
+activation failed" unless `LOCALSTACK_AUTH_TOKEN` is set; override the image
+with `OTTO_E2E_LOCALSTACK_IMAGE`, the token is passed through when present) as
+`otto-e2e-localstack-<slot>` on a free host port (reusing a container of that
+name if one is already up — then it is left running), waits for
+`/_localstack/health`, seeds S3 (a folder prefix with JSON / CSV / binary
+objects), SQS (a standard queue with 3 messages + a `.fifo` queue) and EC2
+(one `otto-e2e` instance) with the CLI, then creates an `access_keys` account
+(`test`/`test`, `endpoint_url: http://127.0.0.1:<port>`) through the API and
+asserts: the card shows account `000000000000`, endpoint, green S3/SQS/EC2
+chips (Athena/EKS not green); S3 browse → folder first → JSON preview →
+downloads whose byte size equals the seeded objects; SQS count 3 → Peek 3 →
+Send → 4 → typed Purge → 0; EC2 `running` → typed Stop → `stopped`. The
+container it started is removed in `afterAll`. Note `OTTO_E2E_BIN` — without
+it the harness drives the *installed* daemon, which may predate the routes.
+
+LocalStack Community limits you will notice: Athena / EKS are not emulated
+(`InternalFailure … not included within your LocalStack license` ⇒ chips
+`unknown`, never green), `stop-instances` completes instantly (no `stopping`
+phase), services lazy-load (`available` until first use), and the container is
+started with `SQS_ENDPOINT_STRATEGY=path` + `LOCALSTACK_HOST=127.0.0.1:<port>`
+so the queue URLs it returns are reachable from the host.
+
+---
+
+## 10. Related docs
 
 - [`./kubernetes-console.md`](./kubernetes-console.md) — where imported EKS
   clusters land; `kubectl` / k9s over the same account credentials.
