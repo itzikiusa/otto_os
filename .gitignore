@@ -59,4 +59,3 @@ docs/superpowers/
 
 # Remotion render output — published to the `walkthroughs` GitHub release by
 # packaging/publish-walkthroughs.sh, never shipped in the app bundle.
-marketing/videos/out/
