@@ -1074,6 +1074,19 @@ export type OttoEvent =
       author_id: Id;
     }
   | {
+      /** A Kubernetes cluster row was created/updated/deleted — the Kubernetes
+       *  console re-fetches its cluster list (or drops the deleted one). */
+      type: 'k8s_cluster_updated';
+      cluster_id: Id;
+      deleted: boolean;
+    }
+  | {
+      /** The kubectl / k9s background installer changed state. */
+      type: 'k8s_install_updated';
+      tool: string;
+      state: string;
+    }
+  | {
       /** A canvas scene's source doc changed — pushed LIVE while an agent edits
        *  the backing file (per-poll) and once with the committed result. The
        *  Canvas page re-renders `doc` for the matching `scene_id`. */
@@ -1183,6 +1196,20 @@ export type OttoEvent =
       type: 'browser_annotation_added';
       workspace_id: Id;
       annotation: unknown;
+    }
+  | {
+      /** An AWS account row was created / updated / deleted (global scope) —
+       *  the AWS console refreshes its account list. */
+      type: 'aws_account_updated';
+      account_id: Id;
+      deleted: boolean;
+    }
+  | {
+      /** The AWS-CLI installer changed state — the first-run panel applies the
+       *  job in place instead of waiting for its 1.5 s poll. */
+      type: 'aws_install_updated';
+      tool: string;
+      state: string;
     };
 
 // ---------------------------------------------------------------------------
@@ -1222,7 +1249,7 @@ export interface NotificationSettings {
 // RBAC — features + capabilities
 // ---------------------------------------------------------------------------
 
-/** The 25 protected features (snake_case, mirrors Rust Feature enum). */
+/** The 32 protected features (snake_case, mirrors Rust Feature enum). */
 export type Feature =
   | 'agents'
   | 'connections'
@@ -1248,7 +1275,14 @@ export type Feature =
   | 'mission_control'
   | 'scheduled_tasks'
   | 'run_with_otto'
-  | 'browser';
+  | 'browser'
+  | 'aws'
+  | 'aws_s3'
+  | 'aws_sqs'
+  | 'aws_ec2'
+  | 'aws_athena'
+  | 'aws_eks'
+  | 'kubernetes';
 
 /** Capability ladder (None < View < Edit < Admin). */
 export type Capability = 'none' | 'view' | 'edit' | 'admin';
@@ -6526,4 +6560,616 @@ export interface ProviderModelCatalog {
 /** `GET /providers/models` / `POST /providers/models/refresh` response. */
 export interface ModelCatalogResp {
   providers: Record<string, ProviderModelCatalog>;
+}
+
+// ---------------------------------------------------------------------------
+// AWS console — mirrors docs/design/aws-k8s-consoles.md §2 (crates/otto-aws).
+// Accounts never carry secrets; the daemon shells out to the `aws` CLI.
+// ---------------------------------------------------------------------------
+
+export type AwsAuthMode = 'profile' | 'access_keys';
+export type AwsService = 's3' | 'sqs' | 'ec2' | 'athena' | 'eks';
+export type InstallTool = 'aws' | 'kubectl' | 'k9s';
+export type InstallJobState = 'idle' | 'running' | 'done' | 'failed';
+
+/** Background CLI installer state (one per tool), polled via `/aws/status`. */
+export interface InstallJob {
+  tool: InstallTool;
+  state: InstallJobState;
+  log_tail: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+}
+
+/** `GET /aws/status`. */
+export interface AwsStatus {
+  installed: boolean;
+  version: string | null;
+  path: string | null;
+  install: InstallJob;
+}
+
+/** One profile parsed from `~/.aws/config` / `~/.aws/credentials` — never key values. */
+export interface DiscoveredProfile {
+  name: string;
+  region?: string | null;
+  sso_start_url?: string | null;
+  sso_session?: string | null;
+  role_arn?: string | null;
+  source: 'config' | 'credentials';
+}
+
+export interface AwsRegion {
+  code: string;
+  name: string;
+}
+
+/** `sts get-caller-identity`. */
+export interface AwsIdentity {
+  account: string;
+  arn: string;
+  user_id: string;
+}
+
+export type AwsPermissionState = 'allowed' | 'denied' | 'unknown';
+
+/** `GET /aws/accounts/{id}/permissions` — the per-service View probe. */
+export interface AwsPermissions {
+  checked_at: string;
+  identity?: AwsIdentity | null;
+  services: Record<AwsService, AwsPermissionState>;
+  login_required: boolean;
+}
+
+export interface AwsAccount {
+  id: Id;
+  name: string;
+  auth_mode: AwsAuthMode;
+  profile?: string | null;
+  region: string;
+  access_key_id?: string | null;
+  role_arn?: string | null;
+  /** Custom service endpoint (LocalStack, VPC endpoints, S3-compatible stores);
+   *  injected as `AWS_ENDPOINT_URL` into every CLI subprocess when set. */
+  endpoint_url?: string | null;
+  environment: Environment;
+  color?: string | null;
+  identity?: AwsIdentity | null;
+  permissions?: AwsPermissions | null;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+  last_used_at?: string | null;
+}
+
+/** `POST /aws/accounts` body; every field optional on `PATCH` (secrets omitted = keep). */
+export interface UpsertAwsAccountReq {
+  name: string;
+  auth_mode: AwsAuthMode;
+  profile?: string | null;
+  region: string;
+  access_key_id?: string | null;
+  secret_access_key?: string | null;
+  session_token?: string | null;
+  role_arn?: string | null;
+  /** `http(s)://…` — plain `http` only for loopback hosts (400 otherwise).
+   *  On `PATCH`, `""` clears it; omitted keeps it. */
+  endpoint_url?: string | null;
+  environment?: Environment;
+  color?: string | null;
+}
+
+/** `POST /aws/accounts/{id}/test`. */
+export interface AwsTestResp {
+  ok: boolean;
+  latency_ms: number;
+  message: string;
+  identity?: AwsIdentity | null;
+  login_required: boolean;
+}
+
+// --- S3 (read-only) ---
+
+export interface S3Bucket {
+  name: string;
+  creation_date: string;
+  region?: string | null;
+}
+
+export interface S3Object {
+  key: string;
+  size: number;
+  last_modified: string;
+  storage_class?: string | null;
+  etag?: string | null;
+}
+
+/** `GET …/s3/buckets/{bucket}/objects` (one delimiter level). */
+export interface S3ListObjectsResp {
+  prefixes: string[];
+  objects: S3Object[];
+  next_token?: string | null;
+  is_truncated: boolean;
+}
+
+export interface S3ObjectHead {
+  key: string;
+  size: number;
+  content_type?: string | null;
+  last_modified: string;
+  etag?: string | null;
+  metadata: Record<string, string>;
+  storage_class?: string | null;
+}
+
+/** `GET …/s3/buckets/{bucket}/preview` — `binary:true` when the type is not previewable. */
+export interface S3PreviewResp {
+  text?: string | null;
+  truncated?: boolean;
+  content_type?: string | null;
+  binary?: boolean;
+}
+
+// --- SQS ---
+
+export interface SqsQueue {
+  url: string;
+  name: string;
+  fifo: boolean;
+}
+
+export interface SqsQueueAttributesResp {
+  attributes: Record<string, string>;
+  approx_messages: number;
+  approx_not_visible: number;
+  approx_delayed: number;
+  dlq_target_arn?: string | null;
+}
+
+export interface SqsMessage {
+  message_id: string;
+  receipt_handle: string;
+  body: string;
+  attributes: Record<string, string>;
+  message_attributes: Record<string, unknown>;
+  md5?: string | null;
+}
+
+export interface SqsPeekReq {
+  url: string;
+  max?: number;
+  visibility_timeout?: number;
+}
+
+export interface SqsSendReq {
+  url: string;
+  body: string;
+  delay_seconds?: number;
+  group_id?: string;
+  dedup_id?: string;
+  message_attributes?: Record<string, { DataType: string; StringValue: string }>;
+}
+
+export interface SqsRedriveReq {
+  source_arn: string;
+  destination_arn?: string;
+}
+
+// --- EC2 ---
+
+export type Ec2State =
+  | 'pending'
+  | 'running'
+  | 'shutting-down'
+  | 'terminated'
+  | 'stopping'
+  | 'stopped'
+  | string;
+
+export interface Ec2Instance {
+  instance_id: string;
+  name?: string | null;
+  state: Ec2State;
+  type: string;
+  az?: string | null;
+  private_ip?: string | null;
+  public_ip?: string | null;
+  launch_time?: string | null;
+  platform?: string | null;
+  vpc_id?: string | null;
+  subnet_id?: string | null;
+  tags: Record<string, string>;
+}
+
+export interface Ec2InstanceDetail extends Ec2Instance {
+  raw: unknown;
+}
+
+export type Ec2Action = 'start' | 'stop' | 'reboot';
+
+export interface Ec2ActionResp {
+  previous_state: string;
+  current_state: string;
+}
+
+// --- Athena ---
+
+export interface AthenaWorkgroup {
+  name: string;
+  state: string;
+  output_location?: string | null;
+}
+
+export interface AthenaColumn {
+  name: string;
+  type: string;
+}
+
+export interface AthenaTable {
+  name: string;
+  type?: string | null;
+  columns: AthenaColumn[];
+}
+
+export interface AthenaExecution {
+  id: string;
+  query: string;
+  state: AthenaQueryState;
+  submitted_at: string;
+  completed_at?: string | null;
+  data_scanned_bytes?: number | null;
+  execution_ms?: number | null;
+}
+
+export interface AthenaQueryReq {
+  sql: string;
+  database?: string;
+  workgroup?: string;
+  output_location?: string;
+}
+
+export type AthenaQueryState = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+
+/** `GET …/athena/query/{qid}` — `result` is the DB Explorer `QueryResult` shape
+ *  so `ResultsGrid` renders it as-is. */
+export interface AthenaQueryStatus {
+  state: AthenaQueryState;
+  reason?: string | null;
+  stats: { data_scanned_bytes: number; execution_ms: number };
+  result?: QueryResult | null;
+  next_token?: string | null;
+}
+
+// --- EKS ---
+
+export interface EksClusterSummary {
+  name: string;
+  status: string;
+  version?: string | null;
+  endpoint?: string | null;
+  arn?: string | null;
+  created_at?: string | null;
+}
+
+export interface EksNodegroup {
+  name: string;
+  status: string;
+  desired?: number | null;
+  min?: number | null;
+  max?: number | null;
+  instance_types: string[];
+  ami_type?: string | null;
+}
+
+export interface EksClusterDetail {
+  cluster: unknown;
+  nodegroups: EksNodegroup[];
+}
+
+export interface EksImportReq {
+  cluster_name_override?: string;
+  default_namespace?: string;
+}
+
+/** The `K8sCluster` row created by `import-kubeconfig` — only the fields the AWS
+ *  module needs to navigate (`#/kubernetes/<id>`); the full shape lives in the
+ *  Kubernetes console section. */
+export interface EksImportResp {
+  id: Id;
+  name: string;
+  [extra: string]: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Kubernetes console (mirror of crates/otto-k8s — see
+// docs/design/aws-k8s-consoles.md §3; keep in lockstep)
+// ---------------------------------------------------------------------------
+
+/** One of the CLIs the daemon can install on demand. */
+export type K8sTool = 'kubectl' | 'k9s';
+
+/** Background installer state for one tool (shared shape with the AWS
+ *  console's `InstallJob`; prefixed here so the two type sections never
+ *  collide). */
+export interface K8sInstallJob {
+  tool: 'aws' | K8sTool;
+  state: 'idle' | 'running' | 'done' | 'failed';
+  log_tail: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+}
+
+/** `GET /k8s/status` per-binary presence. */
+export interface K8sToolStatus {
+  installed: boolean;
+  version?: string | null;
+  path?: string | null;
+}
+
+/** `GET /k8s/status`. */
+export interface K8sStatus {
+  kubectl: K8sToolStatus;
+  k9s: K8sToolStatus;
+  install: { kubectl: K8sInstallJob; k9s: K8sInstallJob };
+}
+
+/** One context found in `~/.kube/config` / `$KUBECONFIG` (`GET /k8s/discover`).
+ *  Never carries credentials. */
+export interface K8sDiscoveredContext {
+  name: string;
+  cluster: string;
+  user: string;
+  namespace?: string | null;
+  kubeconfig_path: string;
+  server?: string | null;
+}
+
+export interface K8sDiscoverResp {
+  contexts: K8sDiscoveredContext[];
+}
+
+/** Where a cluster row's kubeconfig comes from: the user's own file
+ *  (`kubeconfig`), a pasted file Otto owns (`imported`), or an EKS import
+ *  (`eks`, linked to an AWS account). */
+export type K8sClusterSource = 'kubeconfig' | 'imported' | 'eks';
+
+/** Cached capability probe (`GET /k8s/clusters/{id}/capabilities`). */
+export interface K8sCapabilities {
+  server_version?: string | null;
+  metrics_server: boolean;
+  argo_rollouts: boolean;
+  argocd: boolean;
+  checked_at: string;
+}
+
+export interface K8sCluster {
+  id: Id;
+  name: string;
+  source: K8sClusterSource;
+  kubeconfig_path?: string | null;
+  context_name: string;
+  default_namespace?: string | null;
+  aws_account_id?: Id | null;
+  environment: Environment;
+  color?: string | null;
+  capabilities?: K8sCapabilities | null;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+  last_used_at?: string | null;
+}
+
+/** `POST /k8s/clusters` (create from an existing kubeconfig context) and the
+ *  partial body of `PATCH /k8s/clusters/{id}`. */
+export interface UpsertK8sClusterReq {
+  name: string;
+  source: 'kubeconfig';
+  kubeconfig_path?: string | null;
+  context_name: string;
+  default_namespace?: string | null;
+  environment?: Environment;
+  color?: string | null;
+}
+
+/** `POST /k8s/clusters/import` — a pasted kubeconfig Otto stores itself. */
+export interface ImportK8sClusterReq {
+  name: string;
+  kubeconfig_yaml: string;
+  context_name?: string | null;
+  default_namespace?: string | null;
+  environment?: Environment;
+}
+
+/** `POST /k8s/clusters/{id}/test`. */
+export interface K8sTestResp {
+  ok: boolean;
+  latency_ms: number;
+  message: string;
+  server_version?: string | null;
+}
+
+export interface K8sNamespace {
+  name: string;
+  status: string;
+  age_seconds: number;
+}
+
+export interface K8sNode {
+  name: string;
+  status: string;
+  roles: string;
+  version: string;
+  /** Millicores (allocatable). */
+  cpu_capacity: number;
+  /** Bytes (allocatable). */
+  mem_capacity: number;
+  /** Millicores from metrics-server; null when unavailable. */
+  cpu_usage?: number | null;
+  /** Bytes from metrics-server; null when unavailable. */
+  mem_usage?: number | null;
+  age_seconds: number;
+}
+
+/** Resource kinds the `/resources` endpoint understands. `nodes` is served by
+ *  its own endpoint but shares the UI kinds list. */
+export type K8sResourceKind =
+  | 'pods'
+  | 'deployments'
+  | 'statefulsets'
+  | 'daemonsets'
+  | 'replicasets'
+  | 'jobs'
+  | 'cronjobs'
+  | 'services'
+  | 'ingresses'
+  | 'configmaps'
+  | 'secrets'
+  | 'pvcs'
+  | 'hpas'
+  | 'rollouts'
+  | 'applications'
+  | 'events'
+  | 'nodes';
+
+export type K8sHealth = 'ok' | 'warn' | 'bad' | 'progressing';
+
+/** One normalized table row. `extra` carries kind-specific columns
+ *  (deployments: desired/updated/available; rollouts: strategy/phase/step/
+ *  weight; applications: sync/health/revision; secrets: type/keys — never
+ *  values). */
+export interface K8sRow {
+  name: string;
+  namespace: string;
+  kind: string;
+  status: string;
+  ready?: string | null;
+  restarts?: number | null;
+  age_seconds: number;
+  node?: string | null;
+  ip?: string | null;
+  /** Millicores (metrics-server); null when unavailable. Format client-side. */
+  cpu?: number | null;
+  /** Bytes (metrics-server); null when unavailable. Format client-side. */
+  mem?: number | null;
+  images?: string[] | null;
+  labels: Record<string, string>;
+  extra: Record<string, string>;
+  health?: K8sHealth | null;
+}
+
+export interface K8sResourcesResp {
+  kind: string;
+  items: K8sRow[];
+  has_metrics: boolean;
+}
+
+export interface K8sEvent {
+  type: string;
+  reason: string;
+  message: string;
+  count: number;
+  last_seen: string;
+}
+
+/** `GET /k8s/clusters/{id}/resource` — manifest has `managedFields` stripped
+ *  and Secret data replaced by `<redacted>`. */
+export interface K8sResourceDetail {
+  manifest: unknown;
+  describe: string;
+  events: K8sEvent[];
+}
+
+export interface K8sContainer {
+  name: string;
+  image: string;
+  ready: boolean;
+  state: string;
+  restarts: number;
+  init: boolean;
+}
+
+export interface K8sContainersResp {
+  containers: K8sContainer[];
+}
+
+/** Query options for `GET …/pods/{ns}/{name}/logs`. */
+export interface K8sLogsOpts {
+  container?: string;
+  tail?: number;
+  since?: string;
+  previous?: boolean;
+  follow?: boolean;
+  timestamps?: boolean;
+}
+
+export interface K8sContainerMetrics {
+  name: string;
+  cpu_millicores: number;
+  mem_bytes: number;
+}
+
+export interface K8sPodMetrics {
+  name: string;
+  namespace: string;
+  cpu_millicores: number;
+  mem_bytes: number;
+  containers: K8sContainerMetrics[];
+}
+
+export interface K8sMetricsResp {
+  pods: K8sPodMetrics[];
+  available: boolean;
+}
+
+/** `POST /k8s/clusters/{id}/exec` → `Session` (PTY running `kubectl exec -it`). */
+export interface K8sExecReq {
+  workspace_id: Id;
+  ns: string;
+  pod: string;
+  container?: string | null;
+  command?: string[] | null;
+}
+
+/** `POST /k8s/clusters/{id}/k9s` → `Session`. */
+export interface K8sK9sReq {
+  workspace_id: Id;
+  ns?: string | null;
+}
+
+/** Mutating actions (`POST /k8s/clusters/{id}/actions`, §4.6). */
+export type K8sAction =
+  | 'restart'
+  | 'scale'
+  | 'delete_pod'
+  | 'rollout_status'
+  | 'rollout_undo'
+  | 'rollout_pause'
+  | 'rollout_resume'
+  | 'rollout_promote'
+  | 'rollout_abort'
+  | 'rollout_retry'
+  | 'argocd_sync'
+  | 'argocd_refresh'
+  | 'argocd_terminate_op'
+  | 'argocd_app_restart'
+  | 'cronjob_trigger'
+  | 'cronjob_suspend'
+  | 'cronjob_resume';
+
+/** Destructive actions (`delete_pod`, `scale` to 0, `rollout_undo`,
+ *  `argocd_sync` with prune) must carry `params.confirm_name === name`. */
+export interface K8sActionReq {
+  action: K8sAction;
+  kind: K8sResourceKind;
+  ns: string;
+  name: string;
+  params?: Record<string, unknown>;
+}
+
+export interface K8sActionResp {
+  ok: boolean;
+  message: string;
+  output?: string | null;
 }

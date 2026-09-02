@@ -13,7 +13,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 > it. Where the two diverge, each guide documents the *code's actual behavior* and
 > flags the drift; see [Known drift](#known-drift-between-docs-and-code) below.
 >
-> _Last verified against the codebase: **2026-09-01**._
+> _Last verified against the codebase: **2026-09-02**._
 
 ---
 
@@ -28,7 +28,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 | [Mission Control](./mission-control.md) | One **unified work graph** over all eight agentic kinds (sessions, swarms, goal loops, reviews, product stories, workflows, PRs, external triggers), built by a `WorkGraphProjector` off the daemon event bus with no producer rewiring. Nodes carry a normalized status; click one to open the work behind it. | In the Mission Control tab (gated by the `mission_control` feature). |
 | [AI code review](./code-review.md) | Fan out review agents (one per lens × provider) over a **PR** or your **local working tree**; live per-agent findings, retry, grace period, and the PR-review config. Lenses are data-driven from installed `review` skills. | PR mode needs a git token ([git guide](./git.md)). |
 | [Goal Loops](./goal-loops.md) | Give a **goal** + a **budget** (max iterations + active time); a team of agents iterates **Plan → Execute → Evaluate → Digest** on an isolated `goal-loop/<id>` branch until the **machine-checked** acceptance criteria are met or a limit is hit. AI-assisted goal definition, live phase/iteration monitoring, openable executor sessions. | No setup beyond an agent CLI on `PATH`. |
-| [Workflows](./workflows.md) | The visual workflow engine — nodes + edges + triggers, the topological run loop, `human_approval` pause/resume, and the API-client automation runner. **Honest maturity table**: which nodes/triggers are real vs. stubbed/unwired. | Build in the Workflows tab; webhook/event/manual triggers fire today. |
+| [Workflows](./workflows.md) | The visual workflow engine — nodes + edges + triggers, the topological run loop, `human_approval` pause/resume, per-step retry / re-run-from-here, the stall watchdog, the persistent 2-parallel run queue, multi-repo runs, and the API-client automation runner. **Honest maturity table**: which nodes/triggers are real vs. stubbed/unwired. | Build in the Workflows tab; manual / webhook / schedule (incl. cron) / event / chat triggers fire today. |
 | [Scheduled Tasks](./scheduled-tasks.md) | Recurring agent jobs — a prompt on a cadence (interval / daily / weekly) → a Markdown report → deliver to Slack / Telegram / email / webhook (redacted on the way out). Built-in **ticket-followup-review** preset; also driveable over 7 `otto.*` MCP tools. | Create one in the Scheduled Tasks tab (needs an agent CLI on `PATH`). |
 | [Personal Agents](./personal-agents.md) | Grok-bot-style preset agents — a named persona with a **pinned provider + model**, its own memory folder, **1..N schedules** each with a directive, optional browser use, per-agent channel delivery, chat-anytime, and **user-visible rooms** for inter-agent messaging. Includes the per-session model pinning + hourly-refreshed **model catalog** foundation. | Personal Agents tab; four editable example agents are seeded disabled. |
 
@@ -36,8 +36,8 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 
 | Guide | What it covers | Quick-start note |
 |-------|----------------|------------------|
-| [Git & Pull Requests](./git.md) | GitKraken-style repo tabs, stage/commit/discard, diffs, conflict resolution, and agent-drafted PRs that auto-push the branch. Includes **per-provider git-token setup**. | **GitHub** PAT, **Bitbucket Cloud** app password, or **GitLab** PAT → Settings → Git Accounts. |
-| [Jira & Confluence](./jira-confluence.md) | Connecting an Atlassian account and importing issues/pages (search by project/space, no key prefix), reading, and posting comments back. | **Atlassian Cloud API token** (email + token, Basic auth) → Settings → Issue Accounts. One account drives both Jira & Confluence. |
+| [Git & Pull Requests](./git.md) | GitKraken-style repo tabs with a commit graph + WIP/staging panel, stage/commit/discard (file or folder), diffs, an interactive conflict resolver covering merge / rebase / cherry-pick / revert / stash-pop, stash → pull/switch → restore, linked worktrees + submodules as first-class tabs, a **Focus** tab (my PRs + my Jira work), PR review-thread resolve/reply, and agent-drafted PRs (watchable drafting session) that auto-push the branch. Includes **per-provider git-token setup**. | **GitHub** PAT, **Bitbucket Cloud** app password, or **GitLab** PAT → Settings → Git Accounts. |
+| [Jira & Confluence](./jira-confluence.md) | Connecting an Atlassian account and importing issues/pages (search by project/space, no key prefix), reading, posting comments back, transitioning/assigning issues, and creating/updating Confluence pages (rich storage-format HTML). | **Atlassian Cloud API token** (email + token, Basic auth) → Settings → Issue Accounts. One account drives both Jira & Confluence. |
 | [Product](./product.md) | The full product-owner workflow on top of Jira/Confluence: multi-lens/multi-provider analysis + summarizer + open questions, rewrite, test-case generation → Confluence publish, the multi-agent **Plan/Tasks** breakdown (+ send-to-swarm), Discovery drafts → RFC/story, the global Learnings base, versioned history, and the background watcher. | Needs a connected Jira/Confluence account first. |
 | [Discovery Chat](./discovery-chat.md) | The blank-canvas discovery flow on the Product page — a persistent, resumable agent thread you feed ideas/transcripts, then publish as an **RFC** or a **Jira story**. | On the Product page; agent CLI on `PATH` (+ Jira to publish a story). |
 | [Canvas](./canvas.md) | File-backed visual scenes in two modes — **Excalidraw** (`canvas.json`) or **Mermaid** (`canvas.mermaid`); an agent edits the file while you converse in an embedded terminal. | In the Canvas tab, or from a Product story. |
@@ -52,10 +52,12 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 
 | Guide | What it covers | Quick-start note |
 |-------|----------------|------------------|
-| [Connections — SSH & SFTP](./connections-ssh-sftp.md) | Defining connections (SSH / MySQL / Redis / MongoDB / ClickHouse), interactive PTY sessions, **SSH tunnels** (`-L` vs SOCKS5 `-D`, with the MongoDB `+srv` reason and the bastion `AllowTcpForwarding` gotcha), and the **SFTP file browser** over SSH. | Add a connection; secrets go to the Keychain. |
-| [Database Explorer](./database-explorer.md) | A TablePlus-class browser: lazy schema tree, per-engine autocomplete, query tabs with an auto row `LIMIT` and cancel, a virtualized results grid with approval-gated inline edits, a visual JOIN builder, ClickHouse dashboards/widgets, "examine schema with an agent", and streaming CSV/format export. | Reuses connection profiles; engines configured here. |
+| [Connections — SSH & SFTP](./connections-ssh-sftp.md) | Defining connections (SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse) in the unified hub tree (Kafka clusters included), interactive PTY sessions, **SSH tunnels** (`-L` vs SOCKS5 `-D`, with the MongoDB `+srv` reason and the bastion `AllowTcpForwarding` gotcha), and the **SFTP file browser** over SSH. | Add a connection; secrets go to the Keychain. |
+| [Database Explorer](./database-explorer.md) | A TablePlus-class browser for MySQL / PostgreSQL / Redis / MongoDB / ClickHouse: lazy schema tree, per-engine autocomplete, query tabs with true multi-statement batches, an auto row `LIMIT`, cancel and detached runs that survive navigation, a virtualized results grid with approval-gated inline/JSON edits (batched per row), full mongosh scripts, index management from the Structure view, query plans, a visual JOIN builder, ClickHouse dashboards/widgets, "examine schema with an agent", file import and streaming CSV/format export. | Reuses connection profiles; engines configured here. |
 | [Message Brokers (Kafka)](./message-brokers.md) | Connect Kafka clusters (incl. **AWS MSK over an SSH bastion** via the in-process Kafka-aware proxy), browse topics, peek/produce, consumer-group lag, topic configs, Schema Registry, and an Overview with CPU/RAM. PLAINTEXT/TLS + SASL PLAIN/SCRAM, prod/read-only guards. | Add a cluster; MSK path documented step-by-step. |
 | [Browser](./browser.md) | A workspace-scoped web browser: reader tabs (fetch → markdown, JS-capable via a Lightpanda sidecar with plain-fetch fallback), DOM annotations you can send into a live session or save to the Vault, a CSS-selector query, page summarize, Keychain-backed Site Credentials with opt-in governed agent login, and 5 `browser_*` agent MCP tools. Every fetch is netguard-checked. | Paste a URL in the Browser tab; no setup needed (`brew install lightpanda-io/tap/lightpanda` for JS-rendered pages). |
+| [Kubernetes console](./kubernetes-console.md) | A k9s-class console over any kubeconfig context (or a pasted kubeconfig / an EKS import): namespaces, nodes, 16 resource kinds incl. **Argo Rollouts** and **Argo CD Applications** with health colouring and metrics, describe/manifest/events (secrets redacted), streaming `logs -f`, `exec` shells and a k9s tab as Otto sessions, and audited actions (restart, scale, rollout undo/promote/abort, Argo sync/refresh/redeploy, CronJob trigger) — every one a plain `kubectl` command. Self-installs `kubectl`/`k9s`; never edits `~/.kube/config`. | Kubernetes → pick a context; `kubectl` installs on demand. |
+| [AWS console](./aws-console.md) | Browse and operate AWS through the `aws` CLI v2 per saved **account** (SSO profile or access keys — secrets in the Keychain, `~/.aws` never written): **S3** (read-only browse/preview/download), **SQS** (peek/send/purge/redrive), **EC2** (list/start/stop/reboot), **Athena** (catalog, editor, results in the DB Explorer grid, history), **EKS** (clusters → one-click import into the Kubernetes console). Per-service RBAC, on-demand CLI install, SSO-expiry "Sign in" flow. | Open **AWS**; pick a profile from `~/.aws/config` or paste keys. Installs the CLI if missing. |
 
 ## Knowledge & quality
 
@@ -74,7 +76,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 |-------|----------------|------------------|
 | [API client (REST workbench)](./api-client.md) | The built-in "Postman": collections, request builder (HTTP/SSE/WS/gRPC), environments + `{{vars}}`, response viewer, history, and automations. **Outbound is SSRF-guarded** (localhost/RFC1918/cloud-metadata blocked). | In-app; no external setup. |
 | [Daemon HTTP API](./daemon-http-api.md) | Driving Otto **programmatically** over `ottod` (`http://127.0.0.1:7700/api/v1`): authentication (PAT / login / share / ingest tokens), a navigable domain map of the REST surface, the WebSocket terminal & event streams, the async-202 pattern, and an explicit **what-you-can / cannot** list. | Create a PAT → Settings → Personal Access Tokens. |
-| [MCP Control Plane](./mcp-control-plane.md) | Govern MCP tool calls in the call path (allowlist → policy → single-use approval → dry-run → fail-closed audit → stats) **and** expose Otto outward as an MCP server (8 `otto.*` tools over a restricted `kind=mcp` token), with a live-agent gateway. | Register a server, or enable Otto Server in the MCP tab. |
+| [MCP Control Plane](./mcp-control-plane.md) | Govern MCP tool calls in the call path (allowlist → policy → single-use approval → dry-run → fail-closed audit → stats) **and** expose Otto outward as an MCP server (the `otto.*` tool catalog across every feature — workflows, git/PRs, issues, brokers, vault, read-only DB, scheduled tasks, AWS, Kubernetes, … — over scoped per-user tokens, stdio or Streamable-HTTP), with a live-agent gateway. Background: the original [design](./mcp-control-plane-design.md) and [implementation plan](./mcp-control-plane-plan.md). | Register a server, or enable Otto Server in the MCP tab. |
 
 ## Observability
 
@@ -87,7 +89,7 @@ walkthrough of every sub-feature, the relevant REST/WebSocket surface, an explic
 
 | Guide | What it covers | Quick-start note |
 |-------|----------------|------------------|
-| [Multi-user, RBAC & sharing](./rbac-multiuser-sharing.md) | Per-feature roles (None < View < Edit < Admin) and the grant matrix, per-session isolation & data ownership, the admin overview + terminate, audited impersonation, API tokens, and the scoped-share + email-OTP model. | First run sets a root password. |
+| [Multi-user, RBAC & sharing](./rbac-multiuser-sharing.md) | Per-feature roles (None < View < Edit < Admin) and the grant matrix, per-workspace membership (the **By user** tab grants several workspaces at once), per-session isolation & data ownership, the admin overview + terminate, audited impersonation, API tokens, and the scoped-share + email-OTP model. | First run sets a root password. |
 | [Remote / mobile access](./remote-mobile-access.md) | Reaching Otto from a phone/iPad: a Cloudflare tunnel (or opt-in TLS network listener), the installable PWA, scoped/expiring/revocable share links, and the email-OTP access gate (Gmail App Password). Loopback-only by default. | Opt-in; tunnel recommended over the listener. |
 | [Using Otto on mobile](./mobile-usage.md) | Task-oriented: install the PWA, what the touch UI looks like (phone/tablet/desktop shells, bottom nav, drawers), running & typing into a session on a touchscreen (DOM-renderer terminal, key accessory bar), per-device session view, and limits. | Make Otto reachable first (see remote access). |
 | [Sharing a session](./session-sharing.md) | Task-oriented: mint a scoped viewer/editor link to **one** session for someone with no account, optionally email-OTP gated; what the guest sees; revoke (with immediate eviction). | OTP shares need a verified Gmail sender. |
@@ -135,8 +137,9 @@ contract owners.
   embeddings/vector search were removed, and the memory layer is keyword-only
   (`semantic`/`hybrid` accepted as coercing aliases). See [vault](./vault.md).
 - **Skill catalog** — `otto-skills/SKILL_AUTHORING.md` describes a five-category
-  catalog, but the crate currently ships only `review` (7) + `insights` (1); the
-  seven `product` skills are auto-seeded from `otto-product`. See [skills library](./skills-library.md).
+  catalog, but the crate currently ships `review` (17), `development` (12) and
+  `insights` (1) under `crates/otto-skills/assets/skills/`; the `product` skills
+  are auto-seeded from `otto-product`. See [skills library](./skills-library.md).
 - **Insights auth** — `api.md` labels the endpoints `root`, but the code enforces
   RBAC `Insights` tiers (with config/run effectively root-gated today). See
   [insights](./insights.md).
@@ -147,8 +150,10 @@ contract owners.
   alongside these docs.
 - **README feature tour** — now also lists **Goal Loops**, **Mission Control**,
   **Canvas**, **Proof Packs**, **Scheduled Tasks**, **Skills evaluator** and the
-  **MCP Control Plane** (previously also missing Custom plugins & Workflows).
-  **Fixed** alongside these docs.
+  **MCP Control Plane** (previously also missing Custom plugins & Workflows), and
+  as of 2026-09 the **Browser**, **AWS console**, **Kubernetes console**,
+  **Personal Agents**, **Multi-window** and **Snipping tool**. **Fixed**
+  alongside these docs.
 - **`api.md` Canvas `assist_scene`** — the contract (#107) says it "does not
   mutate", but the code commits `doc_json` and broadcasts `CanvasUpdated` /
   `CanvasSessionStarted`. The active `CanvasPage` is file-backed-per-scene; the

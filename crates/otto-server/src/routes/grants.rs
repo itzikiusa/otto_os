@@ -69,6 +69,13 @@ const ALL_FEATURES: &[Feature] = &[
     Feature::ScheduledTasks,
     Feature::RunWithOtto,
     Feature::Browser,
+    Feature::Aws,
+    Feature::AwsS3,
+    Feature::AwsSqs,
+    Feature::AwsEc2,
+    Feature::AwsAthena,
+    Feature::AwsEks,
+    Feature::Kubernetes,
 ];
 
 // ---------------------------------------------------------------------------

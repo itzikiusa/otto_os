@@ -1,0 +1,32 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "argoproj.io/v1alpha1",
+      "kind": "Rollout",
+      "metadata": {"creationTimestamp": "2026-07-01T00:00:00Z", "name": "checkout", "namespace": "shop"},
+      "spec": {
+        "paused": true,
+        "replicas": 5,
+        "strategy": {"canary": {"steps": [{"setWeight": 20}, {"pause": {}}, {"setWeight": 50}, {"pause": {"duration": "10m"}}]}},
+        "template": {"spec": {"containers": [{"image": "registry/checkout:7", "name": "checkout"}]}}
+      },
+      "status": {
+        "availableReplicas": 5, "readyReplicas": 5, "replicas": 6, "updatedReplicas": 1,
+        "canary": {"weights": {"canary": {"weight": 20}, "stable": {"weight": 80}}},
+        "currentStepIndex": 1,
+        "message": "CanaryPauseStep",
+        "pauseConditions": [{"reason": "CanaryPauseStep", "startTime": "2026-09-01T12:00:00Z"}],
+        "phase": "Paused"
+      }
+    },
+    {
+      "apiVersion": "argoproj.io/v1alpha1",
+      "kind": "Rollout",
+      "metadata": {"creationTimestamp": "2026-07-01T00:00:00Z", "name": "payments", "namespace": "shop"},
+      "spec": {"replicas": 2, "strategy": {"blueGreen": {"activeService": "payments"}}, "template": {"spec": {"containers": [{"image": "registry/payments:2", "name": "p"}]}}},
+      "status": {"availableReplicas": 2, "readyReplicas": 2, "replicas": 2, "updatedReplicas": 2, "phase": "Healthy"}
+    }
+  ]
+}

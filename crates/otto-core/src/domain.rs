@@ -2386,7 +2386,7 @@ pub struct ScheduledTaskPreset {
     pub skill: Option<String>,
 }
 
-/// The 23 independently-gatable product features.
+/// The 32 independently-gatable product features.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -2419,6 +2419,22 @@ pub enum Feature {
     RunWithOtto,
     /// Browser — in-app reader/annotate tabs + on-demand page fetch.
     Browser,
+    /// AWS — account (profile) management for the AWS console module.
+    /// `Admin` adds/edits/removes accounts; `View` lists them + runs probes.
+    Aws,
+    /// AWS S3 — bucket/object browsing + download (read-only by design).
+    AwsS3,
+    /// AWS SQS — queue listing/peek (`View`), send/delete/purge (`Edit`).
+    AwsSqs,
+    /// AWS EC2 — instance listing (`View`), start/stop/reboot (`Edit`).
+    AwsEc2,
+    /// AWS Athena — catalog browsing + history (`View`), execute (`Edit`).
+    AwsAthena,
+    /// AWS EKS — cluster listing (`View`), kubeconfig import (`Edit`).
+    AwsEks,
+    /// Kubernetes — cluster/context management (`Admin`), read (`View`),
+    /// exec/restart/rollout/Argo actions (`Edit`).
+    Kubernetes,
 }
 
 impl Feature {
@@ -2450,6 +2466,13 @@ impl Feature {
             "scheduled_tasks" => Some(Self::ScheduledTasks),
             "run_with_otto" => Some(Self::RunWithOtto),
             "browser" => Some(Self::Browser),
+            "aws" => Some(Self::Aws),
+            "aws_s3" => Some(Self::AwsS3),
+            "aws_sqs" => Some(Self::AwsSqs),
+            "aws_ec2" => Some(Self::AwsEc2),
+            "aws_athena" => Some(Self::AwsAthena),
+            "aws_eks" => Some(Self::AwsEks),
+            "kubernetes" => Some(Self::Kubernetes),
             _ => None,
         }
     }
@@ -2482,6 +2505,13 @@ impl Feature {
             Self::ScheduledTasks => "scheduled_tasks",
             Self::RunWithOtto => "run_with_otto",
             Self::Browser => "browser",
+            Self::Aws => "aws",
+            Self::AwsS3 => "aws_s3",
+            Self::AwsSqs => "aws_sqs",
+            Self::AwsEc2 => "aws_ec2",
+            Self::AwsAthena => "aws_athena",
+            Self::AwsEks => "aws_eks",
+            Self::Kubernetes => "kubernetes",
         }
     }
 }
@@ -2502,6 +2532,18 @@ mod tests {
         assert_eq!(Feature::RunWithOtto.as_str(), "run_with_otto");
         assert_eq!(Feature::parse("browser"), Some(Feature::Browser));
         assert_eq!(Feature::Browser.as_str(), "browser");
+        for (k, f) in [
+            ("aws", Feature::Aws),
+            ("aws_s3", Feature::AwsS3),
+            ("aws_sqs", Feature::AwsSqs),
+            ("aws_ec2", Feature::AwsEc2),
+            ("aws_athena", Feature::AwsAthena),
+            ("aws_eks", Feature::AwsEks),
+            ("kubernetes", Feature::Kubernetes),
+        ] {
+            assert_eq!(Feature::parse(k), Some(f));
+            assert_eq!(f.as_str(), k);
+        }
     }
 
     #[test]

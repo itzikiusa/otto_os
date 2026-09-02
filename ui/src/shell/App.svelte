@@ -51,6 +51,8 @@
   import ProofPage from '../modules/proof/ProofPage.svelte';
   import ScheduledTasksPage from '../modules/scheduled-tasks/ScheduledTasksPage.svelte';
   import PersonalAgentsPage from '../modules/personal-agents/PersonalAgentsPage.svelte';
+  import AwsPage from '../modules/aws/AwsPage.svelte';
+  import KubernetesPage from '../modules/kubernetes/KubernetesPage.svelte';
   import RunWithOttoPage from '../modules/run-with-otto/RunWithOttoPage.svelte';
   import VaultPage from '../modules/vault/VaultPage.svelte';
   import { BrowserView } from '../modules/browser';
@@ -217,6 +219,9 @@
   $effect(() => {
     function onHelpKey(e: KeyboardEvent): void {
       if (e.key !== '?' || e.metaKey || e.ctrlKey || e.altKey) return;
+      // A module that owns `?` (e.g. the Kubernetes workspace) handles it first
+      // in the capture phase and marks it consumed.
+      if (e.defaultPrevented) return;
       const el = document.activeElement as HTMLElement | null;
       const typing =
         !!el &&
@@ -428,6 +433,8 @@
       { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
       { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
       { id: 'core.go-scheduled-tasks', title: 'Go to Scheduled Tasks', group: 'Navigate', keywords: 'module scheduled task cron recurring job report cadence hourly daily', run: () => router.go('scheduled-tasks') },
+      { id: 'core.go-aws', title: 'Go to AWS', group: 'Navigate', keywords: 'module aws amazon cloud s3 bucket sqs queue ec2 instance athena query eks account profile sso', run: () => router.go('aws') },
+      { id: 'core.go-kubernetes', title: 'Go to Kubernetes', group: 'Navigate', keywords: 'module kubernetes k8s kubectl k9s cluster context namespace pod deployment logs exec rollout argo argocd restart', run: () => router.go('kubernetes') },
       { id: 'core.go-personal-agents', title: 'Go to Personal Agents', group: 'Navigate', keywords: 'module personal agent persona soul bot room chat schedule recap', run: () => router.go('personal-agents') },
       { id: 'core.go-run-with-otto', title: 'Go to Run with Otto', group: 'Navigate', keywords: 'run with otto one button launch jira github issue pr confluence finding test story channel review proof approval pr draft', run: () => router.go('run-with-otto') },
       { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', keywords: 'canvas studio diagram sketch mockup uml sequence flowchart whiteboard excalidraw mermaid', run: () => router.go('canvas') },
@@ -631,6 +638,10 @@
       <ScheduledTasksPage />
     {:else if moduleName === 'personal-agents'}
       <PersonalAgentsPage />
+    {:else if moduleName === 'aws'}
+      <AwsPage />
+    {:else if moduleName === 'kubernetes'}
+      <KubernetesPage />
     {:else if moduleName === 'run-with-otto'}
       <RunWithOttoPage />
     {:else if moduleName === 'skills-eval'}

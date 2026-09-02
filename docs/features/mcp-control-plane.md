@@ -236,11 +236,18 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Usage / Skills** | ✅ get_usage_summary / list_bundled_skills | — |
 | **Self-Improvement** | ✅ get_config / list_runs / get_run / list_edits | ⚠ run, approve_edit, reject_edit, rollback_edit |
 | **Scheduled Tasks** | ✅ list / list_runs | ⚠ create / update / set_enabled / run / delete |
+| **AWS** | ✅ aws_list_accounts / aws_s3_list_buckets / aws_s3_list_objects / aws_s3_preview / aws_sqs_list_queues / aws_sqs_peek³ / aws_ec2_list_instances / aws_athena_list_tables / aws_athena_get_query / aws_eks_list_clusters | ⚠ aws_athena_query (starts a billed Athena scan; poll `aws_athena_get_query`), aws_sqs_send (produces one message) — no S3 write, no EC2 start/stop |
+| **Kubernetes** | ✅ k8s_list_clusters / k8s_get_resources / k8s_describe / k8s_logs (text tail, never `follow`) / k8s_top | ⚠ k8s_action (restart / scale / delete_pod / rollout_* / Argo Rollouts promote-abort-retry / argocd_sync-refresh-terminate_op-app_restart / cronjob_*; destructive ones need `params.confirm_name == name`) |
 | **Code & Context / Agents / Approvals** | ✅ *search_codebase*¹ / get_context_packet / get_proof_pack / ask_human_approval | ⚠ run_goal_loop |
 
 ¹ Off by default (opt-in): non-mutating tools that stream large/sensitive *content*
 (messages, recalled knowledge, code, rows) are defined but not in `DEFAULT_ENABLED`.
 ² `create_work_item` is the Swarm-task create (mutating).
+³ `aws_sqs_peek` is a POST but a read: `receive-message` with visibility timeout 0
+(nothing consumed), graded `aws_sqs:View` by the policy table. The AWS/K8s tools carry
+no `workspace_id` (accounts/clusters are global rows); the self-call reuses the
+per-service feature grants (`aws_s3`/`aws_sqs`/`aws_ec2`/`aws_athena`/`aws_eks`,
+`kubernetes`) — see [aws-console](./aws-console.md) / [kubernetes-console](./kubernetes-console.md).
 
 **Classification rule.** Every read tool is in exactly one of `DEFAULT_ENABLED`
 (surfaced when the server is on) or the opt-in set; every mutating tool is in
@@ -249,11 +256,13 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 The same feature **reads** are also injected into Otto's *own* agent
 sessions through the inward `ottod mcp-tools` server (§5) as `otto_list_workflows`,
 `otto_list_broker_clusters`, `otto_search_memory` (keyword memory search),
-`otto_list_findings`, `otto_list_improvement_edits`, `otto_vault_read`, … so an
-Otto session can inspect every feature. That server stays read-only with named
-exceptions: the two canvas tools and the three Vault v3 doc writers
-(`otto_vault_write`/`_rename`/`_delete` — Editor-gated as the session owner;
-delete only trashes).
+`otto_list_findings`, `otto_list_improvement_edits`, `otto_vault_read`,
+`aws_list_accounts`, `k8s_get_resources`, … so an Otto session can inspect every
+feature. That server stays read-only with named exceptions: the two canvas tools,
+the three Vault v3 doc writers (`otto_vault_write`/`_rename`/`_delete` —
+Editor-gated as the session owner; delete only trashes), and the three
+cloud-console writers `aws_athena_query` / `aws_sqs_send` / `k8s_action`
+(per-feature `Edit`-gated as the session owner).
 
 ---
 
@@ -444,7 +453,13 @@ the Vault v3 doc tools (`otto_vault_list`/`_dir`/`_read`/`_search`/`_backlinks`/
 `otto_list_broker_clusters`/`_topics`, `otto_search_issues`, `otto_list_swarms`,
 `otto_search_memory`, `otto_list_repos`, `otto_list_sessions`,
 `otto_list_product_stories`, `otto_list_findings`, `otto_usage_summary`,
-`otto_list_improvement_runs`/`_edits` (the pure `read_route` map, unit-tested).
+`otto_list_improvement_runs`/`_edits` (the pure `read_route` map, unit-tested),
+and the **cloud consoles** — AWS: `aws_list_accounts`, `aws_s3_list_buckets`/
+`_list_objects`/`_preview`, `aws_sqs_list_queues`/`_peek`, `aws_ec2_list_instances`,
+`aws_athena_list_tables`/`_get_query`, `aws_eks_list_clusters`; Kubernetes:
+`k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text/plain
+tail, 256 KiB cap keeping the newest lines, never `follow`), `k8s_top` — plus the
+three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action`.
 
 **The gateway.** The inward server *also* surfaces the workspace's **governed
 downstream tools** — fetched from `GET /mcp/gateway/tools?workspace_id=` and

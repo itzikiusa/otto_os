@@ -1,0 +1,27 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "argoproj.io/v1alpha1",
+      "kind": "Application",
+      "metadata": {"creationTimestamp": "2026-06-01T00:00:00Z", "name": "shop-prod", "namespace": "argocd"},
+      "spec": {
+        "destination": {"namespace": "shop", "server": "https://kubernetes.default.svc"},
+        "project": "default",
+        "source": {"path": "apps/shop/overlays/prod", "repoURL": "https://github.com/acme/deploy.git", "targetRevision": "main"}
+      },
+      "status": {
+        "health": {"status": "Healthy"},
+        "operationState": {"phase": "Succeeded", "finishedAt": "2026-09-01T09:00:00Z"},
+        "resources": [
+          {"group": "apps", "kind": "Deployment", "name": "web", "namespace": "shop", "status": "Synced", "version": "v1"},
+          {"group": "argoproj.io", "kind": "Rollout", "name": "checkout", "namespace": "shop", "status": "Synced", "version": "v1alpha1"},
+          {"group": "", "kind": "Service", "name": "web", "namespace": "shop", "status": "Synced", "version": "v1"},
+          {"group": "apps", "kind": "StatefulSet", "name": "redis", "namespace": "shop-data", "status": "OutOfSync", "version": "v1"}
+        ],
+        "sync": {"revision": "0123456789abcdef0123456789abcdef01234567", "status": "OutOfSync"}
+      }
+    }
+  ]
+}

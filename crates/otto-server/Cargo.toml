@@ -28,6 +28,8 @@ rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
 otto-sessions.workspace = true
 otto-connections.workspace = true
+otto-aws.workspace = true
+otto-k8s.workspace = true
 otto-ssh.workspace = true
 otto-dbviewer.workspace = true
 otto-brokers.workspace = true

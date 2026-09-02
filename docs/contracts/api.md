@@ -2386,7 +2386,14 @@ First-party Otto MCP tools (no new HTTP route): the `otto` MCP server is injecte
 at spawn when the per-workspace `otto_mcp_enabled` setting is on (default off, via `PUT /settings`).
 It runs as `ottod mcp-tools` (stdio JSON-RPC) exposing read-only, redacted, row/timeout-capped,
 audited tools — `otto_db_schema`, `otto_git_pr_review`, `otto_product_story` (db_query / swarm_task /
-broker_topic deferred). Tool calls are logged to `mcp_tool_calls` (migration 0060).
+broker_topic deferred), the per-feature reads (see `docs/features/mcp-control-plane.md` §9), and the
+AWS / Kubernetes console tools that wrap `/aws/*` and `/k8s/*` — reads `aws_list_accounts`,
+`aws_s3_list_buckets` / `aws_s3_list_objects` / `aws_s3_preview`, `aws_sqs_list_queues` / `aws_sqs_peek`,
+`aws_ec2_list_instances`, `aws_athena_list_tables` / `aws_athena_get_query`, `aws_eks_list_clusters`,
+`k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text tail), `k8s_top`; and the
+three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action` (same set, `otto.`-prefixed,
+on the outward server with the writers in `DANGEROUS`). Tool calls are logged to `mcp_tool_calls`
+(migration 0060).
 
 ## Must-have wave (Wave 4) — additional routes
 
@@ -3049,3 +3056,213 @@ of a separately-generated AI summary; when the caller already has one (e.g.
 from `/summarize`), passing it here skips the extra fetch and uses it
 verbatim, but `url` is then validated as a well-formed URL (`400` otherwise)
 since that path never reaches the netguard-checked fetch.
+
+## AWS console (`/aws/*`)
+
+Browse and operate AWS from Otto through the **`aws` CLI v2** (no SDK): S3
+(read-only), SQS, EC2, Athena and EKS, per saved **account**. An account is
+either a named profile in `~/.aws/config` (`auth_mode: "profile"` — SSO /
+assume-role / MFA are handled by the CLI itself) or static access keys
+(`auth_mode: "access_keys"` — the secret key + optional session token live in
+the Keychain under `aws-<id>`, injected as env vars into every subprocess).
+Otto **never writes `~/.aws`**. Accounts are a global library (no workspace
+axis). Build contract: `docs/design/aws-k8s-consoles.md`; router:
+`crates/otto-aws/src/http.rs`; guide: `docs/features/aws-console.md`.
+
+Authorization is the policy table's "AWS console" block: `Aws` (accounts +
+plumbing), `AwsS3`, `AwsSqs`, `AwsEc2`, `AwsAthena`, `AwsEks` — see the RBAC
+feature table in `docs/features/rbac-multiuser-sharing.md`. Every service
+route accepts `?region=` (falls back to the account's region). Errors: a
+missing CLI is `400 invalid` whose message contains `not installed`; expired /
+missing credentials are `400 invalid` whose message starts with
+`login required:` (the UI offers **Sign in** → `/login`); IAM denials are
+`403 forbidden`; other CLI failures are `400 invalid` with **redacted** stderr.
+
+### Plumbing & accounts
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /aws/status | Aws:View | — | `AwsStatus { installed, version?, path?, install: InstallJob }` |
+| POST /aws/install | Aws:Admin | — | 202 `InstallJob` — idempotent while `running`; `brew install awscli` when brew is present, else the official `.pkg` into `~/aws-cli` + symlinks in `<data_dir>/bin`. Never `sudo`. |
+| GET /aws/discover | Aws:View | — | `{ profiles: DiscoveredProfile[] }` parsed from `~/.aws/config` + `~/.aws/credentials` — names/metadata only, **never key values** |
+| GET /aws/regions | Aws:View | — | `{ regions: { code, name }[] }` (static, 32 regions) |
+| GET /aws/accounts | Aws:View | — | `AwsAccount[]` |
+| POST /aws/accounts | Aws:Admin | `UpsertAwsAccountReq` | 201 `AwsAccount` — profile mode needs `profile`; keys mode needs `access_key_id` + `secret_access_key`; `region` defaults to `us-east-1`; `endpoint_url` (optional) must be an `http://`/`https://` URL and plain `http` is accepted for **loopback hosts only** (400 `invalid` otherwise). Runs `sts get-caller-identity` best-effort and stores `identity`. |
+| GET /aws/accounts/{id} | Aws:View | — | `AwsAccount` |
+| PATCH /aws/accounts/{id} | Aws:Admin | partial `UpsertAwsAccountReq` — omitted secret fields keep the stored secret; `session_token: ""` clears it; `endpoint_url: ""` clears the custom endpoint | `AwsAccount` |
+| DELETE /aws/accounts/{id} | Aws:Admin | — | 204 — deletes the Keychain secret; linked `k8s_clusters.aws_account_id` is set NULL by the FK |
+| POST /aws/accounts/{id}/test | Aws:View | — | `AwsTestResp { ok, latency_ms, message, identity?, login_required }` (`sts get-caller-identity`) |
+| GET /aws/accounts/{id}/permissions?refresh= | Aws:View | — | `AwsPermissions { checked_at, identity?, services: { s3, sqs, ec2, athena, eks }: "allowed"\|"denied"\|"unknown", login_required }` — six parallel 8 s probes, cached 10 min in `permissions_json` (`refresh=true` bypasses; a `login_required` snapshot is never cached) |
+| POST /aws/accounts/{id}/login | Aws:Edit | `{ workspace_id }` | `Session` — spawns `aws sso login --profile <p>` in a PTY (`Spawner::spawn_command`, provider `aws`); 400 for `access_keys` accounts |
+
+`AwsAccount { id, name, auth_mode: "profile"|"access_keys", profile?, region,
+access_key_id?, role_arn?, endpoint_url?, environment: "dev"|"staging"|"prod",
+color?, identity?: AwsIdentity { account, arn, user_id },
+permissions?: AwsPermissions, created_by?, created_at, updated_at,
+last_used_at? }` — **never** includes secrets. `UpsertAwsAccountReq { name,
+auth_mode, profile?, region?, access_key_id?, secret_access_key?,
+session_token?, role_arn?, endpoint_url?, environment?, color? }` (`role_arn`
+⇒ `sts assume-role` once per ~55 min, cached in memory; `endpoint_url` ⇒
+`AWS_ENDPOINT_URL=<url>` + `AWS_EC2_METADATA_DISABLED=true` in the env of
+**every** `aws` subprocess for that account, both auth modes — LocalStack,
+VPC interface endpoints, S3-compatible stores).
+`InstallJob { tool: "aws", state: "idle"|"running"|"done"|"failed", log_tail,
+started_at?, finished_at?, error? }`. `DiscoveredProfile { name, region?,
+sso_start_url?, sso_session?, role_arn?, source: "config"|"credentials" }`.
+
+### S3 (read-only — every route is `AwsS3:View`)
+
+| Method & path | Request | Response |
+|---|---|---|
+| GET /aws/accounts/{id}/s3/buckets | `?region=` | `{ buckets: { name, creation_date, region? }[] }` (`s3api list-buckets`) |
+| GET /aws/accounts/{id}/s3/buckets/{bucket}/objects | `?prefix=&token=&max=&region=` (`max` 1..1000, default 500) | `{ prefixes: string[], objects: { key, size, last_modified, storage_class, etag }[], next_token?, is_truncated }` — `list-objects-v2 --delimiter /`; the prefix marker object is dropped; `token` is the CLI paginator's `NextToken` |
+| GET /aws/accounts/{id}/s3/buckets/{bucket}/object | `?key=&region=` | `{ key, size, content_type, last_modified, etag, metadata, storage_class }` (`head-object`) |
+| GET /aws/accounts/{id}/s3/buckets/{bucket}/preview | `?key=&max_bytes=&region=` (default 64 KiB, cap 1 MiB) | `{ text?, truncated, content_type, binary? }` — ranged `get-object`; non-text types (anything but `text/*`, JSON/NDJSON/XML/YAML/CSV/JS/SQL, or an `octet-stream` with a text-looking extension) and NUL-bearing bodies return `{ binary: true }` without text |
+| GET /aws/accounts/{id}/s3/buckets/{bucket}/download | `?key=&region=` | streamed body (`aws s3 cp s3://… -` stdout), `Content-Disposition: attachment; filename="<basename>"`, `Content-Length` from the head; objects over **2 GiB** are refused with 413. The child is killed when the client disconnects. |
+
+### SQS
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /aws/accounts/{id}/sqs/queues | AwsSqs:View | `?prefix=&region=` | `{ queues: { url, name, fifo }[] }` |
+| GET /aws/accounts/{id}/sqs/queues/attributes | AwsSqs:View | `?url=&region=` | `{ attributes: Record<string,string>, approx_messages, approx_not_visible, approx_delayed, dlq_target_arn? }` (`get-queue-attributes --attribute-names All`; `dlq_target_arn` parsed from `RedrivePolicy`) |
+| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:View | `{ url, max?: 1..10, visibility_timeout?: 0 }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1`, so peeking does not hide messages |
+| POST /aws/accounts/{id}/sqs/queues/send | AwsSqs:Edit | `{ url, body, delay_seconds?, group_id?, dedup_id?, message_attributes? }` | `{ message_id }` — audited `aws.sqs.send` |
+| POST /aws/accounts/{id}/sqs/queues/delete-message | AwsSqs:Edit | `{ url, receipt_handle }` | 204 — audited `aws.sqs.delete_message` |
+| POST /aws/accounts/{id}/sqs/queues/purge | AwsSqs:Edit | `{ url, confirm_name }` (must equal the queue name) | 204 — audited `aws.sqs.purge` |
+| POST /aws/accounts/{id}/sqs/queues/redrive | AwsSqs:Edit | `{ source_arn, destination_arn? }` | `{ task_handle }` (`start-message-move-task`) — audited `aws.sqs.redrive` |
+
+### EC2
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /aws/accounts/{id}/ec2/instances | AwsEc2:View | `?region=&state=&q=` (`state` ∈ pending/running/shutting-down/terminated/stopping/stopped; `q` filters id/name/ips/type client-side) | `{ instances: Ec2Instance[] }` |
+| GET /aws/accounts/{id}/ec2/instances/{instance_id} | AwsEc2:View | `?region=` | `Ec2Instance & { raw }` |
+| POST /aws/accounts/{id}/ec2/instances/{instance_id}/start | AwsEc2:Edit | `{ confirm_id? }` (`?region=`) | `{ previous_state, current_state }` — audited `aws.ec2.start` |
+| POST /aws/accounts/{id}/ec2/instances/{instance_id}/stop | AwsEc2:Edit | `{ confirm_id }` (must equal the instance id) | `{ previous_state, current_state }` — audited `aws.ec2.stop` |
+| POST /aws/accounts/{id}/ec2/instances/{instance_id}/reboot | AwsEc2:Edit | `{ confirm_id }` (must equal the instance id) | `{ previous_state, current_state }` (reboot returns no state change; both are the observed state) — audited `aws.ec2.reboot` |
+
+`Ec2Instance { instance_id, name (Name tag), state, type, az, private_ip,
+public_ip, launch_time, platform, vpc_id, subnet_id, tags: Record<string,string> }`.
+
+### Athena
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /aws/accounts/{id}/athena/workgroups | AwsAthena:View | `?region=` | `{ workgroups: { name, state, output_location? }[] }` (`list-work-groups` + `get-work-group` fan-out, first 20) |
+| GET /aws/accounts/{id}/athena/databases | AwsAthena:View | `?catalog=AwsDataCatalog&region=` | `{ databases: string[] }` |
+| GET /aws/accounts/{id}/athena/tables | AwsAthena:View | `?database=&catalog=&region=` | `{ tables: { name, type, columns: { name, type }[] }[] }` (`list-table-metadata`; partition keys appended to `columns`) |
+| GET /aws/accounts/{id}/athena/history | AwsAthena:View | `?workgroup=&max=&region=` (`max` ≤ 50) | `{ executions: { id, query, state, submitted_at, completed_at?, data_scanned_bytes?, execution_ms? }[] }` |
+| POST /aws/accounts/{id}/athena/query | AwsAthena:Edit | `{ sql, database?, workgroup?, output_location? }` (`?region=`) | `{ query_execution_id }` — 400 with a hint when neither the workgroup nor the request carries an output location; audited `aws.athena.execute` (SQL clipped to 2000 chars) |
+| GET /aws/accounts/{id}/athena/query/{qid} | AwsAthena:View | `?token=&max=&region=` (`max` ≤ 1000) | `AthenaQueryStatus { state: QUEUED\|RUNNING\|SUCCEEDED\|FAILED\|CANCELLED, reason?, stats: { data_scanned_bytes, execution_ms }, result?: QueryResult, next_token? }` — `result` only when `SUCCEEDED`, in the DB Explorer `QueryResult` shape (`columns: { name, type_hint }[]`, `rows: unknown[][]`, `stats: { duration_ms, row_count, bytes_read }`, `truncated`); the header row is dropped on the first page |
+| POST /aws/accounts/{id}/athena/query/{qid}/cancel | AwsAthena:View | `?region=` | 204 (`stop-query-execution`) |
+
+### EKS
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /aws/accounts/{id}/eks/clusters | AwsEks:View | `?region=` | `{ clusters: { name, status, version, endpoint, arn, created_at }[] }` (`list-clusters` + `describe-cluster` fan-out, first 20) |
+| GET /aws/accounts/{id}/eks/clusters/{name} | AwsEks:View | `?region=` | `{ cluster: Value, nodegroups: { name, status, desired, min, max, instance_types, ami_type }[] }` |
+| POST /aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig | AwsEks:Edit **and** `kubernetes:Admin` (checked in the handler) | `{ cluster_name_override?, default_namespace? }` (`?region=`) | 201 `K8sCluster` — `aws eks update-kubeconfig --kubeconfig <data_dir>/kube/<new_id>.yaml --alias <name>` (file 0600), then a `k8s_clusters` row `source: "eks"`, `aws_account_id: id`; emits `k8s_cluster_updated`; audited `aws.eks.import_kubeconfig` |
+
+## Kubernetes console (`/k8s/*`)
+
+A k9s-class console over any kubeconfig context. The daemon shells out to
+**`kubectl`** only (`-o json`, normalised in Rust — no kube-rs, no `argocd` CLI,
+no `kubectl-argo-rollouts` plugin); Argo CD / Argo Rollouts are driven through
+their CRDs. Every call is `kubectl [--kubeconfig <path>] --context <ctx>
+--request-timeout 20s …` (`--kubeconfig` omitted when the row has no path ⇒
+kubectl's default resolution; streams — `exec`, `logs?follow=true`, k9s — omit
+`--request-timeout`). Otto never writes `~/.kube/config`; imported / EKS
+kubeconfigs live in `<data_dir>/kube/<id>.yaml` (0600). Auth is the
+`kubernetes` feature: View = every read, Edit = `exec` / `k9s` / `actions`,
+Admin = cluster registry + installs (see `crates/otto-server/src/policy.rs`).
+`kubectl` missing ⇒ `400 invalid` whose message starts `kubectl not installed`
+(the UI offers `POST /k8s/install`); cluster RBAC denials ⇒ `403 forbidden`
+`cluster RBAC: <kubectl first line>`. Design contract:
+`docs/design/aws-k8s-consoles.md` §3–§4; guide: `docs/features/kubernetes-console.md`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /k8s/status | kubernetes:View | — | `K8sStatus { kubectl: ToolStatus, k9s: ToolStatus, install: { kubectl: InstallJob, k9s: InstallJob } }` |
+| POST /k8s/install | kubernetes:Admin | `{ tool: "kubectl"\|"k9s" }` | 202 `InstallJob` — background job (brew if present, else direct download into `<data_dir>/bin`); idempotent while `running`; progress via `/k8s/status` + WS `k8s_install_updated` |
+| GET /k8s/discover | kubernetes:View | — | `{ contexts: DiscoveredContext[] }` from `~/.kube/config` + every `$KUBECONFIG` entry via `kubectl config view -o json` (only `contexts[]` + `clusters[].cluster.server` are read — never key/cert/token material) |
+| GET /k8s/clusters | kubernetes:View | — | `K8sCluster[]` (name-sorted global library) |
+| POST /k8s/clusters | kubernetes:Admin | `UpsertK8sClusterReq { name, source?: "kubeconfig", kubeconfig_path?, context_name, default_namespace?, environment?, color? }` | 201 `K8sCluster` — `kubeconfig_path` (`~` ok) must exist; `source` other than `kubeconfig` ⇒ 400 |
+| POST /k8s/clusters/import | kubernetes:Admin | `{ name, kubeconfig_yaml, context_name?, default_namespace?, environment?, color? }` | 201 `K8sCluster` (`source: "imported"`) — writes `<data_dir>/kube/<id>.yaml` 0600, validates with `kubectl --kubeconfig <file> config view -o json`; `context_name` defaults to the file's `current-context`, `default_namespace` to that context's namespace; 1 MiB cap (413) |
+| GET /k8s/clusters/{id} | kubernetes:View | — | `K8sCluster` |
+| PATCH /k8s/clusters/{id} | kubernetes:Admin | partial `{ name?, kubeconfig_path?, context_name?, default_namespace?, environment?, color? }` (`""` clears nullable strings) | `K8sCluster` — `kubeconfig_path` is refused (400) for `imported`/`eks` rows (Otto-managed) |
+| DELETE /k8s/clusters/{id} | kubernetes:Admin | — | 204 — also removes the Otto-owned kubeconfig file for `imported`/`eks` sources (user files are never touched) |
+| POST /k8s/clusters/{id}/test | kubernetes:View | — | `{ ok, latency_ms, message, server_version? }` (`kubectl version -o json --request-timeout=8s`; success bumps `last_used_at`) |
+| GET /k8s/clusters/{id}/capabilities?refresh= | kubernetes:View | — | `K8sCapabilities { server_version?, metrics_server, argo_rollouts, argocd, checked_at }` — cached in the row (`capabilities`), `refresh=true` re-probes (`version`, `get --raw /apis/metrics.k8s.io/v1beta1`, `api-resources --api-group=argoproj.io -o name`) |
+| GET /k8s/clusters/{id}/namespaces | kubernetes:View | — | `{ namespaces: { name, status, age_seconds }[] }` |
+| GET /k8s/clusters/{id}/nodes | kubernetes:View | — | `{ nodes: NodeRow[] }` — `get nodes` merged with metrics-server node usage when available |
+| GET /k8s/clusters/{id}/resources?kind=&ns=&label=&q= | kubernetes:View | — | `{ kind, items: K8sRow[], has_metrics }` — `kind ∈ pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, services, ingresses, configmaps, secrets, pvcs, hpas, rollouts, applications, events` (short names like `po`/`deploy`/`svc` accepted); `ns` empty/absent ⇒ all namespaces (`-A`); `label` ⇒ `-l`; `q` ⇒ case-insensitive substring over name/namespace/status/node/ip/images/labels/extra; pods get `cpu`/`mem` merged from metrics-server when the cluster has it (`has_metrics`) |
+| GET /k8s/clusters/{id}/resource?kind=&ns=&name= | kubernetes:View | — | `{ manifest, describe, events: { type, reason, message, count, last_seen }[] }` — `manifest` has `managedFields` stripped and, for Secrets, every `data`/`stringData` value (and the last-applied annotation) replaced by `"<redacted>"`; `kind` additionally accepts `nodes`/`namespaces` (then `ns` is ignored); events are selected by the object's UID, newest first |
+| GET /k8s/clusters/{id}/pods/{ns}/{name}/containers | kubernetes:View | — | `{ containers: { name, image, ready, state, restarts, init }[] }` (init containers first; `state` is `running` / `waiting:<Reason>` / `terminated:<Reason>`) |
+| GET /k8s/clusters/{id}/pods/{ns}/{name}/logs?container=&tail=500&since=&previous=&follow=&timestamps= | kubernetes:View | — | `text/plain`. Non-follow: 60 s budget, tail-capped at 5 MiB (a `[otto: output truncated …]` first line marks it). `follow=true` ⇒ chunked stream that stays open on `kubectl logs -f`; the child is killed when the client disconnects. `since` accepts a duration (`10m`) or an RFC3339 instant; `tail=-1` ⇒ no `--tail` |
+| GET /k8s/clusters/{id}/metrics?ns= | kubernetes:View | — | `{ pods: { name, namespace, cpu_millicores, mem_bytes, containers: { name, cpu_millicores, mem_bytes }[] }[], available }` — `available:false` (empty list) when metrics-server is absent; a cluster-RBAC denial is still a 403 |
+| POST /k8s/clusters/{id}/exec | kubernetes:Edit | `{ workspace_id, ns, pod, container?, command?: string[] }` | 201 `Session` — PTY via `Spawner::spawn_command(provider="k8s")`: `kubectl [--kubeconfig ..] --context .. -n <ns> exec -it <pod> [-c <c>] -- sh -c 'command -v bash >/dev/null && exec bash \|\| exec sh'` (or `command`); title `"<pod> · <ns>"`, meta `{ k8s: { cluster_id, cluster_name, ns, pod, container, mode: "exec" } }`; audited as `k8s.exec` |
+| POST /k8s/clusters/{id}/k9s | kubernetes:Edit | `{ workspace_id, ns? }` | 201 `Session` — `k9s [--kubeconfig ..] --context .. [-n <ns \| default_namespace>]`; 400 `k9s not installed …` when missing; audited as `k8s.k9s` |
+| POST /k8s/clusters/{id}/actions | kubernetes:Edit | `K8sActionReq { action, kind, ns, name, params? }` | `{ ok, message, output? }` — see the action table below; audited as `k8s.action.<action>` (success AND failure, with `params`); `rollout_status` returns `ok:false` + output when the rollout has not finished within 5 s instead of failing |
+
+`ToolStatus { installed, version?, path? }` · `InstallJob { tool: "kubectl"|"k9s",
+state: "idle"|"running"|"done"|"failed", log_tail, started_at?, finished_at?, error? }` ·
+`DiscoveredContext { name, cluster, user, namespace?, kubeconfig_path, server?, current }`.
+
+`K8sCluster { id, name, source: "kubeconfig"|"imported"|"eks", kubeconfig_path?,
+context_name, default_namespace?, aws_account_id?, environment: "dev"|"staging"|"prod",
+color?, params, capabilities?: K8sCapabilities, created_by, created_at, updated_at,
+last_used_at? }` — `params` holds non-secret extras (`eks_region`, `eks_cluster`);
+no route ever returns kubeconfig contents.
+
+`K8sRow { name, namespace, kind, status, ready?: "n/m", restarts?, age_seconds, node?,
+ip?, cpu? (millicores), mem? (bytes), images?: string[], labels: Record<string,string>,
+extra: Record<string,string>, health?: "ok"|"warn"|"bad"|"progressing" }`. `extra` is
+kind-specific: pods `phase, qos, containers, message?`; deployments / statefulsets /
+daemonsets / replicasets `desired, updated, ready, available[, paused, reason]`; jobs
+`completions, active, failed, duration_seconds?`; cronjobs `schedule, suspend, active,
+last_schedule?, last_successful?`; services `type, ports, external_ip?, selector?`;
+ingresses `class?, hosts, address, tls`; configmaps `keys, key_count`; secrets `type,
+keys, key_count` (**names only, never values**); pvcs `storage_class?, volume?, capacity?,
+access_modes`; hpas `reference, min, max, replicas, desired, targets`; rollouts
+`strategy: canary|blueGreen, phase, step: "<i>/<n>" (canary), weight?, paused, message?,
+desired, updated, ready, available`; applications `sync, health, revision (8 chars),
+repo?, path?, target_revision?, dest_ns?, project?, operation?`; events `reason,
+message, object: "<Kind>/<name>", count, last_seen, source?` (`status` = `Normal`/`Warning`,
+`age_seconds` from the last-seen time). Pod `status`/`health` rules: `Terminating`
+when `deletionTimestamp` is set; a container waiting/terminated reason in
+`CrashLoopBackOff, ImagePullBackOff, ErrImagePull, CreateContainerConfigError, Error,
+OOMKilled, Evicted, …` wins over the phase (⇒ `bad`); `Init:<done>/<n>`,
+`Pending`, `ContainerCreating`, `PodInitializing` ⇒ `progressing`; `Running` with all
+containers ready or `Completed` ⇒ `ok`; anything else ⇒ `warn`.
+
+`NodeRow { name, status: "Ready"|"NotReady"[,SchedulingDisabled], roles, version,
+cpu_capacity (millicores), mem_capacity (bytes), cpu_usage?, mem_usage?, age_seconds,
+labels }`.
+
+### Actions (`POST /k8s/clusters/{id}/actions`)
+
+Destructive verbs require `params.confirm_name === name` (400 otherwise): `delete_pod`,
+`scale` with `replicas: 0`, `rollout_undo`, `argocd_sync` with `prune: true`. Every
+verb maps to kubectl as follows (resource names are `<plural>/<name>`; the Argo CRDs
+are fully qualified — `rollouts.argoproj.io`, `applications.argoproj.io`):
+
+| action | kinds | params | kubectl |
+|---|---|---|---|
+| `restart` | deployments, statefulsets, daemonsets | — | `rollout restart <kind>/<name> -n <ns>` |
+| `restart` | rollouts | — | `patch … --type merge -p {"spec":{"restartAt":"<RFC3339 now>"}}` |
+| `scale` | deployments, statefulsets, rollouts, replicasets | `replicas` (0..10000; 0 ⇒ confirm) | `scale <kind>/<name> -n <ns> --replicas=<n>` |
+| `delete_pod` | pods | `confirm_name`, `grace?` | `delete pods/<name> -n <ns> [--grace-period=<g> [--force when 0]]` |
+| `rollout_status` | deployments, statefulsets, daemonsets | — | `rollout status … --timeout=5s` (non-zero ⇒ `ok:false`, output returned) |
+| `rollout_undo` | deployments, statefulsets, daemonsets | `confirm_name`, `to_revision?` | `rollout undo … [--to-revision=<r>]` |
+| `rollout_pause` / `rollout_resume` | deployments | — | `rollout pause\|resume …` |
+| `rollout_pause` / `rollout_resume` | rollouts | — | `patch … --type merge -p {"spec":{"paused":true\|false}}` |
+| `rollout_promote` | rollouts | `full?` | `patch … --subresource=status --type merge -p {"status":{"pauseConditions":null}}`, then (`full`) `--subresource=status -p {"status":{"promoteFull":true}}`, then `-p {"spec":{"paused":false}}` (what `kubectl argo rollouts promote` does) |
+| `rollout_abort` / `rollout_retry` | rollouts | — | `patch … --subresource=status --type merge -p {"status":{"abort":true\|false}}` |
+| `argocd_sync` | applications | `revision?`, `prune?` (⇒ confirm) | `patch … --type merge -p {"operation":{"initiatedBy":{"username":"otto"},"sync":{"revision":"<revision \| .spec.source.targetRevision \| HEAD>","prune":<bool>,"syncStrategy":{"hook":{}}}}}` |
+| `argocd_refresh` | applications | `hard?` | `annotate … argocd.argoproj.io/refresh=normal\|hard --overwrite` |
+| `argocd_terminate_op` | applications | — | `patch … --type json -p [{"op":"remove","path":"/operation"}]` |
+| `argocd_app_restart` | applications | `resource_kind?`, `resource_name?` | for every Deployment / StatefulSet / DaemonSet / Rollout in `.status.resources[]` (filtered by the params) run the `restart` verb above in that resource's namespace, in this cluster's context |
+| `cronjob_trigger` | cronjobs | — | `create job --from=cronjob/<name> <name>-manual-<unix ts> -n <ns>` (job name trimmed to 63 chars) |
+| `cronjob_suspend` / `cronjob_resume` | cronjobs | — | `patch … --type merge -p {"spec":{"suspend":true\|false}}` |

@@ -50,7 +50,7 @@
               <div class="sc-row">
                 <span class="sc-label">{b.label}</span>
                 <span class="sc-keys">
-                  {#each tokens(b.keys) as t (t)}<kbd>{t}</kbd>{/each}
+                  {#each tokens(b.keys) as t, i (i)}<kbd>{t}</kbd>{/each}
                 </span>
               </div>
             {/each}

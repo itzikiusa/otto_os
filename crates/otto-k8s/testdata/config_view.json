@@ -1,0 +1,18 @@
+{
+  "kind": "Config",
+  "apiVersion": "v1",
+  "preferences": {},
+  "clusters": [
+    {"name": "prod-eks", "cluster": {"server": "https://ABC.gr7.eu-west-1.eks.amazonaws.com", "certificate-authority-data": "DATA+OMITTED"}},
+    {"name": "kind-local", "cluster": {"server": "https://127.0.0.1:6443", "certificate-authority-data": "DATA+OMITTED"}}
+  ],
+  "contexts": [
+    {"name": "prod", "context": {"cluster": "prod-eks", "user": "prod-user", "namespace": "shop"}},
+    {"name": "kind-kind", "context": {"cluster": "kind-local", "user": "kind-kind"}}
+  ],
+  "current-context": "kind-kind",
+  "users": [
+    {"name": "prod-user", "user": {"exec": {"apiVersion": "client.authentication.k8s.io/v1beta1", "command": "aws", "args": ["eks", "get-token"]}}},
+    {"name": "kind-kind", "user": {"client-certificate-data": "DATA+OMITTED", "client-key-data": "DATA+OMITTED", "token": "REDACTED"}}
+  ]
+}

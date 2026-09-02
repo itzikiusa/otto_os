@@ -56,3 +56,6 @@ apps/desktop/src-tauri/binaries/ottod-*-apple-darwin
 
 # Local brainstorming / plan notes — not part of the repo docs
 docs/superpowers/
+
+# Remotion render output — published to the `walkthroughs` GitHub release by
+# packaging/publish-walkthroughs.sh, never shipped in the app bundle.

@@ -8,6 +8,8 @@ members = [
     "crates/otto-pty",
     "crates/otto-sessions",
     "crates/otto-connections",
+    "crates/otto-aws",
+    "crates/otto-k8s",
     "crates/otto-dbviewer",
     "crates/otto-orchestrator",
     "crates/otto-git",
@@ -49,6 +51,8 @@ otto-keychain = { path = "crates/otto-keychain" }
 otto-pty = { path = "crates/otto-pty" }
 otto-sessions = { path = "crates/otto-sessions" }
 otto-connections = { path = "crates/otto-connections" }
+otto-aws = { path = "crates/otto-aws" }
+otto-k8s = { path = "crates/otto-k8s" }
 otto-dbviewer = { path = "crates/otto-dbviewer" }
 otto-orchestrator = { path = "crates/otto-orchestrator" }
 otto-git = { path = "crates/otto-git" }

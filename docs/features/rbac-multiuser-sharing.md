@@ -90,7 +90,7 @@ The check is "**at least**": a route requiring `View` is satisfied by `View`,
 `auth.svelte.ts`); `auth.can(feature, required)` returns true when
 `index(granted) >= index(required)`, with **root always true**.
 
-### 3.2 The gated features (18)
+### 3.2 The gated features (25)
 
 Every feature is an independently-gatable axis. These are the exact enum variants
 and their snake_case strings (used as the `feature` key in grants & in
@@ -116,8 +116,15 @@ and their snake_case strings (used as the `feature` key in grants & in
 | `Context` | `context` | Context | View · materialize = Edit · config = Admin |
 | `Settings` | `settings` | Settings | `Settings:Admin` ≈ the old root-only config gate (now grantable) |
 | `Users` | `users` | Users | **Admin only**: user CRUD, grant management, the active-sessions overview, terminate, and impersonation |
+| `Aws` | `aws` | AWS — accounts | View: list accounts, CLI status, `~/.aws` profile discovery, regions, test, permission probe · Edit: `login` (spawn an `aws sso login` PTY) · Admin: create/update/delete accounts, install the AWS CLI |
+| `AwsS3` | `aws_s3` | AWS — S3 | View: everything (buckets, objects, preview, download) — S3 is **read-only by design**, there is no Edit surface |
+| `AwsSqs` | `aws_sqs` | AWS — SQS | View: list queues, attributes, peek · Edit: send, delete-message, purge, redrive |
+| `AwsEc2` | `aws_ec2` | AWS — EC2 | View: list/describe instances · Edit: start/stop/reboot |
+| `AwsAthena` | `aws_athena` | AWS — Athena | View: workgroups, databases, tables, history, results, cancel · Edit: execute a query (billed per byte scanned) |
+| `AwsEks` | `aws_eks` | AWS — EKS | View: list/describe clusters + nodegroups · Edit: import kubeconfig (creates a Kubernetes cluster row — also needs `kubernetes:Admin`) |
+| `Kubernetes` | `kubernetes` | Kubernetes | View: list clusters, status, discover, test, namespaces, nodes, resources, describe, events, logs, top, capabilities · Edit: exec, k9s, actions (restart/scale/delete pod/rollout + Argo verbs) · Admin: create/import/update/delete clusters, install kubectl/k9s |
 
-> The grant matrix in **Settings → Users** renders these 18 features against the
+> The grant matrix in **Settings → Users** renders these 25 features against the
 > four capabilities (`none / view / edit / admin`) as a segmented control per row
 > (`ALL_FEATURES` / `FEATURE_LABELS` / `CAP_OPTIONS` in `Users.svelte`).
 
@@ -467,7 +474,7 @@ or root`; `root`. Authoritative source: [`../contracts/api.md`](../contracts/api
 ## 11. Capabilities & limitations
 
 **Capabilities**
-- Per-user, per-feature authorization across **18 features** × 4 capabilities,
+- Per-user, per-feature authorization across **25 features** × 4 capabilities,
   enforced centrally by one middleware (no per-handler drift).
 - Default-deny; root bypass; `Users:Admin` is a **grantable** admin (delegate
   without sharing root).

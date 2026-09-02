@@ -966,6 +966,94 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Browser, Edit);
     }
 
+    // ---- AWS console (`/aws/*`) -------------------------------------------
+    // Seven sibling keys, mirroring the Connections/Database split: `Aws` owns
+    // account (profile) management + the CLI install/status plumbing; each
+    // service has its own key so a role can e.g. browse S3 without touching
+    // EC2. Per-service posture (product decision, see docs/features/aws-console.md):
+    //   S3     — read-only by design: every S3 route (incl. download) is View.
+    //   SQS    — list/attributes/peek are View; send/delete/purge/redrive Edit.
+    //   EC2    — describe is View; start/stop/reboot Edit.
+    //   Athena — catalog/history/results/cancel View; executing a query Edit.
+    //   EKS    — describe is View; kubeconfig import Edit.
+    // "Peek" and "cancel" are POSTs that do not mutate user data, so they are
+    // explicitly graded back down to View (same trick as `/db/query-plan`).
+    // Order: the per-service sub-prefixes are matched BEFORE the generic
+    // account routes so `/aws/accounts/{id}/s3/...` never falls into `Aws`.
+    if let Some(rest) = p.strip_prefix("/aws/accounts/{id}/") {
+        if rest.starts_with("s3/") {
+            return Require(AwsS3, View);
+        }
+        if rest.starts_with("sqs/") {
+            let read = get || rest.ends_with("/peek");
+            return Require(AwsSqs, if read { View } else { Edit });
+        }
+        if rest.starts_with("ec2/") {
+            return Require(AwsEc2, if get { View } else { Edit });
+        }
+        if rest.starts_with("athena/") {
+            let read = get || rest.ends_with("/cancel");
+            return Require(AwsAthena, if read { View } else { Edit });
+        }
+        if rest.starts_with("eks/") {
+            return Require(AwsEks, if get { View } else { Edit });
+        }
+        // Account-level probes: `test` (sts get-caller-identity), `permissions`
+        // (per-service capability probe) are reads; `login` spawns an
+        // `aws sso login` PTY session for the caller — an Edit.
+        if rest == "test" || rest == "permissions" {
+            return Require(Aws, View);
+        }
+        if rest == "login" {
+            return Require(Aws, Edit);
+        }
+    }
+    if p == "/aws/accounts" {
+        return Require(Aws, if get { View } else { Admin });
+    }
+    if p == "/aws/accounts/{id}" {
+        return Require(Aws, if get { View } else { Admin });
+    }
+    // `status` = CLI presence/version + install-job state; `discover` = the
+    // profile names found in ~/.aws/config (never secrets); `regions` = static.
+    if matches!(p, "/aws/status" | "/aws/discover" | "/aws/regions") {
+        return Require(Aws, View);
+    }
+    // Installing the CLI writes to the machine — admin only.
+    if p == "/aws/install" {
+        return Require(Aws, Admin);
+    }
+
+    // ---- Kubernetes console (`/k8s/*`) --------------------------------------
+    // One key, three rungs: View = read everything (resources, describe, logs,
+    // top, capabilities); Edit = exec / k9s PTY sessions and every mutating
+    // action (restart, scale, delete pod, rollout + Argo verbs); Admin = manage
+    // the cluster (context) registry and install kubectl/k9s.
+    if let Some(rest) = p.strip_prefix("/k8s/clusters/{id}/") {
+        if rest == "test" {
+            return Require(Kubernetes, View);
+        }
+        if matches!(rest, "exec" | "k9s" | "actions") {
+            return Require(Kubernetes, Edit);
+        }
+        return Require(Kubernetes, if get { View } else { Edit });
+    }
+    if p == "/k8s/clusters" {
+        return Require(Kubernetes, if get { View } else { Admin });
+    }
+    if p == "/k8s/clusters/{id}" {
+        return Require(Kubernetes, if get { View } else { Admin });
+    }
+    if p == "/k8s/clusters/import" {
+        return Require(Kubernetes, Admin);
+    }
+    if matches!(p, "/k8s/status" | "/k8s/discover") {
+        return Require(Kubernetes, View);
+    }
+    if p == "/k8s/install" {
+        return Require(Kubernetes, Admin);
+    }
+
     // ----------------------------------------------------------------------
     // 4. Default — fail closed.
     // ----------------------------------------------------------------------

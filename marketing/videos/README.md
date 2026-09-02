@@ -53,8 +53,8 @@ tasks, the MCP control plane, the knowledge vault, the skill library +
 self-improvement, the skills evaluator, usage/budgets/insights, the API client,
 custom plugins, RBAC + remote + mobile, and the platform polish (palette,
 theming, RTL, auto-update). The in-app **Walkthroughs** page
-(`ui/src/modules/help/Walkthroughs.svelte`) lists the same set, rendered to
-`ui/public/walkthroughs/`.
+(`ui/src/modules/help/Walkthroughs.svelte`) lists the same set and **streams
+them from GitHub** — the MP4s are not bundled into the app (see "Publishing").
 
 ## Commands
 
@@ -65,3 +65,29 @@ npx remotion still src/index.ts Intro out/intro.png --frame=120   # one still
 node render-all.mjs            # render every composition → out/*.mp4
 node render-all.mjs Intro Git  # render a subset
 ```
+
+`out/` is the render output only (gitignored; ~5 MB per 1080p master). Nothing
+copies it into `ui/` — the app never ships the videos.
+
+## Publishing (how the app gets the videos)
+
+The Walkthroughs page loads `<base>/<Id>.mp4` where `<base>` defaults to the
+rolling GitHub release **`walkthroughs`** on `itzikiusa/otto_os`
+(`https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/<Id>.mp4`);
+`VITE_WALKTHROUGHS_BASE` overrides it at UI build time. Keeping them out of the
+bundle saves ~135 MB in *each* of `ottod` (`--features embed-ui`) and `Otto.app`.
+
+After re-rendering, publish with:
+
+```bash
+packaging/publish-walkthroughs.sh            # encode out/*.mp4 → 720p, upload --clobber
+packaging/publish-walkthroughs.sh some/dir   # or a different source dir
+ENCODE_ONLY=1 OUT_DIR=/tmp/wt packaging/publish-walkthroughs.sh   # just encode
+```
+
+The script re-encodes to 1280x720 H.264 (`-crf 30 -preset slow -pix_fmt yuv420p
+-movflags +faststart`, audio re-encoded to 128k AAC) — roughly a 10× reduction from the 1080p
+masters — creates the release if missing (`--prerelease`, so it never shows as
+"Latest"), and replaces the assets in place so the URLs stay stable. Asset names
+must match `file:` in `Walkthroughs.svelte`; add a row there when you add a
+composition.

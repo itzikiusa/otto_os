@@ -770,3 +770,46 @@ like `canvas_updated`'s `doc`).
   the other canvas-family live-edit events.
 - TypeScript types: `{ type: 'browser_tab_updated'; workspace_id: Id; tab: unknown }`
   and `{ type: 'browser_annotation_added'; workspace_id: Id; annotation: unknown }`.
+
+### `aws_account_updated` / `aws_install_updated`
+
+Global scope (the AWS account registry is a global library, like connections)
+— delivered to every authenticated client; the client re-lists
+`GET /aws/accounts` and RBAC filtering happens on that call. Emitted by
+`crates/otto-aws` (`accounts.rs` / `install.rs`).
+
+```json
+{ "type": "aws_account_updated", "account_id": "<Id>", "deleted": false }
+{ "type": "aws_install_updated", "tool": "aws", "state": "running" }
+```
+
+- `aws_account_updated` — after `POST /aws/accounts`, `PATCH /aws/accounts/{id}`,
+  `DELETE /aws/accounts/{id}` (`deleted: true`) and after a permission probe
+  refreshed `permissions_json`.
+- `aws_install_updated` — on every installer state change
+  (`idle → running → done | failed`); the UI polls `GET /aws/status` for the
+  `log_tail` while `running`.
+- TypeScript types: `{ type: 'aws_account_updated'; account_id: Id; deleted: boolean }`
+  and `{ type: 'aws_install_updated'; tool: 'aws'; state: 'idle'|'running'|'done'|'failed' }`.
+
+### `k8s_cluster_updated` / `k8s_install_updated`
+
+Global scope (every authenticated client) — the Kubernetes console's cluster
+registry and its installers are global, like connections. Emitted by
+`crates/otto-k8s` (`clusters.rs` on create / import / patch / delete;
+`install.rs` on every installer state transition).
+
+```json
+{ "type": "k8s_cluster_updated", "cluster_id": "<Id>", "deleted": false }
+{ "type": "k8s_install_updated", "tool": "kubectl", "state": "running" }
+```
+
+- `k8s_cluster_updated` — after `POST /k8s/clusters`, `POST /k8s/clusters/import`,
+  `PATCH /k8s/clusters/{id}` (`deleted: false`) and `DELETE /k8s/clusters/{id}`
+  (`deleted: true`). Clients re-fetch `GET /k8s/clusters` (or drop the row).
+- `k8s_install_updated` — `tool ∈ kubectl | k9s`, `state ∈ running | done | failed`
+  (`idle` is never broadcast). Clients polling `GET /k8s/status` every 1.5 s during
+  an install can stop on `done`/`failed`; the full `InstallJob` (log tail, error)
+  is only in `/k8s/status`.
+- TypeScript types: `{ type: 'k8s_cluster_updated'; cluster_id: Id; deleted: boolean }`
+  and `{ type: 'k8s_install_updated'; tool: 'kubectl' | 'k9s'; state: string }`.

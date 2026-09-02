@@ -125,6 +125,23 @@ pub trait Spawner: Send + Sync {
         first_command: Option<String>,
         title: Option<String>,
     ) -> BoxFuture<'a, Result<Session>>;
+
+    /// Spawns an ad-hoc command as a `SessionKind::Connection` PTY session
+    /// that is NOT backed by a saved connection row (`connection_id = None`).
+    /// Used by the AWS / Kubernetes consoles for `aws sso login`,
+    /// `kubectl exec`, `k9s`, … `provider` is a short tag shown in the session
+    /// list (e.g. "aws", "k8s"). Default: unsupported (test doubles).
+    fn spawn_command<'a>(
+        &'a self,
+        _ws_id: &'a Id,
+        _user_id: &'a Id,
+        _provider: &'a str,
+        _spec: CommandSpec,
+        _title: String,
+        _meta: Option<serde_json::Value>,
+    ) -> BoxFuture<'a, Result<Session>> {
+        Box::pin(async { Err(Error::Invalid("ad-hoc command sessions are not supported here".into())) })
+    }
 }
 
 fn secret_ref_for(id: &Id) -> String {

@@ -334,7 +334,7 @@ async fn capabilities_root_gets_all_admin() {
     // their own slug-keyed capabilities too (string-keyed RBAC axis), so the map
     // may be larger than 22 — assert a lower bound, not an exact count.
     assert!(
-        caps.len() >= 22,
+        caps.len() >= 29,
         "root capabilities should cover at least the 22 built-in features; got: {body}"
     );
     // Every value is "admin" (including any plugin slugs — root is admin everywhere).

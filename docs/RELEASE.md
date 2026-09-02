@@ -147,6 +147,22 @@ open /Applications/Otto.app
 - [ ] Open a session (claude/codex/shell), a git repo, and a DB connection — no
       crashes; no permission prompts that should have been auto-trusted.
 
+## Walkthrough videos (separate from the DMG)
+
+The in-app Walkthroughs page streams its MP4s from the rolling GitHub release
+tagged **`walkthroughs`** (`https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/<Id>.mp4`);
+they are **not** in `ui/dist`, `ottod`, or `Otto.app` (that was ~135 MB in each).
+Only when the videos were re-rendered (`marketing/videos/`):
+
+```bash
+packaging/publish-walkthroughs.sh   # 720p re-encode → gh release upload --clobber
+```
+
+- [ ] `curl -sI -r 0-1023 https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/Intro.mp4`
+      → `302`, then `206` with `Accept-Ranges: bytes` from the CDN.
+- [ ] The release stays a **pre-release** so it never becomes "Latest".
+- [ ] `ui/dist/` contains no `walkthroughs/` directory (`du -sh ui/dist` ≈ 22 MB).
+
 ## 6. Publish (only when explicitly approved)
 
 - [ ] Tag the release and push the tag (`main` is protected — open a PR for code).

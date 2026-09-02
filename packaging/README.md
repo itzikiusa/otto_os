@@ -11,6 +11,7 @@ are the real, chained steps; the full gated checklist lives in
 | `sign.sh` | Sign `ottod` + `Otto.app` with that cert. **Also re-asserts code-signing trust** (idempotent) so it can't silently drift. |
 | `deploy.sh` | One command: rebuild → bundle → sign → replace `/Applications/Otto.app` → relaunch → verify. |
 | `dmg.sh` | Package a signed `Otto.app` into a `.dmg`. |
+| `publish-walkthroughs.sh` | Re-encode `marketing/videos/out/*.mp4` to 720p and upload them (`--clobber`) to the rolling `walkthroughs` GitHub release the in-app Walkthroughs page streams from. Not part of the DMG. |
 | `com.otto.daemon.plist` | `launchd` user-agent template for the daemon (port `7700`). |
 
 ## Quick start

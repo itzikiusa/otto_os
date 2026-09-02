@@ -95,6 +95,25 @@ const DEFAULT_ENABLED: &[&str] = &[
     "list_improvement_runs",
     "get_improvement_run",
     "list_improvement_edits",
+    // AWS console reads (docs/design/aws-k8s-consoles.md §6) — every one is a
+    // GET (or the read-only SQS peek POST) behind its per-service feature grant
+    // (`aws_s3` / `aws_sqs` / `aws_ec2` / `aws_athena` / `aws_eks`: View).
+    "aws_list_accounts",
+    "aws_s3_list_buckets",
+    "aws_s3_list_objects",
+    "aws_s3_preview",
+    "aws_sqs_list_queues",
+    "aws_sqs_peek",
+    "aws_ec2_list_instances",
+    "aws_athena_list_tables",
+    "aws_athena_get_query",
+    "aws_eks_list_clusters",
+    // Kubernetes console reads (`kubernetes`: View).
+    "k8s_list_clusters",
+    "k8s_get_resources",
+    "k8s_describe",
+    "k8s_logs",
+    "k8s_top",
     // (Vault v2 structural reads removed — Vault feature disabled.)
 ];
 const DANGEROUS: &[&str] = &[
@@ -135,6 +154,12 @@ const DANGEROUS: &[&str] = &[
     "vault_write",
     "vault_rename",
     "vault_delete",
+    // AWS / Kubernetes console writers — a billed Athena scan, a produced SQS
+    // message, and a kubectl rollout/scale/delete/Argo verb against a live
+    // cluster. Each is also Edit-gated per feature by the self-call's RBAC.
+    "aws_athena_query",
+    "aws_sqs_send",
+    "k8s_action",
 ];
 
 /// Non-mutating tools that are defined and enableable but stay **off by default**
@@ -518,6 +543,96 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Delete a scheduled task and its run history. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"}}}}),
+
+        // ================= AWS console =================
+        // docs/design/aws-k8s-consoles.md §6. Accounts are global rows (no
+        // workspace_id); the self-call reuses the per-service feature grants
+        // (`aws_s3`/`aws_sqs`/`aws_ec2`/`aws_athena`/`aws_eks`). `region` is
+        // the per-call override every service route accepts.
+        json!({"name":"otto.aws_list_accounts","mutating":false,"category":"AWS",
+            "description":"List the AWS accounts configured in Otto — id, name, auth_mode, region, environment, identity and the cached per-service permission probe. Call first to obtain an `account_id`. Never includes secrets. Read-only.",
+            "inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"otto.aws_s3_list_buckets","mutating":false,"category":"AWS",
+            "description":"List the S3 buckets of an AWS account (name, creation_date, region). S3 is read-only in Otto. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id"],"properties":{
+                "account_id":{"type":"string"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_s3_list_objects","mutating":false,"category":"AWS",
+            "description":"List one folder level of an S3 bucket — `prefixes` + `objects` (key, size, last_modified, storage_class) under `prefix`; page with `token` = previous `next_token`, `max` per page. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","bucket"],"properties":{
+                "account_id":{"type":"string"},"bucket":{"type":"string"},"prefix":{"type":"string"},
+                "token":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_s3_preview","mutating":false,"category":"AWS",
+            "description":"Preview the first `max_bytes` (default 64 KiB, cap 1 MiB) of a text-like S3 object as `{text, truncated, content_type}`; binary objects return `{binary:true}`. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","bucket","key"],"properties":{
+                "account_id":{"type":"string"},"bucket":{"type":"string"},"key":{"type":"string"},
+                "max_bytes":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_sqs_list_queues","mutating":false,"category":"AWS",
+            "description":"List an account's SQS queues (`url`, `name`, `fifo`); optional queue-name `prefix`. The `url` is the id the other SQS tools take. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id"],"properties":{
+                "account_id":{"type":"string"},"prefix":{"type":"string"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_sqs_peek","mutating":false,"category":"AWS",
+            "description":"Peek up to `max` (1..10) messages on an SQS queue WITHOUT consuming them (receive with visibility timeout 0). Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","url"],"properties":{
+                "account_id":{"type":"string"},"url":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_sqs_send","mutating":true,"category":"AWS",
+            "description":"Send ONE message (`body`) to an SQS queue `url`; FIFO queues need `group_id` (+ `dedup_id` unless content-based dedup). Optional `delay_seconds`, `message_attributes`. Returns `{message_id}`. DANGEROUS: produces into a live queue — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","url","body"],"properties":{
+                "account_id":{"type":"string"},"url":{"type":"string"},"body":{"type":"string"},
+                "delay_seconds":{"type":"integer"},"group_id":{"type":"string"},"dedup_id":{"type":"string"},
+                "message_attributes":{"type":"object"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_ec2_list_instances","mutating":false,"category":"AWS",
+            "description":"List EC2 instances (instance_id, name, state, type, az, ips, launch_time, tags); optional `region`, `state` filter and `q` free text. Start/stop/reboot are not exposed. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id"],"properties":{
+                "account_id":{"type":"string"},"region":{"type":"string"},"state":{"type":"string"},"q":{"type":"string"}}}}),
+        json!({"name":"otto.aws_athena_list_tables","mutating":false,"category":"AWS",
+            "description":"List the tables (with columns) of an Athena/Glue `database`; optional `catalog` (default AwsDataCatalog). Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","database"],"properties":{
+                "account_id":{"type":"string"},"database":{"type":"string"},"catalog":{"type":"string"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_athena_query","mutating":true,"category":"AWS",
+            "description":"START an Athena SQL query and return `{query_execution_id}` — does not wait; poll otto.aws_athena_get_query. Optional `database`, `workgroup`, `output_location`. DANGEROUS: Athena bills per byte scanned — approval-gated.",
+            "inputSchema":{"type":"object","required":["account_id","sql"],"properties":{
+                "account_id":{"type":"string"},"sql":{"type":"string"},"database":{"type":"string"},
+                "workgroup":{"type":"string"},"output_location":{"type":"string"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_athena_get_query","mutating":false,"category":"AWS",
+            "description":"Status + results of an Athena query execution: `state` (QUEUED|RUNNING|SUCCEEDED|FAILED|CANCELLED), `reason`, `stats`, and once SUCCEEDED `result` {columns, rows}; page with `token`/`max`. Read-only.",
+            "inputSchema":{"type":"object","required":["account_id","query_execution_id"],"properties":{
+                "account_id":{"type":"string"},"query_execution_id":{"type":"string"},
+                "token":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
+        json!({"name":"otto.aws_eks_list_clusters","mutating":false,"category":"AWS",
+            "description":"List the EKS clusters of an account/region (name, status, version, endpoint, arn, created_at). Read-only.",
+            "inputSchema":{"type":"object","required":["account_id"],"properties":{
+                "account_id":{"type":"string"},"region":{"type":"string"}}}}),
+
+        // ================= Kubernetes console =================
+        // §3 routes; everything is `kubectl` with the cluster's own kubeconfig
+        // server-side. `kubernetes` feature: View for reads, Edit for k8s_action.
+        json!({"name":"otto.k8s_list_clusters","mutating":false,"category":"Kubernetes",
+            "description":"List the Kubernetes clusters registered in Otto — id, name, source, context_name, default_namespace, environment, cached capabilities (metrics_server/argo_rollouts/argocd). Call first to obtain a `cluster_id`. Read-only.",
+            "inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"otto.k8s_get_resources","mutating":false,"category":"Kubernetes",
+            "description":"List resources of one `kind` (pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, services, ingresses, configmaps, secrets, pvcs, hpas, rollouts, applications, events) as normalized rows with `health` and kind-specific `extra`. Omit `namespace` for all namespaces; optional `label` selector and `q` filter. Secret values are never returned. Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id","kind"],"properties":{
+                "cluster_id":{"type":"string"},"kind":{"type":"string"},"namespace":{"type":"string"},
+                "label":{"type":"string"},"q":{"type":"string"}}}}),
+        json!({"name":"otto.k8s_describe","mutating":false,"category":"Kubernetes",
+            "description":"One resource's `manifest` (managedFields stripped, Secret data redacted), `describe` text and recent `events`. Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id","kind","namespace","name"],"properties":{
+                "cluster_id":{"type":"string"},"kind":{"type":"string"},"namespace":{"type":"string"},"name":{"type":"string"}}}}),
+        json!({"name":"otto.k8s_logs","mutating":false,"category":"Kubernetes",
+            "description":"A pod's log tail as `{text}` (no follow). Optional `container`, `tail` (lines, default 500), `since` (e.g. 10m), `previous` (crashed instance), `timestamps`. Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id","namespace","pod"],"properties":{
+                "cluster_id":{"type":"string"},"namespace":{"type":"string"},"pod":{"type":"string"},
+                "container":{"type":"string"},"tail":{"type":"integer"},"since":{"type":"string"},
+                "previous":{"type":"boolean"},"timestamps":{"type":"boolean"}}}}),
+        json!({"name":"otto.k8s_top","mutating":false,"category":"Kubernetes",
+            "description":"Live per-pod CPU (millicores) / memory (bytes) from metrics-server, optionally for one `namespace`; `available:false` when the cluster has none. Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{
+                "cluster_id":{"type":"string"},"namespace":{"type":"string"}}}}),
+        json!({"name":"otto.k8s_action","mutating":true,"category":"Kubernetes",
+            "description":"Run ONE operational action on a resource via kubectl: restart, scale (params.replicas), delete_pod, rollout_status/undo/pause/resume, rollout_promote/abort/retry (Argo Rollouts), argocd_sync/refresh/terminate_op/app_restart, cronjob_trigger/suspend/resume. Destructive actions (delete_pod, scale to 0, rollout_undo, argocd_sync with prune) require `params.confirm_name == name`. DANGEROUS: mutates a live cluster — approval-gated.",
+            "inputSchema":{"type":"object","required":["cluster_id","action","kind","namespace","name"],"properties":{
+                "cluster_id":{"type":"string"},"action":{"type":"string"},"kind":{"type":"string"},
+                "namespace":{"type":"string"},"name":{"type":"string"},"params":{"type":"object"}}}}),
     ]
 }
 
@@ -719,6 +834,35 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
         "rollback_improvement_edit" => format!(
             "Roll back applied self-improvement edit '{}'",
             args.get("edit_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        // AWS / Kubernetes console writers: show the approver the exact target.
+        "aws_athena_query" => {
+            let sql: String = args
+                .get("sql")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect();
+            format!(
+                "Run an Athena query (billed per byte scanned) on AWS account '{}' (database '{}', workgroup '{}'): {sql}",
+                args.get("account_id").and_then(Value::as_str).unwrap_or("?"),
+                args.get("database").and_then(Value::as_str).unwrap_or("-"),
+                args.get("workgroup").and_then(Value::as_str).unwrap_or("-")
+            )
+        }
+        "aws_sqs_send" => format!(
+            "Send a message to SQS queue '{}' on AWS account '{}'",
+            args.get("url").and_then(Value::as_str).unwrap_or("?"),
+            args.get("account_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "k8s_action" => format!(
+            "Kubernetes action '{}' on {}/{} in namespace '{}' of cluster '{}'",
+            args.get("action").and_then(Value::as_str).unwrap_or("?"),
+            args.get("kind").and_then(Value::as_str).unwrap_or("?"),
+            args.get("name").and_then(Value::as_str).unwrap_or("?"),
+            args.get("namespace").and_then(Value::as_str).unwrap_or("?"),
+            args.get("cluster_id").and_then(Value::as_str).unwrap_or("?")
         ),
         _ => format!("External agent requests the dangerous tool '{tool}'."),
     }
@@ -1118,6 +1262,23 @@ fn arg_i64(args: &Value, key: &str) -> Result<i64, Error> {
     args.get(key)
         .and_then(Value::as_i64)
         .ok_or_else(|| Error::Invalid(format!("missing required integer argument '{key}'")))
+}
+
+/// Render the optional query filters of the AWS/K8s console reads: for every
+/// `(query_key, arg_name)` whose argument is a non-empty string, a number or a
+/// bool, append `&key=value` (strings percent-encoded). Returns the string with
+/// the leading `&` stripped so callers can place it right after `?`.
+fn opt_query(args: &Value, pairs: &[(&str, &str)]) -> String {
+    let mut q = String::new();
+    for (key, arg) in pairs {
+        match args.get(arg) {
+            Some(Value::String(s)) if !s.is_empty() => q.push_str(&format!("&{key}={}", seg(s))),
+            Some(Value::Number(n)) => q.push_str(&format!("&{key}={n}")),
+            Some(Value::Bool(b)) => q.push_str(&format!("&{key}={b}")),
+            _ => {}
+        }
+    }
+    q.trim_start_matches('&').to_string()
 }
 
 /// The HTTP verb a tool's self-call uses.
@@ -1785,9 +1946,186 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let id = arg_str(args, "task_id")?;
             SelfCall::delete(format!("/api/v1/scheduled-tasks/{}", seg(&id)))
         }
+        // ---- AWS console (docs/design/aws-k8s-consoles.md §2) ----
+        "aws_list_accounts" => SelfCall::get("/api/v1/aws/accounts".into()),
+        "aws_s3_list_buckets" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/s3/buckets?{}",
+            seg(&arg_str(args, "account_id")?),
+            opt_query(args, &[("region", "region")])
+        )),
+        "aws_s3_list_objects" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/s3/buckets/{}/objects?{}",
+            seg(&arg_str(args, "account_id")?),
+            seg(&arg_str(args, "bucket")?),
+            opt_query(args, &[("prefix", "prefix"), ("token", "token"), ("max", "max"), ("region", "region")])
+        )),
+        "aws_s3_preview" => {
+            let extra = opt_query(args, &[("max_bytes", "max_bytes"), ("region", "region")]);
+            let mut path = format!(
+                "/api/v1/aws/accounts/{}/s3/buckets/{}/preview?key={}",
+                seg(&arg_str(args, "account_id")?),
+                seg(&arg_str(args, "bucket")?),
+                seg(&arg_str(args, "key")?)
+            );
+            if !extra.is_empty() {
+                path.push('&');
+                path.push_str(&extra);
+            }
+            SelfCall::get(path)
+        }
+        "aws_sqs_list_queues" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/sqs/queues?{}",
+            seg(&arg_str(args, "account_id")?),
+            opt_query(args, &[("prefix", "prefix"), ("region", "region")])
+        )),
+        "aws_sqs_peek" => {
+            // Read-only POST: receive-message with visibility timeout pinned to
+            // 0 (nothing consumed); `max` clamped to SQS's 1..10 window.
+            let mut body = json!({"url": arg_str(args, "url")?, "visibility_timeout": 0});
+            if let Some(max) = args.get("max").and_then(Value::as_u64) {
+                body["max"] = json!(max.clamp(1, 10));
+            }
+            SelfCall::post(
+                format!(
+                    "/api/v1/aws/accounts/{}/sqs/queues/peek?{}",
+                    seg(&arg_str(args, "account_id")?),
+                    opt_query(args, &[("region", "region")])
+                ),
+                body,
+            )
+        }
+        "aws_sqs_send" => {
+            let mut body = json!({"url": arg_str(args, "url")?, "body": arg_str(args, "body")?});
+            if let Some(d) = args.get("delay_seconds").and_then(Value::as_u64) {
+                body["delay_seconds"] = json!(d);
+            }
+            for k in ["group_id", "dedup_id"] {
+                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    body[k] = json!(v);
+                }
+            }
+            if let Some(attrs) = args.get("message_attributes").filter(|v| v.is_object()) {
+                body["message_attributes"] = attrs.clone();
+            }
+            SelfCall::post(
+                format!(
+                    "/api/v1/aws/accounts/{}/sqs/queues/send?{}",
+                    seg(&arg_str(args, "account_id")?),
+                    opt_query(args, &[("region", "region")])
+                ),
+                body,
+            )
+        }
+        "aws_ec2_list_instances" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/ec2/instances?{}",
+            seg(&arg_str(args, "account_id")?),
+            opt_query(args, &[("region", "region"), ("state", "state"), ("q", "q")])
+        )),
+        "aws_athena_list_tables" => {
+            let extra = opt_query(args, &[("catalog", "catalog"), ("region", "region")]);
+            let mut path = format!(
+                "/api/v1/aws/accounts/{}/athena/tables?database={}",
+                seg(&arg_str(args, "account_id")?),
+                seg(&arg_str(args, "database")?)
+            );
+            if !extra.is_empty() {
+                path.push('&');
+                path.push_str(&extra);
+            }
+            SelfCall::get(path)
+        }
+        "aws_athena_query" => {
+            let mut body = json!({"sql": arg_str(args, "sql")?});
+            for k in ["database", "workgroup", "output_location"] {
+                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    body[k] = json!(v);
+                }
+            }
+            SelfCall::post(
+                format!(
+                    "/api/v1/aws/accounts/{}/athena/query?{}",
+                    seg(&arg_str(args, "account_id")?),
+                    opt_query(args, &[("region", "region")])
+                ),
+                body,
+            )
+        }
+        "aws_athena_get_query" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/athena/query/{}?{}",
+            seg(&arg_str(args, "account_id")?),
+            seg(&arg_str(args, "query_execution_id")?),
+            opt_query(args, &[("token", "token"), ("max", "max"), ("region", "region")])
+        )),
+        "aws_eks_list_clusters" => SelfCall::get(format!(
+            "/api/v1/aws/accounts/{}/eks/clusters?{}",
+            seg(&arg_str(args, "account_id")?),
+            opt_query(args, &[("region", "region")])
+        )),
+        // ---- Kubernetes console (§3) — `namespace` → `ns`; omitted ⇒ all (-A) ----
+        "k8s_list_clusters" => SelfCall::get("/api/v1/k8s/clusters".into()),
+        "k8s_get_resources" => {
+            let extra = opt_query(args, &[("ns", "namespace"), ("label", "label"), ("q", "q")]);
+            let mut path = format!(
+                "/api/v1/k8s/clusters/{}/resources?kind={}",
+                seg(&arg_str(args, "cluster_id")?),
+                seg(&arg_str(args, "kind")?)
+            );
+            if !extra.is_empty() {
+                path.push('&');
+                path.push_str(&extra);
+            }
+            SelfCall::get(path)
+        }
+        "k8s_describe" => SelfCall::get(format!(
+            "/api/v1/k8s/clusters/{}/resource?kind={}&ns={}&name={}",
+            seg(&arg_str(args, "cluster_id")?),
+            seg(&arg_str(args, "kind")?),
+            seg(&arg_str(args, "namespace")?),
+            seg(&arg_str(args, "name")?)
+        )),
+        // text/plain route — `run_tool` wraps the body as `{text}`; `follow` is
+        // deliberately never forwarded (a stream would hang the call).
+        "k8s_logs" => SelfCall::get(format!(
+            "/api/v1/k8s/clusters/{}/pods/{}/{}/logs?{}",
+            seg(&arg_str(args, "cluster_id")?),
+            seg(&arg_str(args, "namespace")?),
+            seg(&arg_str(args, "pod")?),
+            opt_query(
+                args,
+                &[
+                    ("container", "container"),
+                    ("tail", "tail"),
+                    ("since", "since"),
+                    ("previous", "previous"),
+                    ("timestamps", "timestamps"),
+                ]
+            )
+        )),
+        "k8s_top" => SelfCall::get(format!(
+            "/api/v1/k8s/clusters/{}/metrics?{}",
+            seg(&arg_str(args, "cluster_id")?),
+            opt_query(args, &[("ns", "namespace")])
+        )),
+        "k8s_action" => SelfCall::post(
+            format!("/api/v1/k8s/clusters/{}/actions", seg(&arg_str(args, "cluster_id")?)),
+            json!({
+                "action": arg_str(args, "action")?,
+                "kind": arg_str(args, "kind")?,
+                "ns": arg_str(args, "namespace")?,
+                "name": arg_str(args, "name")?,
+                "params": args.get("params").cloned().unwrap_or(json!({})),
+            }),
+        ),
         other => return Err(Error::Invalid(format!("unknown otto tool '{other}'"))),
     })
 }
+
+/// Tools whose route answers `text/plain` rather than JSON; [`run_tool`] wraps
+/// the body as `{"text": …}` for them (today only the pod-logs route).
+const TEXT_TOOLS: &[&str] = &["k8s_logs"];
+/// Cap on the text handed back for a [`TEXT_TOOLS`] call (keeps the tail —
+/// the newest log lines). The route's own non-follow cap is 5 MiB.
+const MAX_TEXT_CHARS: usize = 256 * 1024;
 
 /// Resolve `(tool, args)` to a self-call and execute it as the user. Thin wrapper
 /// over the pure [`route_for`] so the routing of every tool is unit-tested.
@@ -1802,6 +2140,9 @@ async fn run_tool(
     let url = format!("{base}{}", call.path);
     let empty = json!({});
     let body = call.body.as_ref().unwrap_or(&empty);
+    if TEXT_TOOLS.contains(&tool) && call.method == Method::Get {
+        return self_get_text(client, token, &url).await;
+    }
     match call.method {
         Method::Get => self_get(client, token, &url).await,
         Method::Post => self_post(client, token, &url, body).await,
@@ -1844,6 +2185,31 @@ async fn parse_self(resp: reqwest::Response) -> Result<Value, Error> {
         return Err(Error::Upstream(format!("{status}: {snippet}")));
     }
     Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+/// GET a `text/plain` route (pod logs) and wrap it as `{text, truncated}`,
+/// keeping the newest [`MAX_TEXT_CHARS`] — `parse_self` would turn a non-JSON
+/// body into `null`.
+async fn self_get_text(client: &reqwest::Client, token: &str, url: &str) -> Result<Value, Error> {
+    let resp = client.get(url).bearer_auth(token).send().await
+        .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let snippet: String = text.chars().take(400).collect();
+        return Err(Error::Upstream(format!("{status}: {snippet}")));
+    }
+    let n = text.chars().count();
+    let (text, truncated) = if n > MAX_TEXT_CHARS {
+        let start = text
+            .char_indices()
+            .nth(n - MAX_TEXT_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+        (text[start..].to_string(), true)
+    } else {
+        (text, false)
+    };
+    Ok(json!({"text": text, "truncated": truncated}))
 }
 
 async fn ask_human_approval(ctx: &ServerCtx, user: &otto_core::domain::User, args: &Value) -> Result<Value, Error> {
@@ -2418,6 +2784,164 @@ mod tests {
         assert_eq!(route_for("list_findings", &json!({"review_id":"rv1"})).unwrap().path, "/api/v1/reviews/rv1/findings");
         assert_eq!(route_for("broadcast_message", &json!({"workspace_id":"ws1","text":"hi"})).unwrap().body.unwrap(), json!({"text":"hi"}));
         assert_eq!(route_for("test_integration", &json!({"workspace_id":"ws1","channel":"slack"})).unwrap().path, "/api/v1/workspaces/ws1/integrations/slack/test");
+    }
+
+    // ----- AWS / Kubernetes consoles (docs/design/aws-k8s-consoles.md §6) ----
+
+    const AWS_READS: &[&str] = &[
+        "aws_list_accounts",
+        "aws_s3_list_buckets",
+        "aws_s3_list_objects",
+        "aws_s3_preview",
+        "aws_sqs_list_queues",
+        "aws_sqs_peek",
+        "aws_ec2_list_instances",
+        "aws_athena_list_tables",
+        "aws_athena_get_query",
+        "aws_eks_list_clusters",
+    ];
+    const K8S_READS: &[&str] =
+        &["k8s_list_clusters", "k8s_get_resources", "k8s_describe", "k8s_logs", "k8s_top"];
+    const CONSOLE_WRITES: &[&str] = &["aws_athena_query", "aws_sqs_send", "k8s_action"];
+
+    #[test]
+    fn aws_k8s_tools_present_and_classified() {
+        let names = spec_names();
+        let specs = otto_tool_specs();
+        for n in AWS_READS.iter().chain(K8S_READS).chain(CONSOLE_WRITES) {
+            assert!(names.contains(&format!("otto.{n}")), "missing spec otto.{n}");
+            let spec = specs.iter().find(|s| s["name"] == format!("otto.{n}")).unwrap();
+            let cat = spec["category"].as_str().unwrap();
+            assert!(
+                (n.starts_with("aws_") && cat == "AWS") || (n.starts_with("k8s_") && cat == "Kubernetes"),
+                "{n} in unexpected category {cat}"
+            );
+        }
+        for r in AWS_READS.iter().chain(K8S_READS) {
+            assert!(DEFAULT_ENABLED.contains(r), "{r} must be default-enabled");
+            assert!(!DANGEROUS.contains(r), "{r} must not be DANGEROUS");
+        }
+        for w in CONSOLE_WRITES {
+            assert!(DANGEROUS.contains(w), "{w} must be DANGEROUS");
+            assert!(!DEFAULT_ENABLED.contains(w), "{w} must be off by default");
+            assert!(tool_is_mutating(w));
+            let spec = specs.iter().find(|s| s["name"] == format!("otto.{w}")).unwrap();
+            assert_eq!(spec["mutating"], json!(true));
+        }
+    }
+
+    #[test]
+    fn route_for_maps_aws_console() {
+        assert_eq!(
+            route_for("aws_list_accounts", &json!({})).unwrap(),
+            SelfCall { method: Method::Get, path: "/api/v1/aws/accounts".into(), body: None }
+        );
+        assert_eq!(
+            route_for("aws_s3_list_buckets", &json!({"account_id":"a1"})).unwrap().path,
+            "/api/v1/aws/accounts/a1/s3/buckets?"
+        );
+        assert_eq!(
+            route_for("aws_s3_list_buckets", &json!({"account_id":"a1","region":"eu-west-1"})).unwrap().path,
+            "/api/v1/aws/accounts/a1/s3/buckets?region=eu-west-1"
+        );
+        assert_eq!(
+            route_for("aws_s3_list_objects", &json!({"account_id":"a1","bucket":"b","prefix":"logs/","token":"t","max":50})).unwrap().path,
+            "/api/v1/aws/accounts/a1/s3/buckets/b/objects?prefix=logs%2F&token=t&max=50"
+        );
+        assert_eq!(
+            route_for("aws_s3_preview", &json!({"account_id":"a1","bucket":"b","key":"a b.json","max_bytes":1024})).unwrap().path,
+            "/api/v1/aws/accounts/a1/s3/buckets/b/preview?key=a%20b.json&max_bytes=1024"
+        );
+        assert_eq!(
+            route_for("aws_s3_preview", &json!({"account_id":"a1","bucket":"b","key":"k"})).unwrap().path,
+            "/api/v1/aws/accounts/a1/s3/buckets/b/preview?key=k"
+        );
+        assert_eq!(
+            route_for("aws_sqs_list_queues", &json!({"account_id":"a1","prefix":"orders"})).unwrap().path,
+            "/api/v1/aws/accounts/a1/sqs/queues?prefix=orders"
+        );
+        // Peek: read-only POST, visibility timeout pinned to 0, max clamped 1..10.
+        let c = route_for("aws_sqs_peek", &json!({"account_id":"a1","url":"https://sqs/q","max":99})).unwrap();
+        assert_eq!(c.method, Method::Post);
+        assert_eq!(c.path, "/api/v1/aws/accounts/a1/sqs/queues/peek?");
+        assert_eq!(c.body.unwrap(), json!({"url":"https://sqs/q","visibility_timeout":0,"max":10}));
+        let c = route_for("aws_sqs_send", &json!({"account_id":"a1","url":"https://sqs/q.fifo","body":"{}","group_id":"g1","delay_seconds":5})).unwrap();
+        assert_eq!(c.method, Method::Post);
+        assert_eq!(c.path, "/api/v1/aws/accounts/a1/sqs/queues/send?");
+        assert_eq!(c.body.unwrap(), json!({"url":"https://sqs/q.fifo","body":"{}","group_id":"g1","delay_seconds":5}));
+        assert_eq!(
+            route_for("aws_ec2_list_instances", &json!({"account_id":"a1","region":"us-east-1","state":"running","q":"web"})).unwrap().path,
+            "/api/v1/aws/accounts/a1/ec2/instances?region=us-east-1&state=running&q=web"
+        );
+        assert_eq!(
+            route_for("aws_athena_list_tables", &json!({"account_id":"a1","database":"db","catalog":"AwsDataCatalog"})).unwrap().path,
+            "/api/v1/aws/accounts/a1/athena/tables?database=db&catalog=AwsDataCatalog"
+        );
+        let c = route_for("aws_athena_query", &json!({"account_id":"a1","sql":"SELECT 1","database":"db","workgroup":"primary"})).unwrap();
+        assert_eq!(c.method, Method::Post);
+        assert_eq!(c.path, "/api/v1/aws/accounts/a1/athena/query?");
+        assert_eq!(c.body.unwrap(), json!({"sql":"SELECT 1","database":"db","workgroup":"primary"}));
+        assert_eq!(
+            route_for("aws_athena_get_query", &json!({"account_id":"a1","query_execution_id":"q-1","token":"t2","max":100})).unwrap().path,
+            "/api/v1/aws/accounts/a1/athena/query/q-1?token=t2&max=100"
+        );
+        assert_eq!(
+            route_for("aws_eks_list_clusters", &json!({"account_id":"a1","region":"eu-west-1"})).unwrap().path,
+            "/api/v1/aws/accounts/a1/eks/clusters?region=eu-west-1"
+        );
+        // Required ids are enforced.
+        assert!(route_for("aws_s3_list_objects", &json!({"account_id":"a1"})).is_err());
+        assert!(route_for("aws_athena_query", &json!({"account_id":"a1"})).is_err());
+        assert!(route_for("aws_sqs_send", &json!({"account_id":"a1","url":"u"})).is_err());
+    }
+
+    #[test]
+    fn route_for_maps_k8s_console() {
+        assert_eq!(
+            route_for("k8s_list_clusters", &json!({})).unwrap(),
+            SelfCall { method: Method::Get, path: "/api/v1/k8s/clusters".into(), body: None }
+        );
+        assert_eq!(
+            route_for("k8s_get_resources", &json!({"cluster_id":"c1","kind":"pods","namespace":"prod","label":"app=web"})).unwrap().path,
+            "/api/v1/k8s/clusters/c1/resources?kind=pods&ns=prod&label=app%3Dweb"
+        );
+        // No namespace ⇒ no `ns=` (route default = all namespaces).
+        assert_eq!(
+            route_for("k8s_get_resources", &json!({"cluster_id":"c1","kind":"deployments"})).unwrap().path,
+            "/api/v1/k8s/clusters/c1/resources?kind=deployments"
+        );
+        assert_eq!(
+            route_for("k8s_describe", &json!({"cluster_id":"c1","kind":"deployments","namespace":"prod","name":"web"})).unwrap().path,
+            "/api/v1/k8s/clusters/c1/resource?kind=deployments&ns=prod&name=web"
+        );
+        let c = route_for("k8s_logs", &json!({"cluster_id":"c1","namespace":"prod","pod":"web-1","container":"app","tail":200,"since":"10m","previous":true,"follow":true})).unwrap();
+        assert_eq!(c.method, Method::Get);
+        assert_eq!(c.path, "/api/v1/k8s/clusters/c1/pods/prod/web-1/logs?container=app&tail=200&since=10m&previous=true");
+        assert!(!c.path.contains("follow"), "follow must never be forwarded");
+        assert!(TEXT_TOOLS.contains(&"k8s_logs"));
+        assert_eq!(
+            route_for("k8s_top", &json!({"cluster_id":"c1","namespace":"prod"})).unwrap().path,
+            "/api/v1/k8s/clusters/c1/metrics?ns=prod"
+        );
+        let c = route_for("k8s_action", &json!({"cluster_id":"c1","action":"scale","kind":"deployments","namespace":"prod","name":"web","params":{"replicas":3}})).unwrap();
+        assert_eq!(c.method, Method::Post);
+        assert_eq!(c.path, "/api/v1/k8s/clusters/c1/actions");
+        assert_eq!(c.body.unwrap(), json!({"action":"scale","kind":"deployments","ns":"prod","name":"web","params":{"replicas":3}}));
+        // params defaults to {} so the route's confirm_name check sees an object.
+        let c = route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart","kind":"deployments","namespace":"prod","name":"web"})).unwrap();
+        assert_eq!(c.body.unwrap()["params"], json!({}));
+        assert!(route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart"})).is_err());
+        assert!(route_for("k8s_describe", &json!({"cluster_id":"c1","kind":"pods","name":"p"})).is_err());
+    }
+
+    #[test]
+    fn dangerous_detail_surfaces_console_targets() {
+        let d = dangerous_detail("otto.k8s_action", &json!({"cluster_id":"c1","action":"delete_pod","kind":"pods","namespace":"prod","name":"web-1"}));
+        assert!(d.contains("delete_pod") && d.contains("pods/web-1") && d.contains("prod") && d.contains("c1"), "{d}");
+        let d = dangerous_detail("otto.aws_sqs_send", &json!({"account_id":"a1","url":"https://sqs/q"}));
+        assert!(d.contains("https://sqs/q") && d.contains("a1"), "{d}");
+        let d = dangerous_detail("otto.aws_athena_query", &json!({"account_id":"a1","sql":"SELECT * FROM t","database":"db"}));
+        assert!(d.contains("SELECT * FROM t") && d.contains("db") && d.contains("a1"), "{d}");
     }
 
     #[test]
