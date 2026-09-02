@@ -219,6 +219,9 @@
   $effect(() => {
     function onHelpKey(e: KeyboardEvent): void {
       if (e.key !== '?' || e.metaKey || e.ctrlKey || e.altKey) return;
+      // A module that owns `?` (e.g. the Kubernetes workspace) handles it first
+      // in the capture phase and marks it consumed.
+      if (e.defaultPrevented) return;
       const el = document.activeElement as HTMLElement | null;
       const typing =
         !!el &&

@@ -5,6 +5,7 @@
 pub mod activity;
 pub mod api_client;
 pub mod audit;
+pub mod aws_accounts;
 pub mod browser;
 pub mod browser_credentials;
 pub mod canvas;
@@ -24,6 +25,7 @@ pub mod product;
 pub mod improvements;
 pub mod integrations;
 pub mod issues;
+pub mod k8s_clusters;
 pub mod mcp_audit;
 pub mod mcp_control;
 pub mod goal_loops;
@@ -62,6 +64,7 @@ pub mod workspaces;
 
 pub use activity::{ActivityRepo, NewTask, NewTrail};
 pub use audit::{AuditRepo, NewAuditEntry};
+pub use aws_accounts::{AwsAccountPatch, AwsAccountRow, AwsAccountsRepo, NewAwsAccount};
 pub use browser::{
     BrowserAnnotation, BrowserAnnotationsRepo, BrowserTab, BrowserTabsRepo, NewBrowserAnnotation,
     NewBrowserTab,
@@ -110,6 +113,7 @@ pub use product::*;
 pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
 pub use issues::{IssuesRepo, NewIssueAccount};
+pub use k8s_clusters::{K8sCluster, K8sClusterPatch, K8sClusterSource, K8sClustersRepo, NewK8sCluster};
 pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
 pub use mcp_control::{
     CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval, McpApprovalRepo,

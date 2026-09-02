@@ -18,6 +18,8 @@ import { scheduledTasks } from './stores/scheduledTasks.svelte';
 import { runWithOtto } from './stores/runWithOtto.svelte';
 import { browser } from './stores/browser.svelte';
 import { personalAgents } from './stores/personalAgents.svelte';
+import { k8s } from './stores/k8s.svelte';
+import { aws } from './stores/aws.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -483,6 +485,15 @@ class EventsClient {
         } else if (parsed.type === 'agent_room_message') {
           // Agent-room feeds fetch the room's messages after their cursor.
           personalAgents.applyRoomEvent(parsed);
+        } else if (
+          parsed.type === 'k8s_cluster_updated' ||
+          parsed.type === 'k8s_install_updated'
+        ) {
+          // Kubernetes console: cluster list refetch / installer state tick.
+          k8s.applyEvent(parsed);
+        } else if (parsed.type === 'aws_account_updated' || parsed.type === 'aws_install_updated') {
+          // AWS console: account rows changed / the CLI installer advanced.
+          aws.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

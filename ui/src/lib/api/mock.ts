@@ -4,6 +4,10 @@
 // /ws/*) so client.ts stays untouched.
 
 import type {
+  AwsAccount,
+  AwsPermissions,
+  AwsStatus,
+  AthenaExecution,
   BranchInfo,
   CommitInfo,
   Connection,
@@ -570,7 +574,11 @@ const meta: MetaResp = {
 // HTTP routing
 // ---------------------------------------------------------------------------
 
-type Handler = (m: RegExpMatchArray, body: any, query: URLSearchParams) => { status?: number; json?: unknown } | undefined;
+type Handler = (
+  m: RegExpMatchArray,
+  body: any,
+  query: URLSearchParams,
+) => { status?: number; json?: unknown; /** Verbatim non-JSON body (text/plain logs). */ raw?: string } | undefined;
 
 interface Route {
   method: string;
@@ -611,7 +619,256 @@ function newSessionFor(workspaceId: Id, req: any): Session {
   return s;
 }
 
+
+// ---------------------------------------------------------------------------
+// AWS console fixtures (mirrors docs/design/aws-k8s-consoles.md §2)
+// ---------------------------------------------------------------------------
+
+const awsPermsOk: AwsPermissions = {
+  checked_at: ago(4),
+  identity: { account: '123456789012', arn: 'arn:aws:sts::123456789012:assumed-role/Admin/dana', user_id: 'AROA…' },
+  services: { s3: 'allowed', sqs: 'allowed', ec2: 'allowed', athena: 'allowed', eks: 'allowed' },
+  login_required: false,
+};
+const awsAccounts: AwsAccount[] = [
+  {
+    id: 'aws_sandbox',
+    name: 'sandbox',
+    auth_mode: 'profile',
+    profile: 'sandbox',
+    region: 'eu-west-1',
+    role_arn: null,
+    environment: 'dev',
+    color: '#3b82f6',
+    identity: awsPermsOk.identity,
+    permissions: awsPermsOk,
+    created_by: 'usr_root',
+    created_at: ago(60 * 24 * 3),
+    updated_at: ago(60),
+    last_used_at: ago(5),
+  },
+  {
+    id: 'aws_prod',
+    name: 'prod-eu',
+    auth_mode: 'access_keys',
+    access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+    region: 'eu-central-1',
+    role_arn: 'arn:aws:iam::999999999999:role/ReadOnly',
+    environment: 'prod',
+    color: '#ef4444',
+    identity: { account: '999999999999', arn: 'arn:aws:sts::999999999999:assumed-role/ReadOnly/otto', user_id: 'AROA…' },
+    permissions: {
+      checked_at: ago(12),
+      services: { s3: 'allowed', sqs: 'denied', ec2: 'allowed', athena: 'unknown', eks: 'denied' },
+      login_required: false,
+    },
+    created_by: 'usr_root',
+    created_at: ago(60 * 24 * 9),
+    updated_at: ago(60 * 24),
+    last_used_at: ago(30),
+  },
+];
+const awsStatus: AwsStatus = {
+  installed: localStorage.getItem('otto_mock_aws_missing') !== '1',
+  version: '2.17.3',
+  path: '/opt/homebrew/bin/aws',
+  install: { tool: 'aws', state: 'idle', log_tail: '' },
+};
+let athenaPolls = 0;
+const athenaHistory: AthenaExecution[] = [
+  { id: 'q-1111', query: 'SELECT count(*) FROM logs.requests WHERE dt = date \'2026-09-01\'', state: 'SUCCEEDED', submitted_at: ago(40), completed_at: ago(39), data_scanned_bytes: 512 * 1024 * 1024, execution_ms: 4210 },
+  { id: 'q-2222', query: 'SELECT * FROM logs.requests LIMIT 10', state: 'FAILED', submitted_at: ago(90), completed_at: ago(89), data_scanned_bytes: 0, execution_ms: 300 },
+];
+function awsAccount(id: string): AwsAccount | undefined {
+  return awsAccounts.find((a) => a.id === id);
+}
+
+
+// ---------------------------------------------------------------------------
+// Kubernetes console (/k8s/*) — two clusters, a handful of pods/deployments
+// per namespace, canned describe/events/logs. Enough to drive the workspace
+// without a daemon; mutations only toast.
+// ---------------------------------------------------------------------------
+
+interface MockK8sCluster {
+  id: Id;
+  name: string;
+  source: 'kubeconfig' | 'imported' | 'eks';
+  kubeconfig_path: string | null;
+  context_name: string;
+  default_namespace: string | null;
+  aws_account_id: Id | null;
+  environment: 'dev' | 'staging' | 'prod';
+  color: string | null;
+  capabilities: { server_version: string; metrics_server: boolean; argo_rollouts: boolean; argocd: boolean; checked_at: string } | null;
+  created_by: Id;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string | null;
+}
+
+const k8sClusters: MockK8sCluster[] = [
+  {
+    id: 'k8s_dev', name: 'dev-eu-1', source: 'kubeconfig', kubeconfig_path: '~/.kube/config', context_name: 'dev-eu-1',
+    default_namespace: 'payments', aws_account_id: null, environment: 'dev', color: '#4f8cff',
+    capabilities: { server_version: 'v1.30.2', metrics_server: true, argo_rollouts: true, argocd: true, checked_at: ago(4) },
+    created_by: 'usr_root', created_at: ago(60 * 24 * 9), updated_at: ago(60 * 3), last_used_at: ago(2),
+  },
+  {
+    id: 'k8s_prod', name: 'prod-eu-1', source: 'eks', kubeconfig_path: '<data>/kube/k8s_prod.yaml', context_name: 'prod-eu-1',
+    default_namespace: null, aws_account_id: null, environment: 'prod', color: '#e5484d',
+    capabilities: { server_version: 'v1.29.7-eks', metrics_server: false, argo_rollouts: false, argocd: false, checked_at: ago(30) },
+    created_by: 'usr_root', created_at: ago(60 * 24 * 30), updated_at: ago(60 * 24), last_used_at: ago(60 * 5),
+  },
+];
+interface MockInstallJob {
+  tool: string;
+  state: string;
+  log_tail: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+const k8sInstall: Record<'kubectl' | 'k9s', MockInstallJob> = {
+  kubectl: { tool: 'kubectl', state: 'idle', log_tail: '', started_at: null, finished_at: null, error: null },
+  k9s: { tool: 'k9s', state: 'idle', log_tail: '', started_at: null, finished_at: null, error: null },
+};
+const K8S_NS = ['payments', 'kube-system', 'argocd', 'default'];
+function k8sPods(ns: string) {
+  const mk = (name: string, status: string, ready: string, restarts: number, health: string, age: number) => ({
+    name, namespace: ns, kind: 'Pod', status, ready, restarts, age_seconds: age, node: 'ip-10-0-1-23', ip: `10.0.${ns.length}.${(name.length * 7) % 250}`,
+    cpu: (name.length * 13) % 400, mem: (64 + ((name.length * 31) % 900)) * 1024 * 1024, images: [`registry.local/${name.split('-')[0]}:1.${name.length}.0`],
+    labels: { app: name.split('-')[0], 'app.kubernetes.io/part-of': ns }, extra: {}, health,
+  });
+  return [
+    mk(`${ns}-api-7d9f8b6c4-x2kqp`, 'Running', '2/2', 0, 'ok', 3600 * 26),
+    mk(`${ns}-api-7d9f8b6c4-m8vzt`, 'Running', '2/2', 1, 'ok', 3600 * 26),
+    mk(`${ns}-worker-5c6d7e8f9-q1w2e`, 'CrashLoopBackOff', '0/1', 14, 'bad', 3600 * 2),
+    mk(`${ns}-migrate-28841-abcde`, 'Succeeded', '0/1', 0, 'ok', 3600 * 50),
+    mk(`${ns}-cache-0`, 'Pending', '0/1', 0, 'progressing', 45),
+  ];
+}
+function k8sWorkloads(ns: string, kind: string) {
+  const K = kind === 'deployments' ? 'Deployment' : kind === 'statefulsets' ? 'StatefulSet' : 'DaemonSet';
+  return [
+    { name: `${ns}-api`, namespace: ns, kind: K, status: 'Available', ready: '2/2', age_seconds: 86400 * 12, labels: { app: 'api' }, extra: { desired: '2', updated: '2', available: '2' }, health: 'ok' },
+    { name: `${ns}-worker`, namespace: ns, kind: K, status: 'Progressing', ready: '0/1', age_seconds: 86400 * 3, labels: { app: 'worker' }, extra: { desired: '1', updated: '1', available: '0' }, health: 'bad' },
+  ];
+}
+function k8sRows(kind: string, ns: string) {
+  const nss = ns ? [ns] : K8S_NS;
+  const out: unknown[] = [];
+  for (const n of nss) {
+    if (kind === 'pods') out.push(...k8sPods(n));
+    else if (kind === 'deployments' || kind === 'statefulsets' || kind === 'daemonsets') out.push(...k8sWorkloads(n, kind));
+    else if (kind === 'services') out.push({ name: `${n}-api`, namespace: n, kind: 'Service', status: 'Active', age_seconds: 86400 * 12, labels: {}, extra: { type: 'ClusterIP', cluster_ip: '10.96.12.4', external_ip: '', ports: '80/TCP,443/TCP' }, health: 'ok' });
+    else if (kind === 'cronjobs') out.push({ name: `${n}-nightly`, namespace: n, kind: 'CronJob', status: 'Scheduled', age_seconds: 86400 * 40, labels: {}, extra: { schedule: '0 2 * * *', suspend: 'false', active: '0', last_schedule: '7h' }, health: 'ok' });
+    else if (kind === 'secrets') out.push({ name: `${n}-db-credentials`, namespace: n, kind: 'Secret', status: 'Opaque', age_seconds: 86400 * 90, labels: {}, extra: { type: 'Opaque', keys: 'username,password' }, health: 'ok' });
+    else if (kind === 'rollouts') out.push({ name: `${n}-checkout`, namespace: n, kind: 'Rollout', status: 'Paused', ready: '3/5', age_seconds: 86400 * 5, labels: {}, extra: { strategy: 'canary', phase: 'Paused', step: '2/6', weight: '20', paused: 'true', desired: '5', available: '3' }, health: 'progressing' });
+    else if (kind === 'applications' && n === 'argocd') out.push(
+      { name: 'payments', namespace: n, kind: 'Application', status: 'Synced', age_seconds: 86400 * 120, labels: {}, extra: { sync: 'Synced', health: 'Healthy', revision: 'a1b2c3d4', repo: 'git@github.com:acme/deploy.git', path: 'apps/payments', dest_ns: 'payments' }, health: 'ok' },
+      { name: 'ledger', namespace: n, kind: 'Application', status: 'OutOfSync', age_seconds: 86400 * 80, labels: {}, extra: { sync: 'OutOfSync', health: 'Degraded', revision: 'f00dbabe', repo: 'git@github.com:acme/deploy.git', path: 'apps/ledger', dest_ns: 'ledger' }, health: 'bad' },
+    );
+    else if (kind === 'events') out.push({ name: `${n}-worker.17f1`, namespace: n, kind: 'Event', status: '2m', age_seconds: 120, labels: {}, extra: { type: 'Warning', reason: 'BackOff', object: `pod/${n}-worker-5c6d7e8f9-q1w2e`, message: 'Back-off restarting failed container worker', count: '14' }, health: 'warn' });
+  }
+  return out;
+}
+const K8S_LOG_LINES = Array.from({ length: 800 }, (_, i) => `${new Date(NOW - (800 - i) * 900).toISOString()} level=${i % 37 === 0 ? 'error' : 'info'} msg="handled request" path=/v1/charges/${1000 + i} status=${i % 37 === 0 ? 502 : 200} dur=${(i * 7) % 240}ms`);
+
+const k8sRoutes: Route[] = [
+  { method: 'GET', re: /^\/k8s\/status$/, handle: () => ({ json: { kubectl: { installed: true, version: 'v1.31.0', path: '/opt/homebrew/bin/kubectl' }, k9s: { installed: false, version: null, path: null }, install: k8sInstall } }) },
+  {
+    method: 'POST', re: /^\/k8s\/install$/,
+    handle: (_m, body) => {
+      const tool = body?.tool === 'k9s' ? 'k9s' : 'kubectl';
+      k8sInstall[tool] = { ...k8sInstall[tool], state: 'running', log_tail: `==> Downloading ${tool}…\n`, started_at: new Date().toISOString() };
+      setTimeout(() => { k8sInstall[tool] = { ...k8sInstall[tool], state: 'done', log_tail: k8sInstall[tool].log_tail + '==> Verified.\n', finished_at: new Date().toISOString() }; }, 4000);
+      return { json: k8sInstall[tool] };
+    },
+  },
+  { method: 'GET', re: /^\/k8s\/discover$/, handle: () => ({ json: { contexts: [
+    { name: 'dev-eu-1', cluster: 'dev-eu-1.k8s.local', user: 'dev-admin', namespace: 'payments', kubeconfig_path: '~/.kube/config', server: 'https://10.0.0.10:6443' },
+    { name: 'staging-eu-1', cluster: 'staging', user: 'staging-admin', namespace: null, kubeconfig_path: '~/.kube/config', server: 'https://staging.k8s.acme.io' },
+    { name: 'kind-local', cluster: 'kind-local', user: 'kind-local', namespace: null, kubeconfig_path: '~/.kube/kind.yaml', server: 'https://127.0.0.1:52341' },
+  ] } }) },
+  { method: 'GET', re: /^\/k8s\/clusters$/, handle: () => ({ json: k8sClusters }) },
+  {
+    method: 'POST', re: /^\/k8s\/clusters$/,
+    handle: (_m, body) => {
+      const c: MockK8sCluster = { id: nid('k8s'), name: body.name, source: 'kubeconfig', kubeconfig_path: body.kubeconfig_path ?? null, context_name: body.context_name, default_namespace: body.default_namespace ?? null, aws_account_id: null, environment: body.environment ?? 'dev', color: body.color ?? null, capabilities: null, created_by: 'usr_root', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), last_used_at: null };
+      k8sClusters.push(c);
+      return { status: 201, json: c };
+    },
+  },
+  {
+    method: 'POST', re: /^\/k8s\/clusters\/import$/,
+    handle: (_m, body) => {
+      if (!String(body.kubeconfig_yaml ?? '').includes('kind: Config')) return problem(400, 'invalid', 'not a kubeconfig (missing `kind: Config`)');
+      const c: MockK8sCluster = { id: nid('k8s'), name: body.name, source: 'imported', kubeconfig_path: '<data>/kube/new.yaml', context_name: body.context_name ?? 'current', default_namespace: body.default_namespace ?? null, aws_account_id: null, environment: body.environment ?? 'dev', color: null, capabilities: null, created_by: 'usr_root', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), last_used_at: null };
+      k8sClusters.push(c);
+      return { status: 201, json: c };
+    },
+  },
+  { method: 'GET', re: /^\/k8s\/clusters\/([^/]+)$/, handle: (m) => { const c = k8sClusters.find((x) => x.id === m[1]); return c ? { json: c } : problem(404, 'not_found', 'cluster'); } },
+  { method: 'PATCH', re: /^\/k8s\/clusters\/([^/]+)$/, handle: (m, body) => { const c = k8sClusters.find((x) => x.id === m[1]); if (!c) return problem(404, 'not_found', 'cluster'); Object.assign(c, body, { updated_at: new Date().toISOString() }); return { json: c }; } },
+  { method: 'DELETE', re: /^\/k8s\/clusters\/([^/]+)$/, handle: (m) => { const i = k8sClusters.findIndex((x) => x.id === m[1]); if (i >= 0) k8sClusters.splice(i, 1); return { status: 204 }; } },
+  { method: 'POST', re: /^\/k8s\/clusters\/([^/]+)\/test$/, handle: (m) => ({ json: { ok: m[1] !== 'k8s_prod', latency_ms: 142, message: m[1] === 'k8s_prod' ? 'login required: the SSO session for profile prod has expired' : 'ok', server_version: 'v1.30.2' } }) },
+  { method: 'GET', re: /^\/k8s\/clusters\/([^/]+)\/capabilities$/, handle: (m) => { const c = k8sClusters.find((x) => x.id === m[1]); return c?.capabilities ? { json: c.capabilities } : { json: { server_version: 'v1.30.2', metrics_server: false, argo_rollouts: false, argocd: false, checked_at: new Date().toISOString() } }; } },
+  { method: 'GET', re: /^\/k8s\/clusters\/([^/]+)\/namespaces$/, handle: () => ({ json: { namespaces: K8S_NS.map((n) => ({ name: n, status: 'Active', age_seconds: 86400 * 100 })) } }) },
+  { method: 'GET', re: /^\/k8s\/clusters\/([^/]+)\/nodes$/, handle: () => ({ json: { nodes: [
+    { name: 'ip-10-0-1-23', status: 'Ready', roles: 'control-plane', version: 'v1.30.2', cpu_capacity: 4000, mem_capacity: 16 * 1024 ** 3, cpu_usage: 812, mem_usage: Math.round(6.1 * 1024 ** 3), age_seconds: 86400 * 200 },
+    { name: 'ip-10-0-2-41', status: 'Ready', roles: 'worker', version: 'v1.30.2', cpu_capacity: 8000, mem_capacity: 32 * 1024 ** 3, cpu_usage: 3200, mem_usage: 19 * 1024 ** 3, age_seconds: 86400 * 120 },
+    { name: 'ip-10-0-3-77', status: 'NotReady', roles: 'worker', version: 'v1.30.1', cpu_capacity: 8000, mem_capacity: 32 * 1024 ** 3, cpu_usage: null, mem_usage: null, age_seconds: 3600 * 5 },
+  ] } }) },
+  {
+    method: 'GET', re: /^\/k8s\/clusters\/([^/]+)\/resources$/,
+    handle: (m, _b, q) => {
+      if (m[1] === 'k8s_prod') return problem(502, 'invalid', 'login required: the SSO session for profile prod has expired (run `aws sso login`)');
+      const kind = q.get('kind') ?? 'pods';
+      const ns = q.get('ns') ?? '';
+      return { json: { kind, items: k8sRows(kind, ns), has_metrics: kind === 'pods' } };
+    },
+  },
+  {
+    method: 'GET', re: /^\/k8s\/clusters\/([^/]+)\/resource$/,
+    handle: (_m, _b, q) => {
+      const name = q.get('name') ?? '';
+      const ns = q.get('ns') ?? '';
+      const kind = q.get('kind') ?? 'pods';
+      const isSecret = kind === 'secrets';
+      return { json: {
+        manifest: { apiVersion: 'v1', kind: kind === 'pods' ? 'Pod' : kind, metadata: { name, namespace: ns, labels: { app: name.split('-')[0] }, creationTimestamp: ago(60 * 26) }, ...(isSecret ? { type: 'Opaque', data: { username: '<redacted>', password: '<redacted>' } } : { spec: { containers: [{ name: 'app', image: `registry.local/${name.split('-')[0]}:1.4.0`, ports: [{ containerPort: 8080 }] }, { name: 'sidecar', image: 'envoy:1.30' }] }, status: { phase: 'Running', podIP: '10.0.8.21' } }) },
+        describe: `Name:         ${name}\nNamespace:    ${ns}\nNode:         ip-10-0-1-23/10.0.1.23\nStatus:       Running\nIP:           10.0.8.21\nContainers:\n  app:\n    Image:      registry.local/app:1.4.0\n    State:      Running\n    Ready:      True\n    Restart Count: 0\nEvents:\n  Type    Reason   Age   From     Message\n  ----    ------   ----  ----     -------\n  Normal  Pulled   26h   kubelet  Container image already present on machine\n`,
+        events: [
+          { type: 'Normal', reason: 'Scheduled', message: `Successfully assigned ${ns}/${name} to ip-10-0-1-23`, count: 1, last_seen: '26h' },
+          { type: 'Normal', reason: 'Pulled', message: 'Container image already present on machine', count: 1, last_seen: '26h' },
+          ...(name.includes('worker') ? [{ type: 'Warning', reason: 'BackOff', message: 'Back-off restarting failed container worker', count: 14, last_seen: '2m' }] : []),
+        ],
+      } };
+    },
+  },
+  { method: 'GET', re: /^\/k8s\/clusters\/([^/]+)\/pods\/([^/]+)\/([^/]+)\/containers$/, handle: () => ({ json: { containers: [
+    { name: 'app', image: 'registry.local/app:1.4.0', ready: true, state: 'running', restarts: 0, init: false },
+    { name: 'sidecar', image: 'envoy:1.30', ready: true, state: 'running', restarts: 0, init: false },
+    { name: 'init-migrate', image: 'registry.local/app:1.4.0', ready: true, state: 'terminated', restarts: 0, init: true },
+  ] } }) },
+  {
+    method: 'GET', re: /^\/k8s\/clusters\/([^/]+)\/pods\/([^/]+)\/([^/]+)\/logs$/,
+    handle: (_m, _b, q) => {
+      const tail = Number(q.get('tail') ?? 500);
+      const ts = q.get('timestamps') === 'true';
+      const lines = K8S_LOG_LINES.slice(-tail).map((l) => (ts ? l : l.replace(/^\S+ /, '')));
+      return { raw: lines.join('\n') + '\n' };
+    },
+  },
+  { method: 'GET', re: /^\/k8s\/clusters\/([^/]+)\/metrics$/, handle: (_m, _b, q) => { const ns = q.get('ns') ?? ''; const nss = ns ? [ns] : K8S_NS; return { json: { available: true, pods: nss.flatMap((n) => k8sPods(n).map((p) => ({ name: p.name, namespace: n, cpu_millicores: (p.name.length * 13) % 400, mem_bytes: (64 + ((p.name.length * 31) % 900)) * 1024 * 1024, containers: [{ name: 'app', cpu_millicores: ((p.name.length * 13) % 400) * 0.8, mem_bytes: (64 + ((p.name.length * 31) % 900)) * 1024 * 1024 * 0.7 }, { name: 'sidecar', cpu_millicores: ((p.name.length * 13) % 400) * 0.2, mem_bytes: (64 + ((p.name.length * 31) % 900)) * 1024 * 1024 * 0.3 }] }))) } }; } },
+  { method: 'POST', re: /^\/k8s\/clusters\/([^/]+)\/exec$/, handle: (_m, body) => ({ json: newSessionFor(body.workspace_id, { kind: 'shell', provider: 'k8s', title: `${body.pod} · ${body.ns}` }) }) },
+  { method: 'POST', re: /^\/k8s\/clusters\/([^/]+)\/k9s$/, handle: () => problem(400, 'invalid', 'k9s not installed — install it from the Kubernetes overview') },
+  { method: 'POST', re: /^\/k8s\/clusters\/([^/]+)\/actions$/, handle: (_m, body) => ({ json: { ok: true, message: `${body.action} ${body.kind}/${body.name} (mock)`, output: body.action === 'rollout_status' ? 'deployment "api" successfully rolled out' : null } }) },
+];
+
 const routes: Route[] = [
+  ...k8sRoutes,
   { method: 'GET', re: /^\/health$/, handle: () => ({ json: { ok: true } }) },
   { method: 'GET', re: /^\/meta$/, handle: () => ({ json: { ...meta, needs_onboarding: localStorage.getItem('otto_mock_onboarding') === '1' } }) },
   {
@@ -632,7 +889,9 @@ const routes: Route[] = [
     },
   },
   { method: 'POST', re: /^\/auth\/logout$/, handle: () => ({ status: 204 }) },
-  { method: 'GET', re: /^\/auth\/me$/, handle: () => ({ json: users[0] }) },
+  // MeResp shape (auth.svelte.ts reads `.user` / `.real_user`) — a bare user
+  // left `auth.me` undefined, so every `auth.can(...)` gate was false in mock mode.
+  { method: 'GET', re: /^\/auth\/me$/, handle: () => ({ json: { user: users[0], real_user: users[0], impersonating: false } }) },
 
   { method: 'GET', re: /^\/users$/, handle: () => ({ json: users }) },
   {
@@ -1419,6 +1678,363 @@ const routes: Route[] = [
     },
   },
 
+
+  // --- AWS console ---
+  { method: 'GET', re: /^\/aws\/status$/, handle: () => ({ json: awsStatus }) },
+  {
+    method: 'POST',
+    re: /^\/aws\/install$/,
+    handle: () => {
+      awsStatus.install = { tool: 'aws', state: 'running', log_tail: '==> Downloading awscli…\n', started_at: new Date().toISOString() };
+      setTimeout(() => {
+        awsStatus.install = { ...awsStatus.install, state: 'done', log_tail: awsStatus.install.log_tail + '🍺  awscli installed\n', finished_at: new Date().toISOString() };
+        awsStatus.installed = true;
+        localStorage.removeItem('otto_mock_aws_missing');
+      }, 4000);
+      return { json: awsStatus.install };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/discover$/,
+    handle: () => ({
+      json: {
+        profiles: [
+          { name: 'default', region: 'us-east-1', source: 'credentials' },
+          { name: 'sandbox', region: 'eu-west-1', sso_start_url: 'https://acme.awsapps.com/start', sso_session: 'acme', source: 'config' },
+          { name: 'prod-admin', region: 'eu-central-1', role_arn: 'arn:aws:iam::999999999999:role/Admin', source: 'config' },
+        ],
+      },
+    }),
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/regions$/,
+    handle: () => ({
+      json: {
+        regions: [
+          ['us-east-1', 'US East (N. Virginia)'], ['us-east-2', 'US East (Ohio)'], ['us-west-1', 'US West (N. California)'],
+          ['us-west-2', 'US West (Oregon)'], ['eu-west-1', 'Europe (Ireland)'], ['eu-west-2', 'Europe (London)'],
+          ['eu-central-1', 'Europe (Frankfurt)'], ['eu-north-1', 'Europe (Stockholm)'], ['ap-southeast-1', 'Asia Pacific (Singapore)'],
+          ['ap-northeast-1', 'Asia Pacific (Tokyo)'], ['sa-east-1', 'South America (São Paulo)'], ['il-central-1', 'Israel (Tel Aviv)'],
+        ].map(([code, name]) => ({ code, name })),
+      },
+    }),
+  },
+  { method: 'GET', re: /^\/aws\/accounts$/, handle: () => ({ json: awsAccounts }) },
+  {
+    method: 'POST',
+    re: /^\/aws\/accounts$/,
+    handle: (_m, body) => {
+      const a: AwsAccount = {
+        id: nid('aws'),
+        name: body.name,
+        auth_mode: body.auth_mode,
+        profile: body.profile ?? null,
+        access_key_id: body.access_key_id ?? null,
+        region: body.region,
+        role_arn: body.role_arn ?? null,
+        environment: body.environment ?? 'dev',
+        color: body.color ?? null,
+        identity: null,
+        permissions: null,
+        created_by: 'usr_root',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      awsAccounts.push(a);
+      return { status: 201, json: a };
+    },
+  },
+  { method: 'GET', re: /^\/aws\/accounts\/([^/]+)$/, handle: (m) => (awsAccount(m[1]) ? { json: awsAccount(m[1]) } : problem(404, 'not_found', 'account')) },
+  {
+    method: 'PATCH',
+    re: /^\/aws\/accounts\/([^/]+)$/,
+    handle: (m, body) => {
+      const a = awsAccount(m[1]);
+      if (!a) return problem(404, 'not_found', 'account');
+      Object.assign(a, { ...body, secret_access_key: undefined, session_token: undefined, updated_at: new Date().toISOString() });
+      return { json: a };
+    },
+  },
+  {
+    method: 'DELETE',
+    re: /^\/aws\/accounts\/([^/]+)$/,
+    handle: (m) => {
+      const i = awsAccounts.findIndex((a) => a.id === m[1]);
+      if (i >= 0) awsAccounts.splice(i, 1);
+      return { status: 204 };
+    },
+  },
+  {
+    method: 'POST',
+    re: /^\/aws\/accounts\/([^/]+)\/test$/,
+    handle: (m) => {
+      const a = awsAccount(m[1]);
+      if (!a) return problem(404, 'not_found', 'account');
+      const loginRequired = a.auth_mode === 'profile' && a.profile === 'prod-admin';
+      return {
+        json: loginRequired
+          ? { ok: false, latency_ms: 120, message: 'login required: The SSO session associated with this profile has expired', login_required: true }
+          : { ok: true, latency_ms: 340, message: 'ok', identity: a.identity ?? awsPermsOk.identity, login_required: false },
+      };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/permissions$/,
+    handle: (m) => {
+      const a = awsAccount(m[1]);
+      if (!a) return problem(404, 'not_found', 'account');
+      a.permissions = a.permissions ?? { ...awsPermsOk, checked_at: new Date().toISOString() };
+      return { json: a.permissions };
+    },
+  },
+  {
+    method: 'POST',
+    re: /^\/aws\/accounts\/([^/]+)\/login$/,
+    handle: (m, body) => {
+      const a = awsAccount(m[1]);
+      if (!a) return problem(404, 'not_found', 'account');
+      if (a.auth_mode !== 'profile') return problem(400, 'invalid', 'access_keys accounts cannot sign in interactively');
+      return { json: newSessionFor(body.workspace_id ?? 'wsp_otto', { provider: 'aws', title: `aws sso login · ${a.name}` }) };
+    },
+  },
+  // S3
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/s3\/buckets$/,
+    handle: () => ({
+      json: {
+        buckets: [
+          { name: 'acme-data-lake', creation_date: ago(60 * 24 * 400), region: 'eu-west-1' },
+          { name: 'acme-app-logs', creation_date: ago(60 * 24 * 120), region: 'eu-west-1' },
+          { name: 'acme-backups', creation_date: ago(60 * 24 * 800), region: 'eu-central-1' },
+        ],
+      },
+    }),
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/s3\/buckets\/([^/]+)\/objects$/,
+    handle: (_m, _b, query) => {
+      const prefix = query.get('prefix') ?? '';
+      const depth = prefix.split('/').filter(Boolean).length;
+      const prefixes = depth < 2 ? [`${prefix}2026-09-01/`, `${prefix}2026-09-02/`] : [];
+      const objects = Array.from({ length: 6 }, (_, i) => ({
+        key: `${prefix}${['events', 'report', 'config', 'trace', 'summary', 'data'][i]}-${i}.${['json', 'csv', 'json', 'log', 'txt', 'parquet'][i]}`,
+        size: (i + 1) * 4321,
+        last_modified: ago(i * 37 + 10),
+        storage_class: i === 5 ? 'GLACIER' : 'STANDARD',
+        etag: `"etag${i}"`,
+      }));
+      return { json: { prefixes, objects, is_truncated: false } };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/s3\/buckets\/([^/]+)\/object$/,
+    handle: (_m, _b, query) => ({ json: { key: query.get('key'), size: 4321, content_type: 'application/json', last_modified: ago(10), etag: '"e"', metadata: {}, storage_class: 'STANDARD' } }),
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/s3\/buckets\/([^/]+)\/preview$/,
+    handle: (_m, _b, query) => {
+      const key = query.get('key') ?? '';
+      if (key.endsWith('.parquet')) return { json: { binary: true, content_type: 'application/octet-stream' } };
+      if (key.endsWith('.csv')) return { json: { text: 'id,name,amount\n1,alpha,10.5\n2,beta,20\n3,gamma,7.25\n', truncated: false, content_type: 'text/csv' } };
+      if (key.endsWith('.json')) return { json: { text: JSON.stringify({ event: 'deposit', amount: 10.5, tags: ['a', 'b'], meta: { source: 'api' } }), truncated: false, content_type: 'application/json' } };
+      return { json: { text: `line 1 of ${key}\nline 2\nline 3\n`, truncated: false, content_type: 'text/plain' } };
+    },
+  },
+  // SQS
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/sqs\/queues$/,
+    handle: () => ({
+      json: {
+        queues: [
+          { url: 'https://sqs.eu-west-1.amazonaws.com/123456789012/orders', name: 'orders', fifo: false },
+          { url: 'https://sqs.eu-west-1.amazonaws.com/123456789012/orders-dlq', name: 'orders-dlq', fifo: false },
+          { url: 'https://sqs.eu-west-1.amazonaws.com/123456789012/payments.fifo', name: 'payments.fifo', fifo: true },
+        ],
+      },
+    }),
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/sqs\/queues\/attributes$/,
+    handle: (_m, _b, query) => {
+      const url = query.get('url') ?? '';
+      const name = url.split('/').pop() ?? '';
+      const isDlq = name.endsWith('-dlq');
+      return {
+        json: {
+          attributes: {
+            QueueArn: `arn:aws:sqs:eu-west-1:123456789012:${name}`,
+            ApproximateNumberOfMessages: isDlq ? '17' : '3',
+            VisibilityTimeout: '30',
+            MessageRetentionPeriod: '345600',
+            ...(isDlq ? {} : { RedrivePolicy: JSON.stringify({ deadLetterTargetArn: 'arn:aws:sqs:eu-west-1:123456789012:orders-dlq', maxReceiveCount: 5 }) }),
+          },
+          approx_messages: isDlq ? 17 : 3,
+          approx_not_visible: 1,
+          approx_delayed: 0,
+          dlq_target_arn: isDlq ? null : 'arn:aws:sqs:eu-west-1:123456789012:orders-dlq',
+        },
+      };
+    },
+  },
+  {
+    method: 'POST',
+    re: /^\/aws\/accounts\/([^/]+)\/sqs\/queues\/peek$/,
+    handle: (_m, body) => ({
+      json: {
+        messages: Array.from({ length: Math.min(Number(body.max ?? 10), 3) }, (_, i) => ({
+          message_id: nid('msg'),
+          receipt_handle: nid('rh'),
+          body: JSON.stringify({ order_id: 1000 + i, status: 'created', total: 19.99 * (i + 1) }),
+          attributes: { SentTimestamp: String(Date.now() - i * 60000), ApproximateReceiveCount: String(i + 1) },
+          message_attributes: i === 0 ? { source: { DataType: 'String', StringValue: 'checkout' } } : {},
+          md5: 'd41d8cd98f00b204e9800998ecf8427e',
+        })),
+      },
+    }),
+  },
+  { method: 'POST', re: /^\/aws\/accounts\/([^/]+)\/sqs\/queues\/send$/, handle: () => ({ json: { message_id: nid('msg') } }) },
+  { method: 'POST', re: /^\/aws\/accounts\/([^/]+)\/sqs\/queues\/delete-message$/, handle: () => ({ status: 204 }) },
+  { method: 'POST', re: /^\/aws\/accounts\/([^/]+)\/sqs\/queues\/purge$/, handle: () => ({ status: 204 }) },
+  { method: 'POST', re: /^\/aws\/accounts\/([^/]+)\/sqs\/queues\/redrive$/, handle: () => ({ json: { task_handle: nid('mv') } }) },
+  // EC2
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/ec2\/instances$/,
+    handle: (_m, _b, query) => {
+      const region = query.get('region') ?? 'eu-west-1';
+      const states = ['running', 'running', 'stopped', 'running', 'pending', 'terminated'];
+      return {
+        json: {
+          instances: states.map((state, i) => ({
+            instance_id: `i-0${(i + 1).toString(16).padStart(16, '0')}`,
+            name: ['web-1', 'web-2', 'batch', 'db-replica', 'ci-runner', 'old-web'][i],
+            state,
+            type: ['t3.medium', 't3.medium', 'c6i.xlarge', 'r6g.large', 'm6i.large', 't2.micro'][i],
+            az: `${region}${['a', 'b', 'a', 'c', 'b', 'a'][i]}`,
+            private_ip: `10.0.${i}.${10 + i}`,
+            public_ip: i < 2 ? `54.12.${i}.7` : null,
+            launch_time: ago(60 * 24 * (i + 1) * 3),
+            platform: null,
+            vpc_id: 'vpc-0abc',
+            subnet_id: `subnet-0${i}`,
+            tags: { Name: ['web-1', 'web-2', 'batch', 'db-replica', 'ci-runner', 'old-web'][i], env: 'dev', team: 'platform' },
+          })),
+        },
+      };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/ec2\/instances\/([^/]+)$/,
+    handle: (m) => ({
+      json: {
+        instance_id: m[2], name: 'web-1', state: 'running', type: 't3.medium', az: 'eu-west-1a', private_ip: '10.0.0.10', public_ip: '54.12.0.7',
+        launch_time: ago(60 * 24 * 3), platform: null, vpc_id: 'vpc-0abc', subnet_id: 'subnet-00', tags: { Name: 'web-1', env: 'dev' },
+        raw: { InstanceId: m[2], ImageId: 'ami-0123', State: { Code: 16, Name: 'running' }, BlockDeviceMappings: [{ DeviceName: '/dev/xvda', Ebs: { VolumeId: 'vol-1', Status: 'attached' } }], SecurityGroups: [{ GroupId: 'sg-1', GroupName: 'web' }] },
+      },
+    }),
+  },
+  {
+    method: 'POST',
+    re: /^\/aws\/accounts\/([^/]+)\/ec2\/instances\/([^/]+)\/(start|stop|reboot)$/,
+    handle: (m) => ({ json: { previous_state: m[3] === 'start' ? 'stopped' : 'running', current_state: m[3] === 'start' ? 'pending' : m[3] === 'stop' ? 'stopping' : 'running' } }),
+  },
+  // Athena
+  { method: 'GET', re: /^\/aws\/accounts\/([^/]+)\/athena\/workgroups$/, handle: () => ({ json: { workgroups: [{ name: 'primary', state: 'ENABLED', output_location: 's3://acme-athena-results/' }, { name: 'analytics', state: 'ENABLED', output_location: null }] } }) },
+  { method: 'GET', re: /^\/aws\/accounts\/([^/]+)\/athena\/databases$/, handle: () => ({ json: { databases: ['default', 'logs', 'billing'] } }) },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/athena\/tables$/,
+    handle: (_m, _b, query) => {
+      const db = query.get('database') ?? 'default';
+      const tables = db === 'logs'
+        ? [
+            { name: 'requests', type: 'EXTERNAL_TABLE', columns: [{ name: 'ts', type: 'timestamp' }, { name: 'path', type: 'string' }, { name: 'status', type: 'int' }, { name: 'latency_ms', type: 'bigint' }, { name: 'dt', type: 'date' }] },
+            { name: 'errors', type: 'EXTERNAL_TABLE', columns: [{ name: 'ts', type: 'timestamp' }, { name: 'message', type: 'string' }, { name: 'service', type: 'string' }] },
+          ]
+        : db === 'billing'
+          ? [{ name: 'cur', type: 'EXTERNAL_TABLE', columns: [{ name: 'line_item_usage_account_id', type: 'string' }, { name: 'line_item_unblended_cost', type: 'double' }, { name: 'bill_billing_period_start_date', type: 'timestamp' }] }]
+          : [{ name: 'sample', type: 'EXTERNAL_TABLE', columns: [{ name: 'id', type: 'bigint' }, { name: 'name', type: 'string' }] }];
+      return { json: { tables } };
+    },
+  },
+  { method: 'GET', re: /^\/aws\/accounts\/([^/]+)\/athena\/history$/, handle: () => ({ json: { executions: athenaHistory } }) },
+  {
+    method: 'POST',
+    re: /^\/aws\/accounts\/([^/]+)\/athena\/query$/,
+    handle: (_m, body) => {
+      if (body.workgroup === 'analytics' && !body.output_location) return problem(400, 'invalid', 'workgroup "analytics" has no output location — pass output_location or pick another workgroup');
+      athenaPolls = 0;
+      const id = nid('qx');
+      athenaHistory.unshift({ id, query: body.sql, state: 'RUNNING', submitted_at: new Date().toISOString() });
+      return { json: { query_execution_id: id } };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/athena\/query\/([^/]+)$/,
+    handle: (m) => {
+      const h = athenaHistory.find((x) => x.id === m[2]);
+      if (h && h.state === 'FAILED') return { json: { state: 'FAILED', reason: 'SYNTAX_ERROR: line 1:8: Column \'*\' cannot be resolved', stats: { data_scanned_bytes: 0, execution_ms: 300 } } };
+      athenaPolls += 1;
+      if (h && h.state === 'RUNNING' && athenaPolls < 3) return { json: { state: athenaPolls === 1 ? 'QUEUED' : 'RUNNING', stats: { data_scanned_bytes: athenaPolls * 40_000_000, execution_ms: athenaPolls * 900 } } };
+      if (h) { h.state = 'SUCCEEDED'; h.completed_at = new Date().toISOString(); h.data_scanned_bytes = 128_000_000; h.execution_ms = 2700; }
+      return {
+        json: {
+          state: 'SUCCEEDED',
+          stats: { data_scanned_bytes: 128_000_000, execution_ms: 2700 },
+          result: {
+            columns: [{ name: 'dt', type_hint: 'date' }, { name: 'requests', type_hint: 'bigint' }, { name: 'p95_ms', type_hint: 'double' }],
+            rows: Array.from({ length: 14 }, (_, i) => [`2026-08-${String(i + 1).padStart(2, '0')}`, 120000 + i * 913, 180.5 + i]),
+            stats: { duration_ms: 2700, row_count: 14, bytes_read: 128_000_000 },
+            truncated: false,
+          },
+        },
+      };
+    },
+  },
+  { method: 'POST', re: /^\/aws\/accounts\/([^/]+)\/athena\/query\/([^/]+)\/cancel$/, handle: () => ({ status: 204 }) },
+  // EKS
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/eks\/clusters$/,
+    handle: () => ({
+      json: {
+        clusters: [
+          { name: 'platform-dev', status: 'ACTIVE', version: '1.30', endpoint: 'https://ABC.gr7.eu-west-1.eks.amazonaws.com', arn: 'arn:aws:eks:eu-west-1:123456789012:cluster/platform-dev', created_at: ago(60 * 24 * 200) },
+          { name: 'data-staging', status: 'UPDATING', version: '1.29', endpoint: 'https://DEF.gr7.eu-west-1.eks.amazonaws.com', arn: 'arn:aws:eks:eu-west-1:123456789012:cluster/data-staging', created_at: ago(60 * 24 * 90) },
+        ],
+      },
+    }),
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/eks\/clusters\/([^/]+)$/,
+    handle: (m) => ({
+      json: {
+        cluster: { name: m[2], status: 'ACTIVE', version: '1.30', platformVersion: 'eks.5', kubernetesNetworkConfig: { serviceIpv4Cidr: '172.20.0.0/16' }, logging: { clusterLogging: [{ types: ['api', 'audit'], enabled: true }] } },
+        nodegroups: [
+          { name: 'general', status: 'ACTIVE', desired: 3, min: 2, max: 6, instance_types: ['m6i.large'], ami_type: 'AL2023_x86_64_STANDARD' },
+          { name: 'spot', status: 'ACTIVE', desired: 4, min: 0, max: 20, instance_types: ['c6i.xlarge', 'c5.xlarge'], ami_type: 'AL2023_x86_64_STANDARD' },
+        ],
+      },
+    }),
+  },
+  {
+    method: 'POST',
+    re: /^\/aws\/accounts\/([^/]+)\/eks\/clusters\/([^/]+)\/import-kubeconfig$/,
+    handle: (m) => ({ json: { id: nid('k8s'), name: m[2], source: 'eks', context_name: m[2], environment: 'dev' } }),
+  },
+
   { method: 'GET', re: /^\/settings$/, handle: () => ({ json: settings }) },
   {
     method: 'PUT',
@@ -1448,6 +2064,7 @@ function handleApi(method: string, pathWithQuery: string, body: unknown): { stat
     const m = path.match(r.re);
     if (!m) continue;
     const out = r.handle(m, body ?? {}, query) ?? { status: 204 };
+    if (typeof out.raw === 'string') return { status: out.status ?? 200, body: out.raw };
     if (out.status === 204 && out.json === undefined) return { status: 204, body: null };
     return { status: out.status ?? 200, body: JSON.stringify(out.json) };
   }

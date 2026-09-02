@@ -3357,7 +3357,9 @@ name = "otto-aws"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
+ "bytes",
  "chrono",
+ "dirs",
  "futures-util",
  "http-body-util",
  "otto-connections",
@@ -3367,6 +3369,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
  "tower 0.5.3",
  "tracing",
@@ -3617,6 +3620,7 @@ version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
  "chrono",
+ "dirs",
  "futures-util",
  "http-body-util",
  "otto-connections",
@@ -3626,6 +3630,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
  "tower 0.5.3",
  "tracing",

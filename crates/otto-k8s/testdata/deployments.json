@@ -1,0 +1,37 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {"creationTimestamp": "2026-08-01T00:00:00Z", "labels": {"app": "web"}, "name": "web", "namespace": "shop"},
+      "spec": {"replicas": 3, "selector": {"matchLabels": {"app": "web"}}, "template": {"spec": {"containers": [{"image": "registry/web:1.2.3", "name": "web"}]}}},
+      "status": {"availableReplicas": 3, "observedGeneration": 7, "readyReplicas": 3, "replicas": 3, "updatedReplicas": 3,
+        "conditions": [{"type": "Available", "status": "True"}, {"type": "Progressing", "status": "True", "reason": "NewReplicaSetAvailable"}]}
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {"creationTimestamp": "2026-08-01T00:00:00Z", "name": "api", "namespace": "shop"},
+      "spec": {"replicas": 4, "template": {"spec": {"containers": [{"image": "registry/api:3.1", "name": "api"}]}}},
+      "status": {"availableReplicas": 2, "readyReplicas": 2, "replicas": 5, "unavailableReplicas": 2, "updatedReplicas": 2,
+        "conditions": [{"type": "Progressing", "status": "True", "reason": "ReplicaSetUpdated"}]}
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {"creationTimestamp": "2026-08-01T00:00:00Z", "name": "broken", "namespace": "shop"},
+      "spec": {"replicas": 2, "template": {"spec": {"containers": [{"image": "registry/broken:1", "name": "b"}]}}},
+      "status": {"replicas": 2, "unavailableReplicas": 2, "updatedReplicas": 2,
+        "conditions": [{"type": "Available", "status": "False", "reason": "MinimumReplicasUnavailable"}, {"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded"}]}
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {"creationTimestamp": "2026-08-01T00:00:00Z", "name": "parked", "namespace": "shop"},
+      "spec": {"replicas": 0, "paused": true, "template": {"spec": {"containers": [{"image": "registry/parked:1", "name": "p"}]}}},
+      "status": {"observedGeneration": 2}
+    }
+  ]
+}

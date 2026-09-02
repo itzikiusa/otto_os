@@ -25,11 +25,23 @@ Effective access = the request passes the feature gate **and** the workspace gat
 ## Features & what each capability means
 
 `Agents, Connections, Database, Git, Issues, Product, Swarm, ApiClient, Workflows,
-Channels, SkillEval, Skills, Insights, Usage, SelfImprovement, Context, Settings, Users`
+Channels, SkillEval, Skills, Insights, Usage, SelfImprovement, Context, Settings, Users,
+Aws, AwsS3, AwsSqs, AwsEc2, AwsAthena, AwsEks, Kubernetes`
 
 - **Database** — *View*: `SELECT`/`SHOW`/`EXPLAIN`, schema, read history/saved queries.
   *Edit*: run mutating SQL, manage saved queries/dashboards. *Admin*: manage connections.
 - **Connections** — *View*: list. *Edit*: open/create/edit. *Admin*: manage all / global.
+- **Aws** (accounts) — *View*: list accounts, CLI status, profile discovery, test,
+  permission probe. *Edit*: `aws sso login`. *Admin*: manage accounts, install the CLI.
+  The per-service keys split the console so a role can e.g. browse S3 without
+  touching EC2: **AwsS3** (View only — S3 is read-only by design), **AwsSqs**
+  (*View*: list/attributes/peek · *Edit*: send/delete-message/purge/redrive),
+  **AwsEc2** (*View*: describe · *Edit*: start/stop/reboot), **AwsAthena** (*View*:
+  catalog/history/results/cancel · *Edit*: execute a query), **AwsEks** (*View*:
+  describe · *Edit*: import kubeconfig).
+- **Kubernetes** — *View*: clusters, resources, describe, events, logs, top. *Edit*:
+  exec / k9s PTY sessions and every action (restart, scale, delete pod, rollout +
+  Argo verbs). *Admin*: manage the cluster registry, install kubectl/k9s.
 - **Users** — *Admin* only: user CRUD, grant management, the active-sessions overview,
   session terminate, and impersonation. (This is the "granted admin" capability.)
 - Other features follow the same read/write/manage pattern; `Usage`, `Insights`,

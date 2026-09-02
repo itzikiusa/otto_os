@@ -16,8 +16,11 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
+bytes = { workspace = true }
+dirs = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-sqlx = { workspace = true }
+tempfile = { workspace = true }

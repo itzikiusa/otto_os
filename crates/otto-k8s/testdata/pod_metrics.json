@@ -1,0 +1,20 @@
+{
+  "kind": "PodMetricsList",
+  "apiVersion": "metrics.k8s.io/v1beta1",
+  "metadata": {},
+  "items": [
+    {
+      "metadata": {"name": "web-5d4c-abcde", "namespace": "shop", "creationTimestamp": "2026-09-01T12:00:00Z"},
+      "timestamp": "2026-09-01T12:00:00Z",
+      "window": "15s",
+      "containers": [
+        {"name": "web", "usage": {"cpu": "250m", "memory": "128Mi"}},
+        {"name": "sidecar", "usage": {"cpu": "1500u", "memory": "20480Ki"}}
+      ]
+    },
+    {
+      "metadata": {"name": "worker-crash", "namespace": "shop"},
+      "containers": [{"name": "worker", "usage": {"cpu": "12345678n", "memory": "1Gi"}}]
+    }
+  ]
+}

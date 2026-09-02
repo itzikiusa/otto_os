@@ -159,6 +159,30 @@ bridges so an agent can work a ticket from a chat thread.
   (PLAIN/SCRAM) auth, prod/read-only guards, and an in-process Kafka-aware proxy
   so a private cluster is reachable through a single SSH tunnel (librdkafka can't
   SOCKS, so Otto rewrites the advertised broker addresses on the fly).
+- **AWS console** — S3, SQS, EC2, Athena and EKS in one module, driven through
+  the official `aws` CLI v2 (installed on demand — Homebrew or a direct
+  download — never a bundled SDK), so SSO/MFA/assume-role profiles just work.
+  Accounts are configured in the UI (an existing `~/.aws` profile or access
+  keys kept in the Keychain; Otto never writes `~/.aws/*`), each with a
+  per-service permission probe and a one-click "Sign in" when an SSO session
+  expires. S3 is read-only (browse, preview, download); SQS peek/send/purge/
+  redrive; EC2 start/stop/reboot with typed confirms; a DB-Explorer-style
+  Athena workbench (catalog tree, results grid, history, scanned-bytes cost);
+  EKS clusters importable straight into the Kubernetes console. Six RBAC keys
+  (`aws` for accounts, plus `aws_s3`, `aws_sqs`, `aws_ec2`, `aws_athena`,
+  `aws_eks`) gate it per service, and agents get read tools plus Edit-gated
+  `aws_athena_query` / `aws_sqs_send` over MCP.
+- **Kubernetes console** — a k9s-like cluster workspace over `kubectl` (installed
+  on demand; kubeconfigs picked from `~/.kube/config`, pasted, or imported from
+  EKS into Otto-owned files — your kubeconfig is never modified). Namespace
+  filter, health-colored resource tables with live CPU/MEM when metrics-server
+  exists, a detail drawer with manifest (secrets redacted) / describe / events /
+  streaming **logs** / an inline **exec** terminal, and row actions — restart,
+  scale, rollout undo/pause/resume, **Argo Rollouts** promote/abort/retry and
+  **ArgoCD** sync/refresh/redeploy, all via the CRDs (no extra CLIs). One-click
+  **k9s** tab. Gated by the `kubernetes` RBAC key (View/Edit/Admin); agents get
+  `k8s_get_resources` / `k8s_describe` / `k8s_logs` / `k8s_top` and the
+  Edit-gated `k8s_action` over MCP.
 - **Browser** — a workspace-scoped web browser inside Otto: reader tabs fetch a
   URL and render it as clean markdown (JS-rendered pages via a
   [Lightpanda](https://github.com/lightpanda-io/browser) sidecar, beta software,
@@ -458,7 +482,7 @@ Where everything lives:
 | [`docs/remote-access-runbook.md`](./docs/remote-access-runbook.md) | Operator runbook: reaching Otto from a phone/iPad — Cloudflare tunnel, PWA, share links, email-OTP. |
 | [`docs/RELEASE.md`](./docs/RELEASE.md) | The macOS packaging flow — sidecar copy, Tauri build, codesigning, DMG. |
 | [`docs/plugins/AUTHORING.md`](./docs/plugins/AUTHORING.md) | How to write a custom sidecar plugin (the host API, manifest, examples). |
-| [`marketing/videos/`](./marketing/videos/) | The Remotion source for the in-app **Walkthroughs** (rendered to `ui/public/walkthroughs/`). |
+| [`marketing/videos/`](./marketing/videos/) | The Remotion source for the in-app **Walkthroughs** (rendered to `marketing/videos/out/`, published to the `walkthroughs` GitHub release by `packaging/publish-walkthroughs.sh` — not bundled). |
 
 The architecture overview lives in the [Architecture](#architecture) section
 above and in [`AGENTS.md`](./AGENTS.md); the feature guides and

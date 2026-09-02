@@ -188,6 +188,34 @@ shell crates `crates/otto-aws` + `crates/otto-k8s` (ctx trait + empty
 | `GET /aws/accounts/{id}/eks/clusters/{name}?region=` | View | `{ cluster: Value, nodegroups: { name, status, desired, min, max, instance_types, ami_type }[] }` |
 | `POST /aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig?region=` | Edit | `{ cluster_name_override?, default_namespace? }` → `K8sCluster` — runs `aws eks update-kubeconfig --name .. --kubeconfig <data_dir>/kube/<new_id>.yaml --alias <name>` with the account env, then inserts a `k8s_clusters` row `source='eks', aws_account_id=id`. Requires the caller to also hold `kubernetes:Admin` (check in handler via `GrantsRepo::check_global`). |
 
+### 2.7 Implementation notes / deviations (AWS backend, as built)
+
+- **Probe commands**: the S3 probe is `s3api list-buckets --max-items 1` (same
+  IAM action `s3:ListAllMyBuckets` as `s3 ls`, but JSON). A probe snapshot with
+  `login_required: true` is **not** cached, so the first call after `sso login`
+  re-probes.
+- **S3 object paging** uses the CLI paginator (`--max-items` / `--starting-token`);
+  `next_token` is the CLI's `NextToken` (a raw `NextContinuationToken` is
+  accepted too). The prefix marker object (`key == prefix`) is dropped.
+- **Installer state** lives in a process-wide `OnceLock` in `install.rs` (the
+  `AwsCtx` trait carries no service handle; the router is stateless), not in a
+  service struct. `locate()` additionally honours an `OTTO_AWS_BIN` env
+  override at the top of the ladder (tests / power users).
+- **`POST /aws/accounts`** defaults `region` to `us-east-1` when omitted;
+  `created_by` is nullable in the DTO (FK `ON DELETE SET NULL`).
+- **Audit** adds `aws.sqs.delete_message`, `aws.sqs.redrive` and
+  `aws.eks.import_kubeconfig` to the listed actions.
+- **`import-kubeconfig`** returns **201**, emits `k8s_cluster_updated`, and
+  inserts the `k8s_clusters` row with a local sqlx statement (TODO: switch to
+  `K8sClustersRepo`). Region is passed both as env and `--region`.
+- **Athena `QueryResult`** is a local struct with the identical serde shape
+  (`crates/otto-aws/src/athena.rs`) rather than a dependency on
+  `otto-dbviewer` (keeps the DB drivers out of this crate). Partition keys
+  are appended to `tables[].columns`.
+- **`sso login` PTY** meta is `{ aws: { account_id, profile } }`, title
+  `aws sso login · <account name>`; the assume-role layer is skipped for the
+  login itself (it signs in the base profile).
+
 ## 3. Kubernetes — routes (`crates/otto-k8s`)
 
 ### 3.1 Clusters & plumbing
@@ -314,6 +342,70 @@ service ∈ `s3|sqs|ec2|athena|eks` · deep links `#/aws/<id>/s3/<bucket>?prefix
   button [aws_eks Edit + kubernetes Admin] → import → navigates to
   `#/kubernetes/<clusterId>`.
 
+**As built (UI half — deviations / decisions the spec left open):**
+
+- **Wizard step 2 is "Save & test", not test → save.** `POST …/test` needs an
+  account row (it runs `sts get-caller-identity` with the stored creds), so the
+  wizard saves first and immediately tests; a third panel shows the result
+  (identity, or `login_required` with a "Sign in now" shortcut) plus "Test again"
+  / "Back" (edit + retest) / "Done". Edit mode reuses the same sheet (secrets
+  blank = keep, per the PATCH contract).
+- **Sign-in sheet is global**: `aws.beginLogin(accountId, workspaceId)` stores
+  `{accountId, sessionId}` in the store and `AwsPage` mounts one
+  `LoginSheet` (`<Terminal preferDom>` on the PTY session, `/test` polled every
+  3 s, auto-closes on `ok`, then `permissions?refresh=true`). Any view whose
+  error message starts with `login required` shows a "Sign in" action that
+  routes here. `login` for `access_keys` accounts is never offered (400 on the
+  server) — the card says "update the keys via Edit" instead.
+- **Deep link encoding**: the S3 prefix rides in the LAST hash segment as
+  `#/aws/<id>/s3/<encodeURIComponent(bucket)>?prefix=<encodeURIComponent(prefix)>`.
+  The hash router splits on `/` BEFORE decoding, so an un-encoded prefix with
+  slashes would be split into extra segments; the browser parses the segment
+  with `splitBucketSegment()` (`util.ts`). Bucket rows / breadcrumbs navigate
+  with `router.go` so back/forward walk the prefix history.
+- **S3 download** streams the daemon's response into a Blob
+  (`awsDownloadBlob`, with a byte-progress bar + Cancel via AbortSignal) and
+  hands it to the browser with `<a download>` in both the web build and the
+  Tauri shell — the SFTP "pick a local dir" pattern doesn't apply because the
+  bytes already transit the daemon→webview connection (no server-side
+  `local_path`). Preview drawer is inline on desktop and a Modal sheet on mobile.
+- **Toolbar conventions** (`ViewToolbar.svelte`): every service view has a sticky
+  toolbar with the client-side filter box (`/` focuses it), a Refresh button and
+  an "Auto" checkbox (10 s interval, per view, off by default). EC2/EKS add a
+  region `<select>` fed by `/aws/regions`; EC2 adds a state filter with counts.
+- **Rail vs. mobile**: desktop shows the account → service rail
+  (`AccountRail.svelte`; services hidden when the user lacks `aws_<svc>:View`,
+  greyed + "denied" when the account's probe says `denied`, still clickable so
+  the AccessDenied is visible). On phone/tablet the rail is replaced by the
+  accounts overview (cards) and a service view takes the full width behind a
+  "‹ Accounts" bar; SQS/EKS/EC2 details open as full-width panes / Modal sheets.
+- **Typed confirmations**: SQS purge (queue name), EC2 stop/reboot (instance
+  id), all via `confirmer.promptText`; `confirmer.ask` for delete-message,
+  start, account delete, redrive and EKS import. Never a native dialog.
+- **Athena**: the SQL text + chosen workgroup/database are remembered per
+  account in `localStorage`. "Run" executes the editor SELECTION when one
+  exists (label flips to "Run selection"). Completion is fully client-side from
+  the loaded tree (`db.` → tables, `table.` / `db.table.` → columns, bare →
+  databases + current-db tables/columns + keywords); tables are loaded lazily
+  when a database node is expanded. History rows re-open by loading the SQL
+  into the editor AND fetching `GET …/query/{qid}` for that execution's result.
+  Cost estimate = `max(bytes, 10 MiB) / TiB × $5`.
+- **Types**: `EksImportResp` in the AWS section is the minimal
+  `{ id, name, …rest }` projection of `K8sCluster` (the full shape lives in the
+  Kubernetes section) so the two halves' type sections don't depend on each
+  other. Event variants `aws_account_updated` / `aws_install_updated` are in the
+  `OttoEvent` union; `events.svelte.ts` routes both to `aws.applyEvent`.
+- **Mock layer**: `ui/src/lib/api/mock.ts` serves every §2 route (two accounts,
+  S3/SQS/EC2/Athena/EKS fixtures, a 2-poll RUNNING→SUCCEEDED Athena query, a
+  4 s fake installer); set `localStorage.otto_mock_aws_missing=1` to see the
+  first-run install panel.
+- **E2E**: `ui/e2e/desktop-aws.spec.ts` — renders `#/aws` (install panel,
+  overview, or the explicit "unavailable" state) with no console errors,
+  checks the wizard Modal with `expectFullyInViewport`, and seeds an
+  `access_keys` account over the API asserting the card + `prod` pill. The two
+  API-dependent tests `test.skip` (with the reason logged) when
+  `GET /api/v1/aws/status` is 404 or the test daemon has no `aws` binary.
+
 ### 5.2 Kubernetes (`ui/src/modules/kubernetes/`, store `ui/src/lib/stores/k8s.svelte.ts`, api `ui/src/lib/api/k8s.ts`, types under `// Kubernetes console`)
 Routes: `#/kubernetes` (clusters) · `#/kubernetes/<clusterId>` · `#/kubernetes/<clusterId>/<kind>` · `#/kubernetes/<clusterId>/<kind>/<ns>/<name>`.
 - **Clusters overview**: cards (+ server version, capability chips
@@ -346,6 +438,31 @@ Routes: `#/kubernetes` (clusters) · `#/kubernetes/<clusterId>` · `#/kubernetes
 - Keyboard: `/` focuses filter, `Esc` closes drawer, `l` logs, `s` shell,
   `d` describe on the selected row (k9s muscle memory), shown in a `?` hint.
 
+**As built (UI, `ui/src/modules/kubernetes/`) — deviations & additions:**
+- Route encoding: a cluster-scoped row (Nodes) has no namespace, so the
+  selected-row segment is `#/kubernetes/<id>/nodes/-/<name>` (`-` = empty ns).
+  Cluster / kind / selected row are URL state; namespace, filter, drawer tab
+  and the resource cache live in `ui/src/lib/stores/k8s.svelte.ts`.
+- `InstallJob` is typed as `K8sInstallJob` in `types.ts` (same fields) so the
+  AWS and Kubernetes type sections never collide on one exported name.
+- The first-run panel has a session-only **"Continue without installing"**
+  link (a Viewer can't install; kubectl on a non-standard path would otherwise
+  lock the whole module) — clusters remain reachable, resource loads then
+  surface the daemon's `not installed` error in the table.
+- The wizard's "test" happens **after** save (`/test` needs a cluster id):
+  Save & test → create → best-effort `POST /test` + capability refresh, each
+  toasting its outcome; a single new cluster opens its workspace directly.
+  Multi-select creates one row per context, named after the context.
+- Nodes (own endpoint) are folded into the shared `K8sRow` shape client-side
+  so the table/drawer render every kind identically; `extra` keys the UI
+  doesn't know (newer daemon) are appended as generic columns, never dropped.
+- Extra shortcuts beyond the contract: `n` namespace, `j`/`k` move selection,
+  `Enter` open, `y` manifest, `r` refresh. Logs is View-level (only Shell and
+  §4.6 actions are Edit-gated). Exec/k9s PTY sessions are killed when their
+  view closes (`DELETE /sessions/{id}`); they are not listed in Agents.
+- `GET /k8s/status` returning 404 renders a "console isn't available on this
+  daemon" state (older daemon) instead of the install panel.
+
 ## 6. MCP tools (`crates/ottod/src/mcp_tools.rs`) — inward server
 Add to `tool_catalog()` + `run_tool()`; all call the HTTP routes above with
 the session token (so RBAC applies). Read tools:
@@ -365,6 +482,98 @@ Also register the same set on the **outward** governed surface
 three writers in `DANGEROUS` (so they need human approval by default), with
 `route_for` mappings + the classification tests updated. Update
 `docs/features/mcp-control-plane.md` tool lists.
+
+**As built (MCP half — decisions the list above left open; backend/UI need not
+change, but these are the argument names and bindings agents see):**
+
+- **Optional extras beyond the minimal signatures above**, all mapped 1:1 onto
+  the routes' existing query/body fields — every AWS service tool accepts
+  `region?` (§1 "every service endpoint accepts `?region=`"); `aws_s3_list_objects`
+  also takes `token?`/`max?` (paging), `aws_sqs_list_queues` `prefix?`,
+  `aws_ec2_list_instances` `q?`, `aws_athena_list_tables` `catalog?`,
+  `aws_athena_get_query` `token?`/`max?` (result paging), `aws_athena_query`
+  `output_location?`, `aws_sqs_send` `delay_seconds?`/`group_id?`/`dedup_id?`/
+  `message_attributes?`, `k8s_get_resources` `q?`, `k8s_logs`
+  `since?`/`previous?`/`timestamps?`. Nothing new is required of the routes.
+- **Argument → query naming**: the tools say `namespace`; the routes say `ns`
+  (§3.2). The tools translate. `namespace` omitted on `k8s_get_resources` /
+  `k8s_top` ⇒ the `ns` param is **not sent** (the route's all-namespaces
+  default), not sent as empty.
+- **`aws_sqs_peek` is a POST but a read**: the tool pins `visibility_timeout: 0`
+  and clamps `max` into 1..10 client-side; it lives with the reads on both
+  surfaces (policy already grades `/peek` as `aws_sqs:View`).
+- **`k8s_logs`** returns `{ text, truncated }` (not raw text). `follow` is never
+  forwarded (a streaming response would hang a tool call). The text is capped
+  at **256 KiB keeping the tail** (newest lines) on both surfaces; the inward
+  server uses a 65 s call timeout for this one route because the non-follow
+  logs route itself has a 60 s kubectl budget (the generic tool timeout is 20 s).
+- **`k8s_describe` / `k8s_action` require `namespace`** as written. Every kind in
+  the §3.2 list is namespaced, so no cluster-scoped escape hatch was added;
+  if `nodes` (or another cluster-scoped kind) is ever added to `?kind=`, relax
+  the tool to `namespace?` at the same time.
+- **`k8s_action.params`** is forwarded verbatim, defaulting to `{}`; the route
+  owns the `confirm_name` / `replicas` / `prune` / `revision` semantics. The
+  tool descriptions tell the agent to set `params.confirm_name` only after an
+  explicit user confirmation.
+- **Not exposed to agents (by design, not omission)**: S3 download (binary
+  stream), SQS delete-message / purge / redrive, EC2 start/stop/reboot, Athena
+  cancel, EKS kubeconfig import, `exec` / `k9s` PTYs, account/cluster CRUD and
+  CLI installs. Add any of these only as `DANGEROUS` + module-doc exceptions.
+- **Outward pipeline**: no per-tool feature mapping was needed — the governed
+  self-call reuses the `/aws/*` / `/k8s/*` policy branches, and the token
+  workspace pin is skipped because these tools carry no `workspace_id`
+  (accounts/clusters are global rows, like connections).
+
+**As built (Kubernetes backend half, `crates/otto-k8s` + `otto-state::k8s_clusters`)
+— refinements to §1/§3/§4; the routes and DTO names are exactly as listed:**
+
+- **Installer state is process-global**, not "inside the service": `K8sCtx` is
+  fixed by otto-server and carries no service object, so the per-tool
+  `InstallJob` slots live in a `OnceLock<Arc<Installer>>` (`install.rs`). Same
+  contract on the wire (`/k8s/status` + `k8s_install_updated`).
+- **Streams drop `--request-timeout`.** `base_args()` is exactly §4.1, but
+  `exec`, `logs?follow=true` and k9s use `base_args_stream()` (same flags minus
+  `--request-timeout 20s`) — kubectl applies that flag to its HTTP client and
+  would cut a long-lived stream/PTY.
+- **Metrics come from the metrics API, not `kubectl top` text**:
+  `get --raw /apis/metrics.k8s.io/v1beta1/[namespaces/<ns>/]pods|nodes` (JSON,
+  parsed `Quantity`s). `K8sRow.cpu` is **millicores**, `mem` **bytes**;
+  `NodeRow.cpu_capacity/cpu_usage` millicores, `mem_*` bytes (numbers, UI formats).
+- **Argo CRDs are fully qualified** in every argv (`rollouts.argoproj.io/<n>`,
+  `applications.argoproj.io/<n>`; the `<plural>/<name>` form everywhere) so an
+  unrelated CRD sharing a short name can never be targeted.
+- **`rollout_promote` always unpauses the spec** (`{"spec":{"paused":false}}`)
+  after clearing `pauseConditions`, not only with `full` — an indefinite
+  `pause: {}` step sets both, exactly what `kubectl argo rollouts promote` does.
+  With `full` the `promoteFull` status patch is sent in between.
+- **`argocd_app_restart` runs in the hosting cluster's context** (the app's
+  destination is assumed to be that cluster); the resource's own namespace from
+  `.status.resources[]` wins over the app's destination namespace.
+  `params.resource_name?` was added next to `resource_kind?`.
+- **`scale` also accepts `replicasets`**; `delete_pod` adds `--force` automatically
+  when `params.grace == 0` (kubectl refuses `--grace-period=0` without it).
+- **`rollout_status`** returns `200 { ok:false, output }` (not an error) when the
+  rollout has not converged within the 5 s timeout.
+- **`/resource?kind=`** additionally accepts `nodes` / `namespaces`
+  (cluster-scoped, `ns` ignored); kind short names (`po`, `deploy`, `svc`, …)
+  are accepted on both list and detail. Events for the detail view are selected
+  by `involvedObject.uid`, not name.
+- **`K8sCluster` carries `params`** (non-secret extras such as `eks_region`) and
+  `DiscoveredContext` carries `current: bool`; `K8sRow.extra` gets a few more
+  per-kind keys than the examples (documented in `api.md`). `PATCH` refuses
+  `kubeconfig_path` changes on `imported`/`eks` rows.
+- **Import validates with `kubectl --kubeconfig <file> config view -o json`**
+  (also yields `current-context` and the context's namespace) rather than
+  `config get-contexts`; no YAML parser was added to the crate.
+- **Redaction** = `otto_core::redact::redact_text` + an `AKIA…/ASIA…` scrubber
+  (`cli::strip_aws_keys`) because the core redactor only classifies whole
+  whitespace-delimited words.
+- **Extra audit verbs**: `k8s.install` and `k8s.k9s` alongside the contract's
+  `k8s.action.<action>` / `k8s.exec`; action audits are written for failures too.
+- **EKS env injection** is a minimal local mirror (`clusters::build_aws_env`,
+  raw `aws_accounts` query + Keychain read) with a TODO to share
+  `otto_aws::accounts::build_env`; assume-role caching is NOT replicated here
+  (profile-mode accounts cover it through the CLI itself).
 
 ## 7. Docs to produce
 `docs/features/aws-console.md`, `docs/features/kubernetes-console.md` (follow
