@@ -16,10 +16,22 @@
   import TabStrip from './TabStrip.svelte';
   import ReaderView from './ReaderView.svelte';
   import NotesRail from './NotesRail.svelte';
+  import AgentDock from './AgentDock.svelte';
+  import AskBar from './AskBar.svelte';
   // Raw source text of the picker overlay — `eval`'d into the live tab's own
   // JS context via `browser_eval`, never bundled/imported as a module (see
   // overlay.js's header for why).
   import overlaySrc from './overlay.js?raw';
+
+  interface Props {
+    /** Hosted inside the agent-mode right panel (the "v2" Browser tab): no
+     *  embedded agent dock — the session is the main pane — just the ask bar
+     *  targeting `targetSessionId`. */
+    embedded?: boolean;
+    /** The session the embedded ask bar submits to (the active agent session). */
+    targetSessionId?: string | null;
+  }
+  let { embedded = false, targetSessionId = null }: Props = $props();
 
   let urlInput = $state('');
   let summarizing = $state(false);
@@ -605,6 +617,12 @@
       {/if}
     {/if}
   </div>
+
+  {#if embedded}
+    <AskBar sessionId={targetSessionId} unboundHint="Open an agent session to ask about this page." />
+  {:else}
+    <AgentDock />
+  {/if}
 </div>
 
 <style>

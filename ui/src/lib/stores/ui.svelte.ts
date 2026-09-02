@@ -5,6 +5,11 @@ export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
 export type Direction = 'ltr' | 'rtl';
 export type RightTab = 'git' | 'files' | 'notes' | 'activity' | 'info' | 'browser' | 'api' | 'canvas';
+/** Which browser the agent-mode right panel's Browser tab hosts: `v1` is the
+ *  original per-session panel (native tabs + take-over picker), `v2` is the
+ *  Browser module (reader/live tabs, persisted marks, ask bar) embedded in the
+ *  panel. Transitional — the two are meant to converge on v2. */
+export type BrowserPanelVersion = 'v1' | 'v2';
 
 /** Terminal font choice. 'Cousine' supplies Hebrew glyphs in every stack so RTL
  *  text stays crisp; 'system' keeps SF Mono primary (no change for English). */
@@ -42,6 +47,9 @@ const LS = {
   closeTabPref: 'otto_close_tab_pref',
   termToolbar: 'otto_term_toolbar',
   dbDock: 'otto_db_dock',
+  browserPanelVersion: 'otto_browser_panel_version',
+  browserAgentOpen: 'otto_browser_agent_open',
+  browserAgentH: 'otto_browser_agent_h',
   dbDockWidth: 'otto_db_dock_width',
   wfCtx: 'otto_wf_ctx_open',
   wfCtxWidth: 'otto_wf_ctx_width',
@@ -184,6 +192,15 @@ class UiStore {
   railWidth = $state(clampRail(Number(lsGet(LS.railWidth)) || 240));
   // DB dock: the DB Explorer docked beside the agent panes (side-by-side).
   dbDockOpen = $state(lsGet(LS.dbDock) === '1');
+  /** Agent-mode right panel: which Browser implementation to show. Defaults
+   *  to v1 (the pre-existing behaviour) until the two browsers converge. */
+  browserPanelVersion: BrowserPanelVersion = $state(
+    lsGet(LS.browserPanelVersion) === 'v2' ? 'v2' : 'v1',
+  );
+  /** Browser page: the embedded agent dock (terminal + ask bar) is expanded. */
+  browserAgentOpen = $state(lsGet(LS.browserAgentOpen) !== '0'); // default open
+  /** Browser page: the agent dock's height in px (drag-resizable). */
+  browserAgentH = $state(Math.min(900, Math.max(160, Number(lsGet(LS.browserAgentH)) || 280)));
   dbDockWidth = $state(Math.min(900, Math.max(320, Number(lsGet(LS.dbDockWidth)) || 480)));
   // Workflow run "Context files" sidebar: defaults open, resizable, desktop-only.
   wfCtxOpen = $state(lsGet(LS.wfCtx) !== '0');
@@ -478,6 +495,18 @@ class UiStore {
   toggleDbDock(): void {
     this.dbDockOpen = !this.dbDockOpen;
     lsSet(LS.dbDock, this.dbDockOpen ? '1' : '0');
+  }
+  setBrowserPanelVersion(v: BrowserPanelVersion): void {
+    this.browserPanelVersion = v;
+    lsSet(LS.browserPanelVersion, v);
+  }
+  setBrowserAgentOpen(on: boolean): void {
+    this.browserAgentOpen = on;
+    lsSet(LS.browserAgentOpen, on ? '1' : '0');
+  }
+  setBrowserAgentH(px: number): void {
+    this.browserAgentH = Math.min(900, Math.max(160, Math.round(px)));
+    lsSet(LS.browserAgentH, String(this.browserAgentH));
   }
   setDbDockWidth(px: number): void {
     this.dbDockWidth = Math.min(900, Math.max(320, Math.round(px)));

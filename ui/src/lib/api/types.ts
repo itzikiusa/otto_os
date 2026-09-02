@@ -6314,6 +6314,19 @@ export interface BrowserVaultSaveReq {
   summary?: string;
 }
 
+/** `POST /workspaces/{wid}/browser/ask` body — the Browser page's embedded-
+ *  agent ask bar. One submitted turn carrying the page (`url`), the marks
+ *  the user wants the agent to see (`annotation_ids`, each fenced like a
+ *  send-to-session block) and their question (`text`). The session and every
+ *  annotation must belong to `wid`. Server caps: 8 000 chars of `text`, 20
+ *  ids. */
+export interface BrowserAskReq {
+  session_id: Id;
+  url: string;
+  text: string;
+  annotation_ids?: Id[];
+}
+
 /** `POST /workspaces/{wid}/browser/vault-save` response — the vault-relative
  *  path the note was written to (e.g. `browser/example-com-page.md`). */
 export interface BrowserVaultSaveResp {

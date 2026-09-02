@@ -6,7 +6,28 @@
 
 import * as browserApi from '../api/browser';
 import { nativeBrowserAvailable } from '../nativeBrowser';
-import type { BrowserAnnotation, BrowserPage, BrowserTab, OttoEvent } from '../api/types';
+import type { BrowserAnnotation, BrowserAskReq, BrowserPage, BrowserTab, OttoEvent } from '../api/types';
+
+/** localStorage key for the agent session the Browser page's dock is attached
+ *  to — per workspace, so switching workspaces re-attaches to that
+ *  workspace's own browser agent (or none). */
+const agentKey = (wsId: string) => `otto_browser_agent_${wsId}`;
+
+function lsGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function lsSet(key: string, val: string | null): void {
+  try {
+    if (val === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, val);
+  } catch {
+    /* private mode / quota — the binding just won't persist */
+  }
+}
 
 /** A `mode:"live"` tab only skips the reader fetch where something actually
  *  renders it live (a Tauri child webview) — off Tauri (remote/PWA), the view
@@ -26,6 +47,13 @@ class BrowserStore {
   pageError = $state('');
   /** Annotations for the active tab's URL. */
   annotations: BrowserAnnotation[] = $state([]);
+  /** The agent session the Browser page's dock is attached to (embedded
+   *  terminal + ask bar), or null when none. Persisted per workspace; the
+   *  view validates it against the live session list on attach. */
+  agentSessionId: string | null = $state(null);
+  /** Bumped whenever a mark is created from this device, so the ask bar can
+   *  react (focus + hint) without the dock having to diff the list. */
+  markTick = $state(0);
   private wsId = '';
 
   get activeTab(): BrowserTab | null {
@@ -33,7 +61,10 @@ class BrowserStore {
   }
 
   async loadTabs(workspaceId: string): Promise<void> {
-    this.wsId = workspaceId;
+    if (this.wsId !== workspaceId) {
+      this.wsId = workspaceId;
+      this.agentSessionId = lsGet(agentKey(workspaceId));
+    }
     this.loadingTabs = true;
     try {
       this.tabs = await browserApi.listTabs(workspaceId);
@@ -208,6 +239,7 @@ class BrowserStore {
     if (!this.annotations.some((a) => a.id === ann.id)) {
       this.annotations = [...this.annotations, ann];
     }
+    this.markTick++;
     return ann;
   }
 
@@ -223,6 +255,17 @@ class BrowserStore {
 
   async sendAnnotation(id: string, sessionId: string): Promise<void> {
     await browserApi.sendAnnotation(this.wsId, id, sessionId);
+  }
+
+  /** Bind (or unbind, with null) the Browser page's agent dock to a session. */
+  setAgentSession(id: string | null): void {
+    this.agentSessionId = id;
+    if (this.wsId) lsSet(agentKey(this.wsId), id);
+  }
+
+  /** One "ask" turn: the page + marks + question, submitted into `sessionId`. */
+  async ask(body: BrowserAskReq): Promise<void> {
+    await browserApi.ask(this.wsId, body);
   }
 
   async vaultSave(url: string, vaultId: number, summary?: string) {
