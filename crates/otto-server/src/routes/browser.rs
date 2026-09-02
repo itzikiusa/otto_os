@@ -858,7 +858,9 @@ async fn ask_session(
         return Err(ApiError(Error::NotFound(format!("session {}", req.session_id))));
     }
 
-    let mut marks = Vec::with_capacity(req.annotation_ids.len());
+    // `len()` is already rejected above ASK_MAX_MARKS; the `min` keeps the
+    // bound visible at the allocation itself.
+    let mut marks = Vec::with_capacity(req.annotation_ids.len().min(ASK_MAX_MARKS));
     for id in &req.annotation_ids {
         let ann = ctx
             .browser_annotations
