@@ -1,10 +1,10 @@
-name: Weekly DMG
+name: Monthly DMG
 
 # Build the macOS desktop app (Apple Silicon) and publish the .dmg to a ROLLING
-# GitHub Release tagged `weekly`, every Sunday morning — so the latest build is
+# GitHub Release tagged `latest`, on the 1st of every month — so the latest build is
 # always at a stable URL:
 #
-#   https://github.com/<owner>/<repo>/releases/download/weekly/Otto-macos-arm64.dmg
+#   https://github.com/<owner>/<repo>/releases/download/latest/Otto-macos-arm64.dmg
 #
 # "Updating" = download the same URL again and drag to /Applications (the app
 # self-deploys its bundled ottod daemon on launch). The build is ad-hoc signed
@@ -16,11 +16,11 @@ name: Weekly DMG
 
 on:
   schedule:
-    # Sundays 05:00 UTC (07:00/08:00 Israel time).
-    - cron: '0 5 * * 0'
+    # 1st of every month, 05:00 UTC (07:00/08:00 Israel time). Manual runs: workflow_dispatch.
+    - cron: '0 5 1 * *'   # 05:00 UTC on the 1st of the month (was weekly; the DMG is large)
   workflow_dispatch:
 
-# The release job must create/update the `weekly` tag + release assets.
+# The release job must create/update the `latest` tag + release assets.
 permissions:
   contents: write
 
@@ -91,7 +91,7 @@ jobs:
       - name: Ensure cmake
         run: command -v cmake || brew install cmake
 
-      # Weekly build version: YYYY.MM.DD-{buildnum} (buildnum = the workflow's
+      # Build version: YYYY.MM.DD-{buildnum} (buildnum = the workflow's
       # monotonically-increasing run number). Tauri validates the bundle version
       # as SEMVER, which forbids leading zeros — so the app itself is stamped
       # with the unpadded equivalent (2026.9.7-3) while the release name and
@@ -182,10 +182,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view weekly --json assets -q '.assets[].name' 2>/dev/null \
+          gh release view latest --json assets -q '.assets[].name' 2>/dev/null \
             | grep -E '^Otto-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]+-macos-arm64\.dmg$' \
             | grep -v "^Otto-${{ steps.ver.outputs.display }}-macos-arm64.dmg$" \
-            | while read -r a; do gh release delete-asset weekly "$a" -y; done || true
+            | while read -r a; do gh release delete-asset latest "$a" -y; done || true
 
       # Keep a copy on the run itself too (survives even if the release upload
       # is edited away).
@@ -198,15 +198,17 @@ jobs:
             Otto-macos-arm64.dmg.sha256
           retention-days: 30
 
-      # Rolling release: same `weekly` tag every run, assets replaced in place.
-      - name: Publish rolling `weekly` release
+      # Rolling release: same `latest` tag every run, assets replaced in place.
+      # (The tag is cadence-neutral on purpose so download links survive
+      # schedule changes — it was `weekly` until 2026-09.)
+      - name: Publish rolling `latest` release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: weekly
-          name: Otto Weekly ${{ steps.ver.outputs.display }}
+          tag_name: latest
+          name: Otto ${{ steps.ver.outputs.display }}
           prerelease: true
           body: |
-            Automated weekly macOS build (Apple Silicon) — version **${{ steps.ver.outputs.display }}**, `${{ github.sha }}`.
+            Automated monthly macOS build (Apple Silicon) — version **${{ steps.ver.outputs.display }}**, `${{ github.sha }}`.
 
             **Install / update:** download `Otto-macos-arm64.dmg` (always the newest build; the
             versioned copy `Otto-${{ steps.ver.outputs.display }}-macos-arm64.dmg` is identical),
