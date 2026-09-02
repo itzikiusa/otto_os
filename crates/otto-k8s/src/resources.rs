@@ -1534,7 +1534,7 @@ mod tests {
             "deployments" => include_str!("../testdata/deployments.json"),
             "rollouts" => include_str!("../testdata/rollouts.json"),
             "applications" => include_str!("../testdata/applications.json"),
-            "secrets" => include_str!("../testdata/secrets.json"),
+            "secrets" => include_str!("../testdata/secret_list.json"),
             "pod_metrics" => include_str!("../testdata/pod_metrics.json"),
             "nodes" => include_str!("../testdata/nodes.json"),
             "node_metrics" => include_str!("../testdata/node_metrics.json"),

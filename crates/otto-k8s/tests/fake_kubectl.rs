@@ -69,7 +69,7 @@ case " $* " in
   *" api-resources "*)
     printf 'applications.argoproj.io\nrollouts.argoproj.io\n' ;;
   *" get pods "*) cat "{fx}/pods.json" ;;
-  *" get secrets "*) cat "{fx}/secrets.json" ;;
+  *" get secrets "*) cat "{fx}/secret_list.json" ;;
   *" get deployments "*) cat "{fx}/deployments.json" ;;
   *" rollout restart "*) echo "deployment.apps/web restarted" ;;
   *" rollout status "*) echo "Waiting for deployment \"web\" rollout to finish: 1 of 3 updated replicas are available..." >&2; exit 1 ;;
