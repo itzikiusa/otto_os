@@ -11,6 +11,25 @@
     desc: string;
     /** Extra keywords for the search/fuzzy index. */
     tags: string;
+    /** Feature guide under docs/features/ — the code-grounded, current reference. */
+    doc: string;
+  }
+
+  /** A module that has a feature guide but no walkthrough video (yet). */
+  interface GuideItem {
+    title: string;
+    desc: string;
+    tags: string;
+    doc: string;
+  }
+
+  // The feature guides are the authoritative, code-grounded explainers; videos
+  // lag behind them (see marketing/videos/UPDATE_PLAN.md). Link every entry to
+  // its guide so a stale caption never becomes the last word.
+  const DOCS_BASE = 'https://github.com/itzikiusa/otto_os/blob/main/docs/features';
+
+  function docUrl(doc: string): string {
+    return `${DOCS_BASE}/${doc}`;
   }
 
   // The MP4s are NOT bundled with the app (they were ~135 MB and were baked
@@ -27,34 +46,52 @@
   }
 
   // One entry per rendered composition in marketing/videos/ (→ marketing/videos/out/,
-  // published to the `walkthroughs` release). Order = recommended viewing order
-  // (Intro → features). Keep in sync with marketing/videos/src/Root.tsx + render-all.mjs.
+  // published to the `walkthroughs` release). Order = recommended viewing order:
+  // Intro → agents & delivery → automation → knowledge → infra & data → platform.
+  // Keep the `file` set in sync with marketing/videos/src/Root.tsx + render-all.mjs.
+  // `desc`/`tags` describe the feature as it ships TODAY (so search finds current
+  // terminology) — where a video's captions lag, the note says so and the guide
+  // link is the truth. Caption fixes live in marketing/videos/UPDATE_PLAN.md.
   const videos: VideoItem[] = [
-    { file: 'Intro.mp4',          title: 'Welcome to Otto',         desc: 'Run many AI coding agents — and your whole workflow — in one native window.',                              tags: 'intro welcome overview onboarding first steps tour' },
-    { file: 'Sessions.mp4',       title: 'Agent Sessions',          desc: 'claude, codex, agy & shell as live PTY sessions — tiled, broadcast, resumable, auto-trusted.',             tags: 'agent session terminal pty tiled broadcast resume trust claude codex shell' },
-    { file: 'MissionControl.mp4', title: 'Mission Control',         desc: 'One unified work graph over every agent, swarm, goal loop, review and scheduled task.',                    tags: 'mission control work graph nodes overview unified status' },
-    { file: 'Git.mp4',            title: 'Git & Pull Requests',     desc: 'Repo tabs, commit graph, conflict resolution, and agent-drafted PRs that auto-push.',                      tags: 'git pr pull request branch commit graph diff merge github bitbucket gitlab' },
-    { file: 'Review.mp4',         title: 'AI Code Review',          desc: 'Fan out review agents per lens × provider; findings become a tracked workflow.',                          tags: 'review code lens findings security correctness performance pr working tree' },
-    { file: 'ProofPacks.mp4',     title: 'Proof Packs',             desc: 'No “done” without evidence — artifacts, derived status & risk, and completion gates.',                     tags: 'proof pack evidence artifact status risk gate test pr badge' },
-    { file: 'Product.mp4',        title: 'Product · Jira & Confluence', desc: 'Turn a ticket into a build-ready spec — analyze, ask, rewrite, plan, then inject into an agent.',        tags: 'product jira confluence ticket story spec plan analysis discovery rewrite' },
-    { file: 'Canvas.mp4',         title: 'Canvas',                  desc: 'File-backed Excalidraw & Mermaid scenes an agent edits while you chat.',                                   tags: 'canvas excalidraw mermaid diagram draw scene visual' },
-    { file: 'Swarm.mp4',          title: 'Agent Swarm',             desc: 'A company of role agents — recruiter, coordinator, org tree, Kanban & run graph.',                         tags: 'swarm team agent coordinator recruiter org kanban dag roles' },
-    { file: 'GoalLoops.mp4',      title: 'Goal Loops',              desc: 'Give a goal + budget; agents iterate Plan→Execute→Evaluate→Digest until criteria pass.',                  tags: 'goal loop iterate plan execute evaluate digest budget criteria branch' },
-    { file: 'Connections.mp4',    title: 'Connections · SSH & SFTP', desc: 'SSH/DB connections, tunnels (-L / SOCKS5), and an SFTP browser — secrets in Keychain.',                    tags: 'ssh sftp connection tunnel socks bastion keychain mysql redis mongo clickhouse' },
-    { file: 'Database.mp4',       title: 'Database Explorer',       desc: 'TablePlus-class browser: schema tree, NL→SQL, inline edits, dashboards, export.',                          tags: 'database mysql redis mongodb clickhouse sql query schema nl join dashboard export' },
-    { file: 'Brokers.mp4',        title: 'Message Brokers',         desc: 'Kafka (incl. AWS MSK over SSH) — topics, peek/produce, consumer-group lag, schema registry.',              tags: 'kafka broker topic produce consumer group lag schema registry msk aws' },
-    { file: 'Channels.mp4',       title: 'Channels',                desc: 'Bridge a Slack or Telegram thread to an agent — messages & files both ways.',                              tags: 'slack telegram channel bridge thread ticket relay webhook' },
-    { file: 'Workflows.mp4',      title: 'Workflows',               desc: 'Chain agents, HTTP, DB & approvals into a graph — manual, webhook & event triggers.',                     tags: 'workflow graph node trigger webhook approval automation pipeline' },
-    { file: 'ScheduledTasks.mp4', title: 'Scheduled Tasks',         desc: 'Recurring agent jobs → a Markdown report → delivered to Slack, Telegram, email or webhook.',               tags: 'schedule task recurring cron report daily weekly interval deliver markdown' },
-    { file: 'Mcp.mp4',            title: 'MCP Control Plane',       desc: 'Govern outbound MCP calls; expose Otto outward as otto.* tools behind a restricted token.',                tags: 'mcp model context protocol tool governance approval audit server outbound' },
-    { file: 'Vault.mp4',          title: 'Vault',                   desc: 'Workspace knowledge store: [[backlinks]], hybrid keyword + semantic recall, a live graph.',                tags: 'vault memory knowledge note backlink graph search recall semantic' },
-    { file: 'Skills.mp4',         title: 'Skills & Self-Improvement', desc: 'A versioned skill library that drives reviews & analysis — and improves itself from your sessions.',      tags: 'skill library install version self improvement reflect lens insights' },
-    { file: 'SkillsEval.mp4',     title: 'Skills Evaluator',        desc: 'Benchmark a skill: implement→validate→score→improve across providers, compare runs.',                     tags: 'skill eval benchmark score iterate provider compare report' },
-    { file: 'UsageInsights.mp4',  title: 'Usage, Cost & Insights',  desc: 'Real per-turn tokens & cost from transcripts, budgets, and scheduled catch-up reports.',                   tags: 'usage cost token clickhouse budget insight report daily weekly cache' },
-    { file: 'Api.mp4',            title: 'API Client',              desc: 'A Postman-class workbench: HTTP/SSE/WS/gRPC, environments, import/export — SSRF-guarded.',                 tags: 'api http rest grpc websocket sse postman environment import ssrf' },
-    { file: 'Plugins.mp4',        title: 'Custom Plugins',          desc: 'Runtime sidecar plugins in any language — supervised, reverse-proxied, scoped by RBAC.',                   tags: 'plugin sidecar extend runtime iframe host api rbac install' },
-    { file: 'TeamMobile.mp4',     title: 'Multi-user & Mobile',     desc: 'Per-feature RBAC, scoped email-OTP share links, and an installable PWA over a tunnel.',                    tags: 'rbac user role share link otp mobile pwa tunnel remote tablet responsive sharing' },
-    { file: 'Platform.mp4',       title: 'Platform & Shortcuts',    desc: '⌘K palette, themes, RTL, a customizable sidebar, and daily CLI auto-update.',                              tags: 'platform shortcut command palette theme rtl sidebar settings auto-update' },
+    { file: 'Intro.mp4',          title: 'Welcome to Otto',           desc: 'Run many AI coding agents — and your whole workflow — in one native window.',                                                             tags: 'intro welcome overview onboarding first steps tour ade agentic development environment',                              doc: 'README.md' },
+    { file: 'Sessions.mp4',       title: 'Agent Sessions',            desc: 'claude, codex, agy (Antigravity), custom providers & shell as live PTY sessions — tiled, split, broadcast, resumable, auto-trusted.',       tags: 'agent session terminal pty tiled split broadcast resume trust claude codex agy antigravity shell custom provider model picker names', doc: 'agent-sessions.md' },
+    { file: 'MissionControl.mp4', title: 'Mission Control',           desc: 'One live work graph over sessions, swarms, goal loops, workflows, reviews, product stories, PRs & external triggers.',                       tags: 'mission control work graph nodes overview unified status workflow pr external trigger feed',                          doc: 'mission-control.md' },
+    { file: 'Git.mp4',            title: 'Git & Pull Requests',       desc: 'Repo tabs, commit graph, WIP staging, the conflict resolver, worktrees, a Focus tab, and agent-drafted PRs that auto-push.',              tags: 'git pr pull request branch commit graph diff merge conflict resolver wip stage discard worktree focus stash draft github bitbucket gitlab', doc: 'git.md' },
+    { file: 'Review.mp4',         title: 'AI Code Review',            desc: 'One reviewer per lens × provider over a PR or working tree; findings become tracked records — triage, fix with an agent, verify.',        tags: 'review code lens findings security correctness performance tests pr working tree triage verify waive regressed', doc: 'code-review.md' },
+    { file: 'ProofPacks.mp4',     title: 'Proof Packs',               desc: 'No “done” without evidence — artifacts, derived status & risk, and completion gates on PRs, goal loops and workflows.',                    tags: 'proof pack evidence artifact status risk gate test pr badge score report',                                             doc: 'proof-packs.md' },
+    { file: 'Product.mp4',        title: 'Product · Jira & Confluence', desc: 'Ticket or Confluence page → analyze, ask, rewrite, test cases, plan → hand to a swarm or a fresh agent session; publishes back to Jira & Confluence.', tags: 'product jira confluence ticket story spec plan analysis discovery rfc rewrite test cases learnings mockup publish inject', doc: 'product.md' },
+    { file: 'Canvas.mp4',         title: 'Canvas',                    desc: 'File-backed Excalidraw, Mermaid & D2 scenes an agent edits while you chat.',                                                             tags: 'canvas excalidraw mermaid d2 diagram draw scene visual',                                                              doc: 'canvas.md' },
+    { file: 'Swarm.mp4',          title: 'Agent Swarm',               desc: 'A company of role agents — recruiter, per-swarm coordinator, org tree, Kanban board, run graph, schedules & presets.',                    tags: 'swarm team agent coordinator recruiter org kanban board dag roles preset budget',                                      doc: 'agent-swarm.md' },
+    { file: 'GoalLoops.mp4',      title: 'Goal Loops',                desc: 'Give a goal + budget; agents iterate Plan→Execute→Evaluate→Digest on an isolated goal-loop/<id> branch until criteria pass.',           tags: 'goal loop iterate plan execute evaluate digest budget criteria branch worktree',                                       doc: 'goal-loops.md' },
+    { file: 'Workflows.mp4',      title: 'Workflows',                 desc: 'Chain agents, HTTP, DB, brokers, approvals & swarm tasks into a graph — manual, webhook, event, schedule & Slack-chat triggers; retry + run queue.', tags: 'workflow graph node trigger webhook approval automation pipeline schedule cron slack chat retry queue condition loop version', doc: 'workflows.md' },
+    { file: 'ScheduledTasks.mp4', title: 'Scheduled Tasks',           desc: 'Recurring agent jobs (interval, daily, weekly, cron) → a Markdown report → Slack, Telegram, email or webhook; presets & otto.* MCP tools.', tags: 'schedule task recurring cron report daily weekly interval timezone deliver markdown preset',                          doc: 'scheduled-tasks.md' },
+    { file: 'Channels.mp4',       title: 'Channels',                  desc: 'Bridge a Slack or Telegram thread to an agent — messages relayed both ways (files in on Slack, out on both) — plus Broadcast.',            tags: 'slack telegram channel bridge thread ticket relay broadcast socket mode botfather',                                    doc: 'channels-slack-telegram.md' },
+    { file: 'Skills.mp4',         title: 'Skills & Self-Improvement', desc: 'A versioned skill library (Settings → Skills) that drives review lenses, product analysis & insights — and improves itself from your sessions.', tags: 'skill library install version self improvement reflect lens insights okf',                                        doc: 'skills-library.md' },
+    { file: 'SkillsEval.mp4',     title: 'Skills Lab · Evaluator',    desc: 'Benchmark a skill: implement→validate→score→improve across providers, compare runs — now the Evaluator tab of the Skills Lab module.',   tags: 'skill eval evaluator benchmark score iterate provider compare report skills lab review editor',                       doc: 'skills-evaluator.md' },
+    { file: 'Vault.mp4',          title: 'Vault',                     desc: 'Docs home: register a local (Obsidian) markdown folder — wikilinks & backlinks, tags, full-text search, a scalable graph, OKF validation. Video predates Vault v3 (no vector recall).', tags: 'vault docs knowledge note obsidian markdown backlink wikilink graph search fts tags okf quick switcher', doc: 'vault.md' },
+    { file: 'Connections.mp4',    title: 'Connections · SSH & SFTP',  desc: 'SSH / MySQL / Postgres / Redis / Mongo / ClickHouse / Kafka connections, tunnels (-L / SOCKS5), and an SFTP browser — secrets in Keychain.', tags: 'ssh sftp connection tunnel socks bastion keychain mysql postgres redis mongo clickhouse kafka custom',          doc: 'connections-ssh-sftp.md' },
+    { file: 'Database.mp4',       title: 'Database Explorer',         desc: 'TablePlus-class browser: schema tree, DB Assistant (NL→SQL), reviewed inline edits, index editor, mongosh scripts, ERD, dashboards, export.', tags: 'database mysql postgres redis mongodb clickhouse sql query schema nl assistant join index mongosh explain erd dashboard export detached', doc: 'database-explorer.md' },
+    { file: 'Brokers.mp4',        title: 'Message Brokers',           desc: 'Kafka (incl. AWS MSK over SSH) — topics & configs, peek/produce, consumer-group lag, replay, lag alerts, schema registry.',                tags: 'kafka broker topic produce consumer group lag replay alert schema registry msk config',                             doc: 'message-brokers.md' },
+    { file: 'Api.mp4',            title: 'API Client',                desc: 'A Postman-class workbench: HTTP/SSE/WS/gRPC/GraphQL, environments, cookie jar, Postman/OpenAPI/HAR import, automations — SSRF-guarded.', tags: 'api http rest grpc graphql websocket sse postman openapi har environment import automation ssrf',                    doc: 'api-client.md' },
+    { file: 'Mcp.mp4',            title: 'MCP Control Plane',         desc: 'Govern MCP calls (allowlist → policy → approval → dry-run → fail-closed audit); expose Otto outward as 100+ otto.* tools behind a restricted token.', tags: 'mcp model context protocol tool governance approval audit server outbound gateway policy',                        doc: 'mcp-control-plane.md' },
+    { file: 'Plugins.mp4',        title: 'Custom Plugins',            desc: 'Runtime sidecar plugins in any language — supervised, reverse-proxied, scoped by RBAC.',                                                  tags: 'plugin sidecar extend runtime iframe host api rbac install',                                                          doc: 'plugins.md' },
+    { file: 'UsageInsights.mp4',  title: 'Usage, Cost & Insights',    desc: 'Real per-turn tokens & cost from transcripts, opt-in budgets, system metrics, and scheduled catch-up reports.',                           tags: 'usage cost token clickhouse budget insight report daily weekly cache metrics',                                        doc: 'usage-and-cost.md' },
+    { file: 'TeamMobile.mp4',     title: 'Multi-user & Mobile',       desc: 'Per-feature RBAC grants + workspace roles, scoped expiring share links with email-OTP, and an installable PWA over a tunnel.',              tags: 'rbac user role grant share link otp mobile pwa tunnel remote tablet responsive sharing impersonation',              doc: 'rbac-multiuser-sharing.md' },
+    { file: 'Platform.mp4',       title: 'Platform & Shortcuts',      desc: '⌘K palette, ⌘I Ask Otto, themes, RTL, a customizable sidebar, multi-window, and daily CLI auto-update.',                                  tags: 'platform shortcut command palette theme rtl sidebar settings auto-update multi window',                               doc: 'rtl-and-responsive.md' },
+  ];
+
+  // Modules that ship today but have no walkthrough yet — listed so the page
+  // is an honest map of Otto, not just of what was filmed. Each links to its
+  // feature guide; a later render pass turns these into videos.
+  const guides: GuideItem[] = [
+    { title: 'Run with Otto',      desc: 'One button: a Jira/Confluence/GitHub/Slack item → worktree → agent → proof pack → review → approval → PR.', tags: 'run with otto one button pipeline jira slack pr approval',         doc: 'run-with-otto.md' },
+    { title: 'Browser',            desc: 'Reader & live tabs, DOM marks you send into a session or save to the Vault, site credentials for agents.',   tags: 'browser web reader live tab annotation mark lightpanda credentials', doc: 'browser.md' },
+    { title: 'AWS console',        desc: 'S3, SQS, EC2, Athena & EKS through the aws CLI per saved account — secrets in Keychain.',                     tags: 'aws cloud s3 sqs ec2 athena eks account sso profile',                doc: 'aws-console.md' },
+    { title: 'Kubernetes console', desc: 'k9s-class view over any kubeconfig context: workloads, logs, exec, Argo Rollouts & Argo CD actions.',        tags: 'kubernetes k8s kubectl pod logs exec argo rollouts argocd helm eks',  doc: 'kubernetes-console.md' },
+    { title: 'Personal Agents',    desc: 'Named personas with a pinned provider + model, schedules, memory, chat-anytime and user-visible rooms.',     tags: 'personal agent persona schedule room memory model catalog',          doc: 'personal-agents.md' },
+    { title: 'Snipping Tool',      desc: 'System-wide ⌘⌃⇧2 → region select → annotate; the image is on the clipboard at every step.',                  tags: 'snip screenshot capture annotate clipboard',                          doc: 'snipping-tool.md' },
+    { title: 'Multi-window',       desc: 'File → New Window (⌘⇧N): independent workspace surfaces, restored on relaunch.',                            tags: 'multi window new window restore',                                     doc: 'multi-window.md' },
+    { title: 'Daemon HTTP API',    desc: 'Drive Otto programmatically over ottod — tokens, REST map, WebSocket streams.',                              tags: 'api daemon rest http token websocket programmatic',                   doc: 'daemon-http-api.md' },
   ];
 
   let activeIndex = $state(0);
@@ -90,6 +127,16 @@
         v.desc.toLowerCase().includes(q) ||
         v.tags.includes(q),
       );
+  });
+
+  const filteredGuides = $derived.by(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return guides;
+    return guides.filter((g) =>
+      g.title.toLowerCase().includes(q) ||
+      g.desc.toLowerCase().includes(q) ||
+      g.tags.includes(q),
+    );
   });
 
   function select(i: number): void {
@@ -144,7 +191,17 @@
         router.go('walkthroughs');
       },
     }));
-    const unreg = registry.register('walkthroughs', cmds);
+    // Guides without a video are reachable from ⌘K too ("Guide: AWS console").
+    const guideCmds = guides.map((g) => ({
+      id: `walkthrough.guide.${g.doc}`,
+      title: `Guide: ${g.title}`,
+      group: 'Help',
+      keywords: `${g.tags} docs guide feature`,
+      run: () => {
+        window.open(docUrl(g.doc), '_blank', 'noopener,noreferrer');
+      },
+    }));
+    const unreg = registry.register('walkthroughs', [...cmds, ...guideCmds]);
     return unreg;
   });
 </script>
@@ -188,15 +245,40 @@
           </span>
         </button>
       {:else}
-        <div class="rail-empty dim">No matches for "{searchQuery}"</div>
+        {#if filteredGuides.length === 0}
+          <div class="rail-empty dim">No matches for "{searchQuery}"</div>
+        {/if}
       {/each}
+
+      {#if filteredGuides.length > 0}
+        <div class="rail-section" aria-label="Not yet covered by a video">
+          <div class="rail-section-title dim">Not yet covered — read the guide</div>
+          {#each filteredGuides as g (g.doc)}
+            <a
+              class="rail-guide"
+              href={docUrl(g.doc)}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={g.desc}
+            >
+              <span class="item-text">
+                <span class="item-title">{g.title} <span class="ext" aria-hidden="true">↗</span></span>
+                <span class="item-desc">{g.desc}</span>
+              </span>
+            </a>
+          {/each}
+        </div>
+      {/if}
     </div>
 
     <!-- Main: player -->
     <div class="player-area">
       <div class="player-meta">
         <h2 class="player-title">{current.title}</h2>
-        <p class="player-desc">{current.desc}</p>
+        <p class="player-desc">
+          {current.desc}
+          <a class="doc-link" href={docUrl(current.doc)} target="_blank" rel="noopener noreferrer">Read the guide ↗</a>
+        </p>
       </div>
       {#key current.file}
         {#if failed.has(current.file)}
@@ -337,6 +419,52 @@
     padding: 12px 10px;
     font-size: 12px;
     text-align: center;
+  }
+
+  .rail-section {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .rail-section-title {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 0 10px 4px;
+  }
+
+  .rail-guide {
+    display: flex;
+    padding: 7px 10px;
+    border-radius: var(--radius-s, 6px);
+    color: var(--text);
+    text-decoration: none;
+    transition: background 120ms ease-out;
+  }
+
+  .rail-guide:hover {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  }
+
+  .rail-guide .ext {
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+
+  .doc-link {
+    margin-inline-start: 6px;
+    color: var(--accent);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .doc-link:hover {
+    text-decoration: underline;
   }
 
   .item-num {
