@@ -26,6 +26,15 @@ packaging/deploy.sh
 
 `deploy.sh` reuses an existing frontend build with `SKIP_UI=1 packaging/deploy.sh`.
 
+**Running it from inside Otto (an agent/shell session):** steps 5–6 (install →
+relaunch → verify) run as a one-shot launchd agent, `com.otto.deploy-finish`,
+because the relaunch restarts the daemon and the daemon hangs up every session
+PTY — a script running inline there dies with exit 137 mid-verify. The
+foreground only tails `~/Library/Logs/Otto/deploy-finish-<ts>.log`; if it gets
+killed, the phase still completes. Read the outcome with
+`packaging/deploy.sh --status` (exit 0 = deployed and healthy). `DETACH=0`
+runs the phase inline (fine from a plain Terminal).
+
 ## The recurring "enter your password" keychain prompt — why, and the fix
 
 **Symptom:** macOS keeps popping *"ottod wants to use the confidential information
