@@ -697,77 +697,76 @@ class WorkspaceStore {
 
   /**
    * User-facing tab close: every close gesture (× button, middle-click, ⌘W,
-   * context menu, mobile bar) funnels here. A LIVE session gets a confirm
-   * dialog — Close tab (keeps running) / Archive session (stops it, history
-   * kept) / Cancel — with a "remember my choice" checkbox (reset in Settings →
-   * Appearance). Dead/suspended sessions and the DB pane just close.
+   * context menu, mobile bar, sidebar ×) funnels here. Closing a session's tab
+   * ENDS the session — the same outcome as Archive / Delete from its menu — so
+   * a session can never linger running behind a closed tab. The user picks
+   * Archive (stop, history kept, resumable) or Delete (stop, history gone) in
+   * a confirm dialog with a "remember my choice" checkbox (reset in Settings →
+   * Appearance). The DB pane and already-archived rows just close.
    */
   async requestCloseTab(id: Id): Promise<void> {
     const action = await this.resolveCloseAction([id]);
     if (action === null) return;
-    if (action === 'archive') {
-      try {
-        await this.archiveSession(id); // archiveSession closes the tab itself
-      } catch (e) {
-        toasts.error('Archive failed', e instanceof Error ? e.message : String(e));
-      }
-    } else {
-      this.closeTab(id);
-    }
+    await this.endSession(id, action);
   }
 
   /** Bulk variant (Close Others / Close to the Right / Close All): ONE dialog
-   *  covering all live sessions in the set — never N prompts. */
+   *  covering all sessions in the set — never N prompts. */
   async requestCloseTabs(ids: Id[]): Promise<void> {
     if (ids.length === 0) return;
     const action = await this.resolveCloseAction(ids);
     if (action === null) return;
-    for (const id of ids) {
-      if (action === 'archive' && this.isRunning(id)) {
-        try {
-          await this.archiveSession(id);
-        } catch {
-          this.closeTab(id);
-        }
-      } else {
-        this.closeTab(id);
-      }
+    for (const id of ids) await this.endSession(id, action);
+  }
+
+  /** Apply a resolved close action to one id: end the session (archive or
+   *  delete — both close the tab themselves) or, for a non-session id, just
+   *  close the tab. A failed end falls back to closing the tab so a bulk
+   *  close never leaves a dead tab behind, and reports the error. */
+  private async endSession(id: Id, action: 'close' | 'archive' | 'delete'): Promise<void> {
+    if (action === 'close' || !this.isEndable(id)) {
+      this.closeTab(id);
+      return;
+    }
+    try {
+      if (action === 'delete') await this.killSession(id);
+      else await this.archiveSession(id);
+    } catch (e) {
+      toasts.error(action === 'delete' ? 'Delete failed' : 'Archive failed', e instanceof Error ? e.message : String(e));
+      this.closeTab(id);
     }
   }
 
-  /** Whether a session's process is (as far as the client knows) live: the
-   *  server's transient `live` flag when present, else a status heuristic
-   *  (exited / reconnectable = no running PTY). */
-  private isRunning(id: Id): boolean {
+  /** Whether closing this tab must end a session: any non-archived session
+   *  row (live, idle, suspended or exited — an exited row still sits in the
+   *  Running list until archived). The DB pane and unknown ids are excluded. */
+  private isEndable(id: Id): boolean {
     if (id === DB_PANE_ID) return false;
     const s = this.sessions.find((x) => x.id === id);
-    if (!s || s.archived) return false;
-    if (typeof s.live === 'boolean') return s.live;
-    const status = this.statusMap[id] ?? s.status;
-    return status !== 'exited' && status !== 'reconnectable';
+    return !!s && !s.archived;
   }
 
   /** Shared confirm step for {@link requestCloseTab}/{@link requestCloseTabs}:
-   *  returns 'close' | 'archive', or null for cancel. Applies (and records)
-   *  the remembered preference; skips the dialog when nothing is running. */
-  private async resolveCloseAction(ids: Id[]): Promise<'close' | 'archive' | null> {
-    const running = ids.filter((id) => this.isRunning(id));
-    // Nothing live → closing the tab(s) is trivially safe; no dialog.
-    if (running.length === 0) return 'close';
-    if (ui.closeTabPref === 'close' || ui.closeTabPref === 'archive') return ui.closeTabPref;
-    const many = ids.length > 1;
+   *  returns 'archive' | 'delete' (or 'close' when nothing needs ending), or
+   *  null for cancel. Applies (and records) the remembered preference. */
+  private async resolveCloseAction(ids: Id[]): Promise<'close' | 'archive' | 'delete' | null> {
+    const ending = ids.filter((id) => this.isEndable(id));
+    if (ending.length === 0) return 'close';
+    if (ui.closeTabPref === 'archive' || ui.closeTabPref === 'delete') return ui.closeTabPref;
+    const many = ending.length > 1;
+    const n = ending.length;
     const message = many
-      ? `${ids.length} tabs — ${running.length} session${running.length === 1 ? '' : 's'} still running. Closing a tab keeps its session running in the background; archiving stops it (history kept, resumable).`
-      : `This session is still running. Closing the tab keeps it running in the background; archiving stops it (history kept, resumable from the Archived list).`;
+      ? `Closing these tabs ends ${n} sessions. Archive stops them and keeps their history (resumable from the Archived list); Delete stops them and removes their history for good.`
+      : `Closing this tab ends the session. Archive stops it and keeps its history (resumable from the Archived list); Delete stops it and removes its history for good.`;
     const picked = await confirmer.choose(message, {
-      title: many ? `Close ${ids.length} tabs?` : 'Close session tab?',
+      title: many ? `Close ${n} sessions?` : 'Close session?',
       options: [
-        { label: many ? 'Close tabs' : 'Close tab', value: 'close', kind: 'primary' },
-        { label: many ? `Archive ${running.length} session${running.length === 1 ? '' : 's'}` : 'Archive session', value: 'archive', kind: 'danger' },
+        { label: many ? `Archive ${n} sessions` : 'Archive session', value: 'archive', kind: 'primary' },
+        { label: many ? `Delete ${n} sessions` : 'Delete session', value: 'delete', kind: 'danger' },
       ],
       checkboxLabel: 'Remember my choice (change in Settings → Appearance)',
     });
-    if (picked.value !== 'close' && picked.value !== 'archive') return null;
+    if (picked.value !== 'archive' && picked.value !== 'delete') return null;
     if (picked.remember) ui.setCloseTabPref(picked.value);
     return picked.value;
   }
