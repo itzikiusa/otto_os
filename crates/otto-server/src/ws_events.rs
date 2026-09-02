@@ -277,6 +277,10 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::ProofPackUpdated { workspace_id, .. }
         // Scheduled-task run updates go to the task's workspace members.
         | Event::ScheduledTaskRunUpdated { workspace_id, .. }
+        // Personal-agent run updates + room messages go to the workspace members
+        // (rooms are always fully user-visible by design).
+        | Event::PersonalAgentRunUpdated { workspace_id, .. }
+        | Event::AgentRoomMessage { workspace_id, .. }
         // Run with Otto stage updates go to the run's workspace members.
         | Event::OttoRunUpdated { workspace_id, .. } => Scope::Workspace(workspace_id),
         // Usage tick, self-improvement updates, and insight-ready are global

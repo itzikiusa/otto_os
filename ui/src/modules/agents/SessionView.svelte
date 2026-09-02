@@ -9,6 +9,7 @@
   import AttachProductStory from './AttachProductStory.svelte';
   import Handover from './Handover.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -239,6 +240,11 @@
   }
 
   async function del(): Promise<void> {
+    const ok = await confirmer.ask(
+      'Delete this session and its entire history? This cannot be undone.',
+      { title: 'Delete session', confirmLabel: 'Delete' },
+    );
+    if (!ok) return;
     try {
       await ws.killSession(sessionId);
     } catch (e) {

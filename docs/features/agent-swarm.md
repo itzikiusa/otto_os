@@ -680,11 +680,10 @@ non-terminal status (or whose turn fails) is re-queued only until `attempts`
 reaches `max_attempts`, after which it's marked `blocked` with an `escalation`
 post + notice rather than re-run forever.
 
-> Historical note: an earlier fix doc (`docs/fixes-2026-06-19/batch3-d3-swarm-budget.md`)
-> references migration `0032_swarm_budget.sql` and "runtime measured from
-> `created_at`." The shipped behavior is the one above — migration
-> **`0034_swarm_budgets.sql`**, runtime measured from **`run_started_at`** (the
-> last time the swarm went active). Trust the code/contract over that note.
+> Historical note: an earlier fix doc referenced migration `0032_swarm_budget.sql`
+> and "runtime measured from `created_at`." The shipped behavior is the one above —
+> migration **`0034_swarm_budgets.sql`**, runtime measured from **`run_started_at`**
+> (the last time the swarm went active). Trust the code/contract over that note.
 
 ---
 

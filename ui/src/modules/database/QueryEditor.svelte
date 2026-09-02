@@ -72,13 +72,18 @@
   );
   let mongoshInfo = $state<MongoshInfo | null>(null);
   let mongoshProbed = false;
+  async function probeMongosh(): Promise<void> {
+    mongoshInfo = null; // back to "checking…" while the re-probe runs
+    try {
+      mongoshInfo = await api.get<MongoshInfo>('/db/mongosh');
+    } catch {
+      mongoshInfo = { available: false };
+    }
+  }
   $effect(() => {
     if (!isMongoshScript || mongoshProbed) return;
     mongoshProbed = true;
-    void api
-      .get<MongoshInfo>('/db/mongosh')
-      .then((i) => (mongoshInfo = i))
-      .catch(() => (mongoshInfo = { available: false }));
+    void probeMongosh();
   });
 
   // Reset the tracked selection/cursor when switching query tabs, so a stale
@@ -116,8 +121,58 @@
   }
   function commitRename(t: QueryTab): void {
     const v = renameText.trim();
-    if (v) t.name = v;
+    if (v) {
+      t.name = v;
+      // Persist the rename — the store's tab persistence is private, but
+      // switchTab to the SAME index is a no-op that flushes it.
+      database.switchTab(database.activeTab);
+    }
     renaming = null;
+  }
+
+  // ── Reopen closed tab (⇧⌥⌘W) ─────────────────────────────────────────────
+  // ⌥⌘W / ✕ discard an unsaved buffer instantly; keep the last few closed tab
+  // payloads in memory so a mis-close is recoverable for the session.
+  interface ClosedTabPayload {
+    name: string;
+    statement: string;
+    vars: QueryTab['vars'];
+    timeout_ms: number | null;
+    mask: boolean;
+    savedQueryId?: string;
+  }
+  const MAX_CLOSED = 10;
+  let closedTabs = $state<ClosedTabPayload[]>([]);
+  function closeTabAt(i: number): void {
+    const t = database.tabs[i];
+    // Only a non-empty buffer is worth remembering.
+    if (t && t.statement.trim()) {
+      closedTabs = [
+        ...closedTabs.slice(-(MAX_CLOSED - 1)),
+        {
+          name: t.name,
+          statement: t.statement,
+          vars: { ...t.vars },
+          timeout_ms: t.timeout_ms ?? null,
+          mask: !!t.mask,
+          savedQueryId: t.savedQueryId,
+        },
+      ];
+    }
+    database.closeTab(i);
+  }
+  function reopenClosedTab(): void {
+    const payload = closedTabs[closedTabs.length - 1];
+    if (!payload) return;
+    closedTabs = closedTabs.slice(0, -1);
+    database.newTab(payload.statement);
+    const nt = database.tab;
+    nt.name = payload.name;
+    nt.vars = payload.vars;
+    nt.timeout_ms = payload.timeout_ms;
+    nt.mask = payload.mask;
+    nt.savedQueryId = payload.savedQueryId;
+    database.switchTab(database.activeTab); // same-index no-op → persists tabs
   }
 
   // Map server completion kinds → CodeMirror completion "type" (drives the icon).
@@ -236,6 +291,9 @@
   }
 
   function run(): void {
+    // While a query is running, ⌘↵ (and the editor's submit) must NOT silently
+    // abort-and-restart — stopping is an explicit act (the Stop button / Esc).
+    if (tab.running) return;
     // A mongosh SCRIPT is INDIVISIBLE. `statementAtCursor` cuts on top-level
     // `;`, which for real JavaScript slices the file into fragments that share
     // no scope — running one alone either does nothing visible (the leading
@@ -434,6 +492,7 @@
     { keys: '⌥⌘→ / ⌥⌘←', label: 'Next / previous query tab' },
     { keys: '⌥⌘T', label: 'New query tab' },
     { keys: '⌥⌘W', label: 'Close query tab' },
+    { keys: '⇧⌥⌘W', label: 'Reopen closed tab' },
   ];
 
   function switchRelative(dir: 1 | -1): void {
@@ -447,12 +506,15 @@
     const cmd = e.metaKey || e.ctrlKey; // ⌘ on macOS, Ctrl elsewhere
     // Letter chords match on e.code (physical key) so macOS Option-key character
     // composition (⌥T → "†") doesn't defeat them.
-    // Esc — cancel a running query (or close the shortcuts popover).
+    // Esc — cancel a running query (or close the shortcuts popover). When the
+    // editor's completion popup is open, Esc belongs to IT (close the popup) —
+    // let CodeMirror handle it instead of killing the running query.
     if (e.key === 'Escape') {
-      if (tab.running) {
+      const completionOpen = !!rootEl?.querySelector('.cm-tooltip-autocomplete');
+      if (tab.running && !completionOpen) {
         e.preventDefault();
         database.abortQuery();
-      } else if (shortcutsOpen) {
+      } else if (shortcutsOpen && !completionOpen) {
         shortcutsOpen = false;
       }
       return;
@@ -469,10 +531,12 @@
       if (canEdit && tab.statement.trim()) void openSave();
       return;
     }
-    // ⇧⌘F — format (⌘F alone stays the app-global find).
+    // ⇧⌘F — format (⌘F alone stays the app-global find). A mongosh SCRIPT is
+    // real JavaScript — the structural formatter collapses its newlines, which
+    // breaks ASI statement boundaries — so Format is gated off for scripts.
     if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyF') {
       e.preventDefault();
-      if (database.queryLanguage !== 'redis' && tab.statement.trim() && !tab.running) {
+      if (database.queryLanguage !== 'redis' && !isMongoshScript && tab.statement.trim() && !tab.running) {
         database.formatStatement();
         editorSel = { text: '', cursor: 0 };
       }
@@ -497,9 +561,15 @@
       database.newTab();
       return;
     }
-    if (e.metaKey && e.altKey && e.code === 'KeyW') {
+    if (e.metaKey && e.altKey && !e.shiftKey && e.code === 'KeyW') {
       e.preventDefault();
-      if (database.tabs.length > 1) database.closeTab(database.activeTab);
+      if (database.tabs.length > 1) closeTabAt(database.activeTab);
+      return;
+    }
+    // ⇧⌥⌘W — reopen the most recently closed query tab.
+    if (e.metaKey && e.altKey && e.shiftKey && e.code === 'KeyW') {
+      e.preventDefault();
+      reopenClosedTab();
       return;
     }
     // ⌥⌘→ / ⌥⌘← — switch query tabs (⌃Tab is the app-global session cycler).
@@ -533,6 +603,7 @@
   // ── Shortcuts popover (⌨) ─────────────────────────────────────────────────────
   let shortcutsOpen = $state(false);
   let kbdWrapEl = $state<HTMLElement | null>(null);
+  let kbdPopEl = $state<HTMLElement | null>(null);
   $effect(() => {
     if (!shortcutsOpen) return;
     const onDown = (e: PointerEvent): void => {
@@ -540,6 +611,19 @@
     };
     window.addEventListener('pointerdown', onDown, true);
     return () => window.removeEventListener('pointerdown', onDown, true);
+  });
+  // Clamp the popover into the viewport (never off the right/left edge); the
+  // CSS max-height + overflow cap the vertical side.
+  $effect(() => {
+    const el = kbdPopEl;
+    if (!shortcutsOpen || !el) return;
+    el.style.transform = '';
+    const r = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    let dx = 0;
+    if (r.right > vw - 8) dx = vw - 8 - r.right;
+    if (r.left + dx < 8) dx = 8 - r.left;
+    if (dx !== 0) el.style.transform = `translateX(${dx}px)`;
   });
 </script>
 
@@ -586,7 +670,7 @@
               aria-label="Close tab"
               onclick={(e) => {
                 e.stopPropagation();
-                database.closeTab(i);
+                closeTabAt(i);
               }}
             >
               <Icon name="x" size={10} />
@@ -677,8 +761,10 @@
           database.formatStatement();
           editorSel = { text: '', cursor: 0 };
         }}
-        disabled={!tab.statement.trim() || tab.running}
-        title="Format / beautify the SQL"
+        disabled={!tab.statement.trim() || tab.running || isMongoshScript}
+        title={isMongoshScript
+          ? 'Format is disabled for mongosh scripts — reflowing real JavaScript breaks its statement boundaries'
+          : 'Format / beautify the SQL'}
       >
         <Icon name="command" size={11} /><span class="btn-label">Format</span>
       </button>
@@ -693,7 +779,7 @@
         aria-expanded={shortcutsOpen}
       >⌨</button>
       {#if shortcutsOpen}
-        <div class="qe-kbd-pop" role="menu">
+        <div class="qe-kbd-pop" role="menu" bind:this={kbdPopEl}>
           <div class="qe-kbd-title">Keyboard shortcuts</div>
           {#each SHORTCUTS as s (s.label)}
             <div class="qe-kbd-row">
@@ -841,8 +927,15 @@
         </span>
       {:else}
         <span class="qe-script-state warn">
-          mongosh is not installed on the daemon's PATH — <code class="mono">brew install mongosh</code>, then re-open this tab.
+          mongosh is not installed on the daemon's PATH — <code class="mono">brew install mongosh</code>, then retry.
         </span>
+        <button
+          class="qe-script-retry"
+          onclick={() => void probeMongosh()}
+          title="Probe the daemon for the mongosh CLI again"
+        >
+          <Icon name="refresh" size={10} /> Retry
+        </button>
       {/if}
     </div>
   {/if}
@@ -1117,6 +1210,22 @@
   .qe-script-state.dim {
     color: var(--text-dim);
   }
+  .qe-script-retry {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .qe-script-retry:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent);
+  }
   .qe-vars-label {
     font-size: 11px;
     text-transform: uppercase;
@@ -1176,6 +1285,11 @@
     inset-inline-start: 0;
     z-index: 30;
     min-width: 220px;
+    /* Never off-screen: cap to the viewport and scroll inside (the JS clamp
+       handles the horizontal side). */
+    max-width: calc(100vw - 16px);
+    max-height: min(60vh, calc(100vh - 120px));
+    overflow-y: auto;
     padding: 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);

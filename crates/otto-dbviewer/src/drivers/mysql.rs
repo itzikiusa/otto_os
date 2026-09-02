@@ -438,6 +438,18 @@ impl Driver for MysqlDriver {
         self.run_tracked(cfg, req, &CancelToken::new()).await
     }
 
+    /// Evict + close the cached pool for `cache_key` (connection close, or a
+    /// config change superseded it). `Pool::close` drains the backend
+    /// connections; in-flight queries on the pool error out. Also drops the
+    /// completion snapshot keyed to the same config.
+    async fn close(&self, cache_key: &str) {
+        let pool = self.pools.lock().await.remove(cache_key);
+        if let Some(pool) = pool {
+            pool.close().await;
+        }
+        self.completions.invalidate(cache_key);
+    }
+
     async fn run_tracked(
         &self,
         cfg: &ResolvedConfig,
@@ -1358,12 +1370,20 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::MySqlPool> {
         opts = opts.database(db);
     }
 
-    // TLS.
+    // TLS. When verification is on, verify the HOSTNAME too (VerifyIdentity) —
+    // VerifyCa alone accepts any CA-signed cert for a different host (MITM).
+    // Exception: through an SSH tunnel the TCP endpoint is 127.0.0.1 (the
+    // cert's name can never match), and an explicit `tls.server_name` override
+    // has no sqlx surface to honour — both keep chain-only verification.
+    let hostname_checkable = cfg.param_str("__tunnel_host").is_none()
+        && cfg.tls.server_name.as_deref().filter(|s| !s.is_empty()).is_none();
     let ssl_mode = match cfg.tls.mode {
         types::TlsMode::Disabled => MySqlSslMode::Disabled,
         types::TlsMode::Preferred => MySqlSslMode::Preferred,
         types::TlsMode::Required => {
-            if cfg.tls.verify {
+            if cfg.tls.verify && hostname_checkable {
+                MySqlSslMode::VerifyIdentity
+            } else if cfg.tls.verify {
                 MySqlSslMode::VerifyCa
             } else {
                 MySqlSslMode::Required
@@ -1565,27 +1585,33 @@ async fn exec_read_conn(
     statement: &str,
     max_rows: usize,
 ) -> Result<QueryResult> {
-    let rows = sqlx::query(statement)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(types::upstream)?;
+    use futures_util::TryStreamExt as _;
 
+    // Stream rows instead of `fetch_all`: the auto-LIMIT injector bails on
+    // SHOW/DESC/EXPLAIN and anything with FORMAT/UNION/etc., and a batch never
+    // gets a LIMIT at all — with `fetch_all` those buffered the ENTIRE result
+    // in daemon RAM before the cap applied. Here at most `max_rows` decoded
+    // rows are retained; anything past the cap is drained row-by-row (keeping
+    // the protocol/connection clean for the next statement) and dropped.
+    let mut stream = sqlx::query(statement).fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
-    if let Some(first) = rows.first() {
-        for col in first.columns() {
-            columns.push(Column::typed(col.name(), col.type_info().name()));
+    let mut out_rows: Vec<Vec<Value>> = Vec::new();
+    let mut truncated = false;
+    while let Some(row) = stream.try_next().await.map_err(types::upstream)? {
+        if columns.is_empty() {
+            for col in row.columns() {
+                columns.push(Column::typed(col.name(), col.type_info().name()));
+            }
         }
-    }
-
-    let truncated = rows.len() > max_rows;
-    let take = rows.len().min(max_rows);
-    let mut out_rows: Vec<Vec<Value>> = Vec::with_capacity(take);
-    for row in rows.iter().take(take) {
+        if out_rows.len() >= max_rows {
+            truncated = true;
+            continue; // drain without retaining
+        }
         let mut cells = Vec::with_capacity(columns.len());
         for i in 0..columns.len() {
             // Cap oversized cells (LONGTEXT/blob/JSON) like ClickHouse does —
             // an uncapped multi-MB cell freezes the grid and bloats the WS frame.
-            cells.push(types::cap_cell(mysql_value_to_json(row, i)));
+            cells.push(types::cap_cell(mysql_value_to_json(&row, i)));
         }
         out_rows.push(cells);
     }

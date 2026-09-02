@@ -115,6 +115,14 @@ pub trait Driver: Send + Sync {
         Ok(())
     }
 
+    /// Tear down and evict any cached connection handle / pool for `cache_key`
+    /// (a [`ResolvedConfig::cache_key`] value). Called by the service when a
+    /// connection is explicitly closed, and when a config change rekeys a
+    /// connection so the superseded handle would otherwise be retained forever.
+    /// Must be idempotent — an unknown key is a no-op. The default is a no-op
+    /// for engines that cache nothing.
+    async fn close(&self, _cache_key: &str) {}
+
     /// Produce a normalized [`DbQueryPlan`] for `statement` by running the engine's
     /// native EXPLAIN (the statement is EXPLAIN-wrapped, **never executed raw** —
     /// read-only by construction). `node` scopes the active database (same

@@ -100,6 +100,11 @@ pub fn ensure_read_only(engine: Engine, statement: &str) -> Result<()> {
 /// reconnect on the next query after a long idle is transparent to the user.
 const TUNNEL_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 
+/// Hard cap on an import file's size. The whole file is read into RAM and the
+/// parse + INSERT-rendering pipeline holds several transformed copies of it, so
+/// this bounds worst-case daemon memory for `import_from_path` at a few × this.
+const IMPORT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
 /// Table cap for [`DbViewerService::schema_context`] — the COMPLETE schema fed to
 /// the DB Assistant agent. Generous (a model wants the whole picture) but bounded:
 /// each table is one `object_detail` round-trip, so a runaway schema with tens of
@@ -206,6 +211,14 @@ pub struct DbViewerService {
     /// keyed by `query_id`, kept for [`FINISHED_TTL`] so the client can
     /// re-attach ([`Self::query_status`]) after navigating away.
     finished: Arc<std::sync::Mutex<FinishedStore>>,
+    /// The driver cache key each connection last resolved to. Driver caches are
+    /// keyed by [`ResolvedConfig::cache_key`], not connection id, so this map is
+    /// what lets the service (a) tear a connection's pool down on an explicit
+    /// close ([`Self::close_connection`]) and (b) evict the SUPERSEDED pool when
+    /// a config change (password edit, tunnel restart → new local port) rekeys a
+    /// connection — previously the old pool leaked for the daemon's lifetime.
+    /// Plain `std::sync::Mutex`: held only for map ops, never across an await.
+    active_keys: Arc<std::sync::Mutex<HashMap<Id, (Engine, String)>>>,
 }
 
 /// Removes an in-flight query from the registry when a `run` ends — on success,
@@ -274,6 +287,7 @@ impl DbViewerService {
             tunnels: Arc::new(Mutex::new(HashMap::new())),
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             finished: Arc::new(std::sync::Mutex::new(FinishedStore::default())),
+            active_keys: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -346,11 +360,68 @@ impl DbViewerService {
                 }
             }
         }
+        // Track the cache key this connection now resolves to, and EVICT the
+        // superseded driver-side handle when the key changed (credential/param
+        // edit, or a restarted tunnel minting a new local port / `__socks_port`)
+        // — otherwise the old pool, its backend connections, and its reconnect
+        // loops are retained for the daemon's lifetime.
+        let key = config.cache_key();
+        let stale = {
+            let mut keys = self
+                .active_keys
+                .lock()
+                .map_err(|_| Error::Internal("active-keys registry poisoned".into()))?;
+            match keys.insert(conn_id.clone(), (engine, key.clone())) {
+                Some((old_engine, old_key)) if old_key != key => Some((old_engine, old_key)),
+                _ => None,
+            }
+        };
+        if let Some((old_engine, old_key)) = stale {
+            self.registry.get(old_engine).close(&old_key).await;
+        }
         Ok(Resolved {
             driver,
             config,
             _tunnel: tunnel,
         })
+    }
+
+    /// Tear down everything the daemon holds for a connection: cancel its
+    /// in-flight queries (engine-native, best-effort — this must run FIRST,
+    /// while the tunnel/pool are still alive), evict + close the driver's
+    /// cached pool/handle, and drop the cached SSH tunnel (killing its `ssh`
+    /// child). Idempotent: closing a connection with nothing cached is a no-op
+    /// success. Backs `POST /connections/{id}/db/close` — without it, closing a
+    /// tab was purely client-side and the warm pool made a "closed" connection
+    /// reconnect instantly (and hold backend connections forever).
+    pub async fn close_connection(&self, conn_id: &Id) -> Result<()> {
+        // Cancel in-flight queries scoped to this connection.
+        let query_ids: Vec<String> = self
+            .in_flight
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, q)| &q.conn_id == conn_id)
+                    .map(|(qid, _)| qid.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for qid in query_ids {
+            let _ = self.cancel(conn_id, &qid).await;
+        }
+        // Evict + close the driver-side cached handle for the key this
+        // connection last resolved to.
+        let entry = self
+            .active_keys
+            .lock()
+            .ok()
+            .and_then(|mut keys| keys.remove(conn_id));
+        if let Some((engine, key)) = entry {
+            self.registry.get(engine).close(&key).await;
+        }
+        // Drop the cached SSH tunnel — `SshTunnel::Drop` kills the ssh child.
+        self.tunnels.lock().await.remove(conn_id);
+        Ok(())
     }
 
     /// Get a live SSH tunnel for `conn_id`, reusing a cached one when it's still
@@ -1117,6 +1188,20 @@ impl DbViewerService {
             ));
         }
 
+        // Hard byte cap BEFORE reading: the request names any daemon-host file,
+        // and the parse/render pipeline holds several copies of the data in RAM
+        // — an unbounded multi-GB path would OOM the daemon.
+        let meta = tokio::fs::metadata(local_path)
+            .await
+            .map_err(|e| Error::Invalid(format!("read import file: {e}")))?;
+        if meta.len() > IMPORT_MAX_BYTES {
+            return Err(Error::Invalid(format!(
+                "import file is {} bytes — larger than the {} MiB import cap; \
+                 split the file or load it with the engine's native bulk loader",
+                meta.len(),
+                IMPORT_MAX_BYTES / (1024 * 1024)
+            )));
+        }
         let bytes = tokio::fs::read(local_path)
             .await
             .map_err(|e| Error::Invalid(format!("read import file: {e}")))?;
@@ -1124,20 +1209,20 @@ impl DbViewerService {
 
         match engine {
             // SQL engines import as batched INSERTs through the guarded `run`
-            // path; identifier quoting is engine-aware (Postgres double-quotes,
-            // MySQL/ClickHouse backtick).
+            // path; identifier quoting AND literal escaping are engine-aware
+            // (see `import::SqlFlavor`).
             Engine::Mysql | Engine::Clickhouse | Engine::Postgres => {
-                let quote = if matches!(engine, Engine::Postgres) {
-                    crate::import::SqlQuote::DoubleQuote
-                } else {
-                    crate::import::SqlQuote::Backtick
+                let flavor = match engine {
+                    Engine::Postgres => crate::import::SqlFlavor::Postgres,
+                    Engine::Clickhouse => crate::import::SqlFlavor::Clickhouse,
+                    _ => crate::import::SqlFlavor::Mysql,
                 };
                 let statements = crate::import::build_insert_statements(
                     table,
                     &parsed.columns,
                     &parsed.rows,
                     batch_size,
-                    quote,
+                    flavor,
                 );
                 let mut counts = ImportCounts::default();
                 for stmt in statements {

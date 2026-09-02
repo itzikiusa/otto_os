@@ -214,7 +214,18 @@ impl<'a> Parser<'a> {
                         let cp = self.read_hex4()?;
                         out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                     }
-                    other => out.push(other as char),
+                    other if other < 0x80 => out.push(other as char),
+                    other => {
+                        // A backslash-escaped MULTIBYTE char: `bump()` consumed
+                        // only its lead byte — pushing that as a char is mojibake
+                        // and, worse, leaves the cursor mid-UTF-8 so the next
+                        // slice below panics on a non-char boundary. Copy the
+                        // whole scalar and advance past it.
+                        let start = self.pos - 1;
+                        let end = (start + utf8_len(other)).min(self.src.len());
+                        out.push_str(&self.text[start..end]);
+                        self.pos = end;
+                    }
                 }
             } else if quote == b'`' && b == b'$' && self.peek(1) == Some(b'{') {
                 return Err(err("template interpolation `${…}` is not supported"));
@@ -359,7 +370,16 @@ impl<'a> Parser<'a> {
                 Some(b'\\') => {
                     pattern.push('\\');
                     match self.bump() {
-                        Some(e) => pattern.push(e as char),
+                        Some(e) if e < 0x80 => pattern.push(e as char),
+                        Some(e) => {
+                            // Escaped multibyte char: copy the whole scalar (the
+                            // single-byte push left the cursor mid-UTF-8 and the
+                            // next slice panicked on a non-char boundary).
+                            let start = self.pos - 1;
+                            let end = (start + utf8_len(e)).min(self.src.len());
+                            pattern.push_str(&self.text[start..end]);
+                            self.pos = end;
+                        }
                         None => return Err(err("dangling escape in regex")),
                     }
                 }
@@ -548,6 +568,24 @@ mod tests {
         assert_eq!(v["f"], json!(1.5));
         assert_eq!(v["big"], json!(1000.0));
         assert_eq!(v["arr"], json!([{ "k": 1 }]));
+    }
+
+    /// A backslash-escaped MULTIBYTE char used to leave the byte cursor mid-
+    /// UTF-8 and panic the daemon on the next slice. It must parse (or error),
+    /// never panic — reachable from any pasted Mongo filter.
+    #[test]
+    fn escaped_multibyte_char_does_not_panic() {
+        let v = parse_value("{ a: \"a\\éb\" }").unwrap();
+        assert_eq!(v, json!({ "a": "aéb" }));
+        // Multibyte right after the escape, then MORE multibyte text.
+        let v = parse_value("{ a: \"\\日本語\" }").unwrap();
+        assert_eq!(v, json!({ "a": "日本語" }));
+        // Regex literal with an escaped multibyte char.
+        let v = parse_value("{ r: /a\\éb/i }").unwrap();
+        assert_eq!(
+            v["r"]["$regularExpression"]["pattern"],
+            json!("a\\éb")
+        );
     }
 
     #[test]

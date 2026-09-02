@@ -227,6 +227,7 @@ pub async fn run_lens_session(
         title: Some(appearance.title.clone()),
         cwd: Some(cwd.to_string()),
         connection_id: None,
+        model: None,
         meta: Some(session_meta),
     };
 

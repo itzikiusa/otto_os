@@ -41,6 +41,22 @@
     window.addEventListener('pointerup', up);
   }
 
+  /** Keyboard resize for the split gutters (a11y — pointer-only otherwise):
+   *  arrows nudge the fraction by 2%, Home/End jump to the 20/80 bounds. */
+  function gutterKeydown(axis: 'col' | 'row', e: KeyboardEvent): void {
+    const cur = axis === 'col' ? ws.colFrac : ws.rowFrac;
+    const dec = axis === 'col' ? e.key === 'ArrowLeft' : e.key === 'ArrowUp';
+    const inc = axis === 'col' ? e.key === 'ArrowRight' : e.key === 'ArrowDown';
+    let next: number | null = null;
+    if (dec) next = cur - 0.02;
+    else if (inc) next = cur + 0.02;
+    else if (e.key === 'Home') next = 0.2;
+    else if (e.key === 'End') next = 0.8;
+    if (next === null) return;
+    e.preventDefault();
+    ws.setSplitFrac(axis, next);
+  }
+
   const showColGutter = $derived(
     ws.panes.length >= 3 || (ws.panes.length === 2 && ws.splitAxis === 'col'),
   );
@@ -60,8 +76,10 @@
   let broadcastText = $state('');
   let broadcastBusy = $state(false);
 
+  // Deduped: split() clones the focused id into the new pane, so a raw pane
+  // list can carry the same session twice — the broadcast would hit it twice.
   const broadcastTargets = $derived(
-    ws.panes.filter((id) => id !== DB_PANE_ID),
+    [...new Set(ws.panes.filter((id) => id !== DB_PANE_ID))],
   );
 
   // Auto-disable broadcast mode when panes collapse to 1 or 0.
@@ -149,21 +167,35 @@
   </div>
 
   {#if showColGutter}
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="gutter col"
       style={colGutterPos}
       onpointerdown={(e) => startDrag('col', e)}
+      onkeydown={(e) => gutterKeydown('col', e)}
       role="separator"
+      tabindex="0"
       aria-orientation="vertical"
+      aria-label="Resize split (arrow keys)"
+      aria-valuenow={Math.round(ws.colFrac * 100)}
+      aria-valuemin={20}
+      aria-valuemax={80}
     ></div>
   {/if}
   {#if showRowGutter}
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="gutter row"
       style={rowGutterPos}
       onpointerdown={(e) => startDrag('row', e)}
+      onkeydown={(e) => gutterKeydown('row', e)}
       role="separator"
+      tabindex="0"
       aria-orientation="horizontal"
+      aria-label="Resize split (arrow keys)"
+      aria-valuenow={Math.round(ws.rowFrac * 100)}
+      aria-valuemin={20}
+      aria-valuemax={80}
     ></div>
   {/if}
 </div>
@@ -284,6 +316,23 @@
     inset-inline-end: 8px;
     height: 8px;
     cursor: row-resize;
+  }
+  .gutter:focus-visible {
+    outline: none;
+  }
+  .gutter:focus-visible::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    background: color-mix(in srgb, var(--accent) 65%, transparent);
+    border-radius: 2px;
+  }
+  .gutter.col:focus-visible::after {
+    width: 2px;
+  }
+  .gutter.row:focus-visible::after {
+    height: 2px;
   }
   .gutter:hover::after {
     content: '';

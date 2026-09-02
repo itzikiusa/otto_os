@@ -21,6 +21,12 @@ pub struct ProviderSpec {
     /// Shell command to run to update this provider's CLI, e.g. `"claude update"`.
     /// `None` means "no update command" (built-in shell provider, or unset custom).
     pub update_command: Option<String>,
+    /// Model-flag TEMPLATE appended at spawn when the session pins a model
+    /// (`meta.model`): each element has `{model}` substituted — e.g.
+    /// `["--model","{model}"]` (claude/codex/agy) or `["-m","{model}"]`.
+    /// `None` ⇒ the CLI takes no model flag; pickers hide the model control
+    /// and a pinned model is dropped (`model_args` in manager.rs).
+    pub model_args: Option<Vec<String>>,
     /// True when the provider MINTS ITS OWN session id (so Otto can't pass it at
     /// launch and must capture it from disk after spawn — `codex`). False when
     /// Otto assigns the id via a launch flag (`claude --session-id {sid}`), or the
@@ -30,7 +36,8 @@ pub struct ProviderSpec {
 }
 
 /// Shape accepted from the settings override JSON
-/// (`{"<name>": {"cmd": "...", "args": [...], "resume_args": [...], "update_command": "..."}}`).
+/// (`{"<name>": {"cmd": "...", "args": [...], "resume_args": [...], "update_command": "...",
+/// "model_args": ["-m", "{model}"]}}`).
 #[derive(Debug, Deserialize)]
 struct ProviderOverride {
     cmd: String,
@@ -40,6 +47,8 @@ struct ProviderOverride {
     resume_args: Option<Vec<String>>,
     #[serde(default)]
     update_command: Option<String>,
+    #[serde(default)]
+    model_args: Option<Vec<String>>,
 }
 
 /// Registry of available agent providers. Interior-mutable so the settings
@@ -208,6 +217,7 @@ impl ProviderRegistry {
                     a
                 }),
                 update_command: Some("claude update".into()),
+                model_args: Some(vec!["--model".into(), "{model}".into()]),
                 // Otto assigns the id via `--session-id {sid}`.
                 captures_session_id: false,
             },
@@ -236,6 +246,7 @@ impl ProviderRegistry {
                     a
                 }),
                 update_command: Some("codex update".into()),
+                model_args: Some(vec!["--model".into(), "{model}".into()]),
                 captures_session_id: true,
             },
         );
@@ -265,6 +276,9 @@ impl ProviderRegistry {
                     a
                 }),
                 update_command: Some("agy update".into()),
+                // Verified against the installed agy CLI: `agy --help` lists
+                // `--model  Model for the current CLI session`.
+                model_args: Some(vec!["--model".into(), "{model}".into()]),
                 captures_session_id: true,
             },
         );
@@ -275,6 +289,7 @@ impl ProviderRegistry {
                 args: vec!["-l".into()],
                 resume_args: None,
                 update_command: None,
+                model_args: None,
                 captures_session_id: false,
             },
         );
@@ -286,6 +301,8 @@ impl ProviderRegistry {
                 for (name, o) in parsed {
                     // Only keep a non-empty update_command string.
                     let update_command = o.update_command.filter(|s| !s.trim().is_empty());
+                    // An empty template means "no model flag" — same as unset.
+                    let model_args = o.model_args.filter(|v| !v.is_empty());
                     map.insert(
                         name,
                         ProviderSpec {
@@ -293,6 +310,7 @@ impl ProviderRegistry {
                             args: o.args,
                             resume_args: o.resume_args,
                             update_command,
+                            model_args,
                             // Custom providers use Otto-assigned ids (the `{sid}`
                             // template); rollout-style capture is built-in only.
                             captures_session_id: false,
@@ -322,6 +340,28 @@ impl ProviderRegistry {
             .collect();
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         pairs
+    }
+
+    /// The provider's model-flag TEMPLATE (each element gets `{model}`
+    /// substituted at spawn — see `model_args` in manager.rs), or `None` when
+    /// the CLI takes no model flag (shell, template-less custom providers).
+    pub fn model_args_template(&self, name: &str) -> Option<Vec<String>> {
+        self.map
+            .read()
+            .expect("provider registry lock")
+            .get(name)
+            .and_then(|p| p.model_args.clone())
+    }
+
+    /// True when `name` exists and carries a model-flag template — drives the
+    /// `/meta.model_flags` payload, so pickers hide the model control for
+    /// providers that would silently drop it.
+    pub fn supports_model(&self, name: &str) -> bool {
+        self.map
+            .read()
+            .expect("provider registry lock")
+            .get(name)
+            .is_some_and(|p| p.model_args.is_some())
     }
 
     /// True when `name` exists and supports resume.
@@ -498,6 +538,55 @@ mod tests {
         let d = reg.resolve_default(&["", "codex"]);
         assert!(d != "codex" && d != "claude", "got disabled provider: {d}");
         assert!(reg.names().contains(&d));
+    }
+
+    /// Every built-in agent CLI carries the `--model {model}` template (agy's
+    /// `--model` verified against the installed CLI); shell takes none.
+    #[test]
+    fn builtin_model_templates() {
+        let reg = ProviderRegistry::new(None);
+        for p in ["claude", "codex", "agy"] {
+            assert_eq!(
+                reg.model_args_template(p),
+                Some(vec!["--model".to_string(), "{model}".to_string()]),
+                "{p} should carry the --model template"
+            );
+            assert!(reg.supports_model(p));
+        }
+        assert_eq!(reg.model_args_template("shell"), None);
+        assert!(!reg.supports_model("shell"));
+        assert!(!reg.supports_model("nope"), "unknown provider has no template");
+    }
+
+    /// A custom provider's `model_args` override is honored verbatim; one
+    /// without a template (or with an empty one) reports no model support.
+    #[test]
+    fn custom_model_template_from_override() {
+        let overrides = serde_json::json!({
+            "grok": { "cmd": "grok", "model_args": ["-m", "{model}"] },
+            "kilo": { "cmd": "kilo" },
+            "opencode": { "cmd": "opencode", "model_args": [] },
+        });
+        let reg = ProviderRegistry::new(Some(&overrides));
+        assert_eq!(
+            reg.model_args_template("grok"),
+            Some(vec!["-m".to_string(), "{model}".to_string()])
+        );
+        assert!(reg.supports_model("grok"));
+        assert_eq!(reg.model_args_template("kilo"), None);
+        assert!(!reg.supports_model("kilo"));
+        // Empty template normalizes to "no model flag".
+        assert_eq!(reg.model_args_template("opencode"), None);
+    }
+
+    /// Overriding a BUILT-IN replaces its whole spec: an override without
+    /// `model_args` drops the built-in template too (spec-replacement, not
+    /// merge — same behavior as resume_args/update_command).
+    #[test]
+    fn builtin_override_without_template_drops_it() {
+        let overrides = serde_json::json!({ "claude": { "cmd": "my-claude" } });
+        let reg = ProviderRegistry::new(Some(&overrides));
+        assert_eq!(reg.model_args_template("claude"), None);
     }
 
     /// A providers reload preserves the current skip-permissions mode.

@@ -16,10 +16,8 @@ SurrealDB graph mirror, tree-sitter code intel, spawn-time brain injection).
 "Smart indexing" now means agents writing linked, validated OKF docs that FTS
 and the link graph make findable — durable, diffable, greppable.
 
-This document is the end-user and operator reference for Vault v3. The design
-(including its binding post-review amendments) is
-`docs/superpowers/specs/2026-07-11-vault-docs-home-design.md`; the API contract
-is `docs/contracts/api.md` → *Vault v3 — the docs home*.
+This document is the end-user and operator reference for Vault v3. The API
+contract is `docs/contracts/api.md` → *Vault v3 — the docs home*.
 
 ---
 
@@ -627,8 +625,6 @@ PDF annotation, community plugins.
 
 - `docs/contracts/api.md` — **Vault v3 — the docs home** (authoritative REST
   surface) and **Memory layer** (the keyword memory store that remains).
-- `docs/superpowers/specs/2026-07-11-vault-docs-home-design.md` — the v3 design
-  + binding amendments.
 - [`./mcp-control-plane.md`](./mcp-control-plane.md) — how the `otto_vault_*` /
   `otto.vault_*` tools are surfaced and governed.
 - [`./product.md`](./product.md) — Product's story→memory ingest (the memory

@@ -3,7 +3,9 @@
   // The message can be drafted by an agent from the branch diff, and the branch
   // is pushed automatically (with --set-upstream) right before the PR is opened.
   import Modal from '../../lib/components/Modal.svelte';
+  import Terminal from '../../lib/components/Terminal.svelte';
   import { api } from '../../lib/api/client';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import type { BranchInfo, Collaborator, DraftPrResp, Id, PrSummary } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -32,6 +34,28 @@
   /** Seconds since the draft started — the whole point is that a long turn
    *  should never look indistinguishable from a wedged one. */
   let draftElapsed = $state(0);
+  /** When the current draft started (RFC3339), to recognize its session among
+   *  ws.sessions the moment its `session_created` event lands — the blocking
+   *  POST only returns the id at the END of the turn. */
+  let draftStartedAt = $state<string | null>(null);
+  /** Embedded live draft terminal, collapsed by default. */
+  let showDraftTerm = $state(false);
+
+  /** The draft session to embed: the id from the finished POST, else (while
+   *  drafting) the freshest pr-draft session created since the draft began —
+   *  its `session_created` event adds it to ws.sessions long before the POST
+   *  resolves. pr-draft is a background source, so it appears nowhere else. */
+  const liveDraftId: Id | null = $derived.by(() => {
+    if (draftSessionId) return draftSessionId;
+    if (!drafting || !draftStartedAt) return null;
+    const candidates = ws.sessions.filter(
+      (s) =>
+        (s.meta as { source?: string } | null)?.source === 'pr-draft' &&
+        !s.archived &&
+        s.created_at >= draftStartedAt!,
+    );
+    return candidates.length > 0 ? candidates[candidates.length - 1].id : null;
+  });
   // What the Create button is doing, for the label.
   let phase: '' | 'pushing' | 'creating' = $state('');
 
@@ -121,6 +145,8 @@
     drafting = true;
     draftSessionId = null;
     draftElapsed = 0;
+    // Slight backdate so a session created in the same second still matches.
+    draftStartedAt = new Date(Date.now() - 2000).toISOString();
     const tick = setInterval(() => (draftElapsed += 1), 1000);
     try {
       const d = await api.post<DraftPrResp>(`/repos/${repoId}/pr/draft`, { base: target });
@@ -235,17 +261,28 @@
     </button>
     {#if drafting}
       <span class="dim draft-hint">
-        {draftElapsed}s · running as the <strong>PR draft · {source}</strong> session — open it
-        from Agents to watch it work.
+        {draftElapsed}s · drafting from your branch diff{liveDraftId ? '' : '…'}
       </span>
     {:else if draftSessionId}
-      <span class="dim draft-hint">
-        Drafted by the <strong>PR draft · {source}</strong> session in Agents.
-      </span>
+      <span class="dim draft-hint">Drafted — review and edit before creating.</span>
     {:else}
       <span class="dim draft-hint">Generates the title + description from your branch diff vs {target || 'target'}.</span>
     {/if}
+    {#if liveDraftId}
+      <button class="btn small ghost" onclick={() => (showDraftTerm = !showDraftTerm)}>
+        <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={11} />
+        {showDraftTerm ? 'Hide agent' : 'Watch agent'}
+      </button>
+    {/if}
   </div>
+
+  {#if liveDraftId && showDraftTerm}
+    <!-- Live draft terminal, embedded right here in the git flow (the pr-draft
+         session is a background source — it no longer appears under Agents). -->
+    <div class="draft-term">
+      <Terminal sessionId={liveDraftId} preferDom showToolbar={false} />
+    </div>
+  {/if}
 
   <div class="field">
     <label for="pr-title">Title</label>
@@ -366,6 +403,13 @@
   }
   .draft-hint {
     font-size: 11px;
+  }
+  .draft-term {
+    height: 220px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow: hidden;
   }
   .spinner-xs {
     display: inline-block;

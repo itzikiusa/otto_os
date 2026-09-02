@@ -115,6 +115,22 @@
     }
   }
 
+  /** Delete = PTY killed, row + full history gone — always confirm first
+   *  (mirrors the workspace-delete confirm; one mis-click must not destroy a
+   *  session's history). */
+  async function deleteSession(id: string): Promise<void> {
+    const ok = await confirmer.ask(
+      'Delete this session and its entire history? This cannot be undone.',
+      { title: 'Delete session', confirmLabel: 'Delete' },
+    );
+    if (!ok) return;
+    try {
+      await ws.killSession(id);
+    } catch (e) {
+      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   // ── Workspace management (context menu on the Workspaces rows) ──────────────
   async function renameWorkspace(w: WorkspaceWithRole): Promise<void> {
     const name = await confirmer.promptText('New workspace name', {
@@ -355,7 +371,7 @@
                   oncontextmenu={(e) => ctxMenu.show(e, [
                     ...(ws.myRole !== 'viewer' ? [
                       { label: 'Unarchive', icon: 'refresh', action: () => ws.unarchiveSession(s.id) },
-                      { label: 'Delete', icon: 'trash', danger: true as const, action: () => ws.killSession(s.id) },
+                      { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
                     ] : []),
                     { separator: true },
                     { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
@@ -373,7 +389,7 @@
                   <button class="row-action" title="Restore" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
                     <Icon name="refresh" size={11} />
                   </button>
-                  <button class="row-action danger" title="Delete" aria-label="Delete session" onclick={() => ws.killSession(s.id)}>
+                  <button class="row-action danger" title="Delete" aria-label="Delete session" onclick={() => void deleteSession(s.id)}>
                     <Icon name="trash" size={11} />
                   </button>
                 {/if}
@@ -695,7 +711,7 @@
               ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restartAgent(s.id) }]
               : []),
             { label: 'Archive', icon: 'archive', action: () => ws.archiveSession(s.id) },
-            { label: 'Delete', icon: 'trash', danger: true as const, action: () => ws.killSession(s.id) },
+            { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
           ] : []),
           { separator: true },
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },

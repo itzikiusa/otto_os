@@ -119,14 +119,36 @@ export function uniqueAlias(base: string, taken: Set<string>): string {
   return `${root}_${i}`;
 }
 
-/** Backtick-quote a single identifier, escaping embedded backticks. */
-function q(ident: string): string {
-  return `\`${ident.replace(/`/g, '``')}\``;
+/** The active connection's engine, for identifier quoting + literal escaping. */
+export type SqlEngine = string | null | undefined;
+
+/**
+ * Engine-correct identifier quoter: double quotes for postgres/sqlite (the
+ * standard), backticks for mysql/clickhouse. Emitting backticks on Postgres
+ * produced SQL the server rejects outright.
+ */
+function quoter(engine: SqlEngine): (ident: string) => string {
+  if (engine === 'postgres' || engine === 'sqlite') {
+    return (ident) => `"${ident.replace(/"/g, '""')}"`;
+  }
+  return (ident) => `\`${ident.replace(/`/g, '``')}\``;
 }
 
 /** `db`.`table` (db omitted when empty), used for FROM / JOIN targets. */
-function qualified(t: CanvasTable): string {
+function qualified(t: CanvasTable, q: (s: string) => string): string {
   return t.db ? `${q(t.db)}.${q(t.table)}` : q(t.table);
+}
+
+/**
+ * Render a filter value as a SQL literal. Numbers stay bare; everything else is
+ * single-quoted with '' doubling, plus backslash doubling on mysql/clickhouse
+ * (where `\` is an escape character inside string literals by default).
+ */
+function literal(raw: string, engine: SqlEngine): string {
+  if (/^-?\d+(\.\d+)?$/.test(raw)) return raw;
+  let s = raw;
+  if (engine === 'mysql' || engine === 'clickhouse') s = s.replace(/\\/g, '\\\\');
+  return `'${s.replace(/'/g, "''")}'`;
 }
 
 /**
@@ -163,15 +185,15 @@ export function walkJoins(
   return { order, unreached };
 }
 
-/** `alias`.`col` reference for SELECT / ON / WHERE clauses. */
-function ref(alias: string, col: string): string {
-  return `${q(alias)}.${q(col)}`;
-}
-
 /** Render one ON condition for an edge given the alias of each side. */
-function onClause(edge: JoinEdge, fromAlias: string, toAlias: string): string {
+function onClause(
+  edge: JoinEdge,
+  fromAlias: string,
+  toAlias: string,
+  q: (s: string) => string,
+): string {
   // The edge is directed (from → to); align column to alias accordingly.
-  return `${ref(fromAlias, edge.fromCol)} = ${ref(toAlias, edge.toCol)}`;
+  return `${q(fromAlias)}.${q(edge.fromCol)} = ${q(toAlias)}.${q(edge.toCol)}`;
 }
 
 /**
@@ -191,7 +213,10 @@ export function buildSql(
   orders: OrderRow[],
   limit: number,
   fromUid: string,
+  engine?: SqlEngine,
 ): string {
+  const q = quoter(engine);
+  const ref = (alias: string, col: string): string => `${q(alias)}.${q(col)}`;
   const byUid = new Map(tables.map((t) => [t.uid, t]));
   const from = byUid.get(fromUid);
   if (!from) return '';
@@ -200,9 +225,19 @@ export function buildSql(
   const included = [from, ...order.map((o) => o.table)];
 
   // SELECT — split chosen columns into plain vs aggregated, then append
-  // expression columns. Track plain refs for the GROUP BY clause.
+  // expression columns. Track plain refs for the GROUP BY clause. Auto aliases
+  // are deduped with numeric suffixes (SUM(a.id) + SUM(b.id) would otherwise
+  // both claim `sum_id` and the statement fails).
   const selectParts: string[] = [];
   const groupBy: string[] = [];
+  const takenAliases = new Set<string>();
+  const uniqueSelectAlias = (base: string): string => {
+    let alias = base;
+    let i = 2;
+    while (takenAliases.has(alias)) alias = `${base}_${i++}`;
+    takenAliases.add(alias);
+    return alias;
+  };
   let hasAgg = false;
   for (const t of included) {
     for (const c of t.cols) {
@@ -210,7 +245,7 @@ export function buildSql(
       const agg = t.aggs.get(c) ?? '';
       if (agg) {
         hasAgg = true;
-        selectParts.push(`${aggCall(agg, colRef)} AS ${q(aggAlias(agg, c))}`);
+        selectParts.push(`${aggCall(agg, colRef)} AS ${q(uniqueSelectAlias(aggAlias(agg, c)))}`);
       } else {
         selectParts.push(colRef);
         groupBy.push(colRef);
@@ -226,20 +261,30 @@ export function buildSql(
     // query into aggregation mode, so the plain columns get a GROUP BY.
     if (isAggregateExpr(expr)) hasAgg = true;
     const alias = (e.alias.trim() || `expr_${i + 1}`).replace(/[^A-Za-z0-9_]/g, '_');
-    selectParts.push(`${expr} AS ${q(alias)}`);
+    selectParts.push(`${expr} AS ${q(uniqueSelectAlias(alias))}`);
   });
 
   const select = selectParts.length ? selectParts.join(', ') : '*';
-  let sql = `SELECT ${select}\nFROM ${qualified(from)} AS ${q(from.alias)}`;
+  let sql = `SELECT ${select}\nFROM ${qualified(from, q)} AS ${q(from.alias)}`;
 
   for (const { table, edge } of order) {
     const fromSide = byUid.get(edge.fromUid);
     const toSide = byUid.get(edge.toUid);
     if (!fromSide || !toSide) continue;
-    sql += `\n${edge.type} JOIN ${qualified(table)} AS ${q(table.alias)} ON ${onClause(
+    // The edge the user drew is directed, but the JOIN emits the newly-reached
+    // table on the RIGHT. When the edge points backwards (drawn from the new
+    // table into the already-joined side), LEFT/RIGHT must flip or the query
+    // keeps the wrong side's rows. INNER/FULL are symmetric.
+    let joinType: JoinType = edge.type;
+    if (edge.fromUid === table.uid) {
+      if (joinType === 'LEFT') joinType = 'RIGHT';
+      else if (joinType === 'RIGHT') joinType = 'LEFT';
+    }
+    sql += `\n${joinType} JOIN ${qualified(table, q)} AS ${q(table.alias)} ON ${onClause(
       edge,
       fromSide.alias,
       toSide.alias,
+      q,
     )}`;
   }
 
@@ -257,9 +302,17 @@ export function buildSql(
       const [alias, ...rest] = w.ref.split('.');
       const colRef = ref(alias, rest.join('.'));
       if (w.op === 'IS NULL' || w.op === 'IS NOT NULL') return `${colRef} ${w.op}`;
-      if (w.op === 'IN') return `${colRef} IN (${w.value})`;
-      const v = /^-?\d+(\.\d+)?$/.test(w.value) ? w.value : `'${w.value.replace(/'/g, "''")}'`;
-      return `${colRef} ${w.op} ${v}`;
+      if (w.op === 'IN') {
+        // Comma-separated user input → one escaped literal per element (raw
+        // pass-through was an injection hole and broke on quoted strings).
+        const items = w.value
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+          .map((s) => literal(s, engine));
+        return `${colRef} IN (${items.join(', ')})`;
+      }
+      return `${colRef} ${w.op} ${literal(w.value, engine)}`;
     });
     sql += `\nWHERE ${clauses.join('\n  AND ')}`;
   }

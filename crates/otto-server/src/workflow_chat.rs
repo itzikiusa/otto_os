@@ -653,8 +653,7 @@ impl WorkflowChatTriggerImpl {
             wf.clone(),
             run.id.clone(),
             input.clone(),
-            None,
-            false,
+            otto_core::workflows::RunScope::default(),
             None,
         );
 

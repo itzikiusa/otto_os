@@ -67,6 +67,24 @@ export interface Session {
   last_active_at: string;
   archived: boolean;
   meta: Record<string, unknown>;
+  /** Transient (list/get only): a PTY is live for this session right now.
+   *  Absent on payloads that return the bare domain row (archive, events). */
+  live?: boolean;
+  /** Transient (list/get only): attached `/ws/term` viewer count. */
+  viewers?: number;
+}
+
+/** Body for `POST /sessions/bulk`. */
+export interface BulkSessionsReq {
+  action: 'archive' | 'delete' | 'kill';
+  ids: Id[];
+}
+
+/** Per-id outcome of `POST /sessions/bulk`. */
+export interface BulkSessionResult {
+  id: Id;
+  ok: boolean;
+  error?: string;
 }
 
 export type ConnectionKind =
@@ -1036,6 +1054,26 @@ export type OttoEvent =
       status: string;
     }
   | {
+      /** A personal-agent run started/finished/errored — the Personal Agents
+       *  page re-fetches the agent's run history on a matching tick. */
+      type: 'personal_agent_run_updated';
+      workspace_id: Id;
+      agent_id: Id;
+      run_id: Id;
+      status: string;
+    }
+  | {
+      /** A message was appended to an agent room (agent via the room MCP tools,
+       *  or the user over REST). Ids only — clients re-fetch the room's messages
+       *  after their cursor. */
+      type: 'agent_room_message';
+      workspace_id: Id;
+      room_id: Id;
+      message_id: Id;
+      author_kind: string;
+      author_id: Id;
+    }
+  | {
       /** A canvas scene's source doc changed — pushed LIVE while an agent edits
        *  the backing file (per-poll) and once with the committed result. The
        *  Canvas page re-renders `doc` for the matching `scene_id`. */
@@ -1465,6 +1503,9 @@ export interface MetaResp {
   providers: string[];
   /** Configured default agent (provider name); null when unset. */
   default_provider: string | null;
+  /** Per-provider: whether the CLI accepts a model flag (its spec carries a
+   *  `model_args` template). Pickers hide the model control when false. */
+  model_flags: Record<string, boolean>;
 }
 
 export interface OnboardRootReq {
@@ -1622,6 +1663,9 @@ export interface CreateSessionReq {
   cwd?: string | null;
   connection_id?: Id | null;
   meta?: Record<string, unknown> | null;
+  /** Model to pin for THIS session only (copied into `meta.model`, expanded via
+   *  the provider's model-flag template). Absent/empty = provider default. */
+  model?: string | null;
 }
 
 export interface UpdateSessionReq {
@@ -4230,6 +4274,9 @@ export interface Workflow {
   graph: WorkflowGraph;
   /** Monotonic version counter, bumped on each graph/instructions edit/restore. */
   version?: number;
+  /** Restart policy: 'resume' (default — the startup reconciler re-enters a
+   *  run interrupted by a daemon restart) or 'fail' (legacy hard-fail). */
+  on_restart?: 'resume' | 'fail';
   created_by: Id;
   created_at: string;
   updated_at: string;
@@ -4284,6 +4331,9 @@ export interface WorkflowRun {
   workflow_version?: number | null;
   /** Proof pack assembled for this run, if any. */
   proof_pack_id?: string | null;
+  /** How many times the startup reconciler resumed this run after a daemon
+   *  restart (0/absent = never interrupted). */
+  resume_attempts?: number;
   /** Absolute path of the run's context directory (instruction brief,
    *  repos.json, per-step handoff files). Present on `GET /workflow-runs/{id}`
    *  when the directory exists on disk; absent on list endpoints. */
@@ -4781,6 +4831,17 @@ export interface DbAssistResp {
  *  summary (the panel downloads it as a `.md` file). */
 export interface DbAssistSummaryResp {
   markdown: string;
+}
+
+/** `POST /connections/{id}/db/close` — tear down a connection's live server-side
+ *  resources when its workbench tab closes: drops the SSH tunnel, closes pooled
+ *  engine connections, and cancels any in-flight queries. Idempotent — closing a
+ *  connection with nothing open is a no-op (`closed: false`). */
+export interface DbCloseResp {
+  /** True when a live pool/tunnel existed and was torn down. */
+  closed: boolean;
+  /** How many in-flight queries the server cancelled as part of the close. */
+  cancelled_queries?: number;
 }
 
 export type DbCompletionKind =
@@ -5522,7 +5583,8 @@ export type SaslMechanism = 'plain' | 'scram_sha_256' | 'scram_sha_512';
 export interface SshTunnelConfig {
   host: string;
   port?: number;
-  user: string;
+  /** Optional — the server falls back to ~/.ssh/config, then $USER. */
+  user?: string;
   identity_file?: string | null;
 }
 
@@ -6324,4 +6386,131 @@ export interface BrowserLoginReq {
 export interface BrowserLoginResp {
   logged_in: boolean;
   engine: string;
+}
+
+// ---------------------------------------------------------------------------
+// Personal Agents (mirror of otto_state::personal_agents — keep in lockstep)
+// ---------------------------------------------------------------------------
+
+/** A named persistent agent: persona (soul), pinned provider+model, 1..N
+ *  schedules, optional browser use, per-agent delivery + memory folder, and a
+ *  chat-anytime session. */
+export interface PersonalAgent {
+  id: Id;
+  workspace_id: Id;
+  name: string;
+  /** Emoji / short glyph shown on the card; '' = initial of the name. */
+  avatar: string;
+  /** The persona, materialized into the agent's cwd as its CLAUDE.md/AGENTS.md. */
+  soul_md: string;
+  provider: string;
+  /** '' = provider default model. */
+  model: string;
+  /** '' = `data_dir/personal/<agent-id>/` (resolved by the engine). */
+  cwd: string;
+  /** Reconcile the otto-browser Playwright MCP into every run/chat. */
+  browser: boolean;
+  /** `{type:'none'|'slack'|'telegram'|'email'|'webhook', chat_id?/to?/url?}` —
+   *  same shape as a scheduled task's destination. */
+  delivery: Record<string, unknown>;
+  enabled: boolean;
+  /** The agent's single interactive chat session (set by the chat-session route). */
+  chat_session_id?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One cadence+directive of a personal agent (1..N per agent, own cursor). */
+export interface PersonalAgentSchedule {
+  id: Id;
+  agent_id: Id;
+  /** Existing cadence format: `{cadence:'interval'|'daily'|'weekly'|'cron', …}`. */
+  schedule: Record<string, unknown>;
+  timezone: string;
+  /** The run's task prompt for this schedule. */
+  directive: string;
+  enabled: boolean;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One execution of a personal agent (mirrors ScheduledTaskRun + schedule_id). */
+export interface PersonalAgentRun {
+  id: Id;
+  agent_id: Id;
+  schedule_id?: Id | null;
+  workspace_id: Id;
+  status: 'running' | 'ok' | 'error';
+  trigger: 'schedule' | 'manual';
+  started_at: string;
+  finished_at?: string | null;
+  summary: string;
+  report_path?: string | null;
+  report_rel?: string | null;
+  delivered: boolean;
+  delivery_error?: string | null;
+  error?: string | null;
+  /** The visible agent session the run drove (Open it from the run row). */
+  session_id?: string | null;
+  report_hash?: string | null;
+  attempts: number;
+  /** Delivery was suppressed because the report didn't meaningfully change. */
+  skipped_delivery: boolean;
+  created_at: string;
+}
+
+/** An agent room — the ONLY agent-to-agent transport, always user-visible. */
+export interface AgentRoom {
+  id: Id;
+  workspace_id: Id;
+  name: string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Room + its member agent ids, as the list/get routes return it. */
+export interface AgentRoomWithMembers {
+  room: AgentRoom;
+  members: Id[];
+}
+
+/** One persisted room message. `author_id` is a personal-agent id for
+ *  `author_kind:'agent'`, a user id for `'user'`. */
+export interface AgentRoomMessage {
+  id: Id;
+  room_id: Id;
+  author_kind: 'agent' | 'user';
+  author_id: Id;
+  text: string;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Model catalog — per-provider model lists (`GET /providers/models`).
+// ---------------------------------------------------------------------------
+
+/** One model in a provider's catalog. `source` says where the id came from
+ *  (cli | docs | modelsdev). */
+export interface CatalogModelEntry {
+  id: string;
+  label?: string | null;
+  source?: string | null;
+}
+
+/** A provider's fetched model list. A failed refresh never wipes the last
+ *  good list — `stale` + `last_error` say so instead. */
+export interface ProviderModelCatalog {
+  models: CatalogModelEntry[];
+  fetched_at?: string | null;
+  stale?: boolean;
+  last_error?: string | null;
+}
+
+/** `GET /providers/models` / `POST /providers/models/refresh` response. */
+export interface ModelCatalogResp {
+  providers: Record<string, ProviderModelCatalog>;
 }

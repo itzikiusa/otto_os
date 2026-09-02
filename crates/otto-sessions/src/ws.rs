@@ -397,8 +397,13 @@ async fn serve_terminal<S: SessionsCtx>(
     // Auto-resume: if the session is an exited-but-resumable agent session,
     // spawn it now so the reconnect yields a live terminal instead of a black
     // screen.  Errors are logged and ignored — the WS stays open (no handle).
-    if let Err(e) = ctx.manager().ensure_live(&session_id).await {
-        tracing::warn!(session = %session_id, "ensure_live on ws attach: {e}");
+    // Read-only viewers (shares) never trigger a resume: watching must not
+    // spawn a process on the host. (`ensure_live` itself also refuses archived
+    // sessions, so an archived row can no longer come back live via attach.)
+    if can_input {
+        if let Err(e) = ctx.manager().ensure_live(&session_id).await {
+            tracing::warn!(session = %session_id, "ensure_live on ws attach: {e}");
+        }
     }
 
     // Re-read the current status (it may have changed from Exited → Running

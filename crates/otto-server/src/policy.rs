@@ -396,6 +396,15 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{id}/sessions" {
         return Require(Agents, if get { View } else { Edit });
     }
+    // Dynamic model catalog: reading the discovered model lists = Agents View
+    // (every session surface's model picker needs it); forcing a refresh (an
+    // outbound-fetch write) = Agents Edit.
+    if p == "/providers/models" {
+        return Require(Agents, View);
+    }
+    if p == "/providers/models/refresh" {
+        return Require(Agents, Edit);
+    }
     if p == "/sessions/{id}" {
         // GET inspect = View; PATCH/DELETE = Edit.
         return Require(Agents, if get { View } else { Edit });
@@ -865,6 +874,37 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(ScheduledTasks, Edit);
     }
 
+    // ---- Personal Agents (+ agent rooms) ---------------------------------
+    // Same RBAC posture as Scheduled Tasks (recurring unattended agents): the
+    // feature axis rides `ScheduledTasks`; every handler additionally does the
+    // workspace-role check (flat routes load the agent/run/room and
+    // `require_ws_role` on its workspace_id — IDOR guard). Message posting is a
+    // write (agents post through their session identity; users post directly).
+    if p == "/workspaces/{id}/personal-agents" || p == "/workspaces/{id}/agent-rooms" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
+    if p == "/personal-agents/{id}" || p == "/agent-rooms/{id}" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
+    if p == "/personal-agents/{id}/schedules" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
+    if p == "/personal-agents/schedules/{schedule_id}" {
+        return Require(ScheduledTasks, Edit);
+    }
+    if p == "/personal-agents/{id}/run" || p == "/personal-agents/{id}/chat-session" {
+        return Require(ScheduledTasks, Edit);
+    }
+    if p == "/personal-agents/{id}/runs" || p == "/personal-agents/runs/{run_id}/report" {
+        return Require(ScheduledTasks, View);
+    }
+    if p == "/agent-rooms/{id}/members" || p == "/agent-rooms/{id}/members/{agent_id}" {
+        return Require(ScheduledTasks, Edit);
+    }
+    if p == "/agent-rooms/{id}/messages" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
+
     // Run with Otto — the one-button source→PR-draft pipeline. List/launch are
     // workspace-scoped; the flat by-id routes load the run and re-check the role on
     // its workspace (the IDOR guard). (The webhook entry is Exempt above.)
@@ -1007,6 +1047,20 @@ mod tests {
         assert_eq!(
             pol(Method::GET, "/api/v1/db/mongosh"),
             Require(Database, View)
+        );
+    }
+
+    // ---- Dynamic model catalog ----------------------------------------------
+
+    #[test]
+    fn model_catalog_read_view_refresh_edit() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/providers/models"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/providers/models/refresh"),
+            Require(Agents, Edit)
         );
     }
 

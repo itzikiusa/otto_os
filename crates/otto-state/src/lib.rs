@@ -31,6 +31,7 @@ pub mod mcp_servers;
 pub mod memory;
 pub mod name_themes;
 pub mod notifications;
+pub mod personal_agents;
 pub mod plugins;
 pub mod product_attachments;
 pub mod product_chat;
@@ -39,6 +40,7 @@ pub mod product_mockup;
 pub mod product_refinement;
 pub mod finding_events;
 pub mod proof;
+pub mod provider_models;
 pub mod repo_rules;
 pub mod review_findings;
 pub mod review_proof_packs;
@@ -92,9 +94,15 @@ pub use goal_loops::{GoalLoopsRepo, NewGoalLoop};
 pub use grants::{capability_for_role, GrantsRepo};
 pub use name_themes::{CustomTheme, NameThemesRepo};
 pub use proof::{ProofBlob, ProofRepo, ProofSnapshotRow};
+pub use provider_models::{ProviderModel, ProviderModelsRepo};
 // NewRun/RunPatch/NewRunEvent are referenced via the `runs::` path downstream to
 // avoid colliding with swarm's `RunPatch`/`RunFilter` re-exports.
 pub use runs::RunsRepo;
+pub use personal_agents::{
+    AgentRoom, AgentRoomMessage, AgentRoomsRepo, AgentSchedulePatch, FinishAgentRun, NewAgentRun,
+    NewAgentSchedule, NewPersonalAgent, NewRoomMessage, PersonalAgent, PersonalAgentPatch,
+    PersonalAgentRun, PersonalAgentSchedule, PersonalAgentsRepo,
+};
 pub use scheduled_tasks::{
     FinishRun, NewRun as NewScheduledRun, NewScheduledTask, ScheduledTaskPatch, ScheduledTasksRepo,
 };

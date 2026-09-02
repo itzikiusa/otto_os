@@ -2252,6 +2252,7 @@ mod tests {
                 otto_core::api::CreateSessionReq {
                     kind: otto_core::domain::SessionKind::Connection,
                     provider: Some("shell".into()),
+                    model: None,
                     title: Some("browser-send-test".into()),
                     cwd: Some(session_dir.path().to_string_lossy().to_string()),
                     connection_id: None,
@@ -2329,6 +2330,7 @@ mod tests {
                 otto_core::api::CreateSessionReq {
                     kind: otto_core::domain::SessionKind::Connection,
                     provider: Some("shell".into()),
+                    model: None,
                     title: Some("browser-send-test-ws2".into()),
                     cwd: Some(session_dir.path().to_string_lossy().to_string()),
                     connection_id: None,

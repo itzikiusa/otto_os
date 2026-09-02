@@ -6,6 +6,7 @@
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import type { AcceptanceCriterion, GoalLoopDraft } from '../../lib/api/types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import ModelPicker from '../../lib/components/ModelPicker.svelte';
 
   let { oncancel, oncreated }: { oncancel: () => void; oncreated: (id: string) => void } = $props();
 
@@ -30,7 +31,6 @@
   const providers = $derived(
     agentProviders(),
   );
-  const MODEL_SUGGESTIONS = ['opus', 'sonnet', 'haiku'];
 
   async function define(): Promise<void> {
     const wsId = ws.currentId;
@@ -211,18 +211,11 @@
             {/each}
           </select>
         </label>
-        <label>Model
-          <input
-            class="in num prov"
-            bind:value={execModel}
-            list="gl-models"
-            placeholder="default"
-            title="Model for the executor agents — blank uses the provider default"
-          />
-          <datalist id="gl-models">
-            {#each MODEL_SUGGESTIONS as m (m)}<option value={m}></option>{/each}
-          </datalist>
-        </label>
+        <!-- Catalog-backed model control; hides itself when the provider has
+             no model-flag template. Blank = provider default. -->
+        <div class="model-ctl">
+          <ModelPicker provider={execProvider} value={execModel} onchange={(m) => (execModel = m)} />
+        </div>
       </div>
       <p class="muted small">
         Executors run sequentially on an isolated branch <code>goal-loop/&lt;id&gt;</code> — your working
@@ -344,6 +337,10 @@
   }
   .prov {
     width: 120px;
+  }
+  .model-ctl {
+    min-width: 180px;
+    max-width: 280px;
   }
   .repo-row {
     display: flex;

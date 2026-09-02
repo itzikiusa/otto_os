@@ -53,8 +53,12 @@ export function exportCsv(rows: Record<string, unknown>[], filename: string): vo
     }
   }
   const esc = (v: unknown): string => {
-    const s = v == null ? '' : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    let s = v == null ? '' : String(v);
+    // Formula-injection guard: a STRING cell starting with = + - @ executes when
+    // the CSV lands in a spreadsheet — neutralize with a leading apostrophe.
+    // Non-string values (a bare -5 is data, not a formula) are left alone.
+    if (typeof v === 'string' && /^[=+\-@]/.test(s)) s = `'${s}`;
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines = [cols.map(esc).join(',')];
   for (const r of rows) lines.push(cols.map((c) => esc(r[c])).join(','));

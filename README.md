@@ -7,7 +7,7 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-> Status: early / actively evolving (v0.1). macOS-only for now. Expect rough edges.
+> Status: early / actively evolving. macOS-only for now. Expect rough edges.
 
 > ⚠️ **Vibe coded.** This entire repository was built through conversational AI
 > ("vibe coding") — the code, tests, and documentation were largely AI-generated
@@ -36,10 +36,19 @@ bridges so an agent can work a ticket from a chat thread.
 - **Agent sessions** — run `claude`, `codex`, `agy`, a plain shell, or **any
   custom agent CLI you register** (custom providers are first-class on every
   agent surface, with per-surface provider/model pickers) in real PTY-backed
-  terminals you can watch, split, and type into. Sessions survive restarts
-  (resumable), idle-suspend to save memory, can be confined by an optional
-  macOS **Seatbelt sandbox** (`otto-sandbox`), and auto-trust their workspace
-  folder so they never stall on a permission prompt. By default agents
+  terminals you can watch, split, and type into. Every session can **pin its
+  own model** — chosen from a live per-provider **model catalog** (refreshed
+  hourly from the providers' docs/CLIs, no API keys needed) — and the pin
+  applies to that session only, so switching models never leaks into the next
+  session; custom providers declare their model flag via a template
+  (`--model {model}`, `-m {model}`, …). Sessions survive restarts
+  (resumable), idle-suspend to save memory, and closing a tab asks what you
+  mean — keep it running in the background or **archive** it (stops the
+  process, keeps the full history, resumable later) — with bulk close/archive,
+  reopen-closed-tab (⌘⇧T), and an opt-in auto-archive for long-idle sessions.
+  Sessions can be confined by an optional macOS **Seatbelt sandbox**
+  (`otto-sandbox`) and auto-trust their workspace folder so they never stall
+  on a permission prompt. By default agents
   launch in a **skip-permissions** mode (`--dangerously-skip-permissions`, or
   codex's `--dangerously-bypass-approvals-and-sandbox`) so tool use never blocks;
   a single **Settings → Providers → Permissions** checkbox opts out and falls back
@@ -55,8 +64,9 @@ bridges so an agent can work a ticket from a chat thread.
   straight from the graph (stash · pull · pop), **worktrees & submodules** as
   first-class tabs, auto-fetch, and a **Focus tab** (your PRs across repos +
   your Jira work). **Create PRs** (draft toggle, reviewers at creation) with an
-  **agent-drafted title + description** (it reads your branch diff), pushing
-  the branch automatically; PR review threads support resolve/reply/reopen.
+  **agent-drafted title + description** (it reads your branch diff — watch
+  the drafting agent live inside the PR dialog), pushing the branch
+  automatically; PR review threads support resolve/reply/reopen.
 - **AI code review** — fan out several review agents (one per provider/lens)
   over a PR *or* your local working tree. Each runs as an openable session with
   live progress, per-agent findings, retry, and a configurable grace period.
@@ -121,7 +131,9 @@ bridges so an agent can work a ticket from a chat thread.
   daemon's event bus, so every workstream shows up as a node with a live status —
   click one to jump straight to the work behind it.
 - **Connections** — open SSH / MySQL / PostgreSQL / Redis / MongoDB / ClickHouse
-  sessions side-by-side with agents.
+  sessions side-by-side with agents. The SSH username is optional everywhere
+  (terminals, DB tunnels, Kafka tunnels): leave it empty and ssh resolves it the
+  way your terminal does — `~/.ssh/config` `User`, else your local login name.
 - **Database Explorer** — a TablePlus-class browser for MySQL, PostgreSQL, Redis,
   MongoDB, and ClickHouse over plaintext, TLS/SSL, or SSH tunnels: a lazy schema tree,
   per-engine autocomplete, multiple query tabs, a virtualized results grid
@@ -129,11 +141,17 @@ bridges so an agent can work a ticket from a chat thread.
   visual JOIN builder, Superset-style dashboards/widgets for ClickHouse, and
   "examine this schema with an agent". Read queries get an automatic row `LIMIT`
   so a huge table is never fully scanned, any running query is cancelable, and
-  queries **survive navigation** (detached runs you can re-attach to). Also:
-  NL→SQL assistance, full **mongosh scripts** in the Mongo query tab, index
-  management (view/create/edit/drop from the Structure view), foreign-key
-  navigation, JSON cell/document editing, file import, and streaming CSV/format
-  export.
+  queries **survive navigation** (detached runs you can re-attach to). Closing a
+  connection tab **actually disconnects** — the daemon cancels its in-flight
+  queries, closes the pooled backend connections, and drops the SSH tunnel — and
+  a closed tab stays closed across restarts. The JOIN builder, table designer,
+  and index builder generate **engine-correct SQL** per dialect (Postgres
+  quoting/ALTERs, ClickHouse `ADD INDEX`/`MODIFY COLUMN`), the grid and schema
+  tree are fully keyboard-navigable, and dashboards/widgets are editable in
+  place with cancelable streaming export/import. Also: NL→SQL assistance, full
+  **mongosh scripts** in the Mongo query tab, index management
+  (view/create/edit/drop from the Structure view), foreign-key navigation, JSON
+  cell/document editing, file import, and streaming CSV/format export.
 - **Message Brokers (Kafka)** — connect Kafka clusters (incl. **AWS MSK over an
   SSH bastion**) to browse topics, **peek/produce** messages, inspect
   consumer-group lag, edit topic configs, and view a Schema Registry, with an
@@ -221,13 +239,28 @@ bridges so an agent can work a ticket from a chat thread.
   requests, DB queries, broker peeks, channel notifications, human approvals,
   swarm tasks, …) into runnable graphs, with per-workflow instructions +
   `prompt.md` context files, per-step retry / re-run-from-here, a stall
-  watchdog, and a concurrency cap with queueing. Manual, webhook, **chat**
+  watchdog, and a concurrency cap with queueing. Runs **survive daemon
+  restarts**: finished steps are adopted from the persisted per-node state and
+  the interrupted step resumes (side-effect steps are never blindly re-fired;
+  a per-workflow toggle opts out). Manual, webhook, **chat**
   (run a workflow from a bound Slack/Telegram channel), and event triggers fire
   today; scheduled triggers and a few Product/Review nodes are still being wired.
 - **Scheduled Tasks** — recurring agent jobs on an **interval / daily / weekly**
   schedule. Each run executes a prompt, writes a **Markdown report**, and
   **delivers** it to Slack, Telegram, email, or a webhook (secrets redacted) —
   with a run history and a set of `otto.*` MCP tools to manage jobs.
+- **Personal Agents** — grok-bot-style **preset personal agents**: each one is a
+  named persona (soul) with a **pinned provider + model**, its own working
+  folder and **memory notes**, one **or more** schedules (e.g. a daily recap at
+  09:00 *plus* a 15-minute "needs attention" sweep on the same agent), optional
+  **browser use** (Playwright MCP), and per-agent delivery to Slack/Telegram/
+  email/webhook. Every run is a fresh, watchable session; each agent also has a
+  **chat-anytime** session pinned to the same persona/model. Agents can talk to
+  each other in **rooms** (group chats) that are **always visible to you** —
+  every message is persisted, streamed live to the UI, and you can post into
+  any room; rooms are the only agent-to-agent transport, so nothing happens
+  behind your back. Ships with editable example agents (personal assistant,
+  daily recap, casino reviewers).
 - **Custom plugins** — extend Otto at runtime with out-of-process **sidecar
   plugins** (any language) you install/enable/remove **without rebuilding**: the
   daemon supervises each plugin process, reverse-proxies its HTTP/UI into an
@@ -382,7 +415,7 @@ UI via Vite, and drives every page across five device profiles (iPhone & iPad,
 fit the width and scroll, sections collapse, and core flows work (DB query →
 results, Git commit → diff, terminal output/input) — and runs the same checks in
 **light/dark** and **RTL**. The mobile shell is collapsible-section based and
-touch-readable; see `docs/superpowers/specs/` for the design notes.
+touch-readable.
 
 ## Configuration & secrets
 
@@ -426,12 +459,10 @@ Where everything lives:
 | [`docs/RELEASE.md`](./docs/RELEASE.md) | The macOS packaging flow — sidecar copy, Tauri build, codesigning, DMG. |
 | [`docs/plugins/AUTHORING.md`](./docs/plugins/AUTHORING.md) | How to write a custom sidecar plugin (the host API, manifest, examples). |
 | [`marketing/videos/`](./marketing/videos/) | The Remotion source for the in-app **Walkthroughs** (rendered to `ui/public/walkthroughs/`). |
-| [`docs/sessions-overview-review-2026-09-01.md`](./docs/sessions-overview-review-2026-09-01.md) | Full sessions-overview review (server + UI + workflow restart-resilience): must-fix/must-add findings with `file:line` citations, incl. the tab-close/archive flow, PR-draft session embedding, and the workflow resume-on-restart design. |
 
-Design notes, implementation plans, and research write-ups live under
-[`docs/design/`](./docs/design/), [`docs/plans/`](./docs/plans/), and
-[`docs/research/`](./docs/research/) — useful background, but the feature guides
-and `docs/contracts/` are the sources of truth.
+The architecture overview lives in the [Architecture](#architecture) section
+above and in [`AGENTS.md`](./AGENTS.md); the feature guides and
+`docs/contracts/` are the sources of truth.
 
 ## Contributing
 

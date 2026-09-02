@@ -407,4 +407,3 @@ feature works in `cargo run -p ottod` / `npm run dev` against this tree today.
   sharing model the plugin RBAC axis parallels.
 - **[`../contracts/api.md`](../contracts/api.md)** — authoritative API contract
   ("## Custom Plugins (runtime, out-of-process)" + the grants section).
-- Design note: `docs/superpowers/specs/2026-06-21-runtime-plugins-design.md`.

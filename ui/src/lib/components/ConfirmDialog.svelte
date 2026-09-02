@@ -33,16 +33,35 @@
         }}
       />
     {/if}
+    {#if confirmer.choices && confirmer.checkboxLabel}
+      <label class="cf-remember">
+        <input type="checkbox" bind:checked={confirmer.checkboxChecked} />
+        {confirmer.checkboxLabel}
+      </label>
+    {/if}
     {#snippet footer()}
       <button class="btn" onclick={() => confirmer.dismiss()}>Cancel</button>
-      <button
-        class="btn"
-        class:primary={!confirmer.danger}
-        class:danger={confirmer.danger}
-        onclick={onPrimary}
-      >
-        {confirmer.confirmLabel}
-      </button>
+      {#if confirmer.choices}
+        {#each confirmer.choices as opt (opt.value)}
+          <button
+            class="btn"
+            class:primary={opt.kind === 'primary'}
+            class:danger={opt.kind === 'danger'}
+            onclick={() => confirmer.pick(opt.value)}
+          >
+            {opt.label}
+          </button>
+        {/each}
+      {:else}
+        <button
+          class="btn"
+          class:primary={!confirmer.danger}
+          class:danger={confirmer.danger}
+          onclick={onPrimary}
+        >
+          {confirmer.confirmLabel}
+        </button>
+      {/if}
     {/snippet}
   </Modal>
 {/if}
@@ -58,6 +77,16 @@
   .cf-input {
     width: 100%;
     margin-top: 4px;
+  }
+  .cf-remember {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
   }
   .btn.danger {
     background: var(--danger, #e5534b);

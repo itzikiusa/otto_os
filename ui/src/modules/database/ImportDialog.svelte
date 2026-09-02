@@ -11,8 +11,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { dbImport } from '../../lib/api/client';
-  import type { ImportFormat, ImportResult } from '../../lib/api/types';
+  import { postNdjsonStream } from '../../lib/api/client';
+  import type { ImportFormat, ImportReq, ImportResult } from '../../lib/api/types';
 
   // Format select — the four import formats (the mirror of the export formats).
   const IMPORT_FORMATS: { value: ImportFormat; label: string }[] = [
@@ -41,8 +41,27 @@
   let importing = $state(false);
   // Streamed result: the final {done…}/{error} line, surfaced in the live region.
   let progress = $state<ImportResult | null>(null);
+  // In-flight stream controller — the footer Cancel aborts it while importing.
+  let importAbort: AbortController | null = null;
 
   const connName = $derived(database.selectedConn?.name ?? 'this connection');
+
+  /** `dbImport` with a cancel signal: stream the NDJSON lines into `progress`
+   *  and resolve with the final {done…}/{error} line (mirrors api/client). */
+  async function importStream(id: string, body: ImportReq): Promise<ImportResult> {
+    importAbort = new AbortController();
+    let last: ImportResult = {};
+    await postNdjsonStream(
+      `/connections/${id}/db/import`,
+      body,
+      (msg) => {
+        last = msg as ImportResult;
+        progress = last;
+      },
+      importAbort.signal,
+    );
+    return last;
+  }
 
   function close(): void {
     if (importing) return;
@@ -79,11 +98,7 @@
       // First pass: no confirm. A guarded (Prod/read-only) connection comes back
       // with a final {error} line starting `write_blocked:` — we then run the
       // SAME typed-confirmation flow the query path uses and retry with confirm.
-      let res = await dbImport(
-        id,
-        { local_path: path, format, table: tbl, batch_size: size },
-        (line) => (progress = line),
-      );
+      let res = await importStream(id, { local_path: path, format, table: tbl, batch_size: size });
 
       if (typeof res.error === 'string' && res.error.startsWith('write_blocked:')) {
         const ok = await confirmGuardedWrite();
@@ -93,11 +108,13 @@
           return;
         }
         progress = null;
-        res = await dbImport(
-          id,
-          { local_path: path, format, table: tbl, batch_size: size, confirm_write: true },
-          (line) => (progress = line),
-        );
+        res = await importStream(id, {
+          local_path: path,
+          format,
+          table: tbl,
+          batch_size: size,
+          confirm_write: true,
+        });
       }
 
       if (typeof res.error === 'string') {
@@ -123,9 +140,17 @@
         if (database.selectedObjectPath) void database.refreshObject();
       }
     } catch (e) {
+      // A user-initiated cancel isn't a failure. The server-side stream stops
+      // when the connection drops; batches already committed stay in the table.
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        toasts.info('Import cancelled', 'Batches already written stay in the table.');
+        progress = null;
+        return;
+      }
       toasts.error('Import failed', e instanceof Error ? e.message : String(e));
     } finally {
       importing = false;
+      importAbort = null;
     }
   }
 
@@ -221,7 +246,9 @@
   </div>
 
   {#snippet footer()}
-    <button class="btn" onclick={close} disabled={importing}>Cancel</button>
+    <button class="btn" onclick={() => (importing ? importAbort?.abort() : close())}>
+      {importing ? 'Cancel import' : 'Cancel'}
+    </button>
     <button
       class="btn primary"
       onclick={() => void runImport()}

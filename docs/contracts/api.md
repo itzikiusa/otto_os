@@ -38,12 +38,12 @@ connection library unusable for every non-root account.)
 | 14 | DELETE /api/v1/workspaces/{id} | ws admin | — | 204 (archives) |
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` |
-| 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer | — | `Session[]` |
+| 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=` (all narrowing; `source=none` = sessions with no `meta.source`) | `Session[]` — each row carries transient `live: bool` + `viewers: number` |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
-| 19 | GET /api/v1/sessions/{id} | ws viewer | — | Session |
-| 20 | PATCH /api/v1/sessions/{id} | ws editor | UpdateSessionReq | Session |
-| 21 | DELETE /api/v1/sessions/{id} | ws editor | — | 204 (kills PTY, removes row) |
-| 22 | POST /api/v1/sessions/{id}/restart | ws editor | — | Session (respawn; uses resume args when provider_session_id set) |
+| 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers`) |
+| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session |
+| 21 | DELETE /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | — | 204 (kills PTY, removes row) |
+| 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
 | 23 | POST /api/v1/workspaces/{id}/orchestrate | ws editor | OrchestrateReq | OrchestrateResp |
 | 24 | POST /api/v1/workspaces/{id}/orchestrate/execute | ws editor | ExecutePlanReq | `{"results":[{"action_index":0,"ok":true,"detail":"...","session_ids":["..."]}]}` |
 | 25 | GET /api/v1/workspaces/{id}/connections | ws viewer | — | `Connection[]` (includes global ones; secret never present) |
@@ -451,13 +451,15 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /sessions/{id}/archive | ws editor | — | 204 (archive a channel/agent session) |
-| POST /sessions/{id}/unarchive | ws editor | — | 204 (restore an archived session) |
-| POST /sessions/{id}/input | ws editor | `SendInputReq{text, submit?}` — writes a keystroke/paste into the PTY (`submit` omitted/true appends a newline) | 200 |
-| POST /sessions/{id}/handover | ws editor | — | starts a handover; progress via `SessionMetaUpdated` |
-| POST /sessions/{id}/handover/brief | ws editor | — | generates a handover brief for the session |
+| POST /sessions/{id}/archive | session owner-or-admin | — | Session (kills the PTY, keeps the row + history; hidden in the Archived section, reversible via unarchive) |
+| POST /sessions/{id}/unarchive | session owner-or-admin | — | Session (restore an archived session; it becomes `reconnectable`) |
+| POST /sessions/{id}/kill | session owner-or-admin | — | Session (kill the PTY but KEEP the row un-archived; resumable providers can be reopened) |
+| POST /sessions/bulk | per-id session owner-or-admin | `BulkSessionsReq {action: "archive"\|"delete"\|"kill", ids}` (≤200 ids) | `BulkSessionResult[]` — non-owned/missing ids come back `ok:false` instead of failing the batch |
+| POST /sessions/{id}/input | ws editor + **session owner-or-admin** | `SendInputReq{text, submit?}` — writes a keystroke/paste into the PTY (`submit` omitted/true appends a newline) | 200 |
+| POST /sessions/{id}/handover | ws editor + **owner-or-admin of the source (and of an existing target)** | — | starts a handover; progress via `SessionMetaUpdated` |
+| POST /sessions/{id}/handover/brief | ws editor + **session owner-or-admin** (the brief digests the session's transcript) | — | generates a handover brief for the session |
 | POST /sessions/{session_id}/attach-product | ws editor | `{story_id}` | attaches a product story to the session |
-| POST /app/kill-sessions | member | — | terminate every live PTY (desktop quit hook) |
+| POST /app/kill-sessions | **root only** | — | terminate every live PTY (desktop quit hook); non-root receives 403 |
 
 ## Connection sections (sidebar grouping)
 
@@ -600,6 +602,8 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count |
 | POST /connections/{id}/db/query-plan | ws **viewer** | `{statement, node?}` | `DbQueryPlan` — a normalized query plan from the engine's native EXPLAIN (MySQL `EXPLAIN FORMAT=JSON`, Postgres `EXPLAIN (FORMAT JSON)`, ClickHouse `EXPLAIN json=1` w/ plain-text fallback, Mongo `explain` queryPlanner). The statement is **EXPLAIN-wrapped, never executed raw** — read-only by construction, hence `viewer`. Redis → 400 (no plan surface). |
 | POST /connections/{id}/db/cancel | ws editor | `{query_id}` | 204 — cancel an in-flight query engine-side |
+| POST /connections/{id}/db/close | ws viewer | — | `{"closed": true}` — tear down all server-side state for the connection: cancels its in-flight queries (engine-native, best-effort), evicts and closes the driver's cached connection pool, and drops the cached SSH tunnel (killing the ssh child). Idempotent — closing an already-closed/never-opened connection succeeds. Fired by the UI when a connection tab is closed. |
+| POST /connections/{id}/db/mcp-query | ws viewer | `{statement, max_rows?, node?}` | Read-only DB query for agents over MCP: writes/DDL are refused server-side **before any driver call** (403, `mcp_read_only:` prefix) independent of the write-guard; rows hard-capped at 200; PII masking forced on. Response: QueryResult. |
 | POST /connections/{id}/db/query-status | ws editor | `{query_id}` | `QueryStatus` — re-attach probe for a run whose HTTP wait was lost (queries with a `query_id` execute detached from their request): `{status:"running"}` while it executes, `{status:"done", result?/error?}` while the parked outcome is retained (TTL 10m, capped), `{status:"unknown"}` otherwise. Scoped to the connection — never serves another connection's outcome. |
 | POST /connections/{id}/db/completion | ws viewer | `{prefix, suffix?, database?, node?}` | Context-aware completion items (`{items:[DbCompletionItem]}`). The daemon parses `prefix` (text before the cursor) + `suffix` (text after, to resolve a `FROM` that follows the cursor) to decide intent — tables after `FROM`/`JOIN`, columns after `WHERE`/`AND`/`alias.`, Mongo collections/methods/field-keys (incl. embedded `x.a`). Each item carries a `score` (→ CodeMirror `boost`) so **index columns/fields rank first**, then the rest of the schema. Backed by a per-connection schema snapshot **cached until refresh** (see below; ~5-min TTL safety net). |
 | POST /connections/{id}/db/completion/refresh | ws viewer | `{}` | 204 — drop the connection's cached completion snapshot so the next completion re-introspects. Wired to the UI "Refresh schema" action. No-op for engines without a snapshot cache (Redis). |
@@ -784,14 +788,14 @@ Saved queries/dashboards/widgets are workspace-scoped (list/create under
 | DELETE /db/saved-queries/{qid} | ws editor **+ owner/ws-Admin/root** | — | 204 |
 | GET /workspaces/{wid}/db/dashboards | ws viewer | — | `Dashboard[]` |
 | POST /workspaces/{wid}/db/dashboards | ws editor | CreateDashboardReq | Dashboard |
-| GET /db/dashboards/{id} | ws viewer | — | Dashboard |
-| PATCH /db/dashboards/{id} | ws editor | UpdateDashboardReq | Dashboard |
-| DELETE /db/dashboards/{id} | ws editor | — | 204 |
+| GET /db/dashboards/{id} | ws viewer + owner/ws-Admin/root | — | Dashboard |
+| PATCH /db/dashboards/{id} | ws editor + owner/ws-Admin/root | UpdateDashboardReq | Dashboard |
+| DELETE /db/dashboards/{id} | ws editor + owner/ws-Admin/root | — | 204 |
 | GET /workspaces/{wid}/db/widgets | ws viewer | — | `Widget[]` |
 | POST /workspaces/{wid}/db/widgets | ws editor | CreateWidgetReq | Widget |
-| PATCH /db/widgets/{id} | ws editor | UpdateWidgetReq | Widget |
-| DELETE /db/widgets/{id} | ws editor | — | 204 |
-| POST /db/widgets/{id}/run | ws editor | — | widget query result |
+| PATCH /db/widgets/{id} | ws editor + owner/ws-Admin/root | UpdateWidgetReq | Widget |
+| DELETE /db/widgets/{id} | ws editor + owner/ws-Admin/root | — | 204 |
+| POST /db/widgets/{id}/run | ws editor (on the widget's CONNECTION) + owner/ws-Admin/root | — | widget query result |
 
 `UpdateSavedQueryReq` = `{ name?, statement? }` — a partial update; an absent
 field is left unchanged (so a rename and a statement-edit can be sent
@@ -871,8 +875,7 @@ by the stable finding `id`; each validates the status transition, appends a
 updated `Finding`. Agent-backed actions (fix / verify / regression-test) also
 return a `session_id` for the spawned, openable agent session. Findings reads are
 `Git` **viewer**; writes are `Git` **editor**; repo-rule routes are `Context`
-viewer/editor. See the design at
-`docs/superpowers/specs/2026-06-26-review-findings-workflow-design.md`.
+viewer/editor.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -1433,12 +1436,37 @@ sessions. Every trigger path (manual run, retry-node, webhook, schedule/event
 trigger, chat, scheduled task) shares the gate. A run beyond the cap stays
 `pending` (the UI shows it as *queued*) and starts FIFO as slots free; its
 `workflow_runs` row **is** the queue entry, so the queue is persistent: on
-daemon restart, queued runs re-enqueue in creation order while runs that were
-*executing* are failed as interrupted (as before). `POST
-/workflow-runs/{id}/cancel` on a queued run is honored — it never starts. One
-exception on restart: a **retry-node** re-entry that was still queued fails
-instead of resuming (its retry scope lives only in the engine's memory;
-re-running blind would replay finished steps' side effects).
+daemon restart, queued runs re-enqueue in creation order. `POST
+/workflow-runs/{id}/cancel` on a queued run is honored — it never starts.
+
+**Restart resume (0108).** A daemon restart no longer hard-fails executing
+runs. On startup a reconciler classifies every run left in flight
+(`running`, or `pending` with node progress) per its workflow's
+`on_restart` policy (`'resume'` default | `'fail'` legacy hard-fail;
+settable via `UpdateWorkflowReq.on_restart`, snapshot/restore round-trips
+it): finished steps are **adopted** from the persisted `nodes_json`, and the
+run re-enters at the interrupted step — the same in-place re-entry as
+retry-node, reusing the run's context dir + `otto-wf/<run_id>` worktrees
+(the startup worktree sweep runs after reconciliation, so resumable runs
+keep theirs). Safety rules: a step with external side effects (`git_pr`,
+`channel_notify`, `swarm_task`, `product_publish`, `api_run`,
+`http_request`, `self_improve`, product writes) caught mid-flight is
+**never replayed** — it is marked `error` ("outcome unknown") and the run
+fails with a pointer at retry-node; only idempotent/agent kinds auto-resume
+(an interrupted `agent_prompt` whose handoff step file proves it finished
+is adopted as `success` instead of re-running). A run paused at
+`human_approval` resumes AT the approval node and re-parks (the operator
+decision is re-awaited). Automatic resumes are capped at **2** per run
+(`resume_attempts` on `WorkflowRun`; a resumed run shows "resumed after a
+daemon restart (attempt N)" in the run view), after which the run fails
+like before. A scoped re-entry (retry-node, or the reconciler's own resume)
+persists its scope on the row (`resume_scope_json`), so a restart
+mid-retry resumes with the same scope instead of failing. The run's 10h
+wall-clock budget is anchored to the row's `started_at` (not process
+uptime), so crash-loop resumes cannot extend it. Backed by migration
+**0108** (`workflow_runs.resume_scope_json` / `interrupted_at` /
+`resume_attempts`, `workflows.on_restart` + the same on
+`workflow_versions`).
 
 **Running list.** `GET /workspaces/{wid}/workflow-runs/active` returns
 `ActiveWorkflowRun = {run_id, workflow_id, workspace_id, workflow_name, status,
@@ -1684,8 +1712,7 @@ user may call it.
 ## Custom Plugins (runtime, out-of-process)
 
 Plugins are external sidecar processes installed at runtime under `~/otto-plugins`
-(no app rebuild). Otto supervises them and reverse-proxies their HTTP. Design:
-`docs/superpowers/specs/2026-06-21-runtime-plugins-design.md`; authoring:
+(no app rebuild). Otto supervises them and reverse-proxies their HTTP. Authoring:
 `docs/plugins/AUTHORING.md`.
 
 | Method & path | Auth | Notes |
@@ -2707,6 +2734,65 @@ engine.
 | `otto.set_scheduled_task_enabled` | yes (DANGEROUS) | off | #139 |
 | `otto.run_scheduled_task` | yes (DANGEROUS) | off | #141 |
 | `otto.delete_scheduled_task` | yes (DANGEROUS) | off | #140 |
+
+## Personal Agents
+
+Grok-bot-style preset agents: a named persona (soul) with a **pinned provider +
+model** (per-agent, never leaking into other sessions), 1..N schedules (each
+with its own cadence + directive + cursor), optional browser use
+(`otto-browser` MCP), per-agent channel delivery, per-agent memory folder, and a
+chat-anytime session. Feature guard: `scheduled_tasks` (View for GET, Edit for
+writes) + the workspace-role axis on the agent's workspace.
+
+| Method & path | Role | Body | Response |
+|---|---|---|---|
+| GET /api/v1/workspaces/{id}/personal-agents | scheduled_tasks view + ws viewer | — | `PersonalAgent[]` (first list seeds 4 disabled example agents) |
+| POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?}` | PersonalAgent |
+| GET /api/v1/personal-agents/{id} | scheduled_tasks view + ws viewer | — | PersonalAgent |
+| PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
+| DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
+| GET /api/v1/personal-agents/{id}/schedules | scheduled_tasks view + ws viewer | — | `PersonalAgentSchedule[]` |
+| POST /api/v1/personal-agents/{id}/schedules | scheduled_tasks edit + ws editor | `{schedule, timezone?, directive?, enabled?}` (cadence format identical to scheduled tasks) | PersonalAgentSchedule |
+| PATCH /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | `{schedule?, timezone?, directive?, enabled?}` | PersonalAgentSchedule |
+| DELETE /api/v1/personal-agents/schedules/{schedule_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
+| POST /api/v1/personal-agents/{id}/run | scheduled_tasks edit + ws editor | `{schedule_id?}` (default: first enabled schedule) | PersonalAgentRun (manual fire; poll runs) |
+| GET /api/v1/personal-agents/{id}/runs | scheduled_tasks view + ws viewer | — | `PersonalAgentRun[]` |
+| GET /api/v1/personal-agents/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report; served by run id, path-canonicalized) |
+| POST /api/v1/personal-agents/{id}/chat-session | scheduled_tasks edit + ws editor | — | `{session_id}` — returns (creating if absent) the agent's single interactive chat session, pinned to its provider/model/persona cwd |
+
+### Agent rooms (inter-agent messaging — always user-visible)
+
+Rooms are the ONLY agent-to-agent transport: every message is persisted,
+broadcast over WS (`AgentRoomMessage`), and visible to the user, who can post
+into any room. An agent post is a room-membership-checked post carrying the
+`session_id` of a session whose `meta.personal_agent` maps it to the agent
+(this is what the `otto.room_post`/`otto.room_read` MCP tools send); a post
+without `session_id` is a user post. Posts are capped at 16 KB.
+
+| Method & path | Role | Body | Response |
+|---|---|---|---|
+| GET /api/v1/workspaces/{id}/agent-rooms | scheduled_tasks view + ws viewer | — | `AgentRoom[]` (with members) |
+| POST /api/v1/workspaces/{id}/agent-rooms | scheduled_tasks edit + ws editor | `{name}` | AgentRoom |
+| GET /api/v1/agent-rooms/{id} | scheduled_tasks view + ws viewer | — | AgentRoom |
+| PATCH /api/v1/agent-rooms/{id} | scheduled_tasks edit + ws editor | `{name}` | AgentRoom |
+| DELETE /api/v1/agent-rooms/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
+| POST /api/v1/agent-rooms/{id}/members | scheduled_tasks edit + ws editor | `{agent_id}` | `{ok:true}` |
+| DELETE /api/v1/agent-rooms/{id}/members/{agent_id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |
+| GET /api/v1/agent-rooms/{id}/messages | scheduled_tasks view + ws viewer | query `after?`, `limit?`, `session_id?` | `AgentRoomMessage[]` (agent reads via `session_id` are membership-checked) |
+| POST /api/v1/agent-rooms/{id}/messages | scheduled_tasks edit + ws editor | `{text, session_id?}` | AgentRoomMessage |
+
+## Model catalog
+
+Per-provider model lists, refreshed hourly (and on demand) with **no API
+keys**: CLI probe (e.g. `agy models`) → docs-page scrape (Anthropic / ChatGPT /
+Gemini model docs, netguard-checked, defensive token extraction) → models.dev
+fallback. A failed refresh NEVER wipes the last good list. Feeds the shared
+ModelPicker on every surface that takes a model.
+
+| Method & path | Role | Body | Response |
+|---|---|---|---|
+| GET /api/v1/providers/models | any authenticated | — | `{providers: {<slug>: {models:[{id,label,source}], fetched_at, stale, last_error?}}}` |
+| POST /api/v1/providers/models/refresh | editor | `{provider?}` (absent = all) | same payload, post-refresh |
 
 ## Run with Otto
 

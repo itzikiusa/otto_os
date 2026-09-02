@@ -315,6 +315,18 @@ export function defaultVarSpec(value = ''): VarSpec {
 }
 
 /**
+ * Escape the inner text of a single-quoted SQL string literal. `'` is doubled
+ * always; `\` is doubled too when the dialect treats it as an escape character
+ * (MySQL in its default modes, ClickHouse — matching `codeMask` above). Without
+ * the backslash pass a value ending in `\` swallows the closing quote and the
+ * emitted statement corrupts (or worse, splices the rest of the value as SQL).
+ */
+export function escapeSqlString(s: string, backslashEscapes = true): string {
+  const t = backslashEscapes ? s.replace(/\\/g, '\\\\') : s;
+  return t.replace(/'/g, "''");
+}
+
+/**
  * Render a variable as a literal for substitution:
  * - `number` → the value verbatim (unquoted),
  * - `raw`    → exactly as typed (no quoting/escaping — for expressions/lists),
@@ -327,7 +339,7 @@ export function renderVar(spec: VarSpec, mode: SplitMode = 'sql'): string {
   const quote = mode === 'line' ? '"' : "'";
   let inner = spec.value;
   if (spec.escape) {
-    inner = mode === 'line' ? inner.replace(/(["\\])/g, '\\$1') : inner.replace(/'/g, "''");
+    inner = mode === 'line' ? inner.replace(/(["\\])/g, '\\$1') : escapeSqlString(inner);
   }
   return `${quote}${inner}${quote}`;
 }

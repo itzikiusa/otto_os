@@ -7,6 +7,7 @@
   import type { SkillEvalConfig, SkillEvalValidationCfg } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import ModelPicker from '../../lib/components/ModelPicker.svelte';
 
   const providerOpts = $derived(agentProviders());
 
@@ -98,6 +99,13 @@
         <select id="sv-imp" class="input" bind:value={cfg.improver.provider}>
           {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
         </select>
+        <!-- Catalog-backed; hides itself when the provider has no model-flag
+             template. Blank = provider default. -->
+        <ModelPicker
+          provider={cfg.improver.provider || defaultAgentProvider()}
+          value={cfg.improver.model ?? ''}
+          onchange={(m) => { if (cfg) cfg.improver.model = m; }}
+        />
       </div>
     </section>
 

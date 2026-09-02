@@ -30,6 +30,60 @@
     return ws.sessions.find((s) => s.id === id)?.title ?? '…';
   }
 
+  /** Rich hover tooltip: title · provider · cwd (+ suspended note). */
+  function tabTooltip(id: string): string {
+    if (id === DB_PANE_ID) return 'Database Explorer';
+    const s = ws.sessions.find((x) => x.id === id);
+    if (!s) return 'Double-click to rename';
+    const parts = [s.title, s.provider, s.cwd].filter((p) => p !== '' && p != null);
+    const base = parts.join(' · ');
+    return isResumable(id) ? `${base} — ${SUSPENDED_TIP}` : `${base} — double-click to rename`;
+  }
+
+  // ── Keep the active tab visible + surface overflow ────────────────────────
+  // The strip is overflow-x:auto with the scrollbar hidden, so without these a
+  // ⌃Tab / ⌘] activation can land on a tab scrolled fully out of view with no
+  // visual feedback at all.
+  let tabsEl: HTMLElement | null = $state(null);
+  let overflowing = $state(false);
+
+  function measureOverflow(): void {
+    overflowing = !!tabsEl && tabsEl.scrollWidth > tabsEl.clientWidth + 1;
+  }
+
+  $effect(() => {
+    void ws.openTabs.length; // re-measure when tabs come and go
+    measureOverflow();
+  });
+
+  $effect(() => {
+    const id = ws.activeSessionId;
+    if (!id || !tabsEl) return;
+    tabsEl
+      .querySelector(`[data-tab-id="${CSS.escape(id)}"]`)
+      ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  });
+
+  // Arrow-key navigation across the tablist (ArrowLeft/Right, Home, End).
+  function onTabKeydown(e: KeyboardEvent, id: string): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      activate(id);
+      return;
+    }
+    const idx = ws.openTabs.indexOf(id);
+    let target: string | undefined;
+    if (e.key === 'ArrowRight') target = ws.openTabs[idx + 1];
+    else if (e.key === 'ArrowLeft') target = ws.openTabs[idx - 1];
+    else if (e.key === 'Home') target = ws.openTabs[0];
+    else if (e.key === 'End') target = ws.openTabs[ws.openTabs.length - 1];
+    else return;
+    if (!target) return;
+    e.preventDefault();
+    activate(target);
+    (tabsEl?.querySelector(`[data-tab-id="${CSS.escape(target)}"]`) as HTMLElement | null)?.focus();
+  }
+
   // A tab is "suspended / resumable" — parked to save memory, but auto-resumes
   // on open (`--resume`): status `reconnectable`, or an exited agent session
   // that still has a provider_session_id. A plain exited shell is "ended".
@@ -109,20 +163,22 @@
   data-tauri-drag-region
   onmousedown={startWindowDrag}
 >
-  <div class="tabs">
-    {#each ws.openTabs as id (id)}
+  <div class="tabs" class:overflowing bind:this={tabsEl} onscroll={measureOverflow} role="tablist" aria-label="Session tabs">
+    {#each ws.openTabs as id, tabIdx (id)}
       <div
         class="tab"
         class:active={ws.activeSessionId === id}
         class:resumable={isResumable(id)}
         class:needs-you={needsYou(id)}
+        class:unread={ws.unread[id] === true}
         class:drag-over={dragOverId === id}
+        data-tab-id={id}
         draggable={id !== DB_PANE_ID}
         role="tab"
         tabindex="0"
         aria-selected={ws.activeSessionId === id}
         onclick={() => activate(id)}
-        onkeydown={(e) => e.key === 'Enter' && activate(id)}
+        onkeydown={(e) => onTabKeydown(e, id)}
         ondblclick={() => startRename(id)}
         ondragstart={(e) => onDragStart(e, id)}
         ondragover={(e) => onDragOver(e, id)}
@@ -132,12 +188,36 @@
         onauxclick={(e) => {
           if (e.button === 1) {
             e.preventDefault();
-            ws.closeTab(id);
+            void ws.requestCloseTab(id);
           }
         }}
         oncontextmenu={(e) => ctxMenu.show(e, [
           { label: 'Rename', icon: 'edit', action: () => startRename(id) },
-          { label: 'Close tab', icon: 'x', action: () => ws.closeTab(id) },
+          { label: 'Close tab', icon: 'x', action: () => void ws.requestCloseTab(id) },
+          ...(ws.openTabs.length > 1
+            ? [{
+                label: 'Close others',
+                icon: 'x',
+                action: () => void ws.requestCloseTabs(ws.openTabs.filter((t) => t !== id)),
+              }]
+            : []),
+          ...(tabIdx < ws.openTabs.length - 1
+            ? [{
+                label: 'Close to the right',
+                icon: 'x',
+                action: () => void ws.requestCloseTabs(ws.openTabs.slice(tabIdx + 1)),
+              }]
+            : []),
+          ...(ws.openTabs.length > 1
+            ? [{
+                label: 'Close all tabs',
+                icon: 'x',
+                action: () => void ws.requestCloseTabs([...ws.openTabs]),
+              }]
+            : []),
+          ...(ws.recentlyClosed.length > 0
+            ? [{ label: 'Reopen closed tab', icon: 'refresh', action: () => ws.reopenClosedTab() }]
+            : []),
           { separator: true },
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
           ...(id !== DB_PANE_ID
@@ -179,21 +259,20 @@
             }}
           />
         {:else}
-          <span
-            class="tab-title"
-            title={isResumable(id) ? SUSPENDED_TIP : 'Double-click to rename'}
-          >{title(id)}</span>
+          <span class="tab-title" title={tabTooltip(id)}>{title(id)}</span>
           {#if needsYou(id)}
             <span class="tab-needs-you" title="Waiting on you" aria-label="Needs you">
               <Icon name="bell" size={9} />
             </span>
+          {:else if ws.unread[id] === true}
+            <span class="tab-unread" title="New activity since you last looked" aria-label="Unread activity"></span>
           {/if}
         {/if}
         <button
           class="tab-close"
           onclick={(e) => {
             e.stopPropagation();
-            ws.closeTab(id);
+            void ws.requestCloseTab(id);
           }}
           aria-label="Close tab"
           title="Close (⌘W)"
@@ -269,6 +348,24 @@
   }
   .tabs::-webkit-scrollbar {
     display: none;
+  }
+  /* Overflow affordance: when the strip scrolls, fade both ends so it's clear
+     more tabs exist off-screen (the scrollbar itself is hidden). */
+  .tabs.overflowing {
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      #000 14px,
+      #000 calc(100% - 14px),
+      transparent 100%
+    );
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      #000 14px,
+      #000 calc(100% - 14px),
+      transparent 100%
+    );
   }
   .tab {
     display: flex;
@@ -347,8 +444,29 @@
     transition: opacity 120ms ease-out, background 120ms ease-out;
   }
   .tab:hover .tab-close,
-  .tab.active .tab-close {
+  .tab.active .tab-close,
+  .tab:focus-visible .tab-close,
+  .tab-close:focus-visible {
     opacity: 1;
+  }
+  .tab:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .tab-close:focus-visible {
+    outline: 1px solid var(--accent);
+  }
+  /* Unread activity: a quiet accent dot on background tabs whose session
+     finished working (or needs input) since the user last looked. */
+  .tab-unread {
+    flex-shrink: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 99px;
+    background: var(--accent);
+  }
+  .tab.unread:not(.active) {
+    color: var(--text);
   }
   .tab-close:hover {
     background: color-mix(in srgb, var(--text-dim) 22%, transparent);

@@ -39,6 +39,7 @@ const LS = {
   termFontFamily: 'otto_term_font_family',
   rtlBidi: 'otto_term_rtl_bidi',
   termCopyOnSelect: 'otto_term_copy_on_select',
+  closeTabPref: 'otto_close_tab_pref',
   termToolbar: 'otto_term_toolbar',
   dbDock: 'otto_db_dock',
   dbDockWidth: 'otto_db_dock_width',
@@ -272,6 +273,16 @@ class UiStore {
   termCopyOnSelect = $state(lsGet(LS.termCopyOnSelect) === '1');
   /** Show the desktop terminal toolbar (font zoom + copy-on-select). */
   termToolbar = $state(lsGet(LS.termToolbar) !== '0'); // default on
+  /** Remembered close-tab choice for LIVE sessions: '' = ask every time,
+   *  'close' = close the tab and keep the session running, 'archive' = stop
+   *  the session (history kept). Set from the close-confirm dialog's
+   *  "remember" checkbox; resettable in Settings → Appearance. */
+  closeTabPref: '' | 'close' | 'archive' = $state(
+    ((): '' | 'close' | 'archive' => {
+      const v = lsGet(LS.closeTabPref);
+      return v === 'close' || v === 'archive' ? v : '';
+    })(),
+  );
 
   /** Resolved CSS font-family stack for the terminal, per the current choice. */
   get termFontStack(): string {
@@ -562,6 +573,11 @@ class UiStore {
   setTermToolbar(on: boolean): void {
     this.termToolbar = on;
     lsSet(LS.termToolbar, on ? '1' : '0');
+  }
+
+  setCloseTabPref(pref: '' | 'close' | 'archive'): void {
+    this.closeTabPref = pref;
+    lsSet(LS.closeTabPref, pref);
   }
 
   /** Apply data-theme/data-scheme attrs and accent override on <html>. */

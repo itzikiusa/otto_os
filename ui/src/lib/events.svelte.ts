@@ -17,6 +17,7 @@ import { proof } from './stores/proof.svelte';
 import { scheduledTasks } from './stores/scheduledTasks.svelte';
 import { runWithOtto } from './stores/runWithOtto.svelte';
 import { browser } from './stores/browser.svelte';
+import { personalAgents } from './stores/personalAgents.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -476,6 +477,12 @@ class EventsClient {
         ) {
           // Browser page: tab strip / annotation list refresh in place.
           browser.applyEvent(parsed);
+        } else if (parsed.type === 'personal_agent_run_updated') {
+          // Personal Agents page refreshes the agent's runs + schedule cursors.
+          personalAgents.applyRunEvent(parsed);
+        } else if (parsed.type === 'agent_room_message') {
+          // Agent-room feeds fetch the room's messages after their cursor.
+          personalAgents.applyRoomEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

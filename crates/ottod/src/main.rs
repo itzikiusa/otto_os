@@ -592,15 +592,24 @@ async fn run(cfg: Config) -> Result<(), String> {
         Err(e) => tracing::warn!("skill-eval recovery: {e}"),
     }
 
-    // Same recovery for orphaned workflow runs: a run executes in a background
-    // task that dies with the process, so a row left EXECUTING (`running`) is
-    // failed so it's re-runnable. QUEUED runs (fresh `pending`, parked behind
-    // the parallel-run gate) are NOT orphans — re-enqueue them in order so the
-    // persistent run queue survives the restart.
-    match otto_server::workflow_engine::reap_orphaned_runs(&pool).await {
-        Ok(n) if n > 0 => tracing::info!("workflow recovery: marked {n} orphaned run(s) as error"),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("workflow recovery: {e}"),
+    // Workflow recovery: runs a dead daemon left EXECUTING are RESUMED from
+    // their persisted per-node progress (adopting finished steps, re-entering
+    // at the interrupted one) unless the workflow opts out via
+    // `on_restart = 'fail'`, the resume cap is hit, or the interrupted step
+    // has external side effects (unknown outcome → failed with a pointer at
+    // the manual retry-a-step flow). QUEUED runs (fresh `pending`, parked
+    // behind the parallel-run gate) re-enqueue in order so the persistent run
+    // queue survives the restart. Order matters: reconcile flips resumable
+    // rows back to `pending` BEFORE the worktree sweep below, so their
+    // provisioned worktrees survive for the resumed steps.
+    {
+        let (resumed, settled) =
+            otto_server::workflow_engine::reconcile_interrupted_runs(&ctx).await;
+        if resumed > 0 || settled > 0 {
+            tracing::info!(
+                "workflow recovery: resumed {resumed} interrupted run(s), settled {settled}"
+            );
+        }
     }
     {
         let n = otto_server::workflow_engine::resume_queued_runs(&ctx).await;
@@ -610,7 +619,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
     // And their leftover run worktrees (+ safe otto-wf/<id> branch cleanup) —
     // finalize-time reaping can't run for a crashed daemon, and pre-reap
-    // versions left one worktree per run in the user's real repos.
+    // versions left one worktree per run in the user's real repos. Runs the
+    // reconciler chose to resume are `pending` again and keep theirs.
     otto_server::workflow_engine::sweep_stale_run_worktrees(&ctx).await;
 
     // Goal loops: each loop's controller dies with the process, so a row left
@@ -684,6 +694,23 @@ async fn run(cfg: Config) -> Result<(), String> {
                 let n = manager.suspend_idle_unattached().await;
                 if n > 0 {
                     tracing::info!("suspended {n} idle, unattached session(s)");
+                }
+            }
+        });
+    }
+
+    // Opt-in auto-archive: hourly, archive agent sessions idle beyond the
+    // `session_auto_archive_days` setting (0/absent = off). Archive keeps the
+    // row + history and stays reversible via unarchive.
+    {
+        let manager = Arc::clone(&manager);
+        let interval = std::time::Duration::from_secs(60 * 60);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let n = manager.auto_archive_stale().await;
+                if n > 0 {
+                    tracing::info!("auto-archived {n} stale session(s)");
                 }
             }
         });
@@ -943,11 +970,23 @@ async fn run(cfg: Config) -> Result<(), String> {
     let _scheduled_tasks_handle = otto_server::scheduled_tasks_scheduler::start(ctx.clone());
     tracing::info!("scheduled tasks scheduler started");
 
+    // --- Personal Agents ---
+    // Fires every enabled schedule of every enabled personal agent (per-schedule
+    // cursor), reaps interrupted runs on startup, and bounds concurrency.
+    let _personal_agents_handle = otto_server::personal_agents_scheduler::start(ctx.clone());
+    tracing::info!("personal agents scheduler started");
+
     // --- Run with Otto ---
     // Boot reaper (fail interrupted runs, re-drive resumable ones) + a 30 s tick
     // that re-drives still-active runs. The engine drives the stage machine.
     otto_server::run_scheduler::spawn(ctx.clone());
     tracing::info!("run-with-otto scheduler started");
+
+    // --- Dynamic model catalog ---
+    // Hourly per-provider model discovery (CLI probe / docs scrape / models.dev
+    // fallback); a failed chain keeps the last good list.
+    otto_server::model_catalog::spawn_refresher(ctx.clone());
+    tracing::info!("model-catalog refresher started");
 
     // --- Usage tracking + system metrics (embedded ClickHouse) ---
     // The recorder mines usage from the activity-trail event stream; the

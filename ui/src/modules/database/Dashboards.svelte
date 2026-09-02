@@ -9,7 +9,7 @@
   import { database } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { DbViz } from '../../lib/api/types';
+  import type { DbViz, DbWidget } from '../../lib/api/types';
 
   const canEdit = $derived(ws.myRole !== 'viewer');
   const dashboard = $derived(database.selectedDashboard);
@@ -46,8 +46,9 @@
     }
   }
 
-  // ── Add widget sheet ────────────────────────────────────────────────────
+  // ── Add / edit widget sheet (same form; `editing` switches the save path) ──
   let adding = $state(false);
+  let editing = $state<DbWidget | null>(null);
   let wTitle = $state('');
   let wStatement = $state('');
   let wViz = $state<DbViz>('table');
@@ -63,8 +64,27 @@
     wX = t.result?.columns[0]?.name ?? '';
     wY = t.result?.columns[1]?.name ?? '';
     wViz = 'table';
+    editing = null;
     adding = true;
   }
+
+  function openEdit(w: DbWidget): void {
+    wTitle = w.title;
+    wStatement = w.statement;
+    wViz = w.viz;
+    wX = w.mapping.x ?? w.mapping.category ?? '';
+    wY = w.mapping.y?.[0] ?? w.mapping.value ?? '';
+    editing = w;
+    adding = true;
+  }
+
+  // The connection the edited widget runs on (fixed at creation — shown so a
+  // widget silently bound to the "wrong" focused connection is at least visible).
+  const editingConnName = $derived.by(() => {
+    const w = editing;
+    if (!w) return null;
+    return database.connections.find((c) => c.id === w.connection_id)?.name ?? w.connection_id;
+  });
 
   const VIZ: DbViz[] = ['table', 'number', 'line', 'bar', 'area', 'pie'];
   const needsAxes = $derived(wViz === 'line' || wViz === 'bar' || wViz === 'area');
@@ -73,16 +93,31 @@
   async function saveWidget(): Promise<void> {
     if (!dashboard || !wTitle.trim() || !wStatement.trim()) return;
     saving = true;
+    const mapping = {
+      x: wX || undefined,
+      y: wY ? [wY] : undefined,
+      category: wViz === 'pie' ? wX || undefined : undefined,
+      value: wViz === 'number' ? wY || undefined : undefined,
+    };
+    if (editing) {
+      // updateWidget swaps the store's widget object, which re-runs the tile's
+      // query via WidgetCard's $effect — no explicit refresh needed here.
+      await database.updateWidget(editing.id, {
+        title: wTitle.trim(),
+        statement: wStatement.trim(),
+        viz: wViz,
+        mapping,
+      });
+      saving = false;
+      adding = false;
+      editing = null;
+      return;
+    }
     const w = await database.createWidget({
       title: wTitle.trim(),
       statement: wStatement.trim(),
       viz: wViz,
-      mapping: {
-        x: wX || undefined,
-        y: wY ? [wY] : undefined,
-        category: wViz === 'pie' ? wX || undefined : undefined,
-        value: wViz === 'number' ? wY || undefined : undefined,
-      },
+      mapping,
       dashboard_id: dashboard.id,
     });
     saving = false;
@@ -156,18 +191,23 @@
   {:else if dashboard}
     <div class="widget-grid">
       {#each widgets as w (w.id)}
-        <WidgetCard widget={w} refreshSecs={dashboard.refresh_secs} />
+        <WidgetCard widget={w} refreshSecs={dashboard.refresh_secs} onedit={canEdit ? openEdit : undefined} />
       {/each}
     </div>
   {/if}
 </div>
 
 {#if adding}
-  <Modal title="Add widget" width={520} onclose={() => (adding = false)}>
+  <Modal title={editing ? 'Edit widget' : 'Add widget'} width={520} onclose={() => (adding = false)}>
     <div class="field">
       <label for="w-title">Title</label>
       <input id="w-title" class="input" bind:value={wTitle} placeholder="Daily signups" />
     </div>
+    {#if editing}
+      <p class="conn-note" title={editing.connection_id}>
+        Runs on connection <strong>{editingConnName}</strong> (set at creation).
+      </p>
+    {/if}
     <div class="field">
       <label for="w-stmt">Statement</label>
       <textarea id="w-stmt" class="input mono" rows="4" bind:value={wStatement} spellcheck="false"></textarea>
@@ -187,6 +227,7 @@
             <label for="w-x">{wViz === 'pie' ? 'Category' : 'X axis'}</label>
             <select id="w-x" class="input" bind:value={wX}>
               <option value="">(auto)</option>
+              {#if wX && !resultCols.some((c) => c.name === wX)}<option value={wX}>{wX}</option>{/if}
               {#each resultCols as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
             </select>
           </div>
@@ -195,6 +236,7 @@
           <label for="w-y">{wViz === 'number' ? 'Value' : wViz === 'pie' ? 'Value' : 'Y series'}</label>
           <select id="w-y" class="input" bind:value={wY}>
             <option value="">(auto)</option>
+            {#if wY && !resultCols.some((c) => c.name === wY)}<option value={wY}>{wY}</option>{/if}
             {#each resultCols as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
           </select>
         </div>
@@ -206,7 +248,7 @@
     {#snippet footer()}
       <button class="btn" onclick={() => (adding = false)}>Cancel</button>
       <button class="btn primary" disabled={saving || !wTitle.trim() || !wStatement.trim()} onclick={saveWidget}>
-        {saving ? 'Saving…' : 'Add widget'}
+        {saving ? 'Saving…' : editing ? 'Save' : 'Add widget'}
       </button>
     {/snippet}
   </Modal>
@@ -274,6 +316,11 @@
   .field-row {
     display: flex;
     gap: 12px;
+  }
+  .conn-note {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin: 0 0 10px;
   }
   .axes-hint {
     font-size: 11px;

@@ -17,6 +17,7 @@
   import { SOURCE_KINDS, sourceColor, sourceLabel } from './runStatus';
   import type { OttoRun, Repo, RunDetectResp, RunMode } from '../../lib/api/types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import ModelPicker from '../../lib/components/ModelPicker.svelte';
 
   interface Props {
     wsId: string;
@@ -58,9 +59,6 @@
   // provider as a real session — see run_engine::execute_single_agent).
   const providers = $derived(agentProviders());
   const effectiveProvider = $derived(provider);
-
-  // Model alias suggestions (free text welcome — "" = provider default).
-  const MODEL_SUGGESTIONS = ['opus', 'sonnet', 'haiku'];
 
   // --- debounced source detection -----------------------------------------
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -242,20 +240,11 @@
       </select>
     </label>
 
-    <label class="ctl">
-      <span>Model</span>
-      <input
-        bind:value={model}
-        list="rwo-models"
-        placeholder="default"
-        size="8"
-        aria-label="Model override"
-        title="Model for the executing agent — blank uses the provider default"
-      />
-      <datalist id="rwo-models">
-        {#each MODEL_SUGGESTIONS as m (m)}<option value={m}></option>{/each}
-      </datalist>
-    </label>
+    <!-- Catalog-backed model control; hides itself when the provider has no
+         model-flag template. Blank = provider default. -->
+    <div class="model-ctl">
+      <ModelPicker {provider} value={model} onchange={(m) => (model = m)} />
+    </div>
 
     <label class="chk"><input type="checkbox" bind:checked={autoOpenPr} /> Auto-open PR</label>
 
@@ -359,13 +348,13 @@
   }
   .seg-btn.active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
   .ctl { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--text-dim); }
-  .ctl select,
-  .ctl input {
+  .ctl select {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: var(--radius-s); padding: 0.35rem 0.5rem; font: inherit; font-size: 0.82rem;
     max-width: 15rem;
   }
   .chk { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--text); }
+  .model-ctl { min-width: 12rem; max-width: 18rem; }
   .run { margin-left: auto; font-size: 0.95rem; padding: 0.5rem 1.1rem; }
   .badge {
     font-size: 0.7rem; padding: 0.05rem 0.45rem; border-radius: 999px;

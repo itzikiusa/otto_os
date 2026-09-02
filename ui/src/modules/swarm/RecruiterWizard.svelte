@@ -9,6 +9,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { AgentSkill, CreateAgentReq, RecruitedAgent } from './types';
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
+  import ModelPicker from '../../lib/components/ModelPicker.svelte';
 
   interface Props {
     onclose: () => void;
@@ -187,10 +188,8 @@
           {#each agentProvidersWith(provider) as p (p)}<option value={p}>{p}</option>{/each}
         </select>
       </div>
-      <div class="field">
-        <label for="rc-model">Model <span class="dim">(optional)</span></label>
-        <input id="rc-model" class="input" bind:value={model} placeholder="default — e.g. opus / sonnet" />
-      </div>
+      <!-- Hides itself when the provider has no model-flag template. -->
+      <ModelPicker {provider} value={model} onchange={(m) => (model = m)} />
       <div class="field">
         <label for="rc-rep">Reports to</label>
         <select id="rc-rep" class="input" bind:value={reportsTo}>

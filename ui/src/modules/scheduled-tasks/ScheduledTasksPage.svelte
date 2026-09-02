@@ -7,6 +7,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
+  import ModelPicker from '../../lib/components/ModelPicker.svelte';
 
   let creating = $state(false);
   let editId = $state<string | null>(null);
@@ -37,6 +38,7 @@
   let fSkill = $state('');
   let fKind = $state<'agent_prompt' | 'workflow'>('agent_prompt');
   let fProvider = $state(defaultAgentProvider());
+  let fModel = $state(''); // '' = provider default
   let fWorkflowId = $state('');
   let fCadence = $state<'interval' | 'daily' | 'weekly' | 'cron'>('interval');
   let fEveryMin = $state(60);
@@ -75,6 +77,7 @@
     fSkill = '';
     fKind = 'agent_prompt';
     fProvider = defaultAgentProvider();
+    fModel = '';
     fWorkflowId = '';
     fCadence = 'interval';
     fEveryMin = 60;
@@ -137,6 +140,7 @@
     fSkill = t.skill ?? '';
     fKind = t.kind === 'workflow' ? 'workflow' : 'agent_prompt';
     fProvider = t.provider || defaultAgentProvider();
+    fModel = t.model ?? '';
     fWorkflowId = t.workflow_id ?? '';
     loadSchedule(t.schedule ?? {});
     fTimezone = t.timezone || browserTz;
@@ -196,6 +200,7 @@
       prompt: fPrompt,
       kind: fKind,
       provider: fProvider,
+      model: fModel.trim(),
       skill: fSkill.trim() || null,
       cwd: fCwd.trim(),
       schedule: buildSchedule(),
@@ -377,6 +382,11 @@
           <span>Custom provider slug</span>
           <input bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
         </label>
+      {/if}
+
+      {#if fKind === 'agent_prompt'}
+        <!-- Hides itself when the provider has no model-flag template (e.g. shell). -->
+        <ModelPicker provider={fProvider} value={fModel} onchange={(m) => (fModel = m)} />
       {/if}
 
       {#if fKind === 'workflow'}

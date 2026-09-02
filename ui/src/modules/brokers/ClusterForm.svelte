@@ -57,23 +57,25 @@
       toasts.error('Name and bootstrap servers are required');
       return;
     }
-    // ssh: omit on create (keep) when off; send null on edit to clear.
+    // ssh: omit on create (keep) when off; send null on edit to clear. Only the
+    // host is required — a blank user falls back server-side to ~/.ssh/config
+    // or $USER, exactly like the connections form.
+    if (tunnelOpen && !tunHost.trim()) {
+      toasts.error('SSH tunnel needs a host');
+      return;
+    }
     let ssh: SshTunnelConfig | null | undefined;
-    if (tunnelOpen && tunHost.trim() && tunUser.trim()) {
+    if (tunnelOpen && tunHost.trim()) {
       ssh = {
         host: tunHost.trim(),
         port: tunPort.trim() ? Number(tunPort) : undefined,
-        user: tunUser.trim(),
+        ...(tunUser.trim() ? { user: tunUser.trim() } : {}),
         identity_file: tunIdentity.trim() || null,
       };
     } else if (editing) {
       ssh = null;
     } else {
       ssh = undefined;
-    }
-    if (tunnelOpen && (!tunHost.trim() || !tunUser.trim())) {
-      toasts.error('SSH tunnel needs a host and user');
-      return;
     }
     const req: UpsertClusterReq = {
       name: name.trim(),
@@ -211,8 +213,8 @@
           </label>
         </div>
         <label class="field">
-          <span>Tunnel user</span>
-          <input bind:value={tunUser} placeholder="ec2-user" spellcheck="false" />
+          <span>Tunnel user <em>(optional)</em></span>
+          <input bind:value={tunUser} placeholder="default (~/.ssh/config or $USER)" spellcheck="false" />
         </label>
         <label class="field">
           <span>Identity file <em>(optional — defaults to ssh-agent)</em></span>

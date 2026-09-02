@@ -679,6 +679,7 @@ async fn run_skill_review_agent(
         title: None,
         cwd: Some(cwd.clone()),
         connection_id: None,
+        model: None,
         meta: Some(meta),
     };
     let session = match ctx.manager.create(ws, &user.id, req, None).await {
@@ -843,6 +844,7 @@ async fn run_fix_agent(
         title: None,
         cwd: Some(cwd.clone()),
         connection_id: None,
+        model: None,
         meta: Some(meta),
     };
     let session = match ctx.manager.create(ws, &user.id, req, None).await {

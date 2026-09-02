@@ -35,6 +35,11 @@ const DEFAULT_ENABLED: &[&str] = &[
     // existing jobs; the write tools below stay off until an admin enables them.
     "list_scheduled_tasks",
     "list_scheduled_task_runs",
+    // Personal-agent room tools: deliberately NOT dangerous — every post is
+    // persisted, size-capped, membership-checked and rendered to the user (rooms
+    // are the ONLY agent-to-agent transport, fully auditable by design).
+    "room_post",
+    "room_read",
     // ---- Feature reads (metadata/list/get) — safe to expose by default once the
     // outward server itself is turned on. Content-heavy reads (consume/search)
     // stay off by default; see the two opt-in reads excluded from this list.
@@ -455,6 +460,25 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.rollback_improvement_edit","mutating":true,"category":"Self-Improvement",
             "description":"Roll back (remove) a previously-applied self-improvement edit. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["edit_id"],"properties":{"edit_id":{"type":"string"}}}}),
+
+        // ---- Personal Agents (rooms) ----
+        // Deliberately mutating:false / non-DANGEROUS: a room post cannot leave
+        // the machine (channel delivery of reports is separate), it is capped at
+        // 16 KB, membership-checked, persisted, and always user-visible — the
+        // audit trail IS the feature. The calling session is resolved to its
+        // personal agent via the session's `meta.personal_agent` (the engine
+        // stamps it on every run + chat session); a caller with no
+        // personal-agent session posts/reads as the user via the REST routes.
+        json!({"name":"otto.room_post","mutating":false,"category":"Personal Agents",
+            "description":"Post a message into an agent room you are a member of. The calling personal-agent session is resolved via its session identity; the message (max 16KB) is persisted and shown to the user live. Rooms are the only agent-to-agent channel.",
+            "inputSchema":{"type":"object","required":["room_id","text"],"properties":{
+                "room_id":{"type":"string"},"text":{"type":"string"},
+                "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge; used to resolve which personal agent is speaking)"}}}}),
+        json!({"name":"otto.room_read","mutating":false,"category":"Personal Agents",
+            "description":"Read messages from an agent room you are a member of, oldest first. Pass `after` (the last message id you saw) to page forward.",
+            "inputSchema":{"type":"object","required":["room_id"],"properties":{
+                "room_id":{"type":"string"},"after":{"type":"string"},"limit":{"type":"integer"},
+                "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge)"}}}}),
 
         // ---- Scheduled Tasks ----
         json!({"name":"otto.list_scheduled_tasks","mutating":false,"category":"Scheduled Tasks",
@@ -902,6 +926,22 @@ pub(crate) async fn governed_invoke(
     let audit_id = ctx.mcp.call_log().insert(audit).await.map_err(ApiError)?;
 
     let started = std::time::Instant::now();
+    // An internal per-session MCP credential carries an immutable session
+    // binding; for the room tools it OVERRIDES any client-supplied session_id
+    // so a bound token can only ever speak as its own session's agent.
+    let bound_session = auth.mcp_session_id.as_deref();
+    let rebound;
+    let arguments = match bound_session {
+        Some(sid) if matches!(short.as_str(), "room_post" | "room_read") => {
+            let mut a = arguments.clone();
+            if let Some(o) = a.as_object_mut() {
+                o.insert("session_id".into(), json!(sid));
+            }
+            rebound = a;
+            &rebound
+        }
+        _ => arguments,
+    };
     let result = execute_otto_tool(ctx, user, &short, arguments).await;
     let latency = started.elapsed().as_millis() as i64;
     match result {
@@ -1685,6 +1725,29 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             });
             SelfCall::post(format!("/api/v1/swarm/projects/{}/tasks", seg(&project)), body)
         }
+        "room_post" => {
+            let room = arg_str(args, "room_id")?;
+            let text = arg_str(args, "text")?;
+            let mut body = json!({"text": text});
+            if let Some(sid) = args.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                body["session_id"] = json!(sid);
+            }
+            SelfCall::post(format!("/api/v1/agent-rooms/{}/messages", seg(&room)), body)
+        }
+        "room_read" => {
+            let room = arg_str(args, "room_id")?;
+            let mut q = String::new();
+            if let Some(after) = args.get("after").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                q.push_str(&format!("&after={}", seg(after)));
+            }
+            if let Some(limit) = args.get("limit").and_then(Value::as_i64) {
+                q.push_str(&format!("&limit={limit}"));
+            }
+            if let Some(sid) = args.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                q.push_str(&format!("&session_id={}", seg(sid)));
+            }
+            SelfCall::get(format!("/api/v1/agent-rooms/{}/messages?{}", seg(&room), q.trim_start_matches('&')))
+        }
         "list_scheduled_tasks" => {
             let ws = arg_str(args, "workspace_id")?;
             SelfCall::get(format!("/api/v1/workspaces/{}/scheduled-tasks", seg(&ws)))
@@ -2274,6 +2337,25 @@ mod tests {
         // Content-heavy reads stay off by default.
         assert!(!DEFAULT_ENABLED.contains(&"consume_broker_messages"));
         assert!(!DEFAULT_ENABLED.contains(&"search_memory"));
+    }
+
+    #[test]
+    fn room_tools_are_default_enabled_and_route() {
+        // Rooms are the auditable agent-to-agent channel: enabled by default,
+        // never DANGEROUS (the persistence + user visibility IS the control).
+        assert!(DEFAULT_ENABLED.contains(&"room_post"));
+        assert!(DEFAULT_ENABLED.contains(&"room_read"));
+        assert!(!DANGEROUS.contains(&"room_post"));
+        let c = route_for("room_post", &json!({"room_id":"r1","text":"hi","session_id":"s1"})).unwrap();
+        assert_eq!(c.method, Method::Post);
+        assert_eq!(c.path, "/api/v1/agent-rooms/r1/messages");
+        assert_eq!(c.body.unwrap(), json!({"text":"hi","session_id":"s1"}));
+        let c = route_for("room_read", &json!({"room_id":"r1","after":"m9","limit":50})).unwrap();
+        assert_eq!(c.method, Method::Get);
+        assert_eq!(c.path, "/api/v1/agent-rooms/r1/messages?after=m9&limit=50");
+        // No optional args → no dangling query separator.
+        let c = route_for("room_read", &json!({"room_id":"r1"})).unwrap();
+        assert_eq!(c.path, "/api/v1/agent-rooms/r1/messages?");
     }
 
     #[test]

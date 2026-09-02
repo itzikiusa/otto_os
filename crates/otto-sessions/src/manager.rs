@@ -49,16 +49,16 @@ fn add_dir_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// Build `["--model", name]` args when `meta.model` is set and the provider
-/// supports an explicit `--model` flag (claude — same flag codex accepts).
-/// Returns an empty vec for shell or unknown providers, or when `meta.model`
-/// is absent/empty.  The model flag is provider-specific:
-///   - claude/codex: `--model <name>`
-///   - agy, shell: unsupported — silently omitted (agy has no model flag).
-fn model_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
-    if !matches!(provider, "claude" | "codex") {
+/// Expand a provider's model-flag TEMPLATE (its `ProviderSpec.model_args`,
+/// e.g. `["--model","{model}"]` for claude/codex/agy, `["-m","{model}"]` for a
+/// custom provider) against `meta.model`. Returns an empty vec when the
+/// provider has no template (`None` — shell, template-less custom providers;
+/// pickers hide the model control via `/meta.model_flags` so this is never a
+/// surprise drop) or when `meta.model` is absent/blank.
+fn model_args(template: Option<&[String]>, meta: &serde_json::Value) -> Vec<String> {
+    let Some(template) = template else {
         return vec![];
-    }
+    };
     let Some(model) = meta.get("model").and_then(|v| v.as_str()) else {
         return vec![];
     };
@@ -66,7 +66,7 @@ fn model_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     if model.is_empty() {
         return vec![];
     }
-    vec!["--model".to_string(), model.to_string()]
+    template.iter().map(|a| a.replace("{model}", model)).collect()
 }
 
 /// Extra argv for a **lean turn** — a short, mechanical, user-blocking agent
@@ -1053,6 +1053,15 @@ pub struct SessionManager {
     /// ([`Self::refresh_provider_titles`]). In-memory only: it's a read-cache,
     /// and the durable `meta.title_source` marker survives restarts.
     title_probe: Arc<DashMap<Id, TitleProbe>>,
+    /// Per-session resume/restart serialization. Two concurrent WS attaches to a
+    /// reconnectable session (a pane + the tiled overview is a realistic pair)
+    /// would otherwise both pass `ensure_live`'s `is_live` check and both spawn:
+    /// the second `live.insert` overwrites the first handle (alive but untracked
+    /// — the exact orphan class `evict_if_same` exists to prevent) and, for
+    /// claude/codex, `--resume` runs twice against one conversation (the
+    /// 2026-07-21 fork incident). All resume paths take this lock and re-check
+    /// `is_live` under it.
+    resume_locks: Arc<DashMap<Id, Arc<Mutex<()>>>>,
 }
 
 impl SessionManager {
@@ -1094,6 +1103,7 @@ impl SessionManager {
             captures_in_flight: Arc::new(DashMap::new()),
             name_themes: None,
             title_probe: Arc::new(DashMap::new()),
+            resume_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -1647,23 +1657,67 @@ impl SessionManager {
         otto_tools: Option<crate::mcp::OttoToolsServer>,
     ) -> Vec<String> {
         let user_servers: Vec<crate::mcp::UserMcpServer> = match &self.mcp_servers {
-            Some(provider) => provider
-                .enabled_servers(&session.workspace_id)
-                .into_iter()
-                .map(|s| crate::mcp::UserMcpServer {
-                    name: s.name,
-                    command: s.command,
-                    args: s.args,
-                    env: s.env,
-                })
-                .collect(),
+            Some(provider) => {
+                // The provider trait is sync (its Db impl blocks on a bridge
+                // thread for the query + Keychain reads) — run it on the
+                // blocking pool so a spawn/restart never parks a tokio worker.
+                let provider = Arc::clone(provider);
+                let ws = session.workspace_id.clone();
+                tokio::task::spawn_blocking(move || provider.enabled_servers(&ws))
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("mcp enabled_servers task failed: {e}");
+                        Vec::new()
+                    })
+                    .into_iter()
+                    .map(|s| crate::mcp::UserMcpServer {
+                        name: s.name,
+                        command: s.command,
+                        args: s.args,
+                        env: s.env,
+                    })
+                    .collect()
+            }
             None => Vec::new(),
         };
-        let browser = session
+        let mut browser = session
             .meta
             .get("browser")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // Union semantics for the browser entry: `browser` is per-SESSION meta
+        // but the reconcile is per-CWD — without this, a non-browser spawn in a
+        // shared cwd would strip `otto-browser` from `.mcp.json` while a
+        // concurrent browser session (PR review + a user session, say) is
+        // between its own reconcile and its CLI reading the file. Keep the
+        // entry as long as ANY live session in this cwd wants it.
+        if !browser {
+            let canon = |p: &str| {
+                std::fs::canonicalize(p)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| p.to_string())
+            };
+            let this_cwd = canon(&session.cwd);
+            // Snapshot ids first — never hold a DashMap shard ref across await.
+            let live_ids: Vec<Id> = self.live.iter().map(|e| e.key().clone()).collect();
+            for other_id in live_ids {
+                if other_id == session.id {
+                    continue;
+                }
+                if let Ok(other) = self.repo.get(&other_id).await {
+                    if other
+                        .meta
+                        .get("browser")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                        && canon(&other.cwd) == this_cwd
+                    {
+                        browser = true;
+                        break;
+                    }
+                }
+            }
+        }
         let cfg = crate::mcp::ManagedMcpConfig {
             browser,
             user_servers: user_servers.clone(),
@@ -1742,6 +1796,16 @@ impl SessionManager {
         req: CreateSessionReq,
         spec_override: Option<CommandSpec>,
     ) -> Result<Session> {
+        let mut req = req;
+        // Fold the explicit `model` param into `meta.model` (winning over any
+        // model already in `meta`) so ONE meta key drives both the spawn args
+        // below and every later resume (`restart_locked` re-reads it).
+        if let Some(model) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            let meta = req.meta.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("model".into(), model.into());
+            }
+        }
         let cwd = req.cwd.clone().unwrap_or_else(|| ws.root_path.clone());
 
         let (provider, mut spec, provider_session_id) = match spec_override {
@@ -1768,7 +1832,10 @@ impl SessionManager {
                 // Append --add-dir args from req.meta.extra_dirs
                 let meta_val = req.meta.clone().unwrap_or(serde_json::json!({}));
                 spec.args.extend(add_dir_args(&provider, &meta_val));
-                spec.args.extend(model_args(&provider, &meta_val));
+                spec.args.extend(model_args(
+                    self.providers.model_args_template(&provider).as_deref(),
+                    &meta_val,
+                ));
                 spec.args.extend(lean_turn_args(&provider, &meta_val));
                 // Record the provider_session_id NOW only when Otto assigns it
                 // (claude, via `--session-id {sid}`). Providers that mint their
@@ -2270,7 +2337,21 @@ impl SessionManager {
         if self.is_live(id) {
             return Ok(());
         }
+        // Serialize with every other resume of this session; re-check liveness
+        // under the lock (the loser of the race finds the session live and
+        // returns instead of double-spawning). The Arc is cloned out of the map
+        // entry first so no DashMap shard lock is held across the await.
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
+        if self.is_live(id) {
+            return Ok(());
+        }
         let mut session = self.repo.get(id).await?;
+        if session.archived {
+            return Err(Error::Conflict(
+                "session is archived — unarchive it first".into(),
+            ));
+        }
         // Second-chance provider-id capture. A codex/agy session whose
         // spawn-time capture timed out (slow first rollout write) carries no
         // provider_session_id and would dead-end below: reconnectable in the
@@ -2326,9 +2407,19 @@ impl SessionManager {
                     }
                 }
             }
-            self.restart(id, None).await.map(|_| ())?;
+            self.restart_locked(id, None).await.map(|_| ())?;
         }
         Ok(())
+    }
+
+    /// The per-session resume mutex (created lazily). The map entry ref is
+    /// dropped before the caller awaits the lock, so no shard lock outlives
+    /// this call. Entries are tiny and evicted with the session in `remove`.
+    fn resume_lock(&self, id: &Id) -> Arc<Mutex<()>> {
+        self.resume_locks
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// One synchronous scan for a non-resumable codex/agy session's on-disk
@@ -2848,6 +2939,60 @@ impl SessionManager {
         suspended
     }
 
+    /// Opt-in auto-archive: archive every non-archived agent session whose
+    /// `last_active_at` is older than the configured number of days
+    /// (`session_auto_archive_days` setting; absent or 0 = OFF, the default).
+    /// Never touches live PTYs, attached sessions, or `keep_alive`-pinned
+    /// rows; archive keeps the row + history, so nothing is lost — the session
+    /// just moves to the sidebar's "Archived" section (and stays unarchivable).
+    /// Returns the number archived.
+    pub async fn auto_archive_stale(&self) -> usize {
+        let days = match &self.settings {
+            Some(sr) => match sr.get("session_auto_archive_days").await {
+                Ok(Some(v)) => v.as_u64().unwrap_or(0),
+                _ => 0,
+            },
+            None => 0,
+        };
+        if days == 0 {
+            return 0;
+        }
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+        let all = match self.repo.list_all().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("auto-archive: list failed: {e}");
+                return 0;
+            }
+        };
+        let mut archived = 0;
+        for s in all {
+            if s.archived
+                || s.kind != SessionKind::Agent
+                || s.last_active_at >= cutoff
+                || self.is_live(&s.id)
+                || self.is_attached(&s.id)
+                || s.meta
+                    .get("keep_alive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            match self.archive(&s.id).await {
+                Ok(_) => {
+                    archived += 1;
+                    tracing::info!(
+                        session = %s.id, title = %s.title,
+                        "auto-archived session idle for over {days} day(s)"
+                    );
+                }
+                Err(e) => tracing::warn!(session = %s.id, "auto-archive failed: {e}"),
+            }
+        }
+        archived
+    }
+
     /// Existence-check pruner: for non-live agent sessions with a
     /// `provider_session_id`, verify the provider's on-disk transcript still
     /// exists. If it is positively gone (un-resumable) → delete the row. If it
@@ -3058,6 +3203,7 @@ impl SessionManager {
         // Drop the per-session disconnect sender; any attached viewers were
         // already evicted by the terminate path before removal.
         self.evict.remove(id);
+        self.resume_locks.remove(id);
         let _ = self.events.send(Event::SessionRemoved {
             session_id: id.clone(),
             workspace_id: session.workspace_id,
@@ -3069,7 +3215,21 @@ impl SessionManager {
     /// provider's resume args. Connection sessions need a `spec_override`
     /// (rebuilt by the connections service) — without one this fails.
     pub async fn restart(&self, id: &Id, spec_override: Option<CommandSpec>) -> Result<Session> {
+        // Same per-session serialization as `ensure_live` (which calls
+        // `restart_locked` under its own guard) — see `resume_locks`.
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
+        self.restart_locked(id, spec_override).await
+    }
+
+    /// [`Self::restart`] body; caller MUST hold this session's resume lock.
+    async fn restart_locked(&self, id: &Id, spec_override: Option<CommandSpec>) -> Result<Session> {
         let session = self.repo.get(id).await?;
+        if session.archived {
+            return Err(Error::Conflict(
+                "session is archived — unarchive it first".into(),
+            ));
+        }
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
         }
@@ -3091,8 +3251,10 @@ impl SessionManager {
                 // Append --add-dir and --model args from session.meta.
                 spec.args
                     .extend(add_dir_args(&session.provider, &session.meta));
-                spec.args
-                    .extend(model_args(&session.provider, &session.meta));
+                spec.args.extend(model_args(
+                    self.providers.model_args_template(&session.provider).as_deref(),
+                    &session.meta,
+                ));
                 // Re-apply the out-of-tree context injection so a resumed session
                 // keeps its bundle (no Workspace here — the bundle persists and is
                 // read back). Mirrors the create() path's `before_spawn`.
@@ -4361,59 +4523,65 @@ mod tests {
         assert!(lean_turn_args("codex", &on).is_empty(), "codex takes neither flag");
     }
 
+    /// The built-in `--model {model}` template (claude/codex/agy) expands to
+    /// `["--model", <name>]`.
     #[test]
-    fn model_args_claude_with_model() {
+    fn model_args_builtin_template_with_model() {
+        let tpl = vec!["--model".to_string(), "{model}".to_string()];
         let meta = serde_json::json!({ "model": "claude-opus-4-8" });
-        let args = model_args("claude", &meta);
+        let args = model_args(Some(&tpl), &meta);
         assert_eq!(args, vec!["--model", "claude-opus-4-8"]);
     }
 
-    /// codex also accepts --model.
+    /// A custom provider's template (`-m {model}`) is honored verbatim, with
+    /// `{model}` substituted wherever it appears.
     #[test]
-    fn model_args_codex_with_model() {
-        let meta = serde_json::json!({ "model": "gpt-5-codex" });
-        let args = model_args("codex", &meta);
-        assert_eq!(args, vec!["--model", "gpt-5-codex"]);
+    fn model_args_custom_template() {
+        let tpl = vec!["-m".to_string(), "{model}".to_string()];
+        let meta = serde_json::json!({ "model": "grok-4" });
+        let args = model_args(Some(&tpl), &meta);
+        assert_eq!(args, vec!["-m", "grok-4"]);
+
+        // `{model}` embedded inside a larger element substitutes too.
+        let tpl = vec!["--model={model}".to_string()];
+        assert_eq!(args_join(model_args(Some(&tpl), &meta)), "--model=grok-4");
     }
 
-    /// agy does not support --model; args must be empty.
+    /// No template (shell, template-less custom provider) → the pinned model
+    /// is dropped regardless of meta. Pickers hide the control via
+    /// `/meta.model_flags`, so this is never a surprise.
     #[test]
-    fn model_args_agy_skipped() {
+    fn model_args_no_template_drops_model() {
         let meta = serde_json::json!({ "model": "some-model" });
-        let args = model_args("agy", &meta);
-        assert!(args.is_empty(), "agy has no --model flag");
+        assert!(model_args(None, &meta).is_empty());
     }
 
-    /// shell provider → empty regardless of meta.
-    #[test]
-    fn model_args_shell_skipped() {
-        let meta = serde_json::json!({ "model": "some-model" });
-        let args = model_args("shell", &meta);
-        assert!(args.is_empty(), "shell has no --model flag");
-    }
-
-    /// No model in meta → empty vec.
+    /// No model in meta → empty vec even with a template.
     #[test]
     fn model_args_absent_model_empty() {
-        let meta = serde_json::json!({});
-        let args = model_args("claude", &meta);
+        let tpl = vec!["--model".to_string(), "{model}".to_string()];
+        let args = model_args(Some(&tpl), &serde_json::json!({}));
         assert!(args.is_empty(), "no model key should yield no args");
     }
 
     /// Whitespace-only model is silently skipped.
     #[test]
     fn model_args_blank_model_empty() {
-        let meta = serde_json::json!({ "model": "   " });
-        let args = model_args("claude", &meta);
+        let tpl = vec!["--model".to_string(), "{model}".to_string()];
+        let args = model_args(Some(&tpl), &serde_json::json!({ "model": "   " }));
         assert!(args.is_empty(), "blank model should yield no args");
     }
 
     /// Leading/trailing whitespace is trimmed from the model name.
     #[test]
     fn model_args_model_is_trimmed() {
-        let meta = serde_json::json!({ "model": "  opus  " });
-        let args = model_args("claude", &meta);
+        let tpl = vec!["--model".to_string(), "{model}".to_string()];
+        let args = model_args(Some(&tpl), &serde_json::json!({ "model": "  opus  " }));
         assert_eq!(args, vec!["--model", "opus"]);
+    }
+
+    fn args_join(v: Vec<String>) -> String {
+        v.join(" ")
     }
 
     /// `add_dir_args` is provider-agnostic: ANY non-shell provider handed

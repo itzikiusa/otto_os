@@ -103,6 +103,23 @@
     }
   }
 
+  // ── Expand with inline failure state ───────────────────────────────────────
+  // The store's expand() reports a failed child-load only as a toast and folds
+  // the node back — track the failure here so a "failed — retry" row renders
+  // under the node instead of leaving no trace once the toast fades.
+  let failedNodes = $state<Set<string>>(new Set());
+  async function expandNode(node: SchemaNode): Promise<void> {
+    const wasOpen = database.isExpanded(node.id);
+    await database.expand(node);
+    if (wasOpen) return; // was a collapse toggle — nothing to verify
+    // On failure the store collapses the node back and caches no children.
+    const failed = !database.isExpanded(node.id) && !database.childrenOf(node.id);
+    const next = new Set(failedNodes);
+    if (failed) next.add(node.id);
+    else next.delete(node.id);
+    failedNodes = next;
+  }
+
   function onClick(node: SchemaNode): void {
     if (OBJECT_KINDS.has(node.kind)) {
       void database.openObject(node);
@@ -110,14 +127,14 @@
       // Clicking a database makes it the active one (queries scope to it, like
       // Workbench's bold default schema) and expands it.
       database.setActiveDb(node.label);
-      if (node.has_children) void database.expand(node);
+      if (node.has_children) void expandNode(node);
     } else if (node.kind === 'keyspace') {
       // A Redis keyspace (db0/db1/…) IS the active DB — commands run against it.
       // Clicking selects it (so it's clear which DB you're on) and expands.
       database.setActiveDb(node.id);
-      if (node.has_children) void database.expand(node);
+      if (node.has_children) void expandNode(node);
     } else if (node.has_children) {
-      void database.expand(node);
+      void expandNode(node);
     }
   }
 
@@ -160,7 +177,92 @@
     return database.schemaRoot.filter((n) => nodeMatchesFilter(n, q));
   });
 
-  function showMenu(e: MouseEvent, node: SchemaNode): void {
+  /** Live filter query, shared with the child-level pruning in the snippet. */
+  const treeFilterQ = $derived(database.objectSearchQuery.trim().toLowerCase());
+
+  /** Children a node actually renders: pruned by the filter (keeping ancestors
+   *  of matches; a node whose own name matched shows its whole subtree). */
+  function visibleChildren(node: SchemaNode, children: SchemaNode[]): SchemaNode[] {
+    const q = treeFilterQ;
+    if (!q || node.label.toLowerCase().includes(q)) return children;
+    return children.filter((k) => nodeMatchesFilter(k, q));
+  }
+
+  /** Cap rendered children per node so a 5k-table schema can't flood the DOM;
+   *  a tail row reports how many were held back. */
+  const CHILD_CAP = 1000;
+
+  // ── Keyboard navigation (roving focus over the rendered treeitems) ─────────
+  let treeEl = $state<HTMLElement | null>(null);
+  function visibleItems(): HTMLElement[] {
+    return Array.from(treeEl?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? []);
+  }
+  /** Resolve a rendered row back to its SchemaNode via the cached tree. */
+  function findNode(id: string | undefined, list: SchemaNode[] = database.schemaRoot): SchemaNode | null {
+    if (!id) return null;
+    for (const n of list) {
+      if (n.id === id) return n;
+      const kids = database.childrenOf(n.id);
+      if (kids) {
+        const f = findNode(id, kids);
+        if (f) return f;
+      }
+    }
+    return null;
+  }
+  function onTreeKey(e: KeyboardEvent): void {
+    const items = visibleItems();
+    if (items.length === 0) return;
+    const cur = items.indexOf(document.activeElement as HTMLElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next =
+        e.key === 'ArrowDown'
+          ? Math.min(items.length - 1, cur < 0 ? 0 : cur + 1)
+          : Math.max(0, cur < 0 ? 0 : cur - 1);
+      items[next]?.focus();
+      return;
+    }
+    if (cur < 0) return;
+    const el = items[cur];
+    const node = findNode(el.dataset.nodeId);
+    if (!node) return;
+    const open = database.isExpanded(node.id);
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (node.has_children && !open) void expandNode(node);
+      else if (open) items[cur + 1]?.focus(); // into the first child
+      return;
+    }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (node.has_children && open) {
+        void expandNode(node); // collapse
+        return;
+      }
+      // Collapsed / leaf → jump to the parent (the previous shallower row).
+      const depth = Number(el.dataset.depth ?? 0);
+      for (let i = cur - 1; i >= 0; i--) {
+        if (Number(items[i].dataset.depth ?? 0) < depth) {
+          items[i].focus();
+          return;
+        }
+      }
+      return;
+    }
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onClick(node);
+      return;
+    }
+    // Keyboard path to the same context menu as right-click.
+    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+      e.preventDefault();
+      showMenu(e, node);
+    }
+  }
+
+  function showMenu(e: MouseEvent | KeyboardEvent, node: SchemaNode): void {
     const isObject = OBJECT_KINDS.has(node.kind);
     const isSqlTable =
       database.capabilities?.sql === true && (node.kind === 'table' || node.kind === 'view');
@@ -297,7 +399,8 @@
   }
 </script>
 
-<div class="schema-tree">
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div class="schema-tree" role="tree" aria-label="Schema" tabindex="0" bind:this={treeEl} onkeydown={onTreeKey}>
   {#if !database.schemaLoading && database.schemaRoot.length > 0}
     <div class="tree-search">
       <Icon name="search" size={11} />
@@ -425,10 +528,16 @@
     class:active-db={(node.kind === 'database' && node.label === database.activeDb) ||
       (node.kind === 'keyspace' && node.id === database.activeDb)}
     style="padding-inline-start: {depth * 13 + 4}px"
+    role="treeitem"
+    tabindex="-1"
+    aria-expanded={node.has_children ? open : undefined}
+    aria-selected={selected}
+    data-node-id={node.id}
+    data-depth={depth}
     oncontextmenu={(e) => showMenu(e, node)}
   >
     {#if node.has_children}
-      <button class="caret" onclick={() => database.expand(node)} aria-label="Toggle">
+      <button class="caret" tabindex="-1" onclick={() => expandNode(node)} aria-label="Toggle">
         {#if database.isLoadingNode(node.id)}
           <span class="spin"><Icon name="refresh" size={10} /></span>
         {:else}
@@ -448,17 +557,32 @@
       {#if node.detail}<span class="nl-detail ellipsis">{node.detail}</span>{/if}
     </button>
   </div>
+  {#if !open && failedNodes.has(node.id)}
+    <div class="node-failed" style="padding-inline-start: {(depth + 1) * 13 + 18}px">
+      <Icon name="x" size={10} />
+      <span>failed to load</span>
+      <button class="node-failed-retry" onclick={() => expandNode(node)}>retry</button>
+    </div>
+  {/if}
   {#if open}
     {#if node.kind === 'keyspace'}
       <RedisKeyFilter {node} {depth} />
     {/if}
     {@const children = database.childrenOf(node.id)}
     {#if children}
-      {#each children as child (child.id)}
+      {@const shown = visibleChildren(node, children)}
+      {#each shown.slice(0, CHILD_CAP) as child (child.id)}
         {@render treeNode(child, depth + 1)}
       {:else}
-        <div class="node-empty" style="padding-inline-start: {(depth + 1) * 13 + 18}px">empty</div>
+        <div class="node-empty" style="padding-inline-start: {(depth + 1) * 13 + 18}px">
+          {treeFilterQ && children.length > 0 ? 'no match' : 'empty'}
+        </div>
       {/each}
+      {#if shown.length > CHILD_CAP}
+        <div class="node-more" style="padding-inline-start: {(depth + 1) * 13 + 18}px">
+          showing {CHILD_CAP.toLocaleString()} of {shown.length.toLocaleString()} — refine filter
+        </div>
+      {/if}
     {/if}
   {/if}
 {/snippet}
@@ -529,6 +653,11 @@
   }
   .node.selected {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .node:focus-visible {
+    outline: none;
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
   }
   /* Active database = bold, like Workbench's default schema. */
   .node.active-db .nl-text {
@@ -617,6 +746,37 @@
     font-style: italic;
     padding-top: 2px;
     padding-bottom: 2px;
+  }
+  /* Truncation tail when a node's children exceed the render cap. */
+  .node-more {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    font-style: italic;
+    padding-top: 2px;
+    padding-bottom: 2px;
+  }
+  /* Inline failed-expand row (replaces the toast-only failure). */
+  .node-failed {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10.5px;
+    color: var(--status-exited);
+    padding-top: 2px;
+    padding-bottom: 2px;
+  }
+  .node-failed-retry {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 10px;
+    padding: 0 6px;
+    cursor: pointer;
+  }
+  .node-failed-retry:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent);
   }
   .ellipsis {
     overflow: hidden;

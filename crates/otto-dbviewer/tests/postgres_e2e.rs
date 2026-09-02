@@ -377,7 +377,7 @@ async fn postgres_import_inserts_rows() {
         &parsed.columns,
         &parsed.rows,
         2,
-        otto_dbviewer::SqlQuote::DoubleQuote,
+        otto_dbviewer::SqlFlavor::Postgres,
     );
     assert_eq!(stmts.len(), 2, "3 rows, batch 2 → 2 INSERT statements");
     for s in &stmts {

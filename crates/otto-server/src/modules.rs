@@ -430,6 +430,7 @@ impl Spawner for PtySpawner {
                 title: title.or_else(|| Some(conn.name.clone())),
                 cwd: None,
                 connection_id: Some(conn.id.clone()),
+                model: None,
                 meta: None,
             };
             let session = self.manager.create(&ws, user_id, req, Some(spec)).await?;
@@ -1329,6 +1330,7 @@ impl PlanSpawner for ExecHelper {
                 title: None,
                 cwd: None,
                 connection_id: None,
+                model: None,
                 meta: None,
             };
             self.ctx.manager.create(&ws, &self.user.id, req, None).await
@@ -5082,6 +5084,7 @@ async fn handoff_review(
         title: Some("Fix review findings".to_string()),
         cwd: Some(repo.path.clone()),
         connection_id: None,
+        model: None,
         meta: None,
     };
     let session = ctx
@@ -5401,6 +5404,7 @@ async fn update_providers(
         title: Some("Update CLIs".to_string()),
         cwd: None,
         connection_id: None,
+        model: None,
         meta: None,
     };
 
@@ -5443,9 +5447,12 @@ async fn send_input(
     Json(req): Json<otto_core::api::SendInputReq>,
 ) -> ApiResult<axum::http::StatusCode> {
     // Resolve the session and check that the caller has Editor access to the
-    // workspace that owns it.
+    // workspace that owns it — then owner-or-admin: typing into another user's
+    // live agent is the same capability as attaching to its terminal (the WS
+    // gate), so it gets the same confinement.
     let session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &session.workspace_id, WorkspaceRole::Editor).await?;
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
 
     // Build the bytes to write: append "\n" unless submit is explicitly false.
     let submit = req.submit.unwrap_or(true);
@@ -5773,6 +5780,7 @@ async fn db_explain_with_agent(
         ),
         cwd: Some(ws.root_path.clone()),
         connection_id: None,
+        model: None,
         meta: None,
     };
     let session = ctx
@@ -5860,6 +5868,7 @@ async fn inject_session(
         title: Some(format!("Implement {}", story.source_key)),
         cwd: Some(cwd),
         connection_id: None,
+        model: None,
         meta,
     };
     let session = ctx
@@ -6013,6 +6022,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::repo_rules::routes(),
         crate::routes::proof_pack::routes(),
         crate::routes::scheduled_tasks::routes(),
+        crate::routes::personal_agents::routes(),
         crate::routes::runs::routes(),
         review_config_routes(),
         crate::skill_eval::routes(),

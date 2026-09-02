@@ -78,11 +78,23 @@
   const H = 160;
   const PAD = { l: 4, r: 4, t: 8, b: 18 };
 
-  const maxVal = $derived.by(() => {
-    if (!resolved) return 1;
-    let m = 0;
-    for (const s of resolved.series) for (const v of s.values) if (!Number.isNaN(v)) m = Math.max(m, v);
-    return m || 1;
+  // Real value domain across all series — negatives supported, NaN ignored.
+  // Always spans 0 so bars keep a baseline; a flat/empty domain widens by 1 so
+  // the scale never divides by zero.
+  const domain = $derived.by(() => {
+    let lo = 0;
+    let hi = 0;
+    if (resolved) {
+      for (const s of resolved.series) {
+        for (const v of s.values) {
+          if (Number.isNaN(v)) continue;
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+      }
+    }
+    if (hi === lo) hi = lo + 1;
+    return { lo, hi };
   });
 
   function x(i: number, n: number): number {
@@ -91,8 +103,12 @@
   }
   function y(v: number): number {
     const span = H - PAD.t - PAD.b;
-    return PAD.t + span - (span * (Number.isNaN(v) ? 0 : v)) / maxVal;
+    const { lo, hi } = domain;
+    const val = Number.isNaN(v) ? 0 : v;
+    return PAD.t + span - (span * (val - lo)) / (hi - lo);
   }
+  /** y of the zero line — the baseline; bars grow from here in both directions. */
+  const y0 = $derived(y(0));
   function linePath(values: number[]): string {
     return values.map((v, i) => `${i === 0 ? 'M' : 'L'} ${x(i, values.length).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
   }
@@ -100,29 +116,37 @@
     const top = linePath(values);
     const x0 = x(0, values.length).toFixed(1);
     const xn = x(values.length - 1, values.length).toFixed(1);
-    const yb = (H - PAD.b).toFixed(1);
+    const yb = y0.toFixed(1);
     return `${top} L ${xn} ${yb} L ${x0} ${yb} Z`;
   }
 
   // ── Pie ────────────────────────────────────────────────────────────────────
   const pieSlices = $derived.by(() => {
     if (!resolved || resolved.series.length === 0) return [];
-    const vals = resolved.series[0].values;
-    const total = vals.reduce((a, b) => a + (Number.isNaN(b) ? 0 : b), 0) || 1;
+    // NaN and negative values can't be pie fractions — treat both as 0 (a
+    // negative slice would rewind `acc` and corrupt every arc after it).
+    const vals = resolved.series[0].values.map((v) => (Number.isNaN(v) || v < 0 ? 0 : v));
+    const total = vals.reduce((a, b) => a + b, 0) || 1;
     let acc = 0;
     const cx = 80;
     const cy = 80;
     const r = 70;
     return vals.map((v, i) => {
-      const frac = (Number.isNaN(v) ? 0 : v) / total;
+      const frac = v / total;
       const a0 = acc * 2 * Math.PI - Math.PI / 2;
       acc += frac;
       const a1 = acc * 2 * Math.PI - Math.PI / 2;
       const large = frac > 0.5 ? 1 : 0;
       const p0 = [cx + r * Math.cos(a0), cy + r * Math.sin(a0)];
       const p1 = [cx + r * Math.cos(a1), cy + r * Math.sin(a1)];
+      // A slice covering (almost) the whole pie degenerates: start ≈ end, so the
+      // arc collapses to nothing. Draw a full circle (two half-arcs) instead.
+      const d =
+        frac >= 0.9995
+          ? `M ${cx} ${cy - r} A ${r} ${r} 0 1 1 ${cx} ${cy + r} A ${r} ${r} 0 1 1 ${cx} ${cy - r} Z`
+          : `M ${cx} ${cy} L ${p0[0].toFixed(1)} ${p0[1].toFixed(1)} A ${r} ${r} 0 ${large} 1 ${p1[0].toFixed(1)} ${p1[1].toFixed(1)} Z`;
       return {
-        d: `M ${cx} ${cy} L ${p0[0].toFixed(1)} ${p0[1].toFixed(1)} A ${r} ${r} 0 ${large} 1 ${p1[0].toFixed(1)} ${p1[1].toFixed(1)} Z`,
+        d,
         color: COLORS[i % COLORS.length],
         label: resolved.labels[i],
         pct: Math.round(frac * 100),
@@ -160,19 +184,20 @@
 {:else}
   <div class="svg-wrap">
     <svg viewBox="0 0 {W} {H}" class="chart-svg" preserveAspectRatio="none">
-      <!-- baseline -->
-      <line x1={PAD.l} y1={H - PAD.b} x2={W - PAD.r} y2={H - PAD.b} stroke="var(--border)" stroke-width="0.75" />
+      <!-- baseline (the zero line — sits mid-chart when values go negative) -->
+      <line x1={PAD.l} y1={y0} x2={W - PAD.r} y2={y0} stroke="var(--border)" stroke-width="0.75" />
       {#if viz === 'bar'}
         {@const n = resolved.labels.length}
         {@const groupW = (W - PAD.l - PAD.r) / Math.max(n, 1)}
         {@const barW = (groupW * 0.74) / resolved.series.length}
         {#each resolved.series as s, si (si)}
           {#each s.values as v, i (i)}
+            {@const vy = Number.isNaN(v) ? y0 : y(v)}
             <rect
               x={(PAD.l + i * groupW + groupW * 0.13 + si * barW).toFixed(1)}
-              y={y(v).toFixed(1)}
+              y={Math.min(vy, y0).toFixed(1)}
               width={Math.max(barW - 1, 1).toFixed(1)}
-              height={Math.max(H - PAD.b - y(v), 0).toFixed(1)}
+              height={Math.abs(y0 - vy).toFixed(1)}
               fill={COLORS[si % COLORS.length]}
               rx="1"
             />

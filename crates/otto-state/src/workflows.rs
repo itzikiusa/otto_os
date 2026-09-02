@@ -31,6 +31,9 @@ fn row_to_workflow(r: &sqlx::sqlite::SqliteRow) -> Result<Workflow> {
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
         version: r.try_get("version").unwrap_or(1),
+        on_restart: r
+            .try_get("on_restart")
+            .unwrap_or_else(|_| otto_core::workflows::default_on_restart()),
     })
 }
 
@@ -44,6 +47,9 @@ fn row_to_version(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowVersion> {
         instructions: r.try_get("instructions").unwrap_or_default(),
         graph: parse_graph(&r.get::<String, _>("graph_json"))?,
         note: r.get("note"),
+        on_restart: r
+            .try_get("on_restart")
+            .unwrap_or_else(|_| otto_core::workflows::default_on_restart()),
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
     })
@@ -76,6 +82,7 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
         approved_at: approved_at.as_deref().map(ts).transpose()?,
         workflow_version: r.try_get("workflow_version").ok().flatten(),
         proof_pack_id: r.try_get("proof_pack_id").ok().flatten(),
+        resume_attempts: r.try_get("resume_attempts").unwrap_or(0),
         // Derived at the API layer (routes/workflows.rs) from data_dir +
         // run id when the directory exists — never persisted.
         context_dir: None,
@@ -141,8 +148,18 @@ impl WorkflowsRepo {
         .await
         .map_err(dberr("create workflow"))?;
         // Snapshot the initial version so every workflow has a v1 in history.
-        self.snapshot_version(&id, 1, name, description, instructions, graph, "initial", created_by)
-            .await?;
+        self.snapshot_version(
+            &id,
+            1,
+            name,
+            description,
+            instructions,
+            graph,
+            "initial",
+            &otto_core::workflows::default_on_restart(),
+            created_by,
+        )
+        .await?;
         self.get(&id).await
     }
 
@@ -189,6 +206,7 @@ impl WorkflowsRepo {
         description: Option<&str>,
         instructions: Option<&str>,
         graph: Option<&WorkflowGraph>,
+        on_restart: Option<&str>,
     ) -> Result<Workflow> {
         let now = fmt(Utc::now());
         if let Some(v) = name {
@@ -223,6 +241,16 @@ impl WorkflowsRepo {
                 serde_json::to_string(g).map_err(|e| Error::Internal(e.to_string()))?;
             sqlx::query("UPDATE workflows SET graph_json = ?, updated_at = ? WHERE id = ?")
                 .bind(&graph_json)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update workflow"))?;
+        }
+        if let Some(v) = on_restart {
+            // The route validates the value; the column's CHECK is the backstop.
+            sqlx::query("UPDATE workflows SET on_restart = ?, updated_at = ? WHERE id = ?")
+                .bind(v)
                 .bind(&now)
                 .bind(id)
                 .execute(&self.pool)
@@ -305,16 +333,19 @@ impl WorkflowsRepo {
 
     /// Startup reconciliation: fail every run a dead daemon left EXECUTING
     /// (`running`), plus any `pending` run that already carries node progress —
-    /// a reopened retry-a-step whose scope lived only in the dead process's
-    /// memory (re-running it blind would replay finished steps' side effects).
-    /// FRESH `pending` rows (nodes_json still `[]`) are left untouched: they
-    /// are the persistent run QUEUE, re-enqueued right after this by
-    /// `workflow_engine::resume_queued_runs`. Returns the rows updated.
+    /// a reopened retry-a-step (re-running it blind would replay finished
+    /// steps' side effects). FRESH `pending` rows (nodes_json still `[]`) are
+    /// left untouched: they are the persistent run QUEUE, re-enqueued by
+    /// `workflow_engine::resume_queued_runs`. Since 0108 this bulk hard-fail
+    /// is only the fallback — `workflow_engine::reconcile_interrupted_runs`
+    /// resumes runs per-row where the workflow's `on_restart` policy allows —
+    /// but it remains the semantics for `on_restart = 'fail'`. Returns the
+    /// rows updated.
     pub async fn fail_interrupted_runs(&self, error: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE workflow_runs
              SET status = 'error', error = ?, finished_at = COALESCE(finished_at, ?),
-                 rev = rev + 1
+                 resume_scope_json = NULL, rev = rev + 1
              WHERE status = 'running' OR (status = 'pending' AND nodes_json != '[]')",
         )
         .bind(error)
@@ -323,6 +354,76 @@ impl WorkflowsRepo {
         .await
         .map_err(dberr("fail interrupted runs"))?;
         Ok(res.rows_affected())
+    }
+
+    /// The runs a dead daemon left in flight — EXECUTING (`running`) rows plus
+    /// `pending` rows that already carry node progress (a reopened
+    /// retry-a-step or a run the reconciler itself re-queued). Each row comes
+    /// with its persisted `resume_scope_json` so the startup reconciler can
+    /// re-enter with the exact scope the dead process was running. Oldest
+    /// first, mirroring the queue's FIFO order.
+    pub async fn interrupted_runs(&self) -> Result<Vec<(WorkflowRun, Option<String>)>> {
+        let rows = sqlx::query(
+            "SELECT * FROM workflow_runs
+             WHERE status = 'running' OR (status = 'pending' AND nodes_json != '[]')
+             ORDER BY started_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("interrupted runs"))?;
+        rows.iter()
+            .map(|r| {
+                let scope: Option<String> = r.try_get("resume_scope_json").ok().flatten();
+                Ok((row_to_run(r)?, scope))
+            })
+            .collect()
+    }
+
+    /// Persist (or clear) the run's re-entry scope. Written by `spawn_run` the
+    /// moment a scoped re-entry launches, so a daemon restart mid-retry can
+    /// resume with the same scope instead of failing the run.
+    pub async fn set_run_resume_scope(&self, id: &Id, scope_json: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE workflow_runs SET resume_scope_json = ? WHERE id = ?")
+            .bind(scope_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set run resume scope"))?;
+        Ok(())
+    }
+
+    /// Re-queue an interrupted run for a restart resume: back to `pending`
+    /// with the reconciler's adjusted node states + re-entry scope, the
+    /// resume counter bumped, and any stale approval pause cleared (the
+    /// re-entered approval node re-parks itself). The engine's normal
+    /// Pending→Running transition then owns the lifecycle. Bumps + returns
+    /// `rev` for the announcing WS event.
+    pub async fn prepare_resume(
+        &self,
+        id: &Id,
+        nodes: &[NodeRunState],
+        scope_json: &str,
+    ) -> Result<i64> {
+        let nodes_json =
+            serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
+        let rev: i64 = sqlx::query_scalar(
+            "UPDATE workflow_runs
+             SET status = 'pending', nodes_json = ?, resume_scope_json = ?,
+                 interrupted_at = ?, resume_attempts = resume_attempts + 1,
+                 error = NULL, finished_at = NULL,
+                 waiting_approval = 0, approval_node_id = NULL,
+                 rev = rev + 1
+             WHERE id = ?
+             RETURNING rev",
+        )
+        .bind(&nodes_json)
+        .bind(scope_json)
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("prepare resume"))?;
+        Ok(rev)
     }
 
     /// Ids of QUEUED runs — fresh `pending`, no node progress — oldest first:
@@ -448,6 +549,7 @@ impl WorkflowsRepo {
         instructions: &str,
         graph: &WorkflowGraph,
         note: &str,
+        on_restart: &str,
         created_by: &Id,
     ) -> Result<()> {
         let id = new_id();
@@ -457,8 +559,8 @@ impl WorkflowsRepo {
         sqlx::query(
             "INSERT INTO workflow_versions
                  (id, workflow_id, version, name, description, instructions, graph_json, note,
-                  created_by, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  on_restart, created_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(workflow_id, version) DO NOTHING",
         )
         .bind(&id)
@@ -469,6 +571,7 @@ impl WorkflowsRepo {
         .bind(instructions)
         .bind(&graph_json)
         .bind(note)
+        .bind(on_restart)
         .bind(created_by)
         .bind(&now)
         .execute(&self.pool)
@@ -563,9 +666,13 @@ impl WorkflowsRepo {
             serde_json::to_string(nodes).map_err(|e| Error::Internal(e.to_string()))?;
         let finished_at = if finished { Some(fmt(Utc::now())) } else { None };
         let rev: i64 = sqlx::query_scalar(
+            // A terminal write (finished) also clears the persisted re-entry
+            // scope — it only ever describes an IN-FLIGHT (re-)entry.
             "UPDATE workflow_runs
              SET status = ?, nodes_json = ?, error = ?,
                  finished_at = COALESCE(?, finished_at),
+                 resume_scope_json = CASE WHEN ? IS NULL
+                                          THEN resume_scope_json ELSE NULL END,
                  rev = rev + 1
              WHERE id = ?
              RETURNING rev",
@@ -573,6 +680,7 @@ impl WorkflowsRepo {
         .bind(status.as_str())
         .bind(&nodes_json)
         .bind(error)
+        .bind(&finished_at)
         .bind(&finished_at)
         .bind(id)
         .fetch_one(&self.pool)
@@ -671,7 +779,7 @@ mod tests {
         .unwrap();
         let v = repo.bump_version(&wf.id).await.unwrap();
         assert_eq!(v, 2);
-        repo.snapshot_version(&wf.id, v, "WF", "desc", "", &g2, "edited graph", &"u1".into())
+        repo.snapshot_version(&wf.id, v, "WF", "desc", "", &g2, "edited graph", "resume", &"u1".into())
             .await
             .unwrap();
         assert_eq!(repo.current_version(&wf.id).await.unwrap(), 2);
@@ -791,7 +899,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wf.instructions, "FOLLOW THE RULES");
-        let up = repo.update(&wf.id, None, None, Some("v2 rules"), None).await.unwrap();
+        let up = repo.update(&wf.id, None, None, Some("v2 rules"), None, None).await.unwrap();
         assert_eq!(up.instructions, "v2 rules");
         let versions = repo.list_versions(&wf.id).await.unwrap();
         assert_eq!(versions.last().unwrap().instructions, "FOLLOW THE RULES"); // v1 snapshot

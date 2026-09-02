@@ -563,6 +563,7 @@ const meta: MetaResp = {
   ],
   providers: ['claude', 'codex', 'shell'],
   default_provider: 'claude',
+  model_flags: { claude: true, codex: true, agy: true, shell: false },
 };
 
 // ---------------------------------------------------------------------------

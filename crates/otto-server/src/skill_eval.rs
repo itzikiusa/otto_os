@@ -836,6 +836,7 @@ async fn run_agent_capture(
         title: None,
         cwd: Some(cwd.to_string()),
         connection_id: None,
+        model: None,
         meta: Some(meta),
     };
     let session = match manager.create(ws, &user.id, req, None).await {

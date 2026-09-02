@@ -432,6 +432,5 @@ Tables created/changed:
 - [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md) — the `Git` / `Context` feature
   roles enforced here.
 - `docs/contracts/api.md` ("Review findings workflow"), `docs/contracts/ws.md` —
-  authoritative endpoint + WS contract; design at
-  `docs/superpowers/specs/2026-06-26-review-findings-workflow-design.md`.
+  authoritative endpoint + WS contract.
 </content>

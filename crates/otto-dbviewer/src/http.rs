@@ -218,6 +218,7 @@ pub fn api_router<S: DbViewerCtx>() -> Router<S> {
             post(export_to_path::<S>),
         )
         .route("/connections/{id}/db/cancel", post(cancel_query::<S>))
+        .route("/connections/{id}/db/close", post(close_connection::<S>))
         .route("/connections/{id}/db/query-status", post(query_status::<S>))
         .route("/connections/{id}/db/completion", post(completion::<S>))
         .route(
@@ -543,6 +544,23 @@ async fn cancel_query<S: DbViewerCtx>(
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
     ctx.db().cancel(&id, &req.query_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Server-side teardown for a connection the user closed in the UI: cancels its
+/// in-flight queries, evicts + closes the driver's cached pool, and drops the
+/// cached SSH tunnel. Gated at `Viewer` — closing your own view of a connection
+/// is not a write, and anyone who can browse it should be able to release the
+/// resources their browsing opened. Idempotent: closing an already-closed (or
+/// never-opened) connection is a success.
+async fn close_connection<S: DbViewerCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Response> {
+    let conn = ctx.db().get_connection(&id).await?;
+    check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
+    ctx.db().close_connection(&id).await?;
+    Ok(Json(serde_json::json!({ "closed": true })).into_response())
 }
 
 /// Request body for the query re-attach status probe.

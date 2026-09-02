@@ -114,10 +114,40 @@ pub struct Workflow {
     /// Monotonic version counter; bumped on every graph-changing update.
     #[serde(default = "default_workflow_version")]
     pub version: i64,
+    /// What the startup reconciler does with a run of this workflow that a
+    /// daemon restart interrupted: `"resume"` (default) re-enters it from the
+    /// interrupted step, `"fail"` preserves the legacy hard-fail behavior.
+    #[serde(default = "default_on_restart")]
+    pub on_restart: String,
 }
 
 fn default_workflow_version() -> i64 {
     1
+}
+
+pub fn default_on_restart() -> String {
+    "resume".into()
+}
+
+/// Execution scope of a (re-)entered run — which node execution starts from
+/// and how. The default (`start_node: None`) runs the whole graph. Persisted
+/// on the run row as `resume_scope_json` while the run is in flight so a
+/// daemon restart can re-enter with the same scope, and cleared on terminal
+/// status.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunScope {
+    /// Start execution from this node (it plus everything downstream unless
+    /// `only_node`). Out-of-scope nodes adopt their prior states.
+    #[serde(default)]
+    pub start_node: Option<String>,
+    /// Run only `start_node` itself, not its descendants.
+    #[serde(default)]
+    pub only_node: bool,
+    /// Treat `start_node` itself as ALREADY DONE (adopt its prior state) and
+    /// run only its descendants — the restart reconciler uses this when the
+    /// interrupted step's handoff file proves the step actually finished.
+    #[serde(default)]
+    pub adopt_start: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +276,11 @@ pub struct WorkflowRun {
     /// The Proof Pack assembled for this run on completion, if any.
     #[serde(default)]
     pub proof_pack_id: Option<String>,
+    /// How many times the startup reconciler resumed this run after a daemon
+    /// restart (0 = never interrupted). Drives the "resumed after restart
+    /// (attempt N)" badge in the run view.
+    #[serde(default)]
+    pub resume_attempts: i64,
     /// Absolute path of the run's context directory
     /// (`<data_dir>/workflow-context/<run_id>/` — instruction brief,
     /// `repos.json`, per-step handoff files). Derived at the API layer when
@@ -326,6 +361,9 @@ pub struct UpdateWorkflowReq {
     pub instructions: Option<String>,
     #[serde(default)]
     pub graph: Option<WorkflowGraph>,
+    /// Restart policy: `"resume"` | `"fail"` (see [`Workflow::on_restart`]).
+    #[serde(default)]
+    pub on_restart: Option<String>,
 }
 
 /// `POST /workflow-runs/{id}/retry-node` — re-enter a finished run in place
@@ -393,6 +431,9 @@ pub struct WorkflowVersion {
     /// A short note (e.g. "edited graph", "restored from v3").
     #[serde(default)]
     pub note: String,
+    /// Restart policy snapshot (see [`Workflow::on_restart`]).
+    #[serde(default = "default_on_restart")]
+    pub on_restart: String,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
 }

@@ -159,23 +159,39 @@ pub struct Session {
 /// Meta `source` values stamped on **background/automation** agent sessions —
 /// ones owned by an engine (channel tickets, review agents, skill eval/review,
 /// product analysis, swarm roles, canvas/mockup/db assist panels, workflow
-/// steps, vault docs/refine writers) rather than opened by the user. Any other
-/// value — or no `source` at all — marks a **foreground** session: one listed
-/// in the sidebar's "Agents" group. MUST stay in sync with the UI filter
-/// (`plainAgentSessions` in `ui/src/lib/stores/workspace.svelte.ts`).
-pub const BACKGROUND_SESSION_SOURCES: [&str; 12] = [
+/// steps, vault docs/refine writers, PR drafts, insights/scheduled/goal-loop
+/// runners, finding agents, run-with-otto stages, discovery chats) rather than
+/// opened by the user. Any other value — or no `source` at all — marks a
+/// **foreground** session: one listed in the sidebar's "Agents" group.
+///
+/// THIS ARRAY IS THE SINGLE SOURCE OF TRUTH. The UI mirror
+/// (`BACKGROUND_SOURCES` in `ui/src/lib/stores/workspace.svelte.ts`) must be
+/// kept byte-identical, and every engine that stamps a `meta.source` on the
+/// sessions it owns must list that source here — otherwise its sessions render
+/// as foreground agents AND become durable (exempt from volume cleanup).
+pub const BACKGROUND_SESSION_SOURCES: [&str; 22] = [
     "channel",
     "review",
+    "review_summarizer",
     "skilleval",
     "skillreview",
     "product-analysis",
+    "product_refine",
     "swarm",
     "canvas_assist",
+    "canvas_assist_preview",
     "mockup_assist",
     "db_assist",
     "workflow",
     "vault-docs",
     "vault-docs-review",
+    "pr-draft",
+    "insights",
+    "run_with_otto",
+    "goal_loop",
+    "discovery_chat",
+    "scheduled_task",
+    "finding",
 ];
 
 impl Session {
@@ -2533,5 +2549,44 @@ mod tests {
         assert!(!session(SessionKind::Connection, serde_json::json!({})).is_foreground_agent());
         // Malformed meta (source not a string) reads as no source → foreground.
         assert!(session(SessionKind::Agent, serde_json::json!({"source": 7})).is_foreground_agent());
+    }
+
+    /// Every engine that stamps a `meta.source` must be classified background —
+    /// this list mirrors the actual creation sites in otto-server/otto-channels.
+    /// A source missing here (and from the array) renders as a foreground agent
+    /// and becomes durable, which is a bug (2026-09-01 review: pr-draft et al).
+    #[test]
+    fn background_sources_cover_every_engine() {
+        use super::BACKGROUND_SESSION_SOURCES;
+        for src in [
+            "channel",
+            "review",
+            "review_summarizer",
+            "skilleval",
+            "skillreview",
+            "product-analysis",
+            "product_refine",
+            "swarm",
+            "canvas_assist",
+            "canvas_assist_preview",
+            "mockup_assist",
+            "db_assist",
+            "workflow",
+            "vault-docs",
+            "vault-docs-review",
+            "pr-draft",
+            "insights",
+            "run_with_otto",
+            "goal_loop",
+            "discovery_chat",
+            "scheduled_task",
+            "finding",
+        ] {
+            assert!(
+                BACKGROUND_SESSION_SOURCES.contains(&src),
+                "{src} missing from BACKGROUND_SESSION_SOURCES"
+            );
+        }
+        assert_eq!(BACKGROUND_SESSION_SOURCES.len(), 22);
     }
 }

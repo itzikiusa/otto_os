@@ -384,6 +384,16 @@ impl Driver for PostgresDriver {
         self.run_tracked(cfg, req, &CancelToken::new()).await
     }
 
+    /// Evict + close the cached pool for `cache_key` (connection close, or a
+    /// config change superseded it); also drops the matching completion snapshot.
+    async fn close(&self, cache_key: &str) {
+        let pool = self.pools.lock().await.remove(cache_key);
+        if let Some(pool) = pool {
+            pool.close().await;
+        }
+        self.completions.invalidate(cache_key);
+    }
+
     async fn run_tracked(
         &self,
         cfg: &ResolvedConfig,
@@ -1139,11 +1149,20 @@ async fn build_pool(cfg: &ResolvedConfig) -> Result<sqlx::PgPool> {
     }
 
     // TLS: map TlsMode → PgSslMode + inline CA/client cert via temp files.
+    // When verification is on, verify the HOSTNAME too (VerifyFull) — VerifyCa
+    // alone accepts any CA-signed cert for a different host (MITM). Exception:
+    // through an SSH tunnel the TCP endpoint is 127.0.0.1 (the cert's name can
+    // never match), and an explicit `tls.server_name` override has no sqlx
+    // surface to honour — both keep chain-only verification (VerifyCa).
+    let hostname_checkable = cfg.param_str("__tunnel_host").is_none()
+        && cfg.tls.server_name.as_deref().filter(|s| !s.is_empty()).is_none();
     let ssl_mode = match cfg.tls.mode {
         types::TlsMode::Disabled => PgSslMode::Disable,
         types::TlsMode::Preferred => PgSslMode::Prefer,
         types::TlsMode::Required => {
-            if cfg.tls.verify {
+            if cfg.tls.verify && hostname_checkable {
+                PgSslMode::VerifyFull
+            } else if cfg.tls.verify {
                 PgSslMode::VerifyCa
             } else {
                 PgSslMode::Require
@@ -1339,26 +1358,31 @@ async fn exec_read_conn(
     statement: &str,
     max_rows: usize,
 ) -> Result<QueryResult> {
-    let rows = sqlx::query(statement)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(types::upstream)?;
+    use futures_util::TryStreamExt as _;
 
+    // Stream rows instead of `fetch_all`: the auto-LIMIT injector bails on
+    // SHOW/EXPLAIN/`TABLE t`/VALUES and batches never get a LIMIT — with
+    // `fetch_all` those buffered the ENTIRE result in daemon RAM before the cap
+    // applied. Here at most `max_rows` decoded rows are retained; rows past the
+    // cap are drained one at a time (keeping the connection clean) and dropped.
+    let mut stream = sqlx::query(statement).fetch(&mut *conn);
     let mut columns: Vec<Column> = Vec::new();
-    if let Some(first) = rows.first() {
-        for col in first.columns() {
-            columns.push(Column::typed(col.name(), col.type_info().name()));
+    let mut out_rows: Vec<Vec<Value>> = Vec::new();
+    let mut truncated = false;
+    while let Some(row) = stream.try_next().await.map_err(types::upstream)? {
+        if columns.is_empty() {
+            for col in row.columns() {
+                columns.push(Column::typed(col.name(), col.type_info().name()));
+            }
         }
-    }
-
-    let truncated = rows.len() > max_rows;
-    let take = rows.len().min(max_rows);
-    let mut out_rows: Vec<Vec<Value>> = Vec::with_capacity(take);
-    for row in rows.iter().take(take) {
+        if out_rows.len() >= max_rows {
+            truncated = true;
+            continue; // drain without retaining
+        }
         // Cap oversized cells (text/bytea/JSON) like ClickHouse does — an
         // uncapped multi-MB cell freezes the grid and bloats the WS frame.
         let cells = (0..columns.len())
-            .map(|i| types::cap_cell(pg_value_to_json(row, i)))
+            .map(|i| types::cap_cell(pg_value_to_json(&row, i)))
             .collect();
         out_rows.push(cells);
     }

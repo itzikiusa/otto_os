@@ -65,6 +65,16 @@ export function defaultAgentProvider(): string {
   return list[0] ?? 'claude';
 }
 
+/** Whether `provider` accepts a model flag — its daemon spec carries a
+ *  `model_args` template (`/meta.model_flags`). Surfaces hide their model
+ *  control when false, so a picked model is never silently dropped. Falls back
+ *  to the built-in trio before `/meta` has loaded (or on an older daemon). */
+export function providerSupportsModel(provider: string): boolean {
+  const flags = auth.meta?.model_flags;
+  if (flags && provider in flags) return flags[provider];
+  return provider === 'claude' || provider === 'codex' || provider === 'agy';
+}
+
 /** token → canonical provider alias map for the ⌘K deterministic parser: the
  *  built-in aliases PLUS every registered provider name mapped to itself, so a
  *  custom provider (`grok`) resolves in the no-LLM fast-path. */

@@ -750,15 +750,41 @@ FIFO gate (`workflow_engine::spawn_run`):
 - A run beyond the cap keeps its `pending` status — shown as **queued** in the
   UI — and starts automatically, in creation order, when a slot frees.
 - The queue is **persistent** with no extra table: the still-`pending`
-  `workflow_runs` row *is* the queue entry. On daemon restart, startup
-  recovery fails the runs that were **executing** ("interrupted by a daemon
-  restart", as before) and re-enqueues the queued ones in order
-  (`resume_queued_runs`). Exception: a queued **retry-node** re-entry fails
-  instead — its retry scope (start node + adopted prior states) lives only in
-  the dead process's memory, and re-running blind would replay finished
-  steps' side effects.
+  `workflow_runs` row *is* the queue entry. On daemon restart, queued runs
+  re-enqueue in creation order (`resume_queued_runs`).
 - **Stop** on a queued run works: the gate re-checks the run's status when a
   slot frees and a canceled run never starts.
+
+### Restart resume
+
+A daemon restart (or a computer reboot) no longer cancels executing runs.
+Per-node progress is persisted after every step, so on startup a reconciler
+(`reconcile_interrupted_runs`) re-enters each interrupted run instead of
+failing it:
+
+- **Adoption**: steps that already finished keep their status/output/sessions
+  (the same in-place re-entry retry-node uses); the run re-enters at the
+  interrupted step, reusing its context dir and `otto-wf/<run_id>` worktrees
+  (the startup worktree sweep runs after reconciliation, so resumable runs
+  keep theirs).
+- **Side-effect safety**: a step with external side effects (`git_pr`,
+  `channel_notify`, `swarm_task`, `product_publish`, `api_run`,
+  `http_request`, `self_improve`) caught **mid-flight** is never replayed —
+  its outcome is unknown, so it's marked `error` and the run fails with a
+  pointer at the manual *retry from this step* flow. Idempotent/agent kinds
+  re-run automatically; an interrupted `agent_prompt` whose handoff step file
+  proves it actually finished is **adopted as done** instead of re-running.
+- **Human approval**: a run paused at a `human_approval` node survives the
+  restart — it resumes at the approval node and re-parks, re-awaiting the
+  operator.
+- **Opt-out & caps**: the workflow editor's Instructions panel has a
+  *"Resume after a daemon restart"* toggle (`on_restart: 'resume' | 'fail'`;
+  `'fail'` restores the old hard-fail). Automatic resumes are capped at 2 per
+  run (`resume_attempts`); the run view shows *"Resumed after a daemon
+  restart (attempt N)"*. A retry-node re-entry persists its scope
+  (`resume_scope_json`) so even a restart mid-retry resumes with the same
+  scope. The 10h run wall-clock is anchored to the run row's `started_at`,
+  so crash-loop resumes can't extend it. (Migration `0108_workflow_resume`.)
 
 ### Run repos & branches (`repos[]` input)
 

@@ -372,6 +372,26 @@ pub enum Event {
         run_id: Id,
         status: String,
     },
+    /// A personal-agent run started, finished, or errored. The Personal Agents
+    /// page subscribes and re-fetches the agent's run history on a matching tick
+    /// instead of polling. `status` is the snake_case run status
+    /// ("running"|"ok"|"error").
+    PersonalAgentRunUpdated {
+        workspace_id: Id,
+        agent_id: Id,
+        run_id: Id,
+        status: String,
+    },
+    /// A message was appended to an agent room (by an agent over the room MCP
+    /// tools, or by the user over REST). Carries ids only — clients re-fetch the
+    /// room's messages after their cursor. `author_kind` is "agent" | "user".
+    AgentRoomMessage {
+        workspace_id: Id,
+        room_id: Id,
+        message_id: Id,
+        author_kind: String,
+        author_id: Id,
+    },
     /// A Run with Otto run advanced a stage, errored, or finished. The Run with
     /// Otto page re-fetches the run + its timeline on a matching tick. `status` is
     /// the snake_case `RunStatus`.

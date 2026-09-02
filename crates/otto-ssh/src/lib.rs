@@ -16,7 +16,8 @@
 //!   single local forward can't represent).
 //!
 //! This crate is intentionally dependency-light (just `otto-core` + `tokio` +
-//! `serde`) so any feature crate can reuse it without pulling in a driver stack.
+//! `serde` + `tracing`) so any feature crate can reuse it without pulling in a
+//! driver stack.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -37,6 +38,9 @@ pub struct SshTunnelConfig {
     pub host: String,
     #[serde(default = "default_ssh_port")]
     pub port: u16,
+    /// SSH username. Empty/absent = let ssh resolve it (`~/.ssh/config` `User`,
+    /// else the local login name) — the target is then a bare `host`.
+    #[serde(default)]
     pub user: String,
     /// Path to a private key on disk (optional; agent is used otherwise).
     #[serde(default)]
@@ -53,6 +57,10 @@ fn default_ssh_port() -> u16 {
 pub struct SshTunnel {
     child: Mutex<Child>,
     local_port: u16,
+    /// Last line ssh wrote to stderr, kept by the drain task so a tunnel that
+    /// dies mid-use still has a diagnostic to report. Empty until ssh says
+    /// something.
+    last_stderr: std::sync::Arc<Mutex<String>>,
 }
 
 impl SshTunnel {
@@ -76,17 +84,31 @@ impl SshTunnel {
         }
     }
 
+    /// The last line ssh wrote to stderr (drained continuously after launch),
+    /// for the death report when a tunnel dies mid-use. `None` until ssh has
+    /// said anything.
+    pub fn last_stderr(&self) -> Option<String> {
+        self.last_stderr
+            .lock()
+            .ok()
+            .map(|s| s.clone())
+            .filter(|s| !s.is_empty())
+    }
+
     /// Open a local port-forward (`ssh -L`) from an ephemeral local port to
     /// `remote_host:remote_port` through the SSH server in `cfg`. Returns once
-    /// the local port accepts a TCP connection (or errors after ~12s).
+    /// the local port accepts a TCP connection (or errors after ~12s). A lost
+    /// bind race on the reserved port (another process grabbed it between
+    /// reserve and ssh's bind) is retried on a fresh port.
     pub async fn open(
         cfg: &SshTunnelConfig,
         remote_host: &str,
         remote_port: u16,
     ) -> Result<SshTunnel> {
-        let local_port = free_local_port().await?;
-        let args = local_forward_args(cfg, local_port, remote_host, remote_port);
-        Self::launch(args, local_port).await
+        Self::launch_with_retry(|local_port| {
+            local_forward_args(cfg, local_port, remote_host, remote_port)
+        })
+        .await
     }
 
     /// Open a dynamic SOCKS5 forward (`ssh -D`) on an ephemeral local port
@@ -94,9 +116,30 @@ impl SshTunnel {
     /// dials arbitrary hosts from the SSH server's network. Returns once the
     /// local SOCKS port accepts a TCP connection.
     pub async fn open_socks(cfg: &SshTunnelConfig) -> Result<SshTunnel> {
-        let local_port = free_local_port().await?;
-        let args = socks_forward_args(cfg, local_port);
-        Self::launch(args, local_port).await
+        Self::launch_with_retry(|local_port| socks_forward_args(cfg, local_port)).await
+    }
+
+    /// Reserve a port + launch, retrying (with a fresh port) when ssh loses the
+    /// bind race for the reserved port — the one failure mode where trying
+    /// again genuinely helps. Auth/network errors surface on the first attempt.
+    async fn launch_with_retry(build_args: impl Fn(u16) -> Vec<String>) -> Result<SshTunnel> {
+        const ATTEMPTS: usize = 3;
+        let mut last_err = None;
+        for _ in 0..ATTEMPTS {
+            let local_port = free_local_port().await?;
+            match Self::launch(build_args(local_port), local_port).await {
+                Ok(t) => return Ok(t),
+                Err(e) => {
+                    let msg = e.to_string().to_ascii_lowercase();
+                    let bind_race = msg.contains("bind") || msg.contains("address already in use");
+                    last_err = Some(e);
+                    if !bind_race {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| Error::Upstream("ssh tunnel failed".into())))
     }
 
     /// Spawn `ssh` with the prepared args and wait for the local port to become
@@ -130,9 +173,51 @@ impl SshTunnel {
                 return Err(Error::Upstream(msg));
             }
             if TcpStream::connect(("127.0.0.1", local_port)).await.is_ok() {
+                // TOCTOU guard: the reserved port was released before ssh bound
+                // it, so the successful probe could have reached a FOREIGN
+                // process that grabbed the port first (ssh then exits — it uses
+                // ExitOnForwardFailure). Only bless the tunnel if the ssh child
+                // is still running after the probe; an exit here is a failure,
+                // never a live tunnel pointing at someone else's listener.
+                if let Ok(Some(status)) = child.try_wait() {
+                    let mut msg = format!("ssh tunnel exited early ({status})");
+                    if let Some(mut err) = child.stderr.take() {
+                        use tokio::io::AsyncReadExt;
+                        let mut buf = String::new();
+                        let _ = err.read_to_string(&mut buf).await;
+                        let first = buf.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                        if !first.is_empty() {
+                            msg = format!("ssh tunnel failed: {}", first.trim());
+                        }
+                    }
+                    return Err(Error::Upstream(msg));
+                }
+                // Drain stderr for the tunnel's lifetime: ssh warnings (rekey,
+                // keepalive, channel errors) otherwise fill the ~64 KiB pipe
+                // buffer and BLOCK ssh — wedging the tunnel while `is_alive()`
+                // still reports true. Keep the last line for the death report.
+                let last_stderr = std::sync::Arc::new(Mutex::new(String::new()));
+                if let Some(err) = child.stderr.take() {
+                    let sink = std::sync::Arc::clone(&last_stderr);
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncBufReadExt;
+                        let mut lines = tokio::io::BufReader::new(err).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let line = line.trim().to_string();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            tracing::debug!(target: "otto_ssh", "ssh tunnel stderr: {line}");
+                            if let Ok(mut slot) = sink.lock() {
+                                *slot = line;
+                            }
+                        }
+                    });
+                }
                 return Ok(SshTunnel {
                     child: Mutex::new(child),
                     local_port,
+                    last_stderr,
                 });
             }
             if Instant::now() >= deadline {
@@ -194,6 +279,10 @@ fn base_args(cfg: &SshTunnelConfig) -> Vec<String> {
         "ConnectTimeout=10".into(),
         "-o".into(),
         "ServerAliveInterval=15".into(),
+        // Two missed keep-alives (~30s) declare the path dead — the default of
+        // three left a network-dead tunnel reporting "alive" for ~45s.
+        "-o".into(),
+        "ServerAliveCountMax=2".into(),
         "-p".into(),
         cfg.port.to_string(),
     ];
@@ -214,7 +303,7 @@ fn local_forward_args(
     let mut args = base_args(cfg);
     args.push("-L".into());
     args.push(format!("127.0.0.1:{local_port}:{remote_host}:{remote_port}"));
-    args.push(format!("{}@{}", cfg.user, cfg.host));
+    args.push(ssh_target(cfg));
     args
 }
 
@@ -223,8 +312,18 @@ fn socks_forward_args(cfg: &SshTunnelConfig, local_port: u16) -> Vec<String> {
     let mut args = base_args(cfg);
     args.push("-D".into());
     args.push(format!("127.0.0.1:{local_port}"));
-    args.push(format!("{}@{}", cfg.user, cfg.host));
+    args.push(ssh_target(cfg));
     args
+}
+
+/// `user@host`, or a bare `host` when no user is set so ssh's own resolution
+/// (`~/.ssh/config` `User`, else the local login name) applies.
+fn ssh_target(cfg: &SshTunnelConfig) -> String {
+    if cfg.user.is_empty() {
+        cfg.host.clone()
+    } else {
+        format!("{}@{}", cfg.user, cfg.host)
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +350,7 @@ mod tests {
         assert!(args.iter().any(|a| a == "BatchMode=yes"));
         assert!(args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"));
         assert!(args.iter().any(|a| a == "ExitOnForwardFailure=yes"));
+        assert!(args.iter().any(|a| a == "ServerAliveCountMax=2"));
         assert_eq!(args[args.iter().position(|a| a == "-p").unwrap() + 1], "2222");
         assert_eq!(
             args[args.iter().position(|a| a == "-i").unwrap() + 1],

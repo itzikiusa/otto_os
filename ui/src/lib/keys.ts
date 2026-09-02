@@ -19,6 +19,7 @@ export type KeyAction =
   | 'toggleRight'
   | 'newSession'
   | 'closeTab'
+  | 'reopenTab'
   | 'nextTab'
   | 'prevTab'
   | 'nextSession'
@@ -187,10 +188,11 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
         dispatch('toggleRight', e);
         return;
       case 't':
-        // ⌘T → new session. ⇧⌘T / ⌥⌘T are NOT this (the DB editor uses ⌥⌘T).
-        if (e.shiftKey) return;
+        // ⌘T → new session · ⌘⇧T → reopen closed tab (browser convention; only
+        // reaches us in the desktop shell / PWA — a browser TAB reserves it).
+        // ⌥⌘T is NOT ours (the DB editor uses it).
         e.preventDefault();
-        dispatch('newSession', e);
+        dispatch(e.shiftKey ? 'reopenTab' : 'newSession', e);
         return;
       case 'w':
         if (e.shiftKey) return;
@@ -284,6 +286,7 @@ export const KEYMAP: ShortcutGroup[] = [
     bindings: [
       { keys: '⌘T', label: 'New session' },
       { keys: '⌘W', label: 'Close tab' },
+      { keys: '⌘⇧T', label: 'Reopen closed tab' },
       { keys: '⌃Tab', label: 'Next tab' },
       { keys: '⌃⇧Tab', label: 'Previous tab' },
       { keys: '⌘]', label: 'Next session' },

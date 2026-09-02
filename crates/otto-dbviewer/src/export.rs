@@ -160,7 +160,7 @@ impl<W: Write> ExportSink<W> {
                 let delim = self.format.delimiter().expect("delimited format");
                 let rendered: Vec<String> = row
                     .iter()
-                    .map(|v| escape_field(&cell_text(v), self.format))
+                    .map(|v| escape_field(&guard_formula(v), self.format))
                     .collect();
                 let sep = delim.to_string();
                 self.write_line(&rendered.join(&sep))?;
@@ -242,6 +242,21 @@ fn cell_text(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+/// Render a cell for a delimited export with FORMULA-INJECTION hardening: a
+/// **string** cell leading with `=` or `@` gets a `'` prefix so a spreadsheet
+/// consumer treats it as text, not an executable formula. Deliberately narrow:
+/// only genuine strings (a Decimal/temporal cell rendered as a JSON string can't
+/// start with these), and not `+`/`-` — prefixing those would corrupt legitimate
+/// numeric-looking text far more often than it would stop an attack.
+fn guard_formula(v: &Value) -> String {
+    let text = cell_text(v);
+    if matches!(v, Value::String(_)) && (text.starts_with('=') || text.starts_with('@')) {
+        format!("'{text}")
+    } else {
+        text
     }
 }
 
@@ -491,6 +506,25 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(out.trim_end()).unwrap(),
             json!({ "c": "a,\"b\"\n" })
+        );
+    }
+
+    /// Formula-injection hardening: a string cell leading with `=`/`@` is
+    /// prefixed with `'` in delimited exports; numbers and other scalars (and
+    /// JSON formats) are untouched.
+    #[test]
+    fn csv_guards_leading_formula_strings() {
+        let (out, _) = render(
+            ExportFormat::Csv,
+            &cols(&["a", "b", "c"]),
+            &[vec![json!("=cmd|' /C calc'!A0"), json!(-5), json!("@SUM(1)")]],
+        );
+        assert_eq!(out, "'=cmd|' /C calc'!A0,-5,'@SUM(1)\n");
+        // NDJSON keeps the raw value (JSON is not a spreadsheet surface).
+        let (out, _) = render(ExportFormat::Ndjson, &cols(&["a"]), &[vec![json!("=1+1")]]);
+        assert_eq!(
+            serde_json::from_str::<Value>(out.trim_end()).unwrap(),
+            json!({ "a": "=1+1" })
         );
     }
 

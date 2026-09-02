@@ -7,6 +7,7 @@
 
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../../lib/api/client';
+  import Icon from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { reviewBus, workflowRunBus, budgetBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -55,8 +56,16 @@
   let newViewFilter = $state('{}');
   let showNewViewForm = $state(false);
 
-  /** The active saved-view filter (null = no filter active = show all). */
-  let activeFilter: Record<string, unknown> | null = $state(null);
+  /** The active saved view's ID (null = no filter active = show all).
+   *  Tracked by id, not by filter-object identity — `load(false)` replaces
+   *  `savedViews` with fresh objects, which silently broke an `===` compare. */
+  let activeViewId: string | null = $state(null);
+
+  const activeFilter: Record<string, unknown> | null = $derived(
+    activeViewId === null
+      ? null
+      : (savedViews.find((sv) => sv.id === activeViewId)?.filter ?? null),
+  );
 
   const wsId = $derived(ws.currentId);
 
@@ -190,7 +199,8 @@
   let pollInterval: ReturnType<typeof setInterval>;
 
   onMount(() => {
-    load();
+    // The `$effect(wsId)` below fires on mount too — no initial load() here,
+    // or the view loads twice back to back.
     pollInterval = setInterval(() => load(false), 30_000);
   });
 
@@ -217,13 +227,14 @@
     budget_warn: 'Budget Warning',
   };
 
+  // Icon-component names (the rest of the app uses Icon, not emoji).
   const BUCKET_ICONS: Record<BucketKey, string> = {
-    needs_you: '🔔',
-    working: '⚡',
-    review_ready: '📋',
-    waiting: '⏳',
-    failed: '❌',
-    budget_warn: '💰',
+    needs_you: 'bell',
+    working: 'zap',
+    review_ready: 'eye',
+    waiting: 'clock',
+    failed: 'x',
+    budget_warn: 'chart',
   };
 
   function fmtAge(secs: number): string {
@@ -236,7 +247,10 @@
   function openSession(item: MissionItem) {
     const sid = item.session_id ?? (item.kind === 'session' ? item.id : null);
     if (!sid) return;
-    ws.openSession(sid);
+    // Navigate for real (route + tabs view) — a bare store mutation would
+    // change a tab invisibly behind the Mission Control surface.
+    ws.setViewMode('tabs');
+    ws.navigateToSession(sid);
   }
 </script>
 
@@ -245,12 +259,14 @@
   <div class="mission-header">
     <h2>Mission Control</h2>
     <div class="header-actions">
-      {#if activeFilter !== null}
-        <button class="chip active" onclick={() => (activeFilter = null)}>
+      {#if activeViewId !== null}
+        <button class="chip active" onclick={() => (activeViewId = null)}>
           Clear filter ×
         </button>
       {/if}
-      <button class="icon-btn" onclick={() => load()} title="Refresh">↻</button>
+      <button class="icon-btn" onclick={() => load()} title="Refresh" aria-label="Refresh">
+        <Icon name="refresh" size={13} />
+      </button>
     </div>
   </div>
 
@@ -259,14 +275,14 @@
     <span class="sv-label">Views:</span>
     <button
       class="chip"
-      class:active={activeFilter === null}
-      onclick={() => (activeFilter = null)}
+      class:active={activeViewId === null}
+      onclick={() => (activeViewId = null)}
     >All</button>
     {#each savedViews as sv (sv.id)}
       <button
         class="chip"
-        class:active={activeFilter === sv.filter}
-        onclick={() => (activeFilter = sv.filter)}
+        class:active={activeViewId === sv.id}
+        onclick={() => (activeViewId = sv.id)}
       >
         {sv.name}
         <span
@@ -322,7 +338,7 @@
         {@const items = filteredItems(bucket)}
         <section class="bucket" class:empty-bucket={items.length === 0}>
           <div class="bucket-header">
-            <span class="bucket-icon">{BUCKET_ICONS[bucket]}</span>
+            <span class="bucket-icon"><Icon name={BUCKET_ICONS[bucket]} size={13} /></span>
             <span class="bucket-name">{BUCKET_LABELS[bucket]}</span>
             {#if items.length > 0}
               <span class="bucket-count">{items.length}</span>
@@ -334,13 +350,18 @@
           {:else}
             <ul class="item-list">
               {#each items as item (item.id)}
-                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
                 <li
                   class="item"
                   class:clickable={!!item.session_id || item.kind === 'session'}
+                  role={item.session_id || item.kind === 'session' ? 'button' : undefined}
+                  tabindex={item.session_id || item.kind === 'session' ? 0 : undefined}
                   onclick={() => openSession(item)}
                   onkeydown={(e) => {
-                    if (e.key === 'Enter') openSession(item);
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openSession(item);
+                    }
                   }}
                 >
                   <span class="item-title">{item.title}</span>
@@ -369,8 +390,8 @@
     flex-direction: column;
     height: 100%;
     overflow: hidden;
-    background: var(--surface-0, #0f1117);
-    color: var(--text-primary, #e2e8f0);
+    background: var(--bg);
+    color: var(--text);
   }
 
   .mission-header {
@@ -378,7 +399,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px 8px;
-    border-bottom: 1px solid var(--border, #1e2433);
+    border-bottom: 1px solid var(--border);
   }
 
   .mission-header h2 {
@@ -397,14 +418,14 @@
     background: none;
     border: none;
     cursor: pointer;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-dim);
     font-size: 16px;
     padding: 2px 6px;
     border-radius: 4px;
   }
   .icon-btn:hover {
-    background: var(--surface-1, #1a1f2e);
-    color: var(--text-primary, #e2e8f0);
+    background: var(--surface);
+    color: var(--text);
   }
 
   /* Saved views */
@@ -414,14 +435,14 @@
     flex-wrap: wrap;
     gap: 6px;
     padding: 8px 16px;
-    border-bottom: 1px solid var(--border, #1e2433);
+    border-bottom: 1px solid var(--border);
   }
 
   .sv-label {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-muted, #64748b);
+    color: var(--text-dim);
   }
 
   .chip {
@@ -429,19 +450,19 @@
     align-items: center;
     gap: 4px;
     padding: 2px 10px;
-    border: 1px solid var(--border, #1e2433);
+    border: 1px solid var(--border);
     border-radius: 12px;
-    background: var(--surface-1, #1a1f2e);
-    color: var(--text-secondary, #94a3b8);
+    background: var(--surface);
+    color: var(--text-dim);
     font-size: 12px;
     cursor: pointer;
     transition: background 0.12s, color 0.12s;
   }
   .chip:hover,
   .chip.active {
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
     color: #fff;
-    border-color: var(--accent, #3b82f6);
+    border-color: var(--accent);
   }
   .chip.new {
     border-style: dashed;
@@ -462,14 +483,14 @@
     align-items: center;
     gap: 8px;
     padding: 8px 16px;
-    background: var(--surface-1, #1a1f2e);
-    border-bottom: 1px solid var(--border, #1e2433);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
   }
   .sv-input {
-    background: var(--surface-0, #0f1117);
-    border: 1px solid var(--border, #1e2433);
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: 4px;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text);
     padding: 4px 8px;
     font-size: 13px;
     min-width: 140px;
@@ -480,7 +501,7 @@
   }
   .btn-save {
     padding: 4px 12px;
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
     color: #fff;
     border: none;
     border-radius: 4px;
@@ -490,8 +511,8 @@
   .btn-cancel {
     padding: 4px 12px;
     background: none;
-    color: var(--text-secondary, #94a3b8);
-    border: 1px solid var(--border, #1e2433);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
     border-radius: 4px;
     font-size: 12px;
     cursor: pointer;
@@ -508,8 +529,8 @@
   }
 
   .bucket {
-    background: var(--surface-1, #1a1f2e);
-    border: 1px solid var(--border, #1e2433);
+    background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
   }
@@ -522,21 +543,23 @@
     align-items: center;
     gap: 6px;
     padding: 8px 12px;
-    border-bottom: 1px solid var(--border, #1e2433);
+    border-bottom: 1px solid var(--border);
     font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--text-secondary, #94a3b8);
+    color: var(--text-dim);
   }
   .bucket-icon {
-    font-size: 14px;
+    display: grid;
+    place-items: center;
+    color: var(--text-dim);
   }
   .bucket-name {
     flex: 1;
   }
   .bucket-count {
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
     color: #fff;
     border-radius: 9px;
     padding: 1px 7px;
@@ -547,7 +570,7 @@
   .bucket-empty {
     padding: 10px 12px;
     font-size: 12px;
-    color: var(--text-muted, #64748b);
+    color: var(--text-dim);
     font-style: italic;
   }
 
@@ -559,7 +582,7 @@
 
   .item {
     padding: 8px 12px;
-    border-bottom: 1px solid var(--border, #1e2433);
+    border-bottom: 1px solid var(--border);
     transition: background 0.1s;
   }
   .item:last-child {
@@ -569,13 +592,17 @@
     cursor: pointer;
   }
   .item.clickable:hover {
-    background: var(--surface-2, #1e2537);
+    background: var(--surface-2);
+  }
+  .item.clickable:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   .item-title {
     display: block;
     font-size: 13px;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -590,8 +617,8 @@
 
   .meta-tag {
     font-size: 11px;
-    color: var(--text-muted, #64748b);
-    background: var(--surface-2, #1e2537);
+    color: var(--text-dim);
+    background: var(--surface-2);
     border-radius: 4px;
     padding: 1px 5px;
   }
@@ -599,14 +626,14 @@
     color: #f59e0b;
   }
   .meta-tag.age {
-    color: var(--text-muted, #64748b);
+    color: var(--text-dim);
   }
 
   .loading,
   .empty {
     padding: 24px;
     text-align: center;
-    color: var(--text-muted, #64748b);
+    color: var(--text-dim);
     font-size: 13px;
   }
 </style>

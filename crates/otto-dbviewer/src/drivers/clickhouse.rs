@@ -98,6 +98,11 @@ fn is_native_port(port: u16) -> bool {
     matches!(port, 9000 | 9440) || matches!(port % 10000, 9000 | 9440)
 }
 
+/// Hard cap on an interactive HTTP response body (the `run`/introspection path;
+/// exports stream uncapped via `post_stream`). Bounds daemon RAM for statements
+/// the auto-LIMIT injector can't rewrite; exceeding it is a clear 502, not an OOM.
+const HTTP_RESPONSE_BYTE_CAP: usize = 128 * 1024 * 1024;
+
 /// A transport-agnostic rowset: column (name, CH type) pairs and JSON rows. Both
 /// the HTTP `JSONCompact` reply and a decoded native `Block` normalize to this,
 /// so all higher-level logic (introspection, run, completion) is shared.
@@ -406,7 +411,22 @@ impl ClickhouseDriver {
     /// blocks into a transport-agnostic [`RawRows`]. This is the native twin of
     /// [`Conn::query_json`]: connect (cached, TLS per cfg), stream result
     /// `Block`s, and decode each column's `Value`s to JSON dynamically.
+    /// Uncapped — introspection/export callers; the interactive path goes
+    /// through [`Self::native_query_capped`].
     async fn native_query(&self, cfg: &ResolvedConfig, sql: &str) -> Result<RawRows> {
+        self.native_query_capped(cfg, sql, None).await
+    }
+
+    /// Like [`Self::native_query`] but stops collecting once `row_cap` rows are
+    /// held (further blocks are drained undecoded), bounding daemon RAM for
+    /// interactive statements the auto-LIMIT injector couldn't rewrite. Callers
+    /// pass their page size + 1 so truncation detection still works.
+    async fn native_query_capped(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        row_cap: Option<usize>,
+    ) -> Result<RawRows> {
         use futures_util::StreamExt;
 
         let client = self.native_client(cfg).await?;
@@ -429,10 +449,18 @@ impl ClickhouseDriver {
             if block.rows == 0 {
                 continue;
             }
+            // Past the cap: keep draining the stream (so the multiplexed
+            // connection finishes the query cleanly) without decoding/retaining.
+            if row_cap.is_some_and(|cap| data.len() >= cap) {
+                continue;
+            }
             // Decode column-major `column_data` into row-major JSON. Columns are
             // ordered by `column_types` (an IndexMap preserves SELECT order).
             let order: Vec<&String> = block.column_types.keys().collect();
             for r in 0..block.rows as usize {
+                if row_cap.is_some_and(|cap| data.len() >= cap) {
+                    break;
+                }
                 let mut row = Vec::with_capacity(order.len());
                 for name in &order {
                     let cell = block
@@ -491,6 +519,25 @@ impl ClickhouseDriver {
         query_id: Option<String>,
         timeout_secs: Option<u64>,
     ) -> Result<RawRows> {
+        self.query_rows_db_capped(cfg, sql, active_db, query_id, timeout_secs, None)
+            .await
+    }
+
+    /// Full-fat variant: `row_cap` bounds how many rows the NATIVE transport
+    /// materialises (the HTTP transport is bounded by [`HTTP_RESPONSE_BYTE_CAP`]
+    /// instead). The native transport has no server-side `max_execution_time`
+    /// or cancellable `query_id`, so `timeout_secs` is enforced there as a
+    /// client-side wall clock around the whole query.
+    #[allow(clippy::too_many_arguments)]
+    async fn query_rows_db_capped(
+        &self,
+        cfg: &ResolvedConfig,
+        sql: &str,
+        active_db: Option<&str>,
+        query_id: Option<String>,
+        timeout_secs: Option<u64>,
+        row_cap: Option<usize>,
+    ) -> Result<RawRows> {
         match transport_for(cfg) {
             Transport::Http => {
                 let conn = self
@@ -498,7 +545,10 @@ impl ClickhouseDriver {
                     .await?;
                 Ok(conn.query_json(sql).await?.into_raw())
             }
-            Transport::Native => self.native_query(cfg, sql).await,
+            Transport::Native => {
+                native_with_timeout(timeout_secs, self.native_query_capped(cfg, sql, row_cap))
+                    .await
+            }
         }
     }
 
@@ -539,7 +589,8 @@ impl ClickhouseDriver {
                 conn.query_raw(sql).await
             }
             Transport::Native => {
-                let raw = self.native_query(cfg, sql).await?;
+                let raw =
+                    native_with_timeout(timeout_secs, self.native_query(cfg, sql)).await?;
                 // SHOW CREATE / single-value replies come back as one row, one
                 // string cell; stringify whatever the first cell is.
                 let text = raw
@@ -566,8 +617,17 @@ impl ClickhouseDriver {
         max_rows: usize,
     ) -> Result<QueryResult> {
         let started = Instant::now();
+        // Native transport: materialise at most max_rows+1 rows (the +1 flags
+        // truncation); HTTP is bounded by the response byte cap instead.
         let resp = self
-            .query_rows_db_timeout(cfg, sql, active_db, query_id, timeout_secs)
+            .query_rows_db_capped(
+                cfg,
+                sql,
+                active_db,
+                query_id,
+                timeout_secs,
+                Some(max_rows.saturating_add(1)),
+            )
             .await?;
         let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -757,7 +817,26 @@ impl Conn {
         req = req.timeout(per_request);
         let resp = req.body(body).send().await.map_err(req_err)?;
         let status = resp.status();
-        let text = resp.text().await.map_err(types::upstream)?;
+        // Read the body with a hard byte cap instead of `text()`: statements the
+        // auto-LIMIT injector bails on (FORMAT/SETTINGS/UNION, batches) can
+        // return an unbounded body that would otherwise be buffered whole into
+        // daemon RAM. Exceeding the cap is a clear error, not an OOM. Error
+        // bodies are small and unaffected.
+        use futures_util::StreamExt as _;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(req_err)?;
+            if buf.len() + chunk.len() > HTTP_RESPONSE_BYTE_CAP {
+                return Err(types::upstream(format!(
+                    "clickhouse: response larger than the {} MiB interactive cap — \
+                     narrow the query, add a LIMIT, or use export",
+                    HTTP_RESPONSE_BYTE_CAP / (1024 * 1024)
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8_lossy(&buf).into_owned();
         if !status.is_success() {
             return Err(types::upstream(text.trim().to_string()));
         }
@@ -946,6 +1025,27 @@ fn native_err(e: klickhouse::KlickhouseError) -> otto_core::Error {
     otto_core::Error::Upstream(e.to_string())
 }
 
+/// Enforce a per-statement wall clock on the NATIVE transport (which has no
+/// server-side `max_execution_time` request setting and no cancellable
+/// `query_id` — without this a hung native query blocked forever while
+/// `cancel()` was a silent no-op). `None` runs unbounded, as before.
+async fn native_with_timeout<T>(
+    timeout_secs: Option<u64>,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match timeout_secs {
+        Some(secs) => tokio::time::timeout(Duration::from_secs(secs), fut)
+            .await
+            .map_err(|_| {
+                types::upstream(format!(
+                    "clickhouse: native query timed out after {secs}s (client-side — the \
+                     native transport has no server-side cancel)"
+                ))
+            })?,
+        None => fut.await,
+    }
+}
+
 // --- Native value decoding --------------------------------------------------
 
 /// Convert a decoded native `klickhouse::Value` into a clean JSON value for the
@@ -1122,9 +1222,13 @@ fn req_err(e: reqwest::Error) -> otto_core::Error {
     otto_core::Error::Upstream(msg)
 }
 
-/// Escape single quotes for embedding an identifier inside a SQL string literal.
+/// Escape a value for embedding inside a ClickHouse single-quoted string
+/// literal. ClickHouse honours BACKSLASH escapes in string literals, so `\` must
+/// be doubled BEFORE quotes are doubled — otherwise a value ending in `\`
+/// swallows the closing quote and the following bytes parse as raw SQL (the
+/// object-search box and node-path segments reach here with user input).
 fn esc(s: &str) -> String {
-    s.replace('\'', "''")
+    s.replace('\\', "\\\\").replace('\'', "''")
 }
 
 /// Truthy interpretation of a `system.columns.is_in_primary_key` cell, which
@@ -1149,9 +1253,11 @@ fn new_query_id() -> String {
     format!("otto-{}", otto_core::new_id())
 }
 
-/// Escape backticks for a backtick-quoted identifier (`db`.`tbl`).
+/// Escape a backtick-quoted identifier (`db`.`tbl`). ClickHouse applies string
+/// escaping rules inside backtick idents too, so `\` must be doubled as well —
+/// a trailing `\` would otherwise swallow the closing backtick.
 fn esc_ident(s: &str) -> String {
-    s.replace('`', "``")
+    s.replace('\\', "\\\\").replace('`', "``")
 }
 
 /// Does this statement return a rowset? (first keyword decides).
@@ -1504,6 +1610,16 @@ impl Driver for ClickhouseDriver {
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
         // Run with a throwaway token (no cancel tracking for the bare `run`).
         self.run_tracked(cfg, req, &CancelToken::new()).await
+    }
+
+    /// Evict the cached transport handles for `cache_key` (connection close, or
+    /// a config change superseded them). Dropping the `reqwest::Client` releases
+    /// its keep-alive pool; dropping the last `Arc<klickhouse::Client>` closes
+    /// the native connection. Also drops the matching completion snapshot.
+    async fn close(&self, cache_key: &str) {
+        self.clients.lock().await.remove(cache_key);
+        self.native.lock().await.remove(cache_key);
+        self.completions.invalidate(cache_key);
     }
 
     async fn run_tracked(
@@ -1958,6 +2074,17 @@ mod tests {
         assert_eq!(esc("a'b'c"), "a''b''c");
         assert_eq!(esc_ident("plain"), "plain");
         assert_eq!(esc_ident("we`ird"), "we``ird");
+    }
+
+    /// CH honours `\` escapes in string literals AND backtick idents — an
+    /// unescaped trailing backslash was a quote break-out (injection).
+    #[test]
+    fn escapes_backslashes_in_literals_and_idents() {
+        // `\'` alone would read as an ESCAPED quote; `\\''` stays inert.
+        assert_eq!(esc("evil\\"), "evil\\\\");
+        assert_eq!(esc("a\\'b"), "a\\\\''b");
+        assert_eq!(esc_ident("t\\"), "t\\\\");
+        assert_eq!(esc_ident("a\\`b"), "a\\\\``b");
     }
 
     #[test]

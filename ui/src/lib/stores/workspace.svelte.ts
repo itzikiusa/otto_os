@@ -15,6 +15,7 @@ import type {
   WorkspaceWithRole,
 } from '../api/types';
 import { toasts } from '../toast.svelte';
+import { confirmer } from '../confirm.svelte';
 import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
 
@@ -23,28 +24,41 @@ import { winKey } from '../win';
 // The main window keeps the legacy unprefixed keys.
 const LS_CURRENT = 'otto_workspace';
 const LS_TABS = 'otto_tabs_'; // + workspace id
+const LS_PANES = 'otto_panes_'; // + workspace id — split panes + axis
 // App-wide (deliberately NOT winKey-namespaced): whether the sidebar lists
 // sessions from every workspace, grouped by workspace, instead of only the
 // current one. Default ON — a session shouldn't vanish on a workspace switch.
 const LS_ALL_WS = 'otto_nav_all_ws';
 
 /** Background-spawned session sources that never surface in the sidebar's flat
- *  session lists (they live in their own panels/views). Mirrors the inline
- *  blacklists in `mainSessions`/`plainAgentSessions`. */
+ *  session lists (they live in their own panels/views). MUST stay byte-identical
+ *  to the Rust source of truth: `BACKGROUND_SESSION_SOURCES` in
+ *  `crates/otto-core/src/domain.rs` (which also drives server-side durability).
+ *  Every derived list below filters through `isForeground` — never re-inline a
+ *  source blacklist. */
 const BACKGROUND_SOURCES = new Set([
   'channel',
   'review',
+  'review_summarizer',
   'skilleval',
   'skillreview',
   'product-analysis',
+  'product_refine',
   'swarm',
   'canvas_assist',
+  'canvas_assist_preview',
   'mockup_assist',
   'db_assist',
   'workflow',
-  'insights',
   'vault-docs',
   'vault-docs-review',
+  'pr-draft',
+  'insights',
+  'run_with_otto',
+  'goal_loop',
+  'discovery_chat',
+  'scheduled_task',
+  'finding',
 ]);
 
 /** A user-facing foreground session (sidebar-listable). */
@@ -130,6 +144,17 @@ class WorkspaceStore {
   /** Sidebar filter toggle: show only sessions that need attention. */
   needsYouFilter = $state(false);
 
+  /** Unread-activity flags: a background (non-active) tab's session finished a
+   *  stretch of work (working → idle) or raised "needs you" while the user was
+   *  looking elsewhere. Cleared when the tab is activated. Purely client-side —
+   *  derived from status transitions the events WS already delivers. */
+  unread: Record<Id, boolean> = $state({});
+
+  /** Recently closed tab ids, newest last — the ⌘⇧T "reopen closed tab" stack.
+   *  Close is non-destructive (the session lives on), so reopening is just
+   *  re-adding the tab. Capped; ids whose session vanished are skipped. */
+  recentlyClosed: Id[] = $state([]);
+
   current: WorkspaceWithRole | null = $derived(
     this.workspaces.find((w) => w.id === this.currentId) ?? null,
   );
@@ -150,23 +175,10 @@ class WorkspaceStore {
    *  opened — those stay out of the way so they never interrupt current work.
    *  Review agents are opened on demand from the Review panel's "Open" button. */
   mainSessions: Session[] = $derived(
-    this.activeSessions.filter(
-      (s) =>
-        (s.meta.source !== 'channel' &&
-          s.meta.source !== 'review' &&
-          s.meta.source !== 'skilleval' &&
-        s.meta.source !== 'skillreview' &&
-          s.meta.source !== 'product-analysis' &&
-          s.meta.source !== 'swarm' &&
-          // Workflow step sessions (incl. review reviewers/summarizer, which are
-          // source:'review') stay out of the tiled grid unless explicitly opened —
-          // they're viewed inline under their run in the Workflows page.
-          s.meta.source !== 'workflow' &&
-          s.meta.source !== 'db_assist' &&
-          // Vault docs writers/reviewers live embedded in the Vault view only.
-          (s.meta.source !== 'vault-docs' && s.meta.source !== 'vault-docs-review')) ||
-        this.openTabs.includes(s.id),
-    ),
+    // Background-spawned sessions (workflow steps, review agents, vault docs
+    // writers, PR drafts, …) live in their own panels and stay out of the tiled
+    // grid unless the user explicitly opened them as a tab.
+    this.activeSessions.filter((s) => isForeground(s) || this.openTabs.includes(s.id)),
   );
 
   /** Active agent sessions (claude/codex/shell) — sidebar "Agents" group. */
@@ -231,6 +243,12 @@ class WorkspaceStore {
     this.otherWsSessions = flat;
     // Seed statuses without clobbering fresher event-fed values.
     for (const s of flat) if (!(s.id in this.statusMap)) this.statusMap[s.id] = s.status;
+    // Prune statusMap entries for sessions no longer present anywhere (left
+    // workspaces, reaped sessions) so the map doesn't grow without bound.
+    const known = new Set<Id>([...this.sessions.map((s) => s.id), ...flat.map((s) => s.id)]);
+    for (const id of Object.keys(this.statusMap)) {
+      if (!known.has(id)) delete this.statusMap[id];
+    }
   }
 
   /** Open a session that lives in another workspace: switch there, then focus
@@ -257,33 +275,15 @@ class WorkspaceStore {
       .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)),
   );
 
-  /** Agent sessions started locally (not from a channel or PR review) —
-   *  sidebar "Agents" group. Review agents are reached via the Review panel.
-   *  KEEP IN SYNC with `BACKGROUND_SESSION_SOURCES` in
-   *  crates/otto-core/src/domain.rs — the daemon exempts exactly this set's
-   *  complement (foreground sessions) from auto-pruning, so what the Agents
-   *  tab shows is what retention protects. */
-  plainAgentSessions: Session[] = $derived(
-    this.agentSessions.filter(
-      (s) =>
-        s.meta.source !== 'channel' &&
-        s.meta.source !== 'review' &&
-        s.meta.source !== 'skilleval' &&
-        s.meta.source !== 'skillreview' &&
-        s.meta.source !== 'product-analysis' &&
-        s.meta.source !== 'swarm' &&
-        s.meta.source !== 'canvas_assist' &&
-        s.meta.source !== 'mockup_assist' &&
-        s.meta.source !== 'db_assist' &&
-        // Workflow steps run embedded under their run, not in the flat Agents
-        // list (a busy workspace can have hundreds). Still openable from the
-        // run's step detail via `openSession`, which reads `this.sessions`.
-        s.meta.source !== 'workflow' &&
-        // Vault docs writers/reviewers are embedded-only (Vault runs panel).
-        s.meta.source !== 'vault-docs' &&
-        s.meta.source !== 'vault-docs-review',
-    ),
-  );
+  /** Agent sessions started locally (not by an engine) — sidebar "Agents"
+   *  group. Background sessions (workflow steps, review agents, vault docs
+   *  writers, PR drafts, …) run embedded in their own panels and are still
+   *  openable from there via `openSession`, which reads `this.sessions`.
+   *  `BACKGROUND_SOURCES` mirrors `BACKGROUND_SESSION_SOURCES` in
+   *  crates/otto-core/src/domain.rs — the daemon exempts exactly the
+   *  foreground complement from auto-pruning, so what the Agents tab shows is
+   *  what retention protects. */
+  plainAgentSessions: Session[] = $derived(this.agentSessions.filter(isForeground));
 
   /** Archived sessions — shown in a collapsible "Archived" section. */
   archivedSessions: Session[] = $derived(this.sessions.filter((s) => s.archived));
@@ -293,21 +293,7 @@ class WorkspaceStore {
   // counting them made the badge disagree with the list, e.g. badge 4 / list empty).
   workingCount: number = $derived(
     this.sessions.filter(
-      (s) =>
-        !s.archived &&
-        this.statusMap[s.id] === 'working' &&
-        s.meta.source !== 'review' &&
-        s.meta.source !== 'channel' &&
-        s.meta.source !== 'skilleval' &&
-        s.meta.source !== 'skillreview' &&
-        s.meta.source !== 'product-analysis' &&
-        s.meta.source !== 'swarm' &&
-        s.meta.source !== 'canvas_assist' &&
-        s.meta.source !== 'mockup_assist' &&
-        s.meta.source !== 'db_assist' &&
-        s.meta.source !== 'workflow' &&
-        s.meta.source !== 'vault-docs' &&
-        s.meta.source !== 'vault-docs-review',
+      (s) => !s.archived && this.statusMap[s.id] === 'working' && isForeground(s),
     ).length,
   );
 
@@ -315,21 +301,7 @@ class WorkspaceStore {
    *  "Needs you" badge/count (mirrors {@link workingCount}'s scoping). */
   needsYouCount: number = $derived(
     this.sessions.filter(
-      (s) =>
-        !s.archived &&
-        this.needsYou[s.id] === true &&
-        s.meta.source !== 'review' &&
-        s.meta.source !== 'channel' &&
-        s.meta.source !== 'skilleval' &&
-        s.meta.source !== 'skillreview' &&
-        s.meta.source !== 'product-analysis' &&
-        s.meta.source !== 'swarm' &&
-        s.meta.source !== 'canvas_assist' &&
-        s.meta.source !== 'mockup_assist' &&
-        s.meta.source !== 'db_assist' &&
-        s.meta.source !== 'workflow' &&
-        s.meta.source !== 'vault-docs' &&
-        s.meta.source !== 'vault-docs-review',
+      (s) => !s.archived && this.needsYou[s.id] === true && isForeground(s),
     ).length,
   );
 
@@ -337,6 +309,8 @@ class WorkspaceStore {
   markNeedsYou(id: Id): void {
     if (this.needsYou[id]) return;
     this.needsYou = { ...this.needsYou, [id]: true };
+    // Needing the operator while not on screen is unread activity too.
+    if (id !== this.activeSessionId) this.unread = { ...this.unread, [id]: true };
   }
 
   /** Reload the in-flight workflow runs for the current workspace. Cheap query;
@@ -421,7 +395,20 @@ class WorkspaceStore {
     // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
     const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
     this.openTabs = valid;
-    this.panes = valid.length > 0 ? [valid[0]] : [];
+    // Restore the split layout (pane membership + axis) persisted alongside the
+    // tabs, so a 2–4 pane arrangement survives reloads like colFrac/rowFrac do.
+    let panes: Id[] = [];
+    try {
+      const savedLayout = localStorage.getItem(winKey(LS_PANES + id));
+      if (savedLayout) {
+        const layout = JSON.parse(savedLayout) as { panes?: Id[]; axis?: SplitAxis };
+        panes = (layout.panes ?? []).filter((p) => valid.includes(p)).slice(0, 4);
+        if (layout.axis === 'col' || layout.axis === 'row') this.splitAxis = layout.axis;
+      }
+    } catch {
+      /* corrupt/private mode — fall through to the single-pane default */
+    }
+    this.panes = panes.length > 0 ? panes : valid.length > 0 ? [valid[0]] : [];
     this.focusedPane = 0;
   }
 
@@ -430,20 +417,12 @@ class WorkspaceStore {
     this.sessionsLoading = true;
     try {
       const all = await api.get<Session[]>(`/workspaces/${this.currentId}/sessions`);
-      // Insights runs spawn a throwaway global agent session (meta.source =
-      // 'insights') hosted on an arbitrary workspace just for the FK — it's a
-      // background scheduled job, not a user session, so keep it out of the
-      // Agents list (its report is viewable in the Insights module).
-      // Canvas "Ask AI" also spawns a managed agent session (meta.source =
-      // 'canvas_assist'); it lives in the Canvas Assistant panel (its own shell),
-      // not the Agents list — same treatment as insights/review.
-      // The DB Assistant ('db_assist') also spawns a managed agent session; it
-      // lives in the embedded DB Assistant panel (its own shell beside the query
-      // editor), NOT the Agents list — same treatment as insights/canvas_assist.
-      let kept = all.filter((s) => {
-        const src = (s.meta as { source?: string } | null)?.source;
-        return src !== 'insights' && src !== 'canvas_assist' && src !== 'db_assist';
-      });
+      // Background engine sessions (insights, canvas/db assist, workflow steps,
+      // review agents, PR drafts, …) are NOT stripped here: they stay in
+      // `this.sessions` so their owning panels can look them up / open them,
+      // and every user-facing list filters them via `isForeground` instead —
+      // one shared blacklist (`BACKGROUND_SOURCES`) rather than per-list drift.
+      let kept = all;
       // Per-device session isolation (opt-in, default off): show only sessions
       // this device started (stamped meta.client_id on create). When off, leave
       // the list unchanged so every device sees every session (current behavior).
@@ -481,12 +460,27 @@ class WorkspaceStore {
       if (this.focusedPane >= this.panes.length) {
         this.focusedPane = Math.max(0, this.panes.length - 1);
       }
+      this.persistPanes();
     }
   }
 
   private persistTabs(): void {
     if (this.currentId) {
       localStorage.setItem(winKey(LS_TABS + this.currentId), JSON.stringify(this.openTabs));
+    }
+  }
+
+  /** Persist the split layout (pane membership + axis) per workspace, so a
+   *  2–4 pane arrangement survives reloads (restored in {@link select}). */
+  private persistPanes(): void {
+    if (!this.currentId) return;
+    try {
+      localStorage.setItem(
+        winKey(LS_PANES + this.currentId),
+        JSON.stringify({ panes: this.panes, axis: this.splitAxis }),
+      );
+    } catch {
+      /* private mode */
     }
   }
 
@@ -518,6 +512,13 @@ class WorkspaceStore {
     } else {
       this.panes[this.focusedPane] = id;
       this.panes = [...this.panes];
+    }
+    this.persistPanes();
+    // Activating a tab clears its unread-activity dot.
+    if (this.unread[id]) {
+      const next = { ...this.unread };
+      delete next[id];
+      this.unread = next;
     }
   }
 
@@ -645,15 +646,124 @@ class WorkspaceStore {
     }
   }
 
+  /** Remove the tab (local bookkeeping only — the session keeps running).
+   *  For user-facing close gestures use {@link requestCloseTab}, which adds the
+   *  live-session confirm / archive-instead flow in front of this. */
   closeTab(id: Id): void {
+    const closedIdx = this.openTabs.indexOf(id);
     this.openTabs = this.openTabs.filter((t) => t !== id);
     this.persistTabs();
-    // panes showing this session fall back to another tab or collapse
-    const fallback = this.openTabs[this.openTabs.length - 1] ?? null;
+    // Remember for ⌘⇧T "reopen closed tab" (close is non-destructive).
+    this.recentlyClosed = [...this.recentlyClosed.filter((t) => t !== id), id].slice(-10);
+    // Fall back to the closed tab's NEIGHBOR (the one that slid into its slot,
+    // else the new last tab) — matching every mainstream tabbed UI, instead of
+    // jumping to the far end of the strip.
+    const fallback =
+      closedIdx >= 0
+        ? this.openTabs[Math.min(closedIdx, this.openTabs.length - 1)] ?? null
+        : this.openTabs[this.openTabs.length - 1] ?? null;
     const mapped: (Id | null)[] = this.panes.map((p) => (p === id ? fallback : p));
     const panes = mapped.filter((p, i, arr): p is Id => p !== null && arr.indexOf(p) === i);
     this.panes = panes.length > 0 ? panes : fallback ? [fallback] : [];
     this.focusedPane = Math.min(this.focusedPane, Math.max(0, this.panes.length - 1));
+    this.persistPanes();
+    // Keep the route in step: if the hash still points at the closed session,
+    // the route→store effect would resurrect the tab on the next reload / Back /
+    // module return (openSession only refuses ids that DON'T exist). Navigate
+    // to the fallback (or bare agents) so the closed id leaves the URL.
+    if (router.module === 'agents' && router.parts[1] === id) {
+      router.go(fallback ? `agents/${fallback}` : 'agents');
+    }
+  }
+
+  /**
+   * User-facing tab close: every close gesture (× button, middle-click, ⌘W,
+   * context menu, mobile bar) funnels here. A LIVE session gets a confirm
+   * dialog — Close tab (keeps running) / Archive session (stops it, history
+   * kept) / Cancel — with a "remember my choice" checkbox (reset in Settings →
+   * Appearance). Dead/suspended sessions and the DB pane just close.
+   */
+  async requestCloseTab(id: Id): Promise<void> {
+    const action = await this.resolveCloseAction([id]);
+    if (action === null) return;
+    if (action === 'archive') {
+      try {
+        await this.archiveSession(id); // archiveSession closes the tab itself
+      } catch (e) {
+        toasts.error('Archive failed', e instanceof Error ? e.message : String(e));
+      }
+    } else {
+      this.closeTab(id);
+    }
+  }
+
+  /** Bulk variant (Close Others / Close to the Right / Close All): ONE dialog
+   *  covering all live sessions in the set — never N prompts. */
+  async requestCloseTabs(ids: Id[]): Promise<void> {
+    if (ids.length === 0) return;
+    const action = await this.resolveCloseAction(ids);
+    if (action === null) return;
+    for (const id of ids) {
+      if (action === 'archive' && this.isRunning(id)) {
+        try {
+          await this.archiveSession(id);
+        } catch {
+          this.closeTab(id);
+        }
+      } else {
+        this.closeTab(id);
+      }
+    }
+  }
+
+  /** Whether a session's process is (as far as the client knows) live: the
+   *  server's transient `live` flag when present, else a status heuristic
+   *  (exited / reconnectable = no running PTY). */
+  private isRunning(id: Id): boolean {
+    if (id === DB_PANE_ID) return false;
+    const s = this.sessions.find((x) => x.id === id);
+    if (!s || s.archived) return false;
+    if (typeof s.live === 'boolean') return s.live;
+    const status = this.statusMap[id] ?? s.status;
+    return status !== 'exited' && status !== 'reconnectable';
+  }
+
+  /** Shared confirm step for {@link requestCloseTab}/{@link requestCloseTabs}:
+   *  returns 'close' | 'archive', or null for cancel. Applies (and records)
+   *  the remembered preference; skips the dialog when nothing is running. */
+  private async resolveCloseAction(ids: Id[]): Promise<'close' | 'archive' | null> {
+    const running = ids.filter((id) => this.isRunning(id));
+    // Nothing live → closing the tab(s) is trivially safe; no dialog.
+    if (running.length === 0) return 'close';
+    if (ui.closeTabPref === 'close' || ui.closeTabPref === 'archive') return ui.closeTabPref;
+    const many = ids.length > 1;
+    const message = many
+      ? `${ids.length} tabs — ${running.length} session${running.length === 1 ? '' : 's'} still running. Closing a tab keeps its session running in the background; archiving stops it (history kept, resumable).`
+      : `This session is still running. Closing the tab keeps it running in the background; archiving stops it (history kept, resumable from the Archived list).`;
+    const picked = await confirmer.choose(message, {
+      title: many ? `Close ${ids.length} tabs?` : 'Close session tab?',
+      options: [
+        { label: many ? 'Close tabs' : 'Close tab', value: 'close', kind: 'primary' },
+        { label: many ? `Archive ${running.length} session${running.length === 1 ? '' : 's'}` : 'Archive session', value: 'archive', kind: 'danger' },
+      ],
+      checkboxLabel: 'Remember my choice (change in Settings → Appearance)',
+    });
+    if (picked.value !== 'close' && picked.value !== 'archive') return null;
+    if (picked.remember) ui.setCloseTabPref(picked.value);
+    return picked.value;
+  }
+
+  /** Reopen the most recently closed tab (⌘⇧T). Skips ids whose session no
+   *  longer exists. */
+  reopenClosedTab(): void {
+    while (this.recentlyClosed.length > 0) {
+      const id = this.recentlyClosed[this.recentlyClosed.length - 1];
+      this.recentlyClosed = this.recentlyClosed.slice(0, -1);
+      if (id === DB_PANE_ID || this.sessions.some((s) => s.id === id)) {
+        this.navigateToSession(id);
+        return;
+      }
+    }
   }
 
   /** Move tab `id` to `targetIndex` in `openTabs` and persist the order. */
@@ -668,7 +778,7 @@ class WorkspaceStore {
   }
 
   closeActiveTab(): void {
-    if (this.activeSessionId) this.closeTab(this.activeSessionId);
+    if (this.activeSessionId) void this.requestCloseTab(this.activeSessionId);
   }
 
   cycleTab(dir: 1 | -1): void {
@@ -691,6 +801,7 @@ class WorkspaceStore {
     const cur = this.panes[this.focusedPane];
     this.panes = [...this.panes, cur];
     this.focusedPane = this.panes.length - 1;
+    this.persistPanes();
   }
 
   /**
@@ -735,6 +846,7 @@ class WorkspaceStore {
     // Append as a new pane beside the current one(s) and focus it.
     this.panes = [...this.panes, id];
     this.focusedPane = this.panes.length - 1;
+    this.persistPanes();
     return true;
   }
 
@@ -742,6 +854,7 @@ class WorkspaceStore {
     if (this.panes.length <= 1) return;
     this.panes = this.panes.filter((_, i) => i !== idx);
     this.focusedPane = Math.min(this.focusedPane, this.panes.length - 1);
+    this.persistPanes();
   }
 
   focusPane(idx: number): void {
@@ -782,6 +895,7 @@ class WorkspaceStore {
       if (!paneset.includes(id)) paneset.push(id);
     }
     this.panes = paneset.length > 0 ? paneset : this.panes;
+    this.persistPanes();
     this.maximizedId = null;
     this.setViewMode('tiled');
   }
@@ -841,6 +955,17 @@ class WorkspaceStore {
   applyEvent(ev: OttoEvent): void {
     switch (ev.type) {
       case 'session_status': {
+        // Unread dot: a background tab's session just finished a stretch of
+        // work (working → idle/exited) while the user was looking elsewhere.
+        const prevStatus = this.statusMap[ev.session_id];
+        if (
+          prevStatus === 'working' &&
+          (ev.status === 'idle' || ev.status === 'exited') &&
+          ev.session_id !== this.activeSessionId &&
+          this.openTabs.includes(ev.session_id)
+        ) {
+          this.unread = { ...this.unread, [ev.session_id]: true };
+        }
         this.statusMap[ev.session_id] = ev.status;
         this.sessions = this.sessions.map((s) =>
           s.id === ev.session_id ? { ...s, status: ev.status } : s,
@@ -892,7 +1017,12 @@ class WorkspaceStore {
       }
       case 'session_meta_updated': {
         // Replace the cached session's meta in place (e.g. live handover flags).
+        // Mirrors session_renamed: BOTH lists, so cross-workspace sidebar rows
+        // (issue chips, handover flags) don't go stale.
         this.sessions = this.sessions.map((s) =>
+          s.id === ev.session_id ? { ...s, meta: ev.meta } : s,
+        );
+        this.otherWsSessions = this.otherWsSessions.map((s) =>
           s.id === ev.session_id ? { ...s, meta: ev.meta } : s,
         );
         break;
@@ -913,6 +1043,11 @@ class WorkspaceStore {
       case 'session_removed': {
         delete this.statusMap[ev.session_id];
         this.clearNeedsYou(ev.session_id);
+        if (this.unread[ev.session_id]) {
+          const next = { ...this.unread };
+          delete next[ev.session_id];
+          this.unread = next;
+        }
         if (ev.workspace_id === this.currentId) {
           this.sessions = this.sessions.filter((s) => s.id !== ev.session_id);
           if (this.openTabs.includes(ev.session_id)) this.closeTab(ev.session_id);

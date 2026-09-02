@@ -1,8 +1,7 @@
 # Otto Remote Access — Operator Runbook
 
 How to reach Otto from a phone/tablet over the internet, securely. The phone is a
-thin browser client; every session runs on the Mac. See the design at
-`docs/superpowers/specs/2026-06-19-remote-mobile-access-design.md`.
+thin browser client; every session runs on the Mac.
 
 ## What you get
 

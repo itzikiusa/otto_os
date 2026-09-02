@@ -28,13 +28,13 @@ use otto_channels::adapter::Adapter;
 use otto_core::domain::{Channel, User, Workspace};
 use otto_core::event::Event;
 use otto_core::workflows::{
-    NodeRunState, NodeStatus, NodeTypeSpec, RunStatus, Workflow, WorkflowGraph, WorkflowNode,
+    NodeRunState, NodeStatus, NodeTypeSpec, RunScope, RunStatus, Workflow, WorkflowGraph,
+    WorkflowNode, WorkflowRun,
 };
 use otto_core::{Id, Result};
 use otto_dbviewer::QueryRequest;
 use otto_state::{swarm::NewTask as NewSwarmTask, WorkflowsRepo};
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
 
 use crate::state::ServerCtx;
 
@@ -389,23 +389,381 @@ fn param_str_list(params: &Value, key: &str) -> Vec<String> {
 /// real work.
 const RUN_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60 * 60);
 
-/// Fail any workflow run left EXECUTING by a previous daemon process.
+/// Cap on automatic restart-resumes per run: a run that keeps getting
+/// interrupted (a crash-looping daemon, or a step that itself brings the
+/// daemon down) must not re-execute forever — after this many resumes the
+/// reconciler fails it for a human to look at.
+pub const MAX_RESUME_ATTEMPTS: i64 = 2;
+
+/// Node kinds the startup reconciler may re-execute after a restart caught
+/// them MID-FLIGHT. The allowlist is deliberately explicit: an unlisted kind
+/// interrupted mid-step has an UNKNOWN outcome (`git_pr` may have opened the
+/// PR, `channel_notify` may have posted, `api_run`/`http_request` may have
+/// fired) — replaying it silently would double its side effect, so such runs
+/// fail with a pointer at the manual retry-a-step flow instead. Listed kinds
+/// are safe to re-run: pure/deterministic nodes, read-only fetches, and
+/// agent-backed steps that start a FRESH session in the run's still-alive
+/// worktree (re-doing work costs time, not correctness).
+fn is_restart_resumable_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "manual_trigger"
+            | "agent_prompt"
+            | "prepare_context"
+            | "transform"
+            | "delay"
+            | "log"
+            | "condition"
+            | "loop"
+            | "budget_gate"
+            | "human_approval"
+            | "review_run"
+            | "db_query"
+            | "broker_peek"
+            | "game_engine"
+            | "verifier"
+            | "canvas"
+            | "product_analyze"
+    )
+}
+
+/// What [`reconcile_interrupted_runs`] decided for one interrupted run.
+/// Produced by the pure [`classify_resume`] so the policy is unit-testable
+/// without a daemon.
+#[derive(Debug)]
+pub enum ResumeDecision {
+    /// Re-enter the run: persist `nodes` + `scope` and [`spawn_run`] it.
+    Resume { scope: RunScope, nodes: Vec<NodeRunState> },
+    /// The run cannot be safely resumed — fail it with `error` (nodes carry
+    /// any per-node annotation, e.g. the unknown-outcome step marked Error).
+    Fail { nodes: Vec<NodeRunState>, error: String },
+    /// Every node already settled (the daemon died between the last step and
+    /// the finalize write) — just stamp the terminal status.
+    Finish { status: RunStatus, nodes: Vec<NodeRunState>, error: Option<String> },
+}
+
+/// Pure classification of one interrupted run: where to re-enter, or why not.
 ///
-/// A run executes in a background task that dies with the process, so a
-/// `running` row is orphaned and would otherwise poll forever in the UI. A
-/// QUEUED run (fresh `pending`, no node progress — see [`spawn_run`]) is *not*
-/// orphaned: its row is the persistent queue entry and [`resume_queued_runs`]
-/// re-enqueues it right after this. The exception is a `pending` row that
-/// already carries node states — a reopened retry-a-step whose scope (start
-/// node, adopted prior states) lived only in the dead process's memory; re-
-/// running it blind would replay finished steps' side effects, so it fails
-/// like a running row. Called once on daemon startup (mirrors the review /
-/// skill-eval / product / swarm startup reconciliation). Returns the number of
-/// rows updated.
-pub async fn reap_orphaned_runs(pool: &SqlitePool) -> Result<u64> {
-    WorkflowsRepo::new(pool.clone())
-        .fail_interrupted_runs("Interrupted by a daemon restart — re-run the workflow.")
-        .await
+/// `prior_scope` is the persisted `resume_scope_json` (the scope the dead
+/// process was executing). The caller has already applied the workflow-level
+/// gates (`on_restart = 'fail'`, resume-attempt cap, missing workflow) — this
+/// only reasons about the run's node states vs the graph:
+///   * paused at `human_approval` → re-enter AT the approval node (it re-parks;
+///     side-effect free by construction);
+///   * a node mid-flight → re-enter at it when its kind is restart-safe
+///     ([`is_restart_resumable_kind`]), else fail with the step marked
+///     "outcome unknown";
+///   * no node mid-flight → resume the persisted scope (a re-queued retry that
+///     never started), else the first still-pending node, else finish the run
+///     with the status its settled nodes imply.
+pub fn classify_resume(
+    graph: &WorkflowGraph,
+    run: &WorkflowRun,
+    prior_scope: Option<RunScope>,
+) -> ResumeDecision {
+    let mut nodes = run.nodes.clone();
+    let kind_of = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.kind.as_str())
+    };
+    // The node(s) a dead process left mid-flight. The engine executes
+    // sequentially so there is at most one in practice; flip them ALL back to
+    // Pending defensively (a stray Running state must never survive — nothing
+    // would ever settle it).
+    let running_ids: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.status == NodeStatus::Running)
+        .map(|n| n.node_id.clone())
+        .collect();
+    // Paused at an approval? That node is the re-entry point regardless of its
+    // recorded status — the pause is fully persisted and re-awaiting the
+    // operator is free of side effects.
+    let entry = if run.waiting_approval {
+        run.approval_node_id.clone().or_else(|| running_ids.first().cloned())
+    } else {
+        running_ids.first().cloned()
+    };
+
+    if let Some(entry_id) = entry {
+        let Some(kind) = kind_of(&entry_id) else {
+            return ResumeDecision::Fail {
+                nodes,
+                error: format!(
+                    "Interrupted by a daemon restart at unknown step '{entry_id}' — re-run the workflow."
+                ),
+            };
+        };
+        if !is_restart_resumable_kind(kind) {
+            // Unknown outcome: mark the step itself, settle the rest.
+            for n in nodes.iter_mut() {
+                if n.node_id == entry_id {
+                    n.status = NodeStatus::Error;
+                    n.error = Some(
+                        "interrupted mid-step by a daemon restart — outcome unknown (this step has external side effects)".into(),
+                    );
+                    n.logs.push("✗ interrupted mid-step by a daemon restart".into());
+                } else if matches!(n.status, NodeStatus::Pending | NodeStatus::Running) {
+                    n.status = NodeStatus::Skipped;
+                }
+            }
+            return ResumeDecision::Fail {
+                nodes,
+                error: format!(
+                    "Interrupted by a daemon restart during '{entry_id}' ({kind}) — its outcome is unknown, so it was not replayed. Retry the step (or \"re-run from here\") once you've checked what landed."
+                ),
+            };
+        }
+        for n in nodes.iter_mut() {
+            if running_ids.contains(&n.node_id) {
+                n.status = NodeStatus::Pending;
+                n.error = None;
+            }
+        }
+        // Preserve a single-step retry scope when the restart caught exactly
+        // that step; otherwise re-enter at the step and run its downstream.
+        let only_node = prior_scope
+            .as_ref()
+            .is_some_and(|s| s.only_node && s.start_node.as_deref() == Some(entry_id.as_str()));
+        return ResumeDecision::Resume {
+            scope: RunScope { start_node: Some(entry_id), only_node, adopt_start: false },
+            nodes,
+        };
+    }
+
+    // No node mid-flight. A re-queued scoped re-entry that never started
+    // (pending with progress) resumes its persisted scope verbatim.
+    if run.status == RunStatus::Pending {
+        return match prior_scope {
+            Some(scope) => ResumeDecision::Resume { scope, nodes },
+            None => ResumeDecision::Fail {
+                nodes,
+                error: "Interrupted by a daemon restart — the retry scope was lost (pre-resume run); use \"retry from this step\" again.".into(),
+            },
+        };
+    }
+
+    // Executing, but between node boundaries: resume at the first
+    // still-pending node in topo order, or finish the run if none remain.
+    if let Ok(order) = topo_order(graph) {
+        if let Some(next) = order.iter().find(|id| {
+            nodes
+                .iter()
+                .any(|n| &&n.node_id == id && n.status == NodeStatus::Pending)
+        }) {
+            return ResumeDecision::Resume {
+                scope: RunScope { start_node: Some(next.clone()), only_node: false, adopt_start: false },
+                nodes,
+            };
+        }
+    }
+    let any_error = nodes.iter().any(|n| n.status == NodeStatus::Error);
+    ResumeDecision::Finish {
+        status: if any_error { RunStatus::Error } else { RunStatus::Success },
+        nodes,
+        error: any_error.then(|| "one or more nodes failed".to_string()),
+    }
+}
+
+/// Reconcile every run a previous daemon process left in flight: resume where
+/// the workflow's `on_restart` policy and the interrupted step's kind allow,
+/// fail otherwise. Replaces the old unconditional hard-fail (`Interrupted by a
+/// daemon restart — re-run the workflow.`) — per-node progress was already
+/// persisted after every step, so a restart no longer discards a run's work.
+/// Returns `(resumed, failed_or_finished)`. Called once on daemon startup,
+/// BEFORE [`resume_queued_runs`] (resumed rows go back to `pending` with node
+/// progress, which the queue query ignores) and BEFORE
+/// [`sweep_stale_run_worktrees`] (back-to-pending rows keep their worktrees).
+pub async fn reconcile_interrupted_runs(ctx: &ServerCtx) -> (usize, usize) {
+    let repo = WorkflowsRepo::new(ctx.pool.clone());
+    let rows = match repo.interrupted_runs().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("workflow recovery: listing interrupted runs: {e}");
+            return (0, 0);
+        }
+    };
+    let (mut resumed, mut settled) = (0, 0);
+    for (run, scope_json) in rows {
+        let prior_scope: Option<RunScope> =
+            scope_json.as_deref().and_then(|s| serde_json::from_str(s).ok());
+        // Workflow-level gates first: policy, retry cap, orphaned definition.
+        let loaded = match repo.get(&run.workflow_id).await {
+            Ok(wf) => match ctx.workspaces.get(&wf.workspace_id).await {
+                Ok(ws) => Ok((wf, ws)),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        let decision = match &loaded {
+            Err(e) => ResumeDecision::Fail {
+                nodes: run.nodes.clone(),
+                error: format!("Interrupted by a daemon restart and cannot resume: {e}"),
+            },
+            Ok((wf, _)) if wf.on_restart == "fail" => ResumeDecision::Fail {
+                nodes: run.nodes.clone(),
+                error: "Interrupted by a daemon restart; resume is disabled for this workflow (on_restart = fail) — re-run it manually.".into(),
+            },
+            Ok(_) if run.resume_attempts >= MAX_RESUME_ATTEMPTS => ResumeDecision::Fail {
+                nodes: run.nodes.clone(),
+                error: format!(
+                    "Interrupted by a daemon restart; automatic resume exhausted after {MAX_RESUME_ATTEMPTS} attempts — use \"retry from this step\" or re-run."
+                ),
+            },
+            Ok((wf, _)) => {
+                let mut d = classify_resume(&wf.graph, &run, prior_scope);
+                // Done-file oracle: the interrupted agent step may have
+                // actually FINISHED between the last progress write and the
+                // crash — its handoff `.md` (written by the agent, cleared
+                // before every attempt) is the positive proof. Adopt it as
+                // the step's output instead of re-running the whole turn.
+                if let ResumeDecision::Resume { scope, nodes } = &mut d {
+                    apply_done_file_oracle(ctx, &run, &wf.graph, scope, nodes);
+                }
+                d
+            }
+        };
+        match decision {
+            ResumeDecision::Resume { scope, nodes } => {
+                let scope_json = serde_json::to_string(&scope).unwrap_or_else(|_| "{}".into());
+                match repo.prepare_resume(&run.id, &nodes, &scope_json).await {
+                    Ok(rev) => {
+                        let (wf, ws) = loaded.expect("Resume implies a loaded workflow");
+                        tracing::info!(
+                            run = %run.id, workflow = %wf.name,
+                            attempt = run.resume_attempts + 1,
+                            start = scope.start_node.as_deref().unwrap_or("(whole graph)"),
+                            "workflow recovery: resuming interrupted run"
+                        );
+                        emit_run_updated(
+                            ctx, &run.workspace_id, &run.id, "pending", None, rev, None, &nodes,
+                            false,
+                        );
+                        spawn_run(
+                            ctx.clone(),
+                            ws,
+                            wf,
+                            run.id.clone(),
+                            run.input.clone(),
+                            scope,
+                            Some(nodes),
+                        );
+                        resumed += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(run = %run.id, "workflow recovery: prepare resume failed: {e}");
+                        let _ = repo
+                            .update_run(
+                                &run.id,
+                                RunStatus::Error,
+                                &run.nodes,
+                                Some("Interrupted by a daemon restart; resume bookkeeping failed — re-run the workflow."),
+                                true,
+                            )
+                            .await;
+                        settled += 1;
+                    }
+                }
+            }
+            ResumeDecision::Fail { nodes, error } => {
+                let rev = repo
+                    .update_run(&run.id, RunStatus::Error, &nodes, Some(&error), true)
+                    .await
+                    .unwrap_or(0);
+                emit_run_updated(
+                    ctx, &run.workspace_id, &run.id, "error", None, rev, None, &nodes, false,
+                );
+                settled += 1;
+            }
+            ResumeDecision::Finish { status, nodes, error } => {
+                let rev = repo
+                    .update_run(&run.id, status, &nodes, error.as_deref(), true)
+                    .await
+                    .unwrap_or(0);
+                emit_run_updated(
+                    ctx, &run.workspace_id, &run.id, status.as_str(), None, rev, None, &nodes,
+                    false,
+                );
+                settled += 1;
+            }
+        }
+    }
+    (resumed, settled)
+}
+
+/// If the resume entry is an `agent_prompt` whose handoff `.md` exists in the
+/// run's context dir and postdates the step's start, the step actually
+/// finished — adopt it as Success (output = the handoff content) and set
+/// `adopt_start` so the re-entry runs only its descendants. A single-step
+/// (`only_node`) scope with a proven-done step leaves nothing to run — the
+/// downstream Finish/adoption path handles that naturally since the node is
+/// Success and the engine recomputes final status over adopted states.
+fn apply_done_file_oracle(
+    ctx: &ServerCtx,
+    run: &WorkflowRun,
+    graph: &WorkflowGraph,
+    scope: &mut RunScope,
+    nodes: &mut [NodeRunState],
+) {
+    let Some(entry_id) = scope.start_node.clone() else { return };
+    let Some(node) = graph.nodes.iter().find(|n| n.id == entry_id) else { return };
+    if node.kind != "agent_prompt" {
+        return;
+    }
+    let Some(state) = nodes.iter_mut().find(|n| n.node_id == entry_id) else { return };
+    let Some(content) = find_step_handoff(ctx, &run.id, node, state.started_at) else { return };
+    state.status = NodeStatus::Success;
+    state.error = None;
+    state.output = Some(json!({ "reply": content }));
+    state
+        .logs
+        .push("✓ adopted after daemon restart — the step's handoff file shows it finished".into());
+    scope.adopt_start = true;
+}
+
+/// Locate the interrupted step's handoff file: `step{N}-{slug(name)}.md` in
+/// `<data_dir>/workflow-context/<run_id>/`, where N (the execution-order step
+/// number) is unknown after a restart — so match on the slug, require the
+/// mtime to postdate the step's recorded start (a leftover from an earlier
+/// attempt is cleared before each submit, but stay defensive), and require
+/// non-trivial content. Returns the file's content.
+fn find_step_handoff(
+    ctx: &ServerCtx,
+    run_id: &Id,
+    node: &WorkflowNode,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<String> {
+    let slug = crate::workflow_context::slug(node_display_name(node));
+    let dir = ctx.data_dir.join("workflow-context").join(run_id);
+    let entries = std::fs::read_dir(&dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // step{N}-{slug}.md exactly (no loop-iteration/inner suffixes — those
+        // belong to inner steps the loop node itself re-drives).
+        let Some(rest) = name.strip_prefix("step") else { continue };
+        let Some(tail) = rest.split_once('-').and_then(|(n, tail)| {
+            n.chars().all(|c| c.is_ascii_digit()).then_some(tail)
+        }) else {
+            continue;
+        };
+        if tail != format!("{slug}.md") {
+            continue;
+        }
+        let meta = entry.metadata().ok()?;
+        if let (Some(start), Ok(modified)) = (started_at, meta.modified()) {
+            let modified: chrono::DateTime<chrono::Utc> = modified.into();
+            if modified < start {
+                continue;
+            }
+        }
+        let content = std::fs::read_to_string(entry.path()).ok()?;
+        if content.trim().len() > 40 {
+            return Some(content);
+        }
+    }
+    None
 }
 
 /// Default cap on workflow runs EXECUTING at once, daemon-wide. Every run
@@ -447,18 +805,30 @@ fn run_gate() -> &'static tokio::sync::Semaphore {
 /// progress. If the daemon dies while runs wait, startup re-enqueues them via
 /// [`resume_queued_runs`] in the same (creation) order. A run canceled while
 /// queued is honored here — the permit is released without executing.
-#[allow(clippy::too_many_arguments)]
+///
+/// A SCOPED entry (`scope.start_node` set — a retry-a-step or a restart
+/// resume) persists its scope on the row first, so a daemon death mid-retry
+/// leaves enough on disk for [`reconcile_interrupted_runs`] to re-enter with
+/// the same scope instead of failing the run.
 pub fn spawn_run(
     ctx: ServerCtx,
     ws: Workspace,
     workflow: Workflow,
     run_id: Id,
     input: Value,
-    start_node: Option<String>,
-    only_node: bool,
+    scope: RunScope,
     prior_nodes: Option<Vec<NodeRunState>>,
 ) {
     tokio::spawn(async move {
+        if scope.start_node.is_some() {
+            let scope_json = serde_json::to_string(&scope).unwrap_or_else(|_| "{}".into());
+            if let Err(e) = WorkflowsRepo::new(ctx.pool.clone())
+                .set_run_resume_scope(&run_id, Some(&scope_json))
+                .await
+            {
+                tracing::warn!(%run_id, "persisting run scope failed: {e}");
+            }
+        }
         let gate = run_gate();
         let permit = match gate.try_acquire() {
             Ok(p) => p,
@@ -491,15 +861,15 @@ pub fn spawn_run(
                 return;
             }
         }
-        run_workflow(ctx, ws, workflow, run_id, input, start_node, only_node, prior_nodes).await;
+        run_workflow(ctx, ws, workflow, run_id, input, scope, prior_nodes).await;
         drop(permit);
     });
 }
 
 /// Re-enqueue runs that were QUEUED (fresh `pending`) when the previous daemon
 /// process died, oldest first — the persistent half of the run queue. Called
-/// once on daemon startup, after [`reap_orphaned_runs`] has failed the rows
-/// that can't be safely resumed. Returns how many runs were re-enqueued.
+/// once on daemon startup, after [`reconcile_interrupted_runs`] has resumed or
+/// settled every run with node progress. Returns how many runs were re-enqueued.
 pub async fn resume_queued_runs(ctx: &ServerCtx) -> usize {
     let repo = WorkflowsRepo::new(ctx.pool.clone());
     let ids = match repo.queued_run_ids().await {
@@ -523,7 +893,7 @@ pub async fn resume_queued_runs(ctx: &ServerCtx) -> usize {
         };
         match loaded {
             Ok((wf, ws)) => {
-                spawn_run(ctx.clone(), ws, wf, run.id.clone(), run.input.clone(), None, false, None);
+                spawn_run(ctx.clone(), ws, wf, run.id.clone(), run.input.clone(), RunScope::default(), None);
                 resumed += 1;
             }
             Err(e) => {
@@ -743,14 +1113,13 @@ pub async fn run_workflow(
     workflow: Workflow,
     run_id: Id,
     input: Value,
-    start_node: Option<String>,
-    only_node: bool,
-    // Retry-a-step re-entry (`POST /workflow-runs/{id}/retry-node`): the
-    // finished run's node states. Out-of-scope nodes ADOPT them — status,
-    // output, sessions — so the run keeps its history (siblings stay
-    // Success/Skipped instead of flipping to "outside run scope") and the
-    // final status still accounts for other nodes' failures. `None` for every
-    // normal run.
+    scope: RunScope,
+    // Retry-a-step re-entry (`POST /workflow-runs/{id}/retry-node`) and the
+    // restart reconciler: the run's persisted node states. Out-of-scope nodes
+    // ADOPT them — status, output, sessions — so the run keeps its history
+    // (siblings stay Success/Skipped instead of flipping to "outside run
+    // scope") and the final status still accounts for other nodes' failures.
+    // `None` for every normal run.
     prior_nodes: Option<Vec<NodeRunState>>,
 ) {
     let repo = WorkflowsRepo::new(ctx.pool.clone());
@@ -767,11 +1136,31 @@ pub async fn run_workflow(
     };
 
     // The set of nodes to actually execute (start-from-here / run-only); `None`
-    // means the whole graph. Nodes outside the set are marked skipped.
+    // means the whole graph. Nodes outside the set are marked skipped. An
+    // `adopt_start` scope (restart resume whose entry step provably finished)
+    // treats the entry itself as done — it drops OUT of the set so the
+    // adoption pass below keeps its prior Success state/output while its
+    // descendants run.
+    let RunScope { start_node, only_node, adopt_start } = scope;
     let run_set: Option<std::collections::HashSet<String>> = match &start_node {
         None => None,
-        Some(s) if only_node => Some(std::iter::once(s.clone()).collect()),
-        Some(s) => Some(descendants_inclusive(&workflow.graph, s)),
+        Some(s) if only_node => {
+            let mut set: std::collections::HashSet<String> =
+                std::iter::once(s.clone()).collect();
+            if adopt_start {
+                // Single-step scope whose step is already proven done —
+                // nothing executes; the run finalizes over adopted states.
+                set.remove(s);
+            }
+            Some(set)
+        }
+        Some(s) => {
+            let mut set = descendants_inclusive(&workflow.graph, s);
+            if adopt_start {
+                set.remove(s);
+            }
+            Some(set)
+        }
     };
 
     // node_id -> output once it has run.
@@ -1101,7 +1490,16 @@ pub async fn run_workflow(
 
     // Global wall clock: a run can't execute forever. Checked at each node
     // boundary; a node already executing finishes first (bounded per-node).
-    let run_started = Instant::now();
+    // Anchored to the ROW's `started_at` (not a process-local Instant) so a
+    // crash-looping daemon resuming the run over and over can't extend its
+    // budget indefinitely; falls back to "now" if the row can't be read.
+    let run_deadline = repo
+        .get_run(&run_id)
+        .await
+        .map(|r| r.started_at)
+        .unwrap_or_else(|_| chrono::Utc::now())
+        + chrono::Duration::from_std(RUN_WALL_CLOCK_TIMEOUT)
+            .unwrap_or_else(|_| chrono::Duration::hours(10));
 
     for node_id in order {
         // Honor a cancel request (the API flips the run status to Canceled).
@@ -1113,7 +1511,7 @@ pub async fn run_workflow(
         }
 
         // Stop once the run has exceeded its global time budget.
-        if run_started.elapsed() >= RUN_WALL_CLOCK_TIMEOUT {
+        if chrono::Utc::now() >= run_deadline {
             timed_out = true;
             break;
         }
@@ -4915,7 +5313,8 @@ async fn reap_run_worktrees(ctx: &ServerCtx, run_id: &str) {
 
 /// Startup sweep: reap worktree leftovers of every run directory whose run is
 /// no longer pending/running (crashed daemon, pre-reap versions). Called once
-/// from ottod startup after [`reap_orphaned_runs`].
+/// from ottod startup after [`reconcile_interrupted_runs`] — runs it chose to
+/// resume are `pending` again by then, so their worktrees survive.
 pub async fn sweep_stale_run_worktrees(ctx: &ServerCtx) {
     let base = ctx.data_dir.join("workflow-runs");
     let entries = match std::fs::read_dir(&base) {
@@ -5327,6 +5726,213 @@ mod tests {
         assert!(topo_order(&g).is_err());
     }
 
+    fn nstate(id: &str, status: NodeStatus) -> NodeRunState {
+        NodeRunState {
+            node_id: id.into(),
+            status,
+            output: None,
+            error: None,
+            logs: vec![],
+            started_at: None,
+            duration_ms: None,
+            attempts: None,
+            sessions: vec![],
+        }
+    }
+
+    fn mk_run(status: RunStatus, nodes: Vec<NodeRunState>) -> WorkflowRun {
+        WorkflowRun {
+            id: "r1".into(),
+            workflow_id: "wf1".into(),
+            workspace_id: "ws1".into(),
+            status,
+            input: Value::Null,
+            nodes,
+            error: None,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            rev: 0,
+            waiting_approval: false,
+            approval_node_id: None,
+            approved_by: None,
+            approval_note: None,
+            approved_at: None,
+            workflow_version: None,
+            proof_pack_id: None,
+            resume_attempts: 0,
+            context_dir: None,
+        }
+    }
+
+    /// A restart that caught an idempotent step mid-flight resumes AT it:
+    /// the step flips back to Pending, finished siblings keep their states.
+    #[test]
+    fn classify_resume_reenters_at_interrupted_idempotent_step() {
+        let g = WorkflowGraph {
+            nodes: vec![node("a", "manual_trigger"), node("b", "agent_prompt"), node("c", "git_pr")],
+            edges: vec![edge("a", "b"), edge("b", "c")],
+        };
+        let run = mk_run(
+            RunStatus::Running,
+            vec![
+                nstate("a", NodeStatus::Success),
+                nstate("b", NodeStatus::Running),
+                nstate("c", NodeStatus::Pending),
+            ],
+        );
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Resume { scope, nodes } => {
+                assert_eq!(scope.start_node.as_deref(), Some("b"));
+                assert!(!scope.only_node && !scope.adopt_start);
+                assert_eq!(nodes[1].status, NodeStatus::Pending, "interrupted step re-runs");
+                assert_eq!(nodes[0].status, NodeStatus::Success, "finished step adopted");
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+
+    /// A restart that caught a SIDE-EFFECT step mid-flight must NOT replay it —
+    /// the step is marked unknown-outcome and the run fails.
+    #[test]
+    fn classify_resume_fails_on_interrupted_side_effect_step() {
+        let g = WorkflowGraph {
+            nodes: vec![node("a", "agent_prompt"), node("b", "git_pr"), node("c", "log")],
+            edges: vec![edge("a", "b"), edge("b", "c")],
+        };
+        let run = mk_run(
+            RunStatus::Running,
+            vec![
+                nstate("a", NodeStatus::Success),
+                nstate("b", NodeStatus::Running),
+                nstate("c", NodeStatus::Pending),
+            ],
+        );
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Fail { nodes, error } => {
+                assert!(error.contains("outcome is unknown"), "{error}");
+                assert_eq!(nodes[1].status, NodeStatus::Error);
+                assert_eq!(nodes[2].status, NodeStatus::Skipped);
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    /// A run paused at a human approval resumes AT the approval node — the
+    /// cheapest case: nothing but the wait is lost.
+    #[test]
+    fn classify_resume_reenters_at_waiting_approval_node() {
+        let g = WorkflowGraph {
+            nodes: vec![node("a", "log"), node("gate", "human_approval"), node("b", "channel_notify")],
+            edges: vec![edge("a", "gate"), edge("gate", "b")],
+        };
+        let mut run = mk_run(
+            RunStatus::Running,
+            vec![
+                nstate("a", NodeStatus::Success),
+                nstate("gate", NodeStatus::Running),
+                nstate("b", NodeStatus::Pending),
+            ],
+        );
+        run.waiting_approval = true;
+        run.approval_node_id = Some("gate".into());
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Resume { scope, .. } => {
+                assert_eq!(scope.start_node.as_deref(), Some("gate"));
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+
+    /// A re-queued retry-a-step (pending with progress) resumes its PERSISTED
+    /// scope verbatim; without one (pre-0108 row) it fails like before.
+    #[test]
+    fn classify_resume_honors_persisted_retry_scope() {
+        let g = WorkflowGraph {
+            nodes: vec![node("a", "log"), node("b", "agent_prompt")],
+            edges: vec![edge("a", "b")],
+        };
+        let run = mk_run(
+            RunStatus::Pending,
+            vec![nstate("a", NodeStatus::Success), nstate("b", NodeStatus::Error)],
+        );
+        let scope =
+            RunScope { start_node: Some("b".into()), only_node: true, adopt_start: false };
+        match classify_resume(&g, &run, Some(scope.clone())) {
+            ResumeDecision::Resume { scope: got, .. } => assert_eq!(got, scope),
+            other => panic!("expected Resume, got {other:?}"),
+        }
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Fail { error, .. } => assert!(error.contains("retry scope was lost")),
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    /// Died between the last node and the finalize write → just stamp the
+    /// terminal status the settled nodes imply.
+    #[test]
+    fn classify_resume_finishes_a_fully_settled_run() {
+        let g = WorkflowGraph {
+            nodes: vec![node("a", "log"), node("b", "log")],
+            edges: vec![edge("a", "b")],
+        };
+        let run = mk_run(
+            RunStatus::Running,
+            vec![nstate("a", NodeStatus::Success), nstate("b", NodeStatus::Success)],
+        );
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Finish { status, error, .. } => {
+                assert_eq!(status, RunStatus::Success);
+                assert!(error.is_none());
+            }
+            other => panic!("expected Finish, got {other:?}"),
+        }
+        // …and Error when a settled node failed.
+        let run = mk_run(
+            RunStatus::Running,
+            vec![nstate("a", NodeStatus::Success), nstate("b", NodeStatus::Error)],
+        );
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Finish { status, .. } => assert_eq!(status, RunStatus::Error),
+            other => panic!("expected Finish, got {other:?}"),
+        }
+    }
+
+    /// Died between node boundaries with work remaining → resume at the first
+    /// still-pending node in topo order.
+    #[test]
+    fn classify_resume_resumes_at_first_pending_between_boundaries() {
+        let g = WorkflowGraph {
+            nodes: vec![node("a", "log"), node("b", "log"), node("c", "log")],
+            edges: vec![edge("a", "b"), edge("b", "c")],
+        };
+        let run = mk_run(
+            RunStatus::Running,
+            vec![
+                nstate("a", NodeStatus::Success),
+                nstate("b", NodeStatus::Pending),
+                nstate("c", NodeStatus::Pending),
+            ],
+        );
+        match classify_resume(&g, &run, None) {
+            ResumeDecision::Resume { scope, .. } => {
+                assert_eq!(scope.start_node.as_deref(), Some("b"));
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn side_effect_kinds_are_not_restart_resumable() {
+        for k in ["git_pr", "channel_notify", "swarm_task", "product_publish", "api_run",
+                  "http_request", "self_improve", "product_rewrite", "product_plan"] {
+            assert!(!is_restart_resumable_kind(k), "{k} must not auto-replay");
+        }
+        for k in ["agent_prompt", "transform", "condition", "delay", "log", "loop",
+                  "human_approval", "review_run", "prepare_context"] {
+            assert!(is_restart_resumable_kind(k), "{k} should be restart-safe");
+        }
+    }
+
     #[test]
     fn catalog_kinds_are_known() {
         assert!(is_known_kind("agent_prompt"));
@@ -5477,6 +6083,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             version: 1,
+            on_restart: "resume".into(),
         };
         let mk = |id: &str, status: NodeStatus, out: Value| NodeRunState {
             node_id: id.into(),
@@ -5569,6 +6176,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             version: 1,
+            on_restart: "resume".into(),
         };
         // Slack origin from a chat trigger.
         let t = resolve_chat_target(

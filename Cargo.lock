@@ -3524,6 +3524,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "sha2",
  "sqlparser",
  "sqlx",
  "tempfile",
@@ -3837,6 +3838,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

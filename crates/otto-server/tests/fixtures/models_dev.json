@@ -1,0 +1,92 @@
+{
+ "anthropic": {
+  "id": "anthropic",
+  "name": "Anthropic",
+  "models": {
+   "claude-opus-4-7": {
+    "id": "claude-opus-4-7",
+    "name": "Claude Opus 4.7"
+   },
+   "claude-opus-4-8": {
+    "id": "claude-opus-4-8",
+    "name": "Claude Opus 4.8"
+   },
+   "claude-sonnet-5": {
+    "id": "claude-sonnet-5",
+    "name": "Claude Sonnet 5"
+   },
+   "claude-sonnet-4-5-20250929": {
+    "id": "claude-sonnet-4-5-20250929",
+    "name": "Claude Sonnet 4.5"
+   },
+   "claude-opus-4-5": {
+    "id": "claude-opus-4-5",
+    "name": "Claude Opus 4.5 (latest)"
+   },
+   "claude-sonnet-4-6": {
+    "id": "claude-sonnet-4-6",
+    "name": "Claude Sonnet 4.6"
+   }
+  }
+ },
+ "openai": {
+  "id": "openai",
+  "name": "OpenAI",
+  "models": {
+   "gpt-4o": {
+    "id": "gpt-4o",
+    "name": "GPT-4o"
+   },
+   "gpt-image-1.5": {
+    "id": "gpt-image-1.5",
+    "name": "gpt-image-1.5"
+   },
+   "gpt-5.3-chat-latest": {
+    "id": "gpt-5.3-chat-latest",
+    "name": "GPT-5.3 Chat (latest)"
+   },
+   "gpt-5-nano": {
+    "id": "gpt-5-nano",
+    "name": "GPT-5 Nano"
+   },
+   "gpt-4o-mini": {
+    "id": "gpt-4o-mini",
+    "name": "GPT-4o mini"
+   },
+   "gpt-3.5-turbo": {
+    "id": "gpt-3.5-turbo",
+    "name": "GPT-3.5-turbo"
+   }
+  }
+ },
+ "google": {
+  "id": "google",
+  "name": "Google",
+  "models": {
+   "gemini-3.1-flash-tts-preview": {
+    "id": "gemini-3.1-flash-tts-preview",
+    "name": "Gemini 3.1 Flash TTS Preview"
+   },
+   "gemma-4-26b-a4b-it": {
+    "id": "gemma-4-26b-a4b-it",
+    "name": "Gemma 4 26B A4B IT"
+   },
+   "gemini-3-pro-image": {
+    "id": "gemini-3-pro-image",
+    "name": "Nano Banana Pro"
+   },
+   "gemini-3-pro-image-preview": {
+    "id": "gemini-3-pro-image-preview",
+    "name": "Nano Banana Pro"
+   },
+   "gemini-flash-lite-latest": {
+    "id": "gemini-flash-lite-latest",
+    "name": "Gemini Flash-Lite Latest"
+   },
+   "gemini-3.5-flash-lite": {
+    "id": "gemini-3.5-flash-lite",
+    "name": "Gemini 3.5 Flash Lite"
+   }
+  }
+ }
+}

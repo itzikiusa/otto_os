@@ -123,7 +123,7 @@ pub use otto_ssh::SshTunnelConfig;
 /// is already established by the service, so `host`/`port` are reachable
 /// directly. `params` carries the original profile params for engine extras
 /// (mongo conn_string/srv/replica_set, redis cluster, clickhouse http scheme…).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedConfig {
     pub engine: Engine,
     pub host: String,
@@ -133,6 +133,26 @@ pub struct ResolvedConfig {
     pub database: Option<String>,
     pub tls: TlsConfig,
     pub params: Value,
+}
+
+/// Manual `Debug`: this struct carries the PLAINTEXT password (and `params` may
+/// embed a credential-bearing `conn_string`; `tls` may hold a client private
+/// key), so a derived Debug one stray `{:?}` away from a log line would leak
+/// the secret wholesale. Only non-sensitive facets are printed.
+impl std::fmt::Debug for ResolvedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedConfig")
+            .field("engine", &self.engine)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("database", &self.database)
+            .field("tls_mode", &self.tls.mode)
+            .field("tls_verify", &self.tls.verify)
+            .field("params", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ResolvedConfig {
@@ -158,8 +178,14 @@ impl ResolvedConfig {
     /// thus separate cached handles. (The endpoint is the *resolved* host:port,
     /// so a re-opened SSH tunnel on a new local port naturally rekeys to a fresh
     /// handle.)
+    ///
+    /// The composed facet string is folded through SHA-256 rather than kept raw,
+    /// so the long-lived cache-key strings the drivers hold as map keys never
+    /// carry the plaintext password / TLS material; the engine prefix stays
+    /// readable for debugging. Equality semantics are unchanged.
     pub fn cache_key(&self) -> String {
-        format!(
+        use sha2::{Digest, Sha256};
+        let raw = format!(
             "{engine}|{host}|{port}|{user}|{password}|{database}|\
              {tls_mode:?}|{verify}|{ca}|{cert}|{key}|{server_name}|{params}",
             engine = self.engine.as_str(),
@@ -178,7 +204,8 @@ impl ResolvedConfig {
             // timezone — including it keeps two otherwise-identical configs that
             // differ only by timezone on separate cached sessions.
             params = serde_json::to_string(&self.params).unwrap_or_default(),
-        )
+        );
+        format!("{}|{:x}", self.engine.as_str(), Sha256::digest(raw.as_bytes()))
     }
 }
 
@@ -1247,59 +1274,40 @@ const REDIS_READ_COMMANDS: &[&str] = &[
     "XINFO", "LPOS",
 ];
 
-/// Mongo: read-only only for a small set of recognisable query shapes; anything
-/// else (including raw command JSON we can't safely vet) is treated as a write.
+/// Mongo: read-only only when EVERY statement the driver would execute parses
+/// to a read-only op; anything else is treated as a write.
+///
+/// The classifier must agree with the executor, so it (a) splits the input on
+/// top-level `;` with the SAME splitter the driver runs
+/// ([`crate::drivers::mongodb::split_statements`]) — judging the whole paste
+/// while the driver runs each piece let `db.a.find({}); db.b.deleteMany({})`
+/// classify as a read — and (b) anchors each piece to the parsed `MongoOp`
+/// ([`crate::drivers::mongodb::statement_is_read_only`]) instead of a substring
+/// scan, which a `.find(` inside a string literal could spoof. Parse failure ⇒
+/// write (conservative default).
 fn mongo_is_write(statement: &str) -> bool {
     let s = statement.trim();
     // A mongosh SCRIPT is always a write: arbitrary JavaScript cannot be
-    // proven read-only, and this must be decided BEFORE the read-method scan —
-    // a script opening with `db.getSiblingDB(...).find(...)` would otherwise
-    // pattern-match as a read while its body mutates.
+    // proven read-only, and this must be decided BEFORE any per-statement
+    // parse — a script opening with `db.getSiblingDB(...).find(...)` would
+    // otherwise pattern-match as a read while its body mutates.
     if looks_like_mongosh_script(s) {
         return true;
     }
-    // A Mongo connection also accepts SQL: `run` translates a `SELECT` into a
-    // find/aggregate via `mongo_sql`. The shapes below don't know that spelling,
-    // so a plain `SELECT … FROM coll` used to fall through to "unrecognised ⇒
-    // write" and get refused by the production / read-only guard — the one
-    // translation path the feature exists for. Classify it the way the SQL
-    // engines do instead. `looks_like_sql` only matches a leading `SELECT` (and
-    // `translate` rejects anything that isn't a single SELECT), so no mutating
-    // SQL can enter through here; `sql_is_write` is still the one that decides.
-    if crate::drivers::mongo_sql::looks_like_sql(s) {
-        return sql_is_write(s);
-    }
-    let lower = s.to_ascii_lowercase();
-    // `db.coll.find(...)`, `.findOne(...)`, `.aggregate(...)` (read pipelines may
-    // contain `$merge`/`$out`, but those are uncommon in the explorer console —
-    // we still treat them as writes below), `.countDocuments()`, `.distinct()`.
-    let read_methods = [
-        ".find(",
-        ".findone(",
-        ".count(",
-        ".countdocuments(",
-        ".estimateddocumentcount(",
-        ".distinct(",
-        ".aggregate(",
-        // Index INTROSPECTION — reads `listIndexes`, mutates nothing. Without
-        // these, `getIndexes()` fell through to "unrecognised ⇒ write" and was
-        // refused on a read-only/MCP connection.
-        ".getindexes(",
-        ".getindices(",
-    ];
-    let looks_like_read_method =
-        lower.starts_with("db.") && read_methods.iter().any(|m| lower.contains(m));
-    // Aggregation stages that write must never be allowed through.
-    let has_write_stage = lower.contains("$merge") || lower.contains("$out");
-    // A raw `{ "find": ... }` / `{ "aggregate": ... }` command document.
-    let looks_like_read_command = s.starts_with('{')
-        && (lower.contains("\"find\"")
-            || lower.contains("\"aggregate\"")
-            || lower.contains("\"count\"")
-            || lower.contains("\"distinct\"")
-            || lower.contains("\"listindexes\""));
-    let is_read = (looks_like_read_method || looks_like_read_command) && !has_write_stage;
-    !is_read
+    // Split exactly like the executor, then classify each piece. Blank /
+    // comment-only input executes nothing, so it isn't a write.
+    crate::drivers::mongodb::split_statements(s).iter().any(|stmt| {
+        // A Mongo connection also accepts SQL: `run` translates a `SELECT`
+        // into a find/aggregate via `mongo_sql`. `looks_like_sql` only matches
+        // a leading `SELECT` (and `translate` rejects anything that isn't a
+        // single SELECT), so no mutating SQL can enter through here;
+        // `sql_is_write` still decides.
+        if crate::drivers::mongo_sql::looks_like_sql(stmt) {
+            sql_is_write(stmt)
+        } else {
+            !crate::drivers::mongodb::statement_is_read_only(stmt)
+        }
+    })
 }
 
 /// `GET /db/mongosh` response: whether the `mongosh` CLI — used to execute
@@ -1396,6 +1404,46 @@ mod tests {
         }
         // Plain reads stay reads.
         assert!(!statement_is_write(Engine::Mongodb, "db.customers.find({})"));
+    }
+
+    /// The classifier splits and parses like the EXECUTOR: a write hidden in a
+    /// multi-statement paste behind a read, or a `.find(` spelled inside a
+    /// string literal, must still classify as a write; genuine multi-reads and
+    /// JSON command reads stay reads.
+    #[test]
+    fn mongo_classifier_is_per_statement_and_parse_anchored() {
+        // Write bypass via a trailing statement — each piece is judged alone.
+        assert!(statement_is_write(
+            Engine::Mongodb,
+            "db.a.find({}); db.b.deleteMany({})"
+        ));
+        // `.find(` inside a string literal must not make a delete look read.
+        assert!(statement_is_write(
+            Engine::Mongodb,
+            r#"db.users.deleteMany({note: "x.find(y"})"#
+        ));
+        // Aggregations that WRITE via a top-level stage are writes.
+        assert!(statement_is_write(
+            Engine::Mongodb,
+            r#"db.a.aggregate([{"$match":{}},{"$out":"b"}])"#
+        ));
+        // Genuine multi-statement reads stay reads.
+        assert!(!statement_is_write(
+            Engine::Mongodb,
+            "db.a.find({}); db.b.countDocuments({})"
+        ));
+        // JSON command form + getIndexes + aggregate reads stay reads.
+        assert!(!statement_is_write(
+            Engine::Mongodb,
+            r#"{"collection":"c","op":"find","filter":{}}"#
+        ));
+        assert!(!statement_is_write(Engine::Mongodb, "db.c.getIndexes()"));
+        assert!(!statement_is_write(
+            Engine::Mongodb,
+            r#"db.a.aggregate([{"$match":{"k":1}},{"$count":"n"}])"#
+        ));
+        // Unparseable input fails closed.
+        assert!(statement_is_write(Engine::Mongodb, "db.c.unknownMethod({})"));
     }
 
     #[test]
@@ -1874,7 +1922,12 @@ mod tests {
         let is_write = |s: &str| statement_is_write(Engine::Mongodb, s);
         assert!(!is_write("db.users.find({})"));
         assert!(!is_write("db.users.aggregate([{$match:{a:1}}])"));
-        assert!(!is_write("{ \"find\": \"users\" }"));
+        // The explorer's JSON command form ({collection, op, …}) classifies by
+        // its parsed op; a raw server command doc without "collection" is NOT
+        // executable by the runner (parse error) and so fails closed as a write
+        // — the parse-anchored classifier judges exactly what would run.
+        assert!(!is_write("{ \"collection\": \"users\", \"op\": \"find\" }"));
+        assert!(is_write("{ \"find\": \"users\" }"));
         assert!(is_write("db.users.insertOne({a:1})"));
         assert!(is_write("db.users.deleteMany({})"));
         assert!(is_write("db.users.drop()"));
@@ -1886,7 +1939,10 @@ mod tests {
         // leaving the structure tab as the only way to see a collection's indexes.
         assert!(!is_write("db.users.getIndexes()"));
         assert!(!is_write("db.users.getIndices()"));
-        assert!(!is_write("{ \"listIndexes\": \"users\" }"));
+        // Same collection-less raw command doc rule as above: not executable ⇒
+        // fails closed. The runnable JSON spelling stays a read.
+        assert!(!is_write("{ \"collection\": \"users\", \"op\": \"listIndexes\" }"));
+        assert!(is_write("{ \"listIndexes\": \"users\" }"));
         // Mutating the indexes is still a write.
         assert!(is_write("db.users.createIndex({a:1})"));
         assert!(is_write("db.users.dropIndex(\"a_1\")"));

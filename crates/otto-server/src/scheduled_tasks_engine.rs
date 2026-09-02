@@ -25,19 +25,22 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use otto_core::api::CreateSessionReq;
-use otto_core::domain::{Channel, ScheduledTask, SessionKind};
+use otto_core::domain::{ScheduledTask, SessionKind};
 use otto_core::event::Event;
 use otto_core::{Error, Result};
-use otto_state::{EmailSendersRepo, FinishRun, IntegrationsRepo, NewScheduledRun};
-use serde_json::{json, Value};
+use otto_state::{FinishRun, NewScheduledRun};
+use serde_json::json;
 use tokio::sync::Semaphore;
 use tracing::warn;
 
-use otto_channels::improve_notify::{build_adapter, send_to};
-use otto_channels::{Adapter, GmailSender, WebhookAdapter};
-
 use crate::agent_run::{run_with_recovery, watch_for_result};
 use crate::cadence;
+// Report + delivery mechanics are shared with the personal-agents engine; the
+// old `scheduled_tasks_engine::*` paths remain valid via these re-exports.
+pub use crate::report_delivery::{
+    delivery_message, deliver_webhook, destination_kind, extract_summary, report_hash,
+};
+use crate::report_delivery::{augment_report_prompt, deliver_destination, write_report};
 use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
 use crate::state::ServerCtx;
 
@@ -102,39 +105,10 @@ Task instructions:\n{user_prompt}"
     )
 }
 
-/// Extract the short summary from a report: everything up to the first `---`/`***`
-/// horizontal rule, else the first ~800 characters. Always trimmed.
-pub fn extract_summary(report: &str) -> String {
-    let trimmed = report.trim();
-    for sep in ["\n---", "\n***"] {
-        if let Some(idx) = trimmed.find(sep) {
-            let head = trimmed[..idx].trim();
-            if !head.is_empty() {
-                return head.to_string();
-            }
-        }
-    }
-    if trimmed.chars().count() <= 800 {
-        return trimmed.to_string();
-    }
-    let cut: String = trimmed.chars().take(800).collect();
-    format!("{}…", cut.trim_end())
-}
-
 /// Relative path for a run's report, using **server-generated** segments (the task
 /// id + a server UTC timestamp) — never the user-supplied name (path-safety).
 pub fn report_rel(task_id: &str, now: DateTime<Utc>) -> String {
     format!("{task_id}/reports/{}.md", now.format("%Y%m%dT%H%M%SZ"))
-}
-
-/// The text posted alongside the report attachment.
-pub fn delivery_message(task_name: &str, summary: &str) -> String {
-    format!("*{task_name}*\n\n{summary}")
-}
-
-/// The destination tag (`none` when absent/blank).
-pub fn destination_kind(dest: &Value) -> &str {
-    dest.get("type").and_then(Value::as_str).unwrap_or("none")
 }
 
 /// Whether a no-owner task may use the claude-only headless fallback. Only claude
@@ -448,6 +422,7 @@ async fn run_one_agent_session(
         title: Some(format!("Scheduled: {}", task.name)),
         cwd: Some(cwd.to_string()),
         connection_id: None,
+        model: None,
         meta: Some(meta),
     };
     let session = match ctx.manager.create(ws, &owner.to_string(), req, None).await {
@@ -594,8 +569,7 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
         workflow.clone(),
         run_id.clone(),
         input.clone(),
-        None,
-        false,
+        otto_core::workflows::RunScope::default(),
         None,
     );
 
@@ -761,27 +735,6 @@ fn short(id: &str) -> &str {
     &id[..id.len().min(8)]
 }
 
-/// Normalised content hash for `notify_on_change` — collapses whitespace so a
-/// re-run with only formatting noise still counts as "unchanged".
-pub fn report_hash(report: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let normalized: String = report.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    normalized.hash(&mut h);
-    format!("{:016x}", h.finish())
-}
-
-/// Append the "write your report to FILE" instruction (codex/agy write no
-/// transcript, so the file is the reliable capture path; claude's JSONL is a
-/// fallback handled by the watcher).
-fn augment_report_prompt(base: &str, out_path: &str) -> String {
-    format!(
-        "{base}\n\n---\nWhen you have finished, write your COMPLETE Markdown report (and nothing \
-         else) to this absolute file path, overwriting any existing content:\n\n{out_path}\n\n\
-         Writing that file is the last thing you do."
-    )
-}
-
 /// Format a shell run as a Markdown report.
 fn shell_report(name: &str, cmd: &str, out: &std::process::Output) -> String {
     let code = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
@@ -855,17 +808,6 @@ async fn build_proof_pack(
     Some(pack.id)
 }
 
-async fn write_report(abs: &std::path::Path, report: &str) -> Result<()> {
-    if let Some(parent) = abs.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| Error::Internal(format!("create report dir: {e}")))?;
-    }
-    tokio::fs::write(abs, report)
-        .await
-        .map_err(|e| Error::Internal(format!("write report: {e}")))
-}
-
 async fn prune(ctx: &ServerCtx, task_id: &str) {
     if let Ok(old) = ctx.scheduled_tasks.prune_runs(task_id, KEEP_RUNS).await {
         for p in old {
@@ -878,131 +820,24 @@ async fn prune(ctx: &ServerCtx, task_id: &str) {
 // Delivery (best-effort; the report is stored regardless)
 // ---------------------------------------------------------------------------
 
-/// Deliver the report to the task's destination. Returns `(delivered, error?)`.
-/// The delivered text + attachment are redacted (the report leaves the machine).
+/// Deliver the report to the task's destination via the shared helper.
+/// Returns `(delivered, error?)`.
 async fn deliver(
     ctx: &ServerCtx,
     task: &ScheduledTask,
     summary: &str,
     report: &str,
 ) -> (bool, Option<String>) {
-    let kind = destination_kind(&task.destination);
-    if kind == "none" {
-        return (false, None);
-    }
-    let msg = otto_core::redact::redact_text(&delivery_message(&task.name, summary)).value;
-    let report_bytes = otto_core::redact::redact_text(report).value.into_bytes();
-    match kind {
-        "slack" | "telegram" => deliver_channel(ctx, task, kind, &msg, &report_bytes).await,
-        "email" => deliver_email(ctx, task, &msg, &report_bytes).await,
-        "webhook" => {
-            let url = task.destination.get("url").and_then(Value::as_str).unwrap_or("");
-            match deliver_webhook(url, &msg, "report.md", &report_bytes).await {
-                Ok(()) => (true, None),
-                Err(e) => (false, Some(e.to_string())),
-            }
-        }
-        other => (false, Some(format!("unknown destination type '{other}'"))),
-    }
-}
-
-async fn deliver_channel(
-    ctx: &ServerCtx,
-    task: &ScheduledTask,
-    kind: &str,
-    msg: &str,
-    bytes: &[u8],
-) -> (bool, Option<String>) {
-    let channel = match kind {
-        "slack" => Channel::Slack,
-        "telegram" => Channel::Telegram,
-        _ => return (false, Some(format!("bad channel '{kind}'"))),
-    };
-    let integ = match IntegrationsRepo::new(ctx.pool.clone())
-        .get(&task.workspace_id, channel)
-        .await
-    {
-        Ok(Some(i)) => i,
-        Ok(None) => return (false, Some(format!("no {kind} integration configured for the workspace"))),
-        Err(e) => return (false, Some(e.to_string())),
-    };
-    let chat = task
-        .destination
-        .get("chat_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&integ.channel_id)
-        .to_string();
-    if chat.trim().is_empty() {
-        return (false, Some("no destination chat configured".into()));
-    }
-    if !send_to(&ctx.secrets, &integ, &chat, None, msg).await {
-        return (false, Some("channel send failed (bot token missing or API error)".into()));
-    }
-    if let Some(adapter) = build_adapter(&ctx.secrets, &integ) {
-        if let Err(e) = adapter.upload(&chat, None, "report.md", bytes).await {
-            return (true, Some(format!("message sent but attachment upload failed: {e}")));
-        }
-    }
-    (true, None)
-}
-
-async fn deliver_email(
-    ctx: &ServerCtx,
-    task: &ScheduledTask,
-    msg: &str,
-    bytes: &[u8],
-) -> (bool, Option<String>) {
-    let Some(to) = task
-        .destination
-        .get("to")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return (false, Some("email destination is missing 'to'".into()));
-    };
-    let Some(owner) = task.created_by.as_deref().filter(|s| !s.is_empty()) else {
-        return (false, Some("task has no owner to resolve a verified email sender".into()));
-    };
-    let sender = match EmailSendersRepo::new(ctx.pool.clone()).get(owner).await {
-        Ok(Some(s)) if s.verified_at.is_some() => s,
-        Ok(_) => return (false, Some("no verified email sender for the task owner".into())),
-        Err(e) => return (false, Some(e.to_string())),
-    };
-    let pw = match ctx.secrets.get(&sender.secret_ref) {
-        Ok(Some(p)) => p,
-        _ => return (false, Some("email app password unavailable in keychain".into())),
-    };
-    let subject = task
-        .destination
-        .get("subject")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Scheduled task report")
-        .to_string();
-    let mailer = GmailSender::new(sender.gmail_address, pw);
-    match mailer.send_with_attachment(to, &subject, msg, "report.md", bytes).await {
-        Ok(()) => (true, None),
-        Err(e) => (false, Some(e.to_string())),
-    }
-}
-
-/// POST the report to a user-supplied URL via `WebhookAdapter`, which runs the
-/// `otto_netguard` SSRF check + redirect policy before every request.
-pub async fn deliver_webhook(url: &str, text: &str, filename: &str, bytes: &[u8]) -> Result<()> {
-    if url.trim().is_empty() {
-        return Err(Error::Invalid("webhook destination is missing 'url'".into()));
-    }
-    let adapter = WebhookAdapter::new(Some(url.to_string()));
-    adapter
-        .send_formatted("scheduled-task", None, text)
-        .await
-        .map_err(|e| Error::Upstream(format!("webhook delivery: {e}")))?;
-    adapter
-        .upload("scheduled-task", None, filename, bytes)
-        .await
-        .map_err(|e| Error::Upstream(format!("webhook attachment: {e}")))?;
-    Ok(())
+    deliver_destination(
+        ctx,
+        &task.workspace_id,
+        task.created_by.as_deref(),
+        &task.name,
+        &task.destination,
+        summary,
+        report,
+    )
+    .await
 }
 
 #[cfg(test)]

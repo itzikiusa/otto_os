@@ -1,3 +1,29 @@
+<script lang="ts" module>
+  // Canvas state survives unmount (tab switch, "Open in Query") and connection
+  // flips: each connection id gets its own snapshot here, restored when the
+  // builder remounts or the user switches back. Module-level on purpose — the
+  // component is mounted under `{#if mainTab === 'builder'}` and would lose
+  // everything otherwise. (Proper home would be the database store / conn
+  // snapshot; this cache is the component-local stand-in.)
+  import type {
+    CanvasTable as CacheTable,
+    ExprCol as CacheExpr,
+    JoinEdge as CacheEdge,
+    OrderRow as CacheOrder,
+    WhereRow as CacheWhere,
+  } from './joinCanvas';
+  interface BuilderSnapshot {
+    tables: CacheTable[];
+    edges: CacheEdge[];
+    wheres: CacheWhere[];
+    orders: CacheOrder[];
+    exprs: CacheExpr[];
+    limit: number;
+    selectedDb: string;
+  }
+  const builderCache = new Map<string, BuilderSnapshot>();
+</script>
+
 <script lang="ts">
   // Visual JOIN canvas (Navicat-style) for SQL engines.
   //
@@ -50,8 +76,14 @@
   let bottomOpen = $state(true);
   let exprsOpen = $state(false);
 
+  // Engine of the active connection — drives aggregate options, identifier
+  // quoting in the generated SQL, and which expression snippets make sense.
+  const engine = $derived(database.capabilities?.engine ?? null);
   // Engine-specific aggregate list for the per-column dropdown.
-  const aggOptions = $derived(aggregateOptions(database.capabilities?.engine));
+  const aggOptions = $derived(aggregateOptions(engine ?? undefined));
+  // `IF(cond, a, b)` exists on MySQL and ClickHouse only; elsewhere CASE is the
+  // portable spelling (offered for every engine).
+  const hasIfFn = $derived(engine === 'mysql' || engine === 'clickhouse');
 
   // Common built-in functions for the expression quick-insert menu.
   const FN_SNIPPETS = [
@@ -160,6 +192,33 @@
   // Edge popover.
   let editEdge = $state<string | null>(null);
 
+  // ── Per-connection canvas persistence ───────────────────────────────────
+  // ALL builder state is keyed by connection id: switching connections swaps in
+  // that connection's canvas (instead of leaving the previous one to run
+  // against the wrong server), and switching back restores it. Declared BEFORE
+  // the palette-loading effect so a restore lands first on a connection flip.
+  const connKey = $derived(String(database.selectedConnId ?? ''));
+  let restoredFor = $state<string | null>(null);
+  $effect(() => {
+    const key = connKey;
+    if (restoredFor === key) return;
+    restoredFor = key;
+    const snap = builderCache.get(key);
+    tables = snap?.tables ?? [];
+    edges = snap?.edges ?? [];
+    wheres = snap?.wheres ?? [];
+    orders = snap?.orders ?? [];
+    exprs = snap?.exprs ?? [];
+    limit = snap?.limit ?? 100;
+    selectedDb = snap?.selectedDb ?? '';
+  });
+  // Continuously mirror the live state into the cache (references, not copies —
+  // deep mutations flow through), so unmounting loses nothing.
+  $effect(() => {
+    if (restoredFor !== connKey) return; // mid-switch: don't cross-save
+    builderCache.set(connKey, { tables, edges, wheres, orders, exprs, limit, selectedDb });
+  });
+
   // ── Palette data loading ────────────────────────────────────────────────
   $effect(() => {
     // Reload the database list when the connection or its schema root changes
@@ -176,8 +235,11 @@
     // Keep the current db if still present; otherwise select the first.
     if (dbs.length && !dbs.some((d) => d.path === selectedDb)) {
       selectedDb = dbs[0].path;
-      await loadPaletteTables();
     }
+    // ALWAYS refetch the table list: the same db path on a different
+    // connection is a different database, so a kept `selectedDb` must not
+    // keep the previous connection's palette.
+    await loadPaletteTables();
   }
 
   async function loadPaletteTables(): Promise<void> {
@@ -252,7 +314,16 @@
 
   function setAlias(uid: string, alias: string): void {
     const clean = alias.replace(/[^A-Za-z0-9_]/g, '_');
+    const old = tables.find((t) => t.uid === uid)?.alias;
+    if (old === undefined || old === clean) return;
     tables = tables.map((t) => (t.uid === uid ? { ...t, alias: clean } : t));
+    // Filters and sorts store `alias.col` refs — rewrite them or the rename
+    // silently orphans every row that pointed at the old alias.
+    const prefix = `${old}.`;
+    const rewrite = (r: string): string =>
+      r.startsWith(prefix) ? `${clean}.${r.slice(prefix.length)}` : r;
+    wheres = wheres.map((w) => ({ ...w, ref: rewrite(w.ref) }));
+    orders = orders.map((o) => ({ ...o, ref: rewrite(o.ref) }));
   }
 
   /** Column names that participate in any foreign key (for the FK badge). */
@@ -593,7 +664,7 @@
 
   const generatedSql = $derived.by(() => {
     if (!baseUid) return '';
-    return buildSql(tables, edges, wheres, exprs, orders, limit, baseUid);
+    return buildSql(tables, edges, wheres, exprs, orders, limit, baseUid, engine);
   });
 
   function openInQuery(andRun: boolean): void {
@@ -813,7 +884,7 @@
       {#if fkSuggestions.length}
         <div class="fk-bar">
           <span class="fk-label">Suggested joins</span>
-          {#each fkSuggestions as s (s.fromUid + s.fromCol + s.toUid)}
+          {#each fkSuggestions as s (s.fromUid + s.fromCol + s.toUid + s.toCol)}
             <button class="fk-chip" onclick={() => applySuggestion(s)}>
               <Icon name="merge" size={10} />{s.label}
             </button>
@@ -926,7 +997,9 @@
                         <input
                           class="input mono expr-input"
                           value={e.expression}
-                          placeholder="IF(a.x > 0, 'yes', 'no')"
+                          placeholder={hasIfFn
+                            ? "IF(a.x > 0, 'yes', 'no')"
+                            : "CASE WHEN a.x > 0 THEN 'yes' ELSE 'no' END"}
                           spellcheck="false"
                           oninput={(ev) =>
                             setExprField(e.id, 'expression', (ev.currentTarget as HTMLInputElement).value)}
@@ -945,10 +1018,13 @@
                         </button>
                       </div>
                       <div class="expr-snips">
-                        <button
-                          class="snip"
-                          onclick={() => insertSnippet(e.id, 'IF(condition, then_value, else_value)')}
-                        >IF</button>
+                        {#if hasIfFn}
+                          <!-- IF() is MySQL/ClickHouse only — everyone else gets CASE. -->
+                          <button
+                            class="snip"
+                            onclick={() => insertSnippet(e.id, 'IF(condition, then_value, else_value)')}
+                          >IF</button>
+                        {/if}
                         <button
                           class="snip"
                           onclick={() =>

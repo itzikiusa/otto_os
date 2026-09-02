@@ -48,7 +48,7 @@
 
   // Derive the running agent sessions so the operator can pick one.
   const agentSessions = $derived(
-    ws.agentSessions.filter((s: Session) => s.status !== 'exited'),
+    ws.plainAgentSessions.filter((s: Session) => s.status !== 'exited'),
   );
 
   // ── Preview logic ─────────────────────────────────────────────────────────

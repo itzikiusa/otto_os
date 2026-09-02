@@ -4,7 +4,7 @@ Otto can be deployed for a team: every user gets explicit, per-feature
 permissions; each user's sessions and data are private to them; and an admin can
 oversee and impersonate. This guide explains the model and how to operate it.
 
-> Implemented on branch `feat/rbac-multiuser` (design: `docs/superpowers/specs/2026-06-19-rbac-multiuser-design.md`).
+> Implemented on branch `feat/rbac-multiuser`.
 > Migrations `0038`–`0040`.
 
 ## The model in one minute
@@ -97,5 +97,5 @@ Sensitive actions are recorded in the **audit log** (root-only `/audit-log`):
 - New users start with **no grants** (default-deny) — assign them in the grant matrix.
 - Existing single-user installs are unaffected: root sees everything; nothing is hidden.
 - For remote/company access over the internet, pair this with the secure-exposure +
-  share-link work (`docs/superpowers/specs/2026-06-19-remote-mobile-access-design.md`):
+  share-link work:
   Cloudflare Tunnel, scoped share links, and the email-OTP gate.

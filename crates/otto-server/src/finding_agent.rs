@@ -165,6 +165,7 @@ pub async fn spawn_session(
         title: None,
         cwd: Some(cwd.to_string()),
         connection_id: None,
+        model: None,
         meta: Some(meta),
     };
     let session = match ctx.manager.create(&ws, &user_id.to_string(), req, None).await {

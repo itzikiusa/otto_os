@@ -8,6 +8,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { AgentSchedule, AgentSkill, CreateAgentReq, SwarmAgent } from './types';
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
+  import ModelPicker from '../../lib/components/ModelPicker.svelte';
 
   interface Props {
     agent?: SwarmAgent | null;
@@ -126,10 +127,8 @@
         {#each providers as p (p)}<option value={p}>{p}</option>{/each}
       </select>
     </div>
-    <div class="field">
-      <label for="ag-model">Model <span class="dim">(optional)</span></label>
-      <input id="ag-model" class="input" bind:value={model} placeholder="default — e.g. opus / sonnet / haiku" />
-    </div>
+    <!-- Hides itself when the provider has no model-flag template. -->
+    <ModelPicker {provider} value={model} onchange={(m) => (model = m)} />
     <div class="field">
       <label for="ag-reports">Reports to</label>
       <select id="ag-reports" class="input" bind:value={reportsTo}>

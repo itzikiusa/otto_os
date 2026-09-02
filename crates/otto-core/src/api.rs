@@ -44,6 +44,11 @@ pub struct MetaResp {
     /// New sessions and channel replies fall back to this when no explicit
     /// provider is chosen.
     pub default_provider: Option<String>,
+    /// Per-provider: whether the CLI accepts a model flag (its spec carries a
+    /// `model_args` template). Drives whether pickers show a model control —
+    /// a provider without a template hides it (never a silent drop).
+    #[serde(default)]
+    pub model_flags: std::collections::HashMap<String, bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -463,6 +468,12 @@ pub struct CreateSessionReq {
     pub cwd: Option<String>,
     pub connection_id: Option<Id>,
     pub meta: Option<Value>,
+    /// Model to pin for THIS session only (e.g. "claude-opus-4-8"). Copied into
+    /// `meta.model` at create (winning over any `meta.model` in `meta`), which
+    /// the spawn/resume path expands through the provider's `model_args`
+    /// template. Absent/empty ⇒ the provider's own default model.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// `PATCH /api/v1/sessions/{id}`

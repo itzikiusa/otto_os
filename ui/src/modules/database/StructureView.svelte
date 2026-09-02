@@ -12,6 +12,19 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
 
   const detail = $derived(database.objectDetail);
+
+  /** Re-issue the failed openObject for the still-selected path. openObject only
+   *  needs the node's id (path) for the fetch — label/kind are rebuilt from the
+   *  path's last segment for display parity. */
+  function retryOpen(): void {
+    const path = database.selectedObjectPath;
+    if (!path) return;
+    const last = path.split('/').pop() ?? path;
+    const sep = last.indexOf(':');
+    const kind = (sep > 0 ? last.slice(0, sep) : 'table') as SchemaNode['kind'];
+    const label = sep > 0 ? last.slice(sep + 1) : last;
+    void database.openObject({ id: path, label, kind, has_children: false });
+  }
   // A stored procedure / function — its "columns" are parameters and its main
   // content is the DDL (the SHOW CREATE body).
   const isRoutine = $derived(detail?.kind === 'procedure' || detail?.kind === 'function');
@@ -148,6 +161,20 @@
     return engine === 'postgres'
       ? `"${name.replace(/"/g, '""')}"`
       : '`' + name.replace(/`/g, '``') + '`';
+  }
+  // The prepared statements run in a query tab against the ACTIVE db, which
+  // need not be this object's db — qualify from the selected object's path
+  // (`db:{db}/table:{t}` / `schema:{s}/table:{t}`), like `tableRefFromNode`.
+  const objSchema = $derived.by(() => {
+    const seg = (database.selectedObjectPath ?? '')
+      .split('/')
+      .find((s) => s.startsWith('db:') || s.startsWith('schema:'));
+    return seg ? seg.slice(seg.indexOf(':') + 1) : null;
+  });
+  /** `db`.`table` (schema omitted when the path lacks one) for SQL statements. */
+  function qualifiedObj(): string {
+    const obj = detail!.name;
+    return objSchema ? `${q(objSchema)}.${q(obj)}` : q(obj);
   }
   const indexFields = $derived.by(() => {
     if (!detail) return [] as string[];
@@ -384,19 +411,23 @@
   function dropIndexStmt(idx: DbIndexDef): string {
     const obj = detail!.name;
     if (!isSql) return `db.${obj}.dropIndex(${JSON.stringify(idx.name)})`;
+    const ref = qualifiedObj();
     if (engine === 'mysql') {
       // MySQL exposes the PK as an index literally named PRIMARY; it has its
       // own verb and can't be named in DROP INDEX.
       return idx.name === 'PRIMARY'
-        ? `ALTER TABLE ${q(obj)} DROP PRIMARY KEY;`
-        : `ALTER TABLE ${q(obj)} DROP INDEX ${q(idx.name)};`;
+        ? `ALTER TABLE ${ref} DROP PRIMARY KEY;`
+        : `ALTER TABLE ${ref} DROP INDEX ${q(idx.name)};`;
     }
     if (engine === 'postgres') {
+      // A Postgres index is schema-scoped — DROP INDEX must name that schema
+      // when the session's search_path points elsewhere.
+      const idxRef = objSchema ? `${q(objSchema)}.${q(idx.name)}` : q(idx.name);
       return backsPrimaryKey(idx)
-        ? `ALTER TABLE ${q(obj)} DROP CONSTRAINT ${q(idx.name)};`
-        : `DROP INDEX ${q(idx.name)};`;
+        ? `ALTER TABLE ${ref} DROP CONSTRAINT ${q(idx.name)};`
+        : `DROP INDEX ${idxRef};`;
     }
-    return `ALTER TABLE ${q(obj)} DROP INDEX ${q(idx.name)};`;
+    return `ALTER TABLE ${ref} DROP INDEX ${q(idx.name)};`;
   }
   /**
    * Rebuild a CREATE INDEX / createIndex for the given shape. `base` (set when
@@ -442,6 +473,16 @@
       opts.name = name;
       return `db.${obj}.createIndex({ ${key} }, ${JSON.stringify(opts, null, 2)})`;
     }
+    if (engine === 'clickhouse') {
+      // ClickHouse has no CREATE INDEX (and no UNIQUE index) — its secondary
+      // indexes are DATA-SKIPPING indexes added via ALTER, and they need a
+      // TYPE. minmax is the safe default; the user reviews before running.
+      return (
+        '-- ClickHouse data-skipping index — adjust TYPE to fit the data\n' +
+        '-- (minmax / set(N) / bloom_filter / ngrambf_v1 / tokenbf_v1).\n' +
+        `ALTER TABLE ${qualifiedObj()} ADD INDEX ${q(name)} (${cols.map(q).join(', ')}) TYPE minmax GRANULARITY 1;`
+      );
+    }
     const method = (base?.method ?? '').toUpperCase();
     // MySQL spells FULLTEXT / SPATIAL as the index KIND (and neither can be
     // unique); everywhere else UNIQUE is the only kind we emit.
@@ -464,10 +505,10 @@
     if (pred && engine === 'mysql') {
       const parts = cols.map(q);
       parts[0] = `(CASE WHEN ${pred} THEN ${q(cols[0])} END)`;
-      return `${mysqlPartialNote}\nCREATE ${kind}INDEX ${q(name)} ON ${q(obj)} (${parts.join(', ')});`;
+      return `${mysqlPartialNote}\nCREATE ${kind}INDEX ${q(name)} ON ${qualifiedObj()} (${parts.join(', ')});`;
     }
     const where = pred && engine === 'postgres' ? ` WHERE ${pred}` : '';
-    return `CREATE ${kind}INDEX ${q(name)} ON ${q(obj)}${using} (${cols.map(q).join(', ')})${where};`;
+    return `CREATE ${kind}INDEX ${q(name)} ON ${qualifiedObj()}${using} (${cols.map(q).join(', ')})${where};`;
   }
 
   /** Split an existing Mongo `partialFilterExpression` into editable rows; keys
@@ -591,6 +632,16 @@
 <div class="structure">
   {#if database.objectLoading}
     <div class="loading"><Icon name="refresh" size={16} /><span>Loading structure…</span></div>
+  {:else if !detail && database.objectError}
+    <!-- A failed open stays visible here (the toast fades) instead of decaying
+         into the neutral "no object" empty state. -->
+    <EmptyState
+      icon="x"
+      title="Couldn't load object"
+      body={database.objectError}
+      actionLabel="Retry"
+      onaction={retryOpen}
+    />
   {:else if !detail}
     <EmptyState icon="box" title="No object selected" body="Pick a table, view, collection or key from the schema tree to inspect its structure." />
   {:else}
@@ -939,7 +990,15 @@
                 spellcheck="false"
               />
             </label>
-            <label class="ib-unique"><input type="checkbox" bind:checked={idxUnique} /> Unique</label>
+            {#if engine !== 'clickhouse'}
+              <label class="ib-unique"><input type="checkbox" bind:checked={idxUnique} /> Unique</label>
+            {:else}
+              <div class="ib-hint dim">
+                ClickHouse: prepares a <strong>data-skipping</strong> index
+                (<code>ALTER TABLE … ADD INDEX … TYPE minmax</code>) — there are no unique
+                or plain b-tree indexes; adjust the TYPE in the query tab if needed.
+              </div>
+            {/if}
             <div class="ib-actions">
               <button class="btn small" onclick={resetIdxBuilder}>Cancel</button>
               <button class="btn small primary" disabled={idxCols.length === 0} onclick={buildIndex}>

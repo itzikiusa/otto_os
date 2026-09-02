@@ -438,6 +438,19 @@
     editingConn = null;
     connFormOpen = true;
   }
+  // Point the user at the connection list from anywhere: make sure the sidebar
+  // rail is actually visible (it may be collapsed) and land on the picker tab.
+  function showConnections(): void {
+    if (database.sidebarCollapsed) database.toggleSidebar();
+    database.setSideTab('connections');
+  }
+  // The persistent "+" in the side-tab strip: jump to the picker AND open the
+  // new-connection form — the create affordance must not live only inside the
+  // Connections tab body.
+  function newConnectionFromStrip(): void {
+    showConnections();
+    newConnection();
+  }
   function editConnection(c: Connection): void {
     editingConn = c;
     connFormOpen = true;
@@ -668,6 +681,12 @@
   const hasAnyTab = $derived(
     openConns.length > 0 || brokers.openClusters.length > 0 || database.sshTabs.length > 0,
   );
+  // An empty workbench (fresh start, after a restore that found nothing, or the
+  // last tab closed) always surfaces the picker — a schema/saved/history side
+  // tab with no connection behind it is a dead end.
+  $effect(() => {
+    if (!hasAnyTab && database.sideTab !== 'connections') database.setSideTab('connections');
+  });
   // The cluster / ssh session backing the active non-DB pane (null when a DB tab
   // is focused, or when the backing tab was closed out from under the pane).
   const activeCluster = $derived(
@@ -787,6 +806,9 @@
         <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} onclick={() => database.setSideTab('saved')}>Saved</button>
         <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} onclick={() => database.setSideTab('history')}>History</button>
         <span class="grow"></span>
+        <!-- Persistent "New connection" — visible on every side tab, not only
+             inside the Connections tab body. -->
+        <button class="icon-btn" onclick={newConnectionFromStrip} title="New connection (SSH, database or custom CLI)" aria-label="New connection"><Icon name="plus" size={12} /></button>
         {#if database.sideTab === 'schema' && database.selectedConnId}
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
         {/if}
@@ -805,7 +827,14 @@
         {:else if database.selectedConnId}
           {@render schemaSideBody()}
         {:else}
-          <div class="list-empty">Open a connection to browse its schema.</div>
+          <!-- Not a dead end: hand the user the two ways forward. -->
+          <div class="side-empty">
+            <div class="list-empty">Open a connection to browse its schema.</div>
+            <div class="side-empty-actions">
+              <button class="btn small" onclick={() => database.setSideTab('connections')}>Browse connections</button>
+              <button class="btn small ghost" onclick={newConnection}>New connection</button>
+            </div>
+          </div>
         {/if}
       </div>
     {/if}
@@ -826,14 +855,16 @@
 
   <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
     {#if !hasAnyTab}
+      <!-- Always actionable: create the first connection, or surface the picker
+           (which may be hidden behind a collapsed rail / another side tab). -->
       <EmptyState
         icon="db"
         title="Open a connection"
         body={database.connections.length === 0 && brokers.clusters.length === 0
           ? 'No database, Kafka, SSH or custom connections in this workspace yet.'
           : 'Choose a connection, Kafka cluster or SSH host on the left to open it here.'}
-        actionLabel={database.connections.length === 0 ? 'New connection' : undefined}
-        onaction={database.connections.length === 0 ? newConnection : undefined}
+        actionLabel={database.connections.length === 0 ? 'New connection' : 'Show connections'}
+        onaction={database.connections.length === 0 ? newConnection : showConnections}
       />
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
@@ -996,6 +1027,8 @@
           icon="db"
           title="Pick a connection"
           body="Choose a connection on the left to open it here."
+          actionLabel="Show connections"
+          onaction={showConnections}
         />
       {/if}
     {/if}
@@ -1433,6 +1466,19 @@
     color: var(--text-dim);
     padding: 8px 6px;
     line-height: 1.5;
+  }
+  /* Schema-tab empty state with its way-forward buttons. */
+  .side-empty {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 2px;
+  }
+  .side-empty-actions {
+    display: flex;
+    gap: 6px;
+    padding: 0 6px;
+    flex-wrap: wrap;
   }
   .list-search {
     display: flex;

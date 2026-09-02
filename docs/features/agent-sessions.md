@@ -384,6 +384,12 @@ keeping it resumable."*
 auto-suspend)"* (agent sessions only), toggling `meta.keep_alive`. A pinned
 session is never auto-suspended.
 
+**Opt-in auto-archive:** set the `session_auto_archive_days` setting to N > 0
+and an hourly sweep archives any non-archived agent session whose
+`last_active_at` is older than N days — never a live, attached, or
+`keep_alive`-pinned one. Archive keeps the row + history and is reversible via
+unarchive; the default (absent or `0`) is **off**.
+
 **Non-resumable background sessions are reaped, not leaked.** A live agent
 session that can *never* be suspended (no captured provider id — e.g. a codex
 review agent whose rollout pick was ambiguous across a same-cwd fan-out) used
@@ -411,12 +417,27 @@ the updated `Session`.
 
 - **Close pane** (the pane `×`, tooltip *"Close pane (keeps running)"*) only
   detaches the UI; the session keeps running on the daemon.
-- **Archive** — `POST /sessions/{id}/archive` keeps the row + history but hides
-  it from the active list (shown in an "Archived" section); `…/unarchive`
-  restores it as `reconnectable`. Channel-spawned sessions auto-archive after
-  long idleness.
-- **Delete** — `DELETE /api/v1/sessions/{id}` kills the PTY and removes the row.
-  The UI marks this action as danger.
+- **Close tab** — closing a tab whose session is still LIVE (the `live` flag on
+  the session payload, status heuristic as fallback) asks what you mean:
+  *Close tab* (UI only, session keeps running), *Archive session* (stop it,
+  keep history), or Cancel — with a "remember my choice" checkbox (reset under
+  **Settings → Appearance**). A dead/suspended session's tab closes without
+  asking. Bulk closes (Close Others / Close to the Right / Close All in the
+  tab's context menu) show ONE dialog for the whole set. Closed tabs are
+  reopenable with **⌘⇧T** (close never deletes anything).
+- **Archive** — `POST /sessions/{id}/archive` kills any live PTY and keeps the
+  row + history, hidden in the "Archived" section; `…/unarchive` restores it as
+  `reconnectable`. Both return the updated `Session`. Channel-spawned sessions
+  auto-archive after long idleness. An archived session can NOT be resumed or
+  restarted (409) until unarchived — attaching to its terminal no longer
+  silently revives it.
+- **Kill (keep listed)** — `POST /sessions/{id}/kill` stops the process but
+  keeps the row un-archived in the list; resumable providers reopen on demand.
+- **Bulk** — `POST /sessions/bulk` `{action: archive|delete|kill, ids}` applies
+  one action across many sessions (per-id owner check; failures reported
+  per-id, the batch continues).
+- **Delete** — `DELETE /api/v1/sessions/{id}` kills the PTY and removes the row
+  **and its history**. The UI marks this action as danger and always confirms.
 - **Retention** — sessions in the **Agents** group are durable: no background
   sweep archives or deletes them, ever. Archive and delete (above) are the
   only ways they leave the list. Channel-spawned (ticket/chat) sessions keep
@@ -573,18 +594,20 @@ resolve the owning workspace from the row and role-check against it.
 | Method & path | Auth | Notes |
 |---|---|---|
 | `GET /meta` | public | `MetaResp` — `providers`, `default_provider`, `tools` |
-| `GET /workspaces/{id}/sessions` | ws viewer (`Agents:View`) | `Session[]` (you see your own; ws-admin/root see all) |
+| `GET /workspaces/{id}/sessions` | ws viewer (`Agents:View`) | `Session[]` (you see your own; ws-admin/root see all); optional `?archived=&kind=&source=&status=` filters; rows carry transient `live` + `viewers` |
 | `POST /workspaces/{id}/sessions` | ws editor (`Agents:Edit`) | `CreateSessionReq` → `Session` |
-| `GET /sessions/{id}` | ws viewer | `Session` |
-| `PATCH /sessions/{id}` | ws editor | `UpdateSessionReq{title?, meta?}` → `Session` |
-| `DELETE /sessions/{id}` | ws editor | 204 — kills PTY, removes row |
-| `POST /sessions/{id}/restart` | ws editor | respawn (resume when `provider_session_id` set) → `Session` |
-| `POST /sessions/{id}/input` | ws editor | `SendInputReq{text, submit?}` → 200 |
-| `POST /sessions/{id}/archive` / `…/unarchive` | ws editor | 204 |
-| `POST /sessions/{id}/handover` / `…/handover/brief` | ws editor | start a handover / generate its brief (see §10) |
+| `GET /sessions/{id}` | owner-or-admin | `Session` (with transient `live`, `viewers`) |
+| `PATCH /sessions/{id}` | owner-or-admin | `UpdateSessionReq{title?, meta?}` → `Session` |
+| `DELETE /sessions/{id}` | owner-or-admin | 204 — kills PTY, removes row |
+| `POST /sessions/{id}/restart` | owner-or-admin | respawn (resume when `provider_session_id` set) → `Session`; 409 when archived |
+| `POST /sessions/{id}/input` | ws editor + owner-or-admin | `SendInputReq{text, submit?}` → 200 |
+| `POST /sessions/{id}/archive` / `…/unarchive` | owner-or-admin | → `Session` |
+| `POST /sessions/{id}/kill` | owner-or-admin | stop the PTY, keep the row un-archived → `Session` |
+| `POST /sessions/bulk` | per-id owner-or-admin | `{action: archive\|delete\|kill, ids}` → per-id results |
+| `POST /sessions/{id}/handover` / `…/handover/brief` | ws editor + owner-or-admin | start a handover / generate its brief (see §10) |
 | `POST /sessions/{session_id}/attach-product` | ws editor | `{story_id}` — attach a product story |
 | `POST /workspaces/{id}/broadcast` | ws editor | `BroadcastReq{text, session_ids?}` → `BroadcastResp{session_ids}` |
-| `POST /app/kill-sessions` | member | terminate every live PTY |
+| `POST /app/kill-sessions` | root only | terminate every live PTY |
 | `GET/POST /workspaces/{wid}/sessions/{sid}/trail` | viewer / editor (+owner) | activity trail (§6) |
 | `GET/PUT /workspaces/{wid}/sessions/{sid}/tasks` | viewer / editor (+owner) | task tracker (§6) |
 | `GET /workspaces/{wid}/activity/summary` | ws viewer | per-session roll-up |

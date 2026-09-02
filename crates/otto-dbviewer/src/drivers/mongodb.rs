@@ -418,36 +418,8 @@ impl Driver for MongoDriver {
         if let Some(validator) = collection_validator(&db, coll_name).await {
             extra.insert("validator".into(), bson_to_json(&validator));
         }
-        // Collection stats (best-effort): doc count, data/storage size, index sizes.
-        if let Ok(stats) = db
-            .run_command(doc! { "collStats": coll_name, "scale": 1 })
-            .await
-        {
-            let mut s = Map::new();
-            for k in [
-                "count",
-                "size",
-                "storageSize",
-                "avgObjSize",
-                "nindexes",
-                "totalIndexSize",
-                "totalSize",
-            ] {
-                if let Some(v) = stats.get(k) {
-                    s.insert(k.to_string(), bson_to_json(v));
-                }
-            }
-            // Surface the exact collStats document count as the row count.
-            match stats.get("count") {
-                Some(Bson::Int64(c)) => detail.row_count = Some(*c),
-                Some(Bson::Int32(c)) => detail.row_count = Some(*c as i64),
-                Some(Bson::Double(c)) => detail.row_count = Some(*c as i64),
-                _ => {}
-            }
-            if !s.is_empty() {
-                extra.insert("stats".into(), Value::Object(s));
-            }
-        }
+        // (collStats was already fetched above — `avgObjSize` had to be known
+        // before sampling — and filled `extra.stats` + `row_count` there.)
         detail.extra = Value::Object(extra);
 
         Ok(detail)
@@ -488,6 +460,17 @@ impl Driver for MongoDriver {
 
     async fn invalidate_completion_cache(&self, cfg: &ResolvedConfig) {
         self.completions.invalidate(&cfg.cache_key());
+    }
+
+    /// Evict + shut down the cached `Client` for `cache_key` (connection close,
+    /// or a config change superseded it). `Client::shutdown` closes the pool and
+    /// stops the topology-monitor tasks; also drops the completion snapshot.
+    async fn close(&self, cache_key: &str) {
+        let client = self.clients.lock().await.remove(cache_key);
+        if let Some(client) = client {
+            client.shutdown().await;
+        }
+        self.completions.invalidate(cache_key);
     }
 
     /// Structured query plan via the server `explain` command (queryPlanner
@@ -826,12 +809,14 @@ impl MongoDriver {
                 let update = parsed
                     .update
                     .ok_or_else(|| types::invalid("update requires an update document"))?;
-                let res = if matches!(parsed.op, MongoOp::UpdateOne) {
-                    coll.update_one(filter, update).await
-                } else {
-                    coll.update_many(filter, update).await
-                }
-                .map_err(types::upstream)?;
+                let res = write_with_timeout(max_time_ms, async {
+                    if matches!(parsed.op, MongoOp::UpdateOne) {
+                        coll.update_one(filter, update).await
+                    } else {
+                        coll.update_many(filter, update).await
+                    }
+                })
+                .await?;
                 Ok(write_result(
                     res.modified_count,
                     format!(
@@ -846,10 +831,10 @@ impl MongoDriver {
                 let replacement = parsed
                     .update
                     .ok_or_else(|| types::invalid("replaceOne requires a replacement document"))?;
-                let res = coll
-                    .replace_one(filter, replacement)
-                    .await
-                    .map_err(types::upstream)?;
+                let res = write_with_timeout(max_time_ms, async {
+                    coll.replace_one(filter, replacement).await
+                })
+                .await?;
                 Ok(write_result(
                     res.modified_count,
                     format!(
@@ -865,24 +850,28 @@ impl MongoDriver {
                     return Err(types::invalid("insert requires at least one document"));
                 }
                 let n = if matches!(parsed.op, MongoOp::InsertOne) {
-                    coll.insert_one(docs.into_iter().next().unwrap())
-                        .await
-                        .map_err(types::upstream)?;
+                    write_with_timeout(max_time_ms, async {
+                        coll.insert_one(docs.into_iter().next().unwrap()).await
+                    })
+                    .await?;
                     1
                 } else {
-                    coll.insert_many(&docs).await.map_err(types::upstream)?;
+                    write_with_timeout(max_time_ms, async { coll.insert_many(&docs).await })
+                        .await?;
                     docs.len() as u64
                 };
                 Ok(write_result(n, format!("inserted {n}"), started))
             }
             MongoOp::DeleteOne | MongoOp::DeleteMany => {
                 let filter = parsed.filter.unwrap_or_default();
-                let res = if matches!(parsed.op, MongoOp::DeleteOne) {
-                    coll.delete_one(filter).await
-                } else {
-                    coll.delete_many(filter).await
-                }
-                .map_err(types::upstream)?;
+                let res = write_with_timeout(max_time_ms, async {
+                    if matches!(parsed.op, MongoOp::DeleteOne) {
+                        coll.delete_one(filter).await
+                    } else {
+                        coll.delete_many(filter).await
+                    }
+                })
+                .await?;
                 Ok(write_result(
                     res.deleted_count,
                     format!("deleted {}", res.deleted_count),
@@ -900,18 +889,22 @@ impl MongoDriver {
                         spec.insert(k, v);
                     }
                 }
-                db.run_command(doc! { "createIndexes": &parsed.collection, "indexes": [spec] })
-                    .await
-                    .map_err(types::upstream)?;
+                write_with_timeout(max_time_ms, async {
+                    db.run_command(doc! { "createIndexes": &parsed.collection, "indexes": [spec] })
+                        .await
+                })
+                .await?;
                 Ok(write_result(1, format!("created index {name}"), started))
             }
             MongoOp::DropIndex => {
                 let name = parsed
                     .index_name
                     .ok_or_else(|| types::invalid("dropIndex requires an index name"))?;
-                db.run_command(doc! { "dropIndexes": &parsed.collection, "index": &name })
-                    .await
-                    .map_err(types::upstream)?;
+                write_with_timeout(max_time_ms, async {
+                    db.run_command(doc! { "dropIndexes": &parsed.collection, "index": &name })
+                        .await
+                })
+                .await?;
                 Ok(write_result(1, format!("dropped index {name}"), started))
             }
             MongoOp::GetIndexes => {
@@ -1333,21 +1326,26 @@ impl MongoDriver {
         const SCRIPT_MAX_LINES: usize = 10_000;
 
         let started = Instant::now();
-        let (uri, extra_args) = mongosh_invocation(cfg, req.node.as_deref())?;
+        let uri = mongosh_invocation(cfg, req.node.as_deref())?;
         let mut file = tempfile::Builder::new()
             .prefix("otto-mongosh-")
             .suffix(".js")
             .tempfile()
             .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
+        // SECURITY: the URI carries the DB credential, so it must NEVER appear
+        // on mongosh's argv (visible to every local process via `ps` for the
+        // script's lifetime). Instead the shell starts with `--nodb` and the
+        // 0600 temp script itself connects via a `db = connect(<uri>)` prelude.
+        std::io::Write::write_all(&mut file, mongosh_script_prelude(&uri).as_bytes())
+            .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
         std::io::Write::write_all(&mut file, req.statement.as_bytes())
             .map_err(|e| types::invalid(format!("script temp file: {e}")))?;
 
         let mut cmd = tokio::process::Command::new("mongosh");
-        cmd.arg(&uri)
+        cmd.arg("--nodb")
             .arg("--quiet")
             .arg("--file")
             .arg(file.path())
-            .args(&extra_args)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
         let out = match tokio::time::timeout(SCRIPT_TIMEOUT, cmd.output()).await {
@@ -1427,21 +1425,21 @@ fn pct(s: &str) -> String {
     out
 }
 
-/// Build the `mongosh` invocation for a script run: the connection URI
-/// (mirroring `client_options` — a full `conn_string` wins, else host/port +
-/// credential + replica_set, with the SSH SOCKS5 tunnel layered on as the
-/// Node driver's `proxyHost`/`proxyPort` URI options, which mongosh honors)
-/// plus TLS flags for the host/port path (a `conn_string` carries its own TLS
-/// options). Pure so tests can assert the shapes without spawning a shell.
-fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<(String, Vec<String>)> {
-    let (mut uri, args) = match cfg.param_str("conn_string") {
-        Some(conn_string) => {
-            let uri = match cfg.password.as_deref() {
-                Some(secret) => conn_string.replace("{secret}", secret),
-                None => conn_string,
-            };
-            (uri, Vec::new())
-        }
+/// Build the connection URI a mongosh SCRIPT run connects with (mirroring
+/// `client_options` — a full `conn_string` wins, else host/port + credential +
+/// replica_set, with the SSH SOCKS5 tunnel layered on as the Node driver's
+/// `proxyHost`/`proxyPort` URI options, which mongosh honors). TLS for the
+/// host/port path rides as URI options (`tls`, `tlsCAFile`,
+/// `tlsCertificateKeyFile`, `tlsAllowInvalidCertificates`) rather than argv
+/// flags — the URI never touches argv (see `run_script`), so neither may the
+/// TLS setup that must accompany it. Pure so tests can assert the shapes
+/// without spawning a shell.
+fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String> {
+    let mut uri = match cfg.param_str("conn_string") {
+        Some(conn_string) => match cfg.password.as_deref() {
+            Some(secret) => conn_string.replace("{secret}", secret),
+            None => conn_string,
+        },
         None => {
             let auth = match (cfg.user.as_deref(), cfg.password.as_deref()) {
                 (Some(u), Some(p)) => format!("{}:{}@", pct(u), pct(p)),
@@ -1462,20 +1460,20 @@ fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<(Strin
             if let Some(rs) = cfg.param_str("replica_set") {
                 query.push(format!("replicaSet={rs}"));
             }
-            let mut args = Vec::new();
             if cfg.tls.enabled() {
                 let files = TlsFiles::materialize(&cfg.tls)?;
-                args.push("--tls".to_string());
+                query.push("tls=true".to_string());
                 if !cfg.tls.verify {
-                    args.push("--tlsAllowInvalidCertificates".to_string());
+                    query.push("tlsAllowInvalidCertificates=true".to_string());
                 }
                 if let Some(ca) = files.ca {
-                    args.push("--tlsCAFile".to_string());
-                    args.push(ca.to_string_lossy().into_owned());
+                    query.push(format!("tlsCAFile={}", pct(&ca.to_string_lossy())));
                 }
                 if let Some(pair) = files.client_pair.or(files.client_cert) {
-                    args.push("--tlsCertificateKeyFile".to_string());
-                    args.push(pair.to_string_lossy().into_owned());
+                    query.push(format!(
+                        "tlsCertificateKeyFile={}",
+                        pct(&pair.to_string_lossy())
+                    ));
                 }
             }
             let query = if query.is_empty() {
@@ -1483,13 +1481,10 @@ fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<(Strin
             } else {
                 format!("?{}", query.join("&"))
             };
-            (
-                format!(
-                    "mongodb://{auth}{host}:{port}/{db}{query}",
-                    host = cfg.host,
-                    port = cfg.port
-                ),
-                args,
+            format!(
+                "mongodb://{auth}{host}:{port}/{db}{query}",
+                host = cfg.host,
+                port = cfg.port
             )
         }
     };
@@ -1499,7 +1494,15 @@ fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<(Strin
         let sep = if uri.contains('?') { '&' } else { '?' };
         uri.push_str(&format!("{sep}proxyHost=127.0.0.1&proxyPort={port}"));
     }
-    Ok((uri, args))
+    Ok(uri)
+}
+
+/// The one-line prelude prepended to a mongosh script so the 0600 temp FILE —
+/// not argv — carries the credential-bearing URI: the shell starts `--nodb` and
+/// the script itself connects. JSON-encoding the URI yields a valid JS string
+/// literal (quotes/backslashes escaped).
+fn mongosh_script_prelude(uri: &str) -> String {
+    format!("db = connect({});\n", Value::String(uri.to_string()))
 }
 
 // --- command parsing --------------------------------------------------------
@@ -1568,7 +1571,11 @@ struct Parsed {
 /// `/* */` comments. Each piece is cleaned of surrounding trivia; blank /
 /// comment-only pieces are dropped. A paste with no top-level `;` yields one
 /// statement (the whole input).
-fn split_statements(input: &str) -> Vec<String> {
+///
+/// `pub(crate)` because the write-gate classifier (`types::mongo_is_write`)
+/// must split with EXACTLY the rules the executor uses — a classifier that
+/// judges the whole paste while the driver runs each piece is a guard bypass.
+pub(crate) fn split_statements(input: &str) -> Vec<String> {
     let bytes = input.as_bytes();
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -1680,6 +1687,30 @@ fn parse_command(statement: &str) -> Result<Parsed> {
         index_name: parsed.index_name,
         explain: parsed.explain,
     })
+}
+
+/// Classify ONE already-split Mongo statement as read-only by PARSING it with
+/// the same parser the executor uses (`parse_command`) and anchoring the
+/// decision to the resolved [`MongoOp`] — never a substring scan, which a
+/// `.find(` inside a string literal can spoof. Parse failure ⇒ NOT read-only
+/// (the conservative default: the guard refuses what it can't vet; an
+/// unparseable statement errors at execution anyway).
+pub(crate) fn statement_is_read_only(stmt: &str) -> bool {
+    let Ok(parsed) = parse_command(stmt.trim()) else {
+        return false;
+    };
+    match parsed.op {
+        MongoOp::Find | MongoOp::Count | MongoOp::GetIndexes => true,
+        // Aggregation reads — unless a top-level stage writes ($out/$merge must
+        // be top-level pipeline stages, so checking stage keys is exact).
+        MongoOp::Aggregate => !parsed
+            .pipeline
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|stage| stage.keys().any(|k| k == "$out" || k == "$merge")),
+        _ => false,
+    }
 }
 
 fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
@@ -1910,10 +1941,18 @@ fn extract_balanced(s: &str) -> Result<(String, &str)> {
     }
     let mut depth = 0i32;
     let mut in_str: Option<u8> = None;
+    // A `\"` inside a string must not close it (nor may the escaped char be
+    // read as a quote/bracket) — without this, `find({k:"a\"b)"})` miscounted
+    // depth and spuriously rejected valid input.
+    let mut escaped = false;
     for (i, &b) in bytes.iter().enumerate() {
         match in_str {
             Some(q) => {
-                if b == q {
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == q {
                     in_str = None;
                 }
             }
@@ -1942,12 +1981,18 @@ fn split_top_level_args(arg: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut in_str: Option<u8> = None;
+    // Honour `\"` inside strings — same rule as `extract_balanced`.
+    let mut escaped = false;
     let mut start = 0usize;
     let bytes = arg.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         match in_str {
             Some(q) => {
-                if b == q {
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == q {
                     in_str = None;
                 }
             }
@@ -2572,6 +2617,28 @@ fn write_result(affected: u64, message: String, started: Instant) -> QueryResult
     result
 }
 
+/// Client-side wall clock for Mongo WRITE ops (`QueryRequest::timeout_ms`): the
+/// driver's update/insert/delete/index option types expose no `maxTimeMS`, so
+/// the bound is enforced on the request future — a stuck `updateMany` no longer
+/// runs forever with no cancel path. `None` runs unbounded, as before.
+async fn write_with_timeout<T, F>(max_time_ms: Option<i64>, fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = std::result::Result<T, mongodb::error::Error>>,
+{
+    match max_time_ms {
+        Some(ms) => tokio::time::timeout(std::time::Duration::from_millis(ms as u64), fut)
+            .await
+            .map_err(|_| {
+                types::upstream(format!(
+                    "mongodb: write timed out after {ms}ms (client-side — the server may \
+                     still complete it)"
+                ))
+            })?
+            .map_err(types::upstream),
+        None => fut.await.map_err(types::upstream),
+    }
+}
+
 async fn collect_docs(
     mut cursor: mongodb::Cursor<Document>,
     max_rows: usize,
@@ -2614,7 +2681,13 @@ fn docs_to_result(docs: Vec<Document>, truncated: bool, started: Instant) -> Que
         .map(|doc| {
             columns
                 .iter()
-                .map(|col| doc.get(col).map(bson_to_json_typed).unwrap_or(Value::Null))
+                .map(|col| {
+                    // Cap oversized cells like every other engine — a single
+                    // huge embedded document/string must not freeze the grid.
+                    doc.get(col)
+                        .map(|b| types::cap_cell(bson_to_json_typed(b)))
+                        .unwrap_or(Value::Null)
+                })
                 .collect()
         })
         .collect();
@@ -2765,16 +2838,14 @@ mod tests {
     /// tunnel — the SOCKS5 proxy as Node-driver URI options.
     #[test]
     fn mongosh_invocation_builds_the_native_equivalent_uri() {
-        let (uri, args) =
-            mongosh_invocation(&script_cfg(json!({})), Some("db:promotions")).unwrap();
+        let uri = mongosh_invocation(&script_cfg(json!({})), Some("db:promotions")).unwrap();
         assert_eq!(
             uri,
             "mongodb://root:p%40ss%2Fw@127.0.0.1:27017/promotions?authSource=admin"
         );
-        assert!(args.is_empty());
 
         // Tunnelled → SOCKS options appended to the existing query string.
-        let (uri, _) = mongosh_invocation(
+        let uri = mongosh_invocation(
             &script_cfg(json!({ "__socks_port": 1080, "replica_set": "rs0" })),
             Some("db:promotions"),
         )
@@ -2792,12 +2863,26 @@ mod tests {
             "__socks_port": 1081,
         }));
         cfg.password = Some("s3c".into());
-        let (uri, args) = mongosh_invocation(&cfg, None).unwrap();
+        let uri = mongosh_invocation(&cfg, None).unwrap();
         assert_eq!(
             uri,
             "mongodb+srv://u:s3c@cluster.example.net/app?retryWrites=true&proxyHost=127.0.0.1&proxyPort=1081"
         );
-        assert!(args.is_empty());
+    }
+
+    /// The credential-bearing URI reaches mongosh through the 0600 script file
+    /// (`db = connect("…")`), never argv — the prelude must be a valid JS string
+    /// literal even when the URI holds quotes/backslashes.
+    #[test]
+    fn mongosh_prelude_json_escapes_the_uri() {
+        assert_eq!(
+            mongosh_script_prelude("mongodb://u:p@h:1/db"),
+            "db = connect(\"mongodb://u:p@h:1/db\");\n"
+        );
+        assert_eq!(
+            mongosh_script_prelude("mongodb://u:p\"x\\@h:1/db"),
+            "db = connect(\"mongodb://u:p\\\"x\\\\@h:1/db\");\n"
+        );
     }
 
     #[test]
@@ -2935,6 +3020,20 @@ mod tests {
         let replacement = p.update.unwrap();
         assert_eq!(replacement.get_str("status").unwrap(), "paid");
         assert!(replacement.contains_key("items"));
+    }
+
+    /// `\"` inside a string literal must not miscount bracket depth or split
+    /// args — `find({k:"a\"b)"})` is valid input.
+    #[test]
+    fn shorthand_honours_escaped_quotes_in_strings() {
+        let p = parse_command(r#"db.c.find({k:"a\"b)"})"#).unwrap();
+        assert_eq!(p.op, MongoOp::Find);
+        assert_eq!(p.filter.unwrap().get_str("k").unwrap(), "a\"b)");
+        // And in a two-arg call the top-level comma split ignores an escaped
+        // quote followed by a comma inside the string.
+        let p = parse_command(r#"db.c.find({k:"a\",b"}, {k:1})"#).unwrap();
+        assert_eq!(p.filter.unwrap().get_str("k").unwrap(), "a\",b");
+        assert!(p.projection.is_some());
     }
 
     #[test]

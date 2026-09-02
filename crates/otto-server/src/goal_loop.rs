@@ -954,6 +954,7 @@ async fn run_executor_attempt(
         title: Some(format!("Loop: {} (iter {idx})", exec.name)),
         cwd: Some(cwd.to_string()),
         connection_id: None,
+        model: None,
         meta: Some(meta),
     };
     // We need a Workspace + user to create the session. The session manager

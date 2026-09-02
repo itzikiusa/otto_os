@@ -454,6 +454,7 @@ pub async fn run_insights(ctx: &ServerCtx, kind: Kind, offset: i64) -> otto_core
         title: Some(format!("Insights: {}", kind.word())),
         cwd: Some(cwd.clone()),
         connection_id: None,
+        model: None,
         meta: Some(meta),
     };
 

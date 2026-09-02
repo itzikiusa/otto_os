@@ -505,6 +505,7 @@ impl Bridge {
                     title: Some(session_title(&msg.text, channel_label)),
                     cwd: None,
                     connection_id: None,
+                    model: None,
                     meta: Some(meta),
                 };
                 let session = match self

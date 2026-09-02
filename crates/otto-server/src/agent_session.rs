@@ -169,6 +169,7 @@ pub async fn run_session_turn_with(
                 title: Some(title.to_string()),
                 cwd: Some(cwd_canon.clone()),
                 connection_id: None,
+                model: None,
                 meta: Some(meta),
             };
             let session = ctx

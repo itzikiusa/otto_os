@@ -160,6 +160,7 @@ async fn install_servers(
         title: Some("Install language servers".to_string()),
         cwd: None,
         connection_id: None,
+        model: None,
         meta: None,
     };
 

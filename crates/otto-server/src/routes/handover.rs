@@ -55,6 +55,10 @@ pub async fn handover_session(
     let source = ctx.manager.get(&source_id).await.map_err(ApiError)?;
     require_agent(&source)?;
     crate::auth::require_ws_role(&ctx, &user, &source.workspace_id, WorkspaceRole::Editor).await?;
+    // Owner-or-admin on the SOURCE: the brief digests the source's transcript /
+    // scrollback, so handing it over is a read of that session's content — same
+    // confinement as the terminal WS gate and the activity trail.
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &source).await?;
 
     // Resolve the target: spawn a new agent, or claim an existing one. Both end
     // up carrying `handover_from` (breadcrumb) and `handover_pending` (badge).
@@ -81,6 +85,7 @@ pub async fn handover_session(
                 title: Some(title),
                 cwd: Some(source.cwd.clone()),
                 connection_id: None,
+                model: None,
                 meta: Some(serde_json::json!({
                     "handover_from": source.id,
                     "handover_pending": true,
@@ -104,6 +109,9 @@ pub async fn handover_session(
                     "target session is in a different workspace".into(),
                 )));
             }
+            // The handover injects a prompt into the target's PTY — owner-or-admin
+            // there too, or an Editor could drive another user's agent.
+            crate::auth::require_session_owner_or_admin(&ctx, &user, &existing).await?;
             // Records the breadcrumb + pending badge and broadcasts the change.
             ctx.manager
                 .update_meta(
@@ -145,6 +153,8 @@ pub async fn handover_brief(
     let source = ctx.manager.get(&source_id).await.map_err(ApiError)?;
     require_agent(&source)?;
     crate::auth::require_ws_role(&ctx, &user, &source.workspace_id, WorkspaceRole::Editor).await?;
+    // The brief exposes the source session's transcript — owner-or-admin only.
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &source).await?;
 
     let (brief, fallback, had_context) = generate_brief(
         &ctx,

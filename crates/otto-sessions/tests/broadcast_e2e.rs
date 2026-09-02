@@ -75,6 +75,7 @@ async fn spawn_shell(mgr: &SessionManager, ws: &Workspace, user: &Id, cwd: &Path
         title: None,
         cwd: Some(cwd.to_string_lossy().into_owned()),
         connection_id: None,
+        model: None,
         meta: None,
     };
     let s = mgr.create(ws, user, req, None).await.expect("spawn shell");

@@ -36,7 +36,7 @@ workspace. It does **not** replace the per-feature pages — it is a cross-cutti
 - Items are **materialized by a projector** that subscribes to the daemon's existing event
   bus plus a periodic reconcile/backfill — **no module is rewired** to feed it.
 
-The design thesis (from `docs/design/workgraph-mission-control-design.md`): every activity
+The design thesis: every activity
 type already broadcasts an `Event::*`, so a single subscriber can project those events into
 work items. This is the lowest-coupling option — re-derivable, no new failure surface in hot
 paths, single source of truth per fact (cost/status/title live in the owning repos; the
@@ -403,8 +403,6 @@ graph on a matching tick instead of polling.
   [`./goal-loops.md`](./goal-loops.md), [`./code-review.md`](./code-review.md),
   [`./workflows.md`](./workflows.md), [`./product.md`](./product.md) — the source features
   whose rows Mission Control projects.
-- `docs/design/workgraph-mission-control-design.md`, `docs/design/workgraph-requirements.md`,
-  `docs/design/workgraph-plan.md` — the design/requirements/plan behind the work graph.
 - `docs/contracts/api.md` (#126–#134) and `docs/contracts/ws.md` (`work_graph_updated`) — the
   authoritative API/event contract.
 - [`../MULTI-USER-RBAC.md`](../MULTI-USER-RBAC.md) — workspace roles and the feature-

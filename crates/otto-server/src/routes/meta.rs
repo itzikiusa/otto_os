@@ -37,6 +37,13 @@ pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
     // The live registry (builtins + custom overrides) is the single source
     // of truth for the provider list.
     let providers = ctx.manager.providers().names();
+    // Per-provider: whether the CLI accepts a model flag (its spec carries a
+    // `model_args` template). Pickers hide the model control when false, so a
+    // pinned model is never silently dropped.
+    let model_flags = providers
+        .iter()
+        .map(|p| (p.clone(), ctx.manager.providers().supports_model(p)))
+        .collect();
 
     // The configured default agent (a provider name). Used by the UI to
     // preselect a provider for new sessions, and mirrors the value channel
@@ -63,6 +70,7 @@ pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
         tools,
         providers,
         default_provider,
+        model_flags,
     }))
 }
 

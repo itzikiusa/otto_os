@@ -14,6 +14,9 @@
     args?: string[];
     resume_args?: string[] | null;
     update_command?: string | null;
+    /** Model-flag template, `{model}` substituted at spawn (e.g. `--model {model}`).
+     *  Unset = the CLI takes no model flag; pickers hide the model control. */
+    model_args?: string[] | null;
   }
 
   interface CliAutoUpdate {
@@ -66,6 +69,48 @@
   let skipPermissions = $state(true);
   let savingSkip = $state(false);
 
+  // Dynamic model catalog: per-provider counts + freshness from
+  // GET /providers/models; Refresh re-runs the daemon's source chain
+  // (CLI probe / docs scrape / models.dev). Loaded independently of the
+  // settings blob so a catalog hiccup never blocks this page.
+  interface CatalogEntry {
+    models: { id: string; label: string; source: string }[];
+    fetched_at: string | null;
+    stale: boolean;
+    last_error?: string;
+  }
+  let catalog: Record<string, CatalogEntry> = $state({});
+  let refreshingModels: string | null = $state(null); // provider slug, or '*' for all
+
+  async function loadCatalog(): Promise<void> {
+    try {
+      const r = await api.get<{ providers: Record<string, CatalogEntry> }>('/providers/models');
+      catalog = r.providers;
+    } catch {
+      // Non-fatal — the section just renders empty.
+    }
+  }
+
+  async function refreshModels(provider?: string): Promise<void> {
+    refreshingModels = provider ?? '*';
+    try {
+      const r = await api.post<{ providers: Record<string, CatalogEntry> }>(
+        '/providers/models/refresh',
+        provider ? { provider } : {},
+      );
+      catalog = r.providers;
+      toasts.info('Model catalog refreshed');
+    } catch (e) {
+      toasts.error('Refresh failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      refreshingModels = null;
+    }
+  }
+
+  $effect(() => {
+    void loadCatalog();
+  });
+
   // Providers offered in the default-agent picker: the live registry from
   // /meta (built-ins + custom overrides), falling back to the built-in names.
   const providers = $derived(auth.meta?.providers ?? BUILTINS.map((b) => b.name));
@@ -77,6 +122,7 @@
   let args = $state('');
   let resumeArgs = $state('');
   let updateCmd = $state('');
+  let modelArgs = $state('');
   let formOpen = $state(false);
 
   async function updateAllCLIs(): Promise<void> {
@@ -123,6 +169,7 @@
     args = '';
     resumeArgs = '';
     updateCmd = '';
+    modelArgs = '';
     formOpen = true;
   }
 
@@ -134,6 +181,7 @@
     args = (p.args ?? []).join(' ');
     resumeArgs = (p.resume_args ?? []).join(' ');
     updateCmd = p.update_command ?? '';
+    modelArgs = (p.model_args ?? []).join(' ');
     formOpen = true;
   }
 
@@ -289,6 +337,8 @@
     if (ra !== '') def.resume_args = ra.split(/\s+/);
     const uc = updateCmd.trim();
     if (uc !== '') def.update_command = uc;
+    const ma = modelArgs.trim();
+    if (ma !== '') def.model_args = ma.split(/\s+/);
 
     const next = { ...custom };
     if (editing && editing !== n) delete next[editing];
@@ -311,7 +361,8 @@
         <p class="dim">
           Agent CLIs Otto can spawn as sessions. Built-ins are always available;
           add any other CLI (opencode, kilo, …) below. <code>{'{sid}'}</code> and
-          <code>{'{cwd}'}</code> expand in arguments.
+          <code>{'{cwd}'}</code> expand in arguments; <code>{'{model}'}</code> in the
+          model flag template.
         </p>
       </div>
       <button class="btn primary" onclick={updateAllCLIs} disabled={updating || loading}>
@@ -463,6 +514,48 @@
 
     <div class="section">
       <div class="row between">
+        <div class="label">Models catalog</div>
+        <button
+          class="btn sm"
+          onclick={() => refreshModels()}
+          disabled={refreshingModels !== null}
+        >
+          {refreshingModels === '*' ? 'Refreshing…' : 'Refresh all'}
+        </button>
+      </div>
+      <div class="list">
+        {#each Object.entries(catalog).sort() as [prov, cat] (prov)}
+          <div class="item">
+            <span class="mono">{prov}</span>
+            <span class="dim sm">{cat.models.length} models</span>
+            {#if cat.stale}<span class="chip">stale</span>{/if}
+            <span class="grow"></span>
+            <span class="dim sm">
+              {cat.fetched_at
+                ? `fetched ${new Date(cat.fetched_at).toLocaleString()}`
+                : 'never fetched'}{#if cat.last_error}&nbsp;· {cat.last_error}{/if}
+            </span>
+            <button
+              class="btn sm"
+              onclick={() => refreshModels(prov)}
+              disabled={refreshingModels !== null}
+            >
+              {refreshingModels === prov ? '…' : 'Refresh'}
+            </button>
+          </div>
+        {:else}
+          <div class="dim sm empty">No catalog yet — Refresh to discover models.</div>
+        {/each}
+      </div>
+      <p class="dim sm">
+        Model ids discovered at runtime from each provider's CLI or public docs
+        (no API keys). Model pickers across Otto offer these; a failed refresh
+        keeps the last good list and shows <em>stale</em> instead.
+      </p>
+    </div>
+
+    <div class="section">
+      <div class="row between">
         <div class="label">Custom</div>
         <button class="btn" onclick={openNew}>Add provider</button>
       </div>
@@ -474,6 +567,7 @@
             <span class="grow"></span>
             {#if p.resume_args?.length}<span class="chip">resume</span>{/if}
             {#if p.update_command}<span class="chip">update</span>{/if}
+            {#if p.model_args?.length}<span class="chip">model</span>{/if}
             {@render enableToggle(n)}
             <button class="btn sm" onclick={() => openEdit(n)}>Edit</button>
             <button class="btn sm danger" onclick={() => remove(n)} disabled={saving}>Remove</button>
@@ -507,6 +601,10 @@
           <label>
             <span>Update command (optional)</span>
             <input bind:value={updateCmd} placeholder={'npm i -g opencode'} spellcheck="false" />
+          </label>
+          <label>
+            <span>Model flag template (optional)</span>
+            <input bind:value={modelArgs} placeholder={'--model {model}'} spellcheck="false" />
           </label>
         </div>
         <div class="row end">

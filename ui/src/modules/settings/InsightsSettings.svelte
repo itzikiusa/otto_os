@@ -9,10 +9,20 @@
   import { router } from '../../lib/router.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import ModelPicker from '../../lib/components/ModelPicker.svelte';
 
   let cfg: InsightsConfig | null = $state(null);
   let loading = $state(true);
   let saving = $state(false);
+  // Local model draft — the picker's free-text path fires per keystroke, so we
+  // debounce the PUT instead of racing saveAgent's `saving` guard.
+  let modelDraft = $state('');
+  let modelSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  function onModelChange(m: string): void {
+    modelDraft = m;
+    if (modelSaveTimer) clearTimeout(modelSaveTimer);
+    modelSaveTimer = setTimeout(() => void saveAgent({ model: m }), 500);
+  }
 
   // ---------------------------------------------------------------------------
   // Load on mount
@@ -29,6 +39,7 @@
     loading = true;
     try {
       cfg = await insightsApi.getConfig();
+      modelDraft = cfg.model || '';
     } catch (e) {
       toasts.error('Could not load insights settings', e instanceof Error ? e.message : String(e));
     } finally {
@@ -147,16 +158,15 @@
           {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
         </select>
       </label>
-      <label class="agent-fld">
-        <span class="toggle-title">Model <span class="toggle-desc">(optional)</span></span>
-        <input
-          type="text"
-          placeholder="default"
-          value={cfg.model || ''}
-          disabled={saving}
-          onchange={(e) => saveAgent({ model: e.currentTarget.value })}
+      <!-- Catalog-backed; hides itself when the provider has no model-flag
+           template. Empty provider = default → resolve for the model list. -->
+      <div class="agent-fld">
+        <ModelPicker
+          provider={cfg.provider || defaultAgentProvider()}
+          value={modelDraft}
+          onchange={onModelChange}
         />
-      </label>
+      </div>
     </div>
 
     <div class="note">
@@ -201,8 +211,7 @@
     gap: 5px;
     font-size: 13px;
   }
-  .agent-fld select,
-  .agent-fld input {
+  .agent-fld select {
     padding: 5px 8px;
   }
 

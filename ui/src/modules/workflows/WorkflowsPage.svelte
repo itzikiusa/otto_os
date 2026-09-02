@@ -15,6 +15,7 @@
   import TriggersPanel from './TriggersPanel.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
+  import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -144,6 +145,7 @@
     cur.approval_node_id = nr.approval_node_id ?? null;
     cur.workflow_version = nr.workflow_version ?? null;
     cur.proof_pack_id = nr.proof_pack_id ?? null;
+    cur.resume_attempts = nr.resume_attempts ?? cur.resume_attempts ?? 0;
     // Keep the last known dir when a payload omits it (list rows / WS-driven
     // snapshots don't carry it) so the Context-files browser doesn't vanish.
     cur.context_dir = nr.context_dir ?? cur.context_dir ?? null;
@@ -399,6 +401,21 @@
       toasts.error('Save failed', e instanceof Error ? e.message : String(e));
     } finally {
       savingInstructions = false;
+    }
+  }
+
+  // Restart policy toggle: saved immediately (its own PATCH — a policy flip
+  // must not ride on, or wait for, an unsaved instructions edit).
+  async function saveOnRestart(resume: boolean): Promise<void> {
+    if (!current) return;
+    try {
+      const wf = await api.patch<Workflow>(`/workflows/${current.id}`, {
+        on_restart: resume ? 'resume' : 'fail',
+      });
+      current = wf;
+      workflows = workflows.map((w) => (w.id === wf.id ? wf : w));
+    } catch (e) {
+      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -1513,6 +1530,13 @@
       {/if}
 
       <!-- Human-approval banner: shown when a run is paused at a human_approval node -->
+      {#if run && (run.resume_attempts ?? 0) > 0}
+        <div class="resumed-banner" title="A daemon restart interrupted this run; it picked up from the step it was on">
+          <Icon name="refresh" size={13} />
+          <span>Resumed after a daemon restart (attempt {run.resume_attempts})</span>
+        </div>
+      {/if}
+
       {#if run?.waiting_approval && run.approval_node_id}
         <div class="approval-banner">
           <Icon name="user-check" size={14} />
@@ -1558,6 +1582,18 @@
             bind:value={wfInstructions}
             placeholder="Standing rules every step follows by the letter (markdown)"
           ></textarea>
+          <label class="resume-toggle">
+            <input
+              type="checkbox"
+              checked={(current.on_restart ?? 'resume') !== 'fail'}
+              onchange={(e) => void saveOnRestart(e.currentTarget.checked)}
+            />
+            <span>
+              Resume after a daemon restart — an interrupted run picks up from the step it
+              was on (steps with external side effects are never replayed). Unchecked, a
+              restart fails the run and it must be re-run manually.
+            </span>
+          </label>
         </div>
       {/if}
 
@@ -1727,13 +1763,13 @@
                 <option value="">default ({defaultAgentProvider()})</option>
                 {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
               </select>
-              <label for="np-model">Model (optional)</label>
-              <input
-                id="np-model"
-                type="text"
-                placeholder="e.g. opus / sonnet / haiku (default)"
+              <!-- Empty provider = default → resolve so the picker lists the
+                   models that will actually run. Hides itself for a provider
+                   with no model-flag template. -->
+              <ModelPicker
+                provider={paramStr('provider') || defaultAgentProvider()}
                 value={paramStr('model')}
-                oninput={(e) => onParam('model', e.currentTarget.value)}
+                onchange={(m) => onParam('model', m)}
               />
             {/snippet}
             <!-- Per-kind param forms. Each kind exposes only its meaningful
@@ -3788,6 +3824,19 @@
     font-size: 11.5px;
     color: var(--text-dim);
   }
+  .resume-toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .resume-toggle input {
+    margin-top: 1px;
+    accent-color: var(--accent);
+  }
   /* Human-approval banner */
   .run-input {
     display: flex;
@@ -3827,6 +3876,16 @@
   }
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .resumed-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: var(--panel, rgba(255, 255, 255, 0.03));
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-dim);
   }
   .approval-banner {
     display: flex;

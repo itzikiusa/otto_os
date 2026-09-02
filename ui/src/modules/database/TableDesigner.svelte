@@ -2,7 +2,10 @@
   // Workbench-style column designer for a SQL table. Edit column name / type /
   // NOT NULL / default, add or drop columns, then "Prepare ALTER" — which opens
   // the generated `ALTER TABLE …` in a query tab for the user to review and run
-  // (never auto-applied). MySQL syntax (the platform's primary SQL engine).
+  // (never auto-applied). Generation is engine-aware: MySQL uses CHANGE COLUMN
+  // clauses in one ALTER, Postgres a sequence of standard ALTER statements
+  // (RENAME / ALTER COLUMN TYPE / SET-DROP NOT NULL / SET DEFAULT), ClickHouse
+  // RENAME/MODIFY COLUMN (no FKs; nullability lives in the type).
   import Icon from '../../lib/components/Icon.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import type { DbColumnDef } from '../../lib/api/types';
@@ -76,8 +79,17 @@
   function addFk(): void {
     fks = [...fks, { name: '', cols: '', refTable: '', refCols: '' }];
   }
+  // Engine of the active connection — decides quoting + ALTER dialect. The
+  // designer is only reachable for SQL engines (StructureView gates the button).
+  const engine = $derived(database.capabilities?.engine ?? 'mysql');
+  // ClickHouse has no foreign keys and no plain ADD INDEX-with-columns (its
+  // secondary indexes are data-skipping and need a TYPE) — hide those sections.
+  const isClickhouse = $derived(engine === 'clickhouse');
+
   function quoteIdent(s: string): string {
-    return '`' + s.replace(/`/g, '``') + '`';
+    return engine === 'postgres'
+      ? '"' + s.replace(/"/g, '""') + '"'
+      : '`' + s.replace(/`/g, '``') + '`';
   }
   /** Quote a comma-separated identifier list: `a, b ` → `` `a`, `b` ``. */
   function quoteCols(csv: string): string {
@@ -88,35 +100,73 @@
       .map(quoteIdent)
       .join(', ');
   }
-  function colDef(r: Row): string {
+  // The prepared statement runs in a query tab against the ACTIVE db, which
+  // need not be this table's db — qualify from the selected object's path
+  // (`db:{db}/table:{t}` or `schema:{s}/table:{t}`).
+  const objSchema = $derived.by(() => {
+    const seg = (database.selectedObjectPath ?? '')
+      .split('/')
+      .find((s) => s.startsWith('db:') || s.startsWith('schema:'));
+    return seg ? seg.slice(seg.indexOf(':') + 1) : null;
+  });
+  const tableRef = $derived(
+    objSchema ? `${quoteIdent(objSchema)}.${quoteIdent(table)}` : quoteIdent(table),
+  );
+
+  function colDef(r: Row, orig: DbColumnDef | null): string {
     let s = `${quoteIdent(r.name)} ${r.type}`;
-    s += r.notNull ? ' NOT NULL' : ' NULL';
+    if (!isClickhouse) s += r.notNull ? ' NOT NULL' : ' NULL';
     if (r.def.trim() !== '') s += ` DEFAULT ${r.def.trim()}`;
+    if (engine === 'mysql' && orig) {
+      // CHANGE COLUMN replaces the WHOLE definition — without re-stating the
+      // original attributes a rename silently drops AUTO_INCREMENT /
+      // ON UPDATE CURRENT_TIMESTAMP and the comment. (DEFAULT_GENERATED is
+      // information_schema bookkeeping, not valid DDL.)
+      const extra = (orig.extra ?? '').replace(/DEFAULT_GENERATED/gi, '').trim();
+      if (extra) s += ` ${extra}`;
+      if (orig.comment) s += ` COMMENT '${orig.comment.replace(/'/g, "''")}'`;
+    }
     return s;
   }
 
-  // Diff the edited rows against the originals → ALTER clauses.
-  const sql = $derived.by(() => {
+  interface RowDiff {
+    r: Row;
+    orig: DbColumnDef;
+    renamed: boolean;
+    typeChanged: boolean;
+    nullChanged: boolean;
+    defChanged: boolean;
+  }
+  /** Diff one edited row against its original column (null = unchanged). */
+  function diffRow(r: Row): RowDiff | null {
+    const orig = columns.find((c) => c.name === r.orig);
+    if (!orig || !r.name.trim() || !r.type.trim()) return null;
+    const d: RowDiff = {
+      r,
+      orig,
+      renamed: r.name !== r.orig,
+      typeChanged: r.type !== orig.data_type,
+      nullChanged: r.notNull === orig.nullable,
+      defChanged: r.def !== (orig.default ?? ''),
+    };
+    return d.renamed || d.typeChanged || d.nullChanged || d.defChanged ? d : null;
+  }
+
+  /** MySQL: one ALTER with comma-separated clauses (CHANGE COLUMN carries all). */
+  function mysqlSql(): string {
     const parts: string[] = [];
     for (const r of rows) {
       if (r.orig === null) {
-        if (!r.drop && r.name.trim() && r.type.trim()) parts.push(`ADD COLUMN ${colDef(r)}`);
+        if (!r.drop && r.name.trim() && r.type.trim())
+          parts.push(`ADD COLUMN ${colDef(r, null)}`);
         continue;
       }
       if (r.drop) {
         parts.push(`DROP COLUMN ${quoteIdent(r.orig)}`);
         continue;
       }
-      const orig = columns.find((c) => c.name === r.orig);
-      if (!orig) continue;
-      const changed =
-        r.name !== r.orig ||
-        r.type !== orig.data_type ||
-        r.notNull === orig.nullable ||
-        r.def !== (orig.default ?? '');
-      if (changed && r.name.trim() && r.type.trim()) {
-        parts.push(`CHANGE COLUMN ${quoteIdent(r.orig)} ${colDef(r)}`);
-      }
+      const d = diffRow(r);
+      if (d) parts.push(`CHANGE COLUMN ${quoteIdent(r.orig!)} ${colDef(r, d.orig)}`);
     }
     // New indexes: ADD [UNIQUE] INDEX [name] (cols).
     for (const ix of indexes) {
@@ -136,7 +186,83 @@
         `ADD ${named}FOREIGN KEY (${cols}) REFERENCES ${quoteIdent(fk.refTable.trim())} (${refCols})`,
       );
     }
-    return parts.length ? `ALTER TABLE ${quoteIdent(table)}\n  ${parts.join(',\n  ')};` : '';
+    return parts.length ? `ALTER TABLE ${tableRef}\n  ${parts.join(',\n  ')};` : '';
+  }
+
+  /** Postgres: standard SQL has no CHANGE COLUMN — each change is its own
+   *  ALTER statement (rename first, then the rest address the new name). */
+  function postgresSql(): string {
+    const stmts: string[] = [];
+    const alter = (clause: string): void => {
+      stmts.push(`ALTER TABLE ${tableRef} ${clause};`);
+    };
+    for (const r of rows) {
+      if (r.orig === null) {
+        if (!r.drop && r.name.trim() && r.type.trim()) alter(`ADD COLUMN ${colDef(r, null)}`);
+        continue;
+      }
+      if (r.drop) {
+        alter(`DROP COLUMN ${quoteIdent(r.orig)}`);
+        continue;
+      }
+      const d = diffRow(r);
+      if (!d) continue;
+      if (d.renamed) alter(`RENAME COLUMN ${quoteIdent(r.orig)} TO ${quoteIdent(r.name)}`);
+      const col = quoteIdent(r.name);
+      if (d.typeChanged) alter(`ALTER COLUMN ${col} TYPE ${r.type}`);
+      if (d.nullChanged) alter(`ALTER COLUMN ${col} ${r.notNull ? 'SET' : 'DROP'} NOT NULL`);
+      if (d.defChanged) {
+        alter(
+          r.def.trim() !== ''
+            ? `ALTER COLUMN ${col} SET DEFAULT ${r.def.trim()}`
+            : `ALTER COLUMN ${col} DROP DEFAULT`,
+        );
+      }
+    }
+    for (const ix of indexes) {
+      const cols = quoteCols(ix.cols);
+      if (!cols) continue;
+      const named = ix.name.trim() ? `${quoteIdent(ix.name.trim())} ` : '';
+      stmts.push(`CREATE ${ix.unique ? 'UNIQUE ' : ''}INDEX ${named}ON ${tableRef} (${cols});`);
+    }
+    for (const fk of fks) {
+      const cols = quoteCols(fk.cols);
+      const refCols = quoteCols(fk.refCols);
+      if (!cols || !fk.refTable.trim() || !refCols) continue;
+      const named = fk.name.trim() ? `CONSTRAINT ${quoteIdent(fk.name.trim())} ` : '';
+      alter(
+        `ADD ${named}FOREIGN KEY (${cols}) REFERENCES ${quoteIdent(fk.refTable.trim())} (${refCols})`,
+      );
+    }
+    return stmts.join('\n');
+  }
+
+  /** ClickHouse: RENAME COLUMN + MODIFY COLUMN clauses; nullability is part of
+   *  the type (`Nullable(T)`), FKs don't exist, indexes need a skipping TYPE. */
+  function clickhouseSql(): string {
+    const parts: string[] = [];
+    for (const r of rows) {
+      if (r.orig === null) {
+        if (!r.drop && r.name.trim() && r.type.trim()) parts.push(`ADD COLUMN ${colDef(r, null)}`);
+        continue;
+      }
+      if (r.drop) {
+        parts.push(`DROP COLUMN ${quoteIdent(r.orig)}`);
+        continue;
+      }
+      const d = diffRow(r);
+      if (!d) continue;
+      if (d.renamed) parts.push(`RENAME COLUMN ${quoteIdent(r.orig!)} TO ${quoteIdent(r.name)}`);
+      if (d.typeChanged || d.defChanged) parts.push(`MODIFY COLUMN ${colDef(r, d.orig)}`);
+    }
+    return parts.length ? `ALTER TABLE ${tableRef}\n  ${parts.join(',\n  ')};` : '';
+  }
+
+  // Diff the edited rows against the originals → engine-correct ALTER SQL.
+  const sql = $derived.by(() => {
+    if (engine === 'postgres') return postgresSql();
+    if (engine === 'clickhouse') return clickhouseSql();
+    return mysqlSql();
   });
 
   function apply(): void {
@@ -215,7 +341,14 @@
         <div class="td-row" class:dropped={r.drop}>
           <input class="mono" bind:value={r.name} placeholder="name" spellcheck="false" />
           <input class="mono" bind:value={r.type} placeholder="type" spellcheck="false" />
-          <span class="ctr"><input type="checkbox" bind:checked={r.notNull} /></span>
+          <span class="ctr">
+            <input
+              type="checkbox"
+              bind:checked={r.notNull}
+              disabled={isClickhouse}
+              title={isClickhouse ? 'ClickHouse nullability lives in the type — use Nullable(T)' : undefined}
+            />
+          </span>
           <input class="mono" bind:value={r.def} placeholder="NULL" spellcheck="false" />
           <button
             class="icon-btn"
@@ -231,6 +364,17 @@
       <button class="td-add" onclick={addColumn}><Icon name="plus" size={12} />Add column</button>
     </div>
 
+    {#if isClickhouse}
+      <!-- ClickHouse: secondary indexes are data-skipping (need a TYPE — use the
+           Structure tab's index builder) and foreign keys don't exist. -->
+      <div class="td-section">
+        <div class="td-section-title">Indexes &amp; foreign keys</div>
+        <div class="dim small">
+          ClickHouse has no plain indexes or foreign keys — use the Structure tab's
+          index builder to add a data-skipping index.
+        </div>
+      </div>
+    {:else}
     <!-- Indexes -->
     <div class="td-section">
       <div class="td-section-title">Indexes</div>
@@ -260,6 +404,7 @@
       {/each}
       <button class="td-add" onclick={addFk}><Icon name="plus" size={12} />Add foreign key</button>
     </div>
+    {/if}
 
     {#if sql}
       <pre class="td-preview mono">{sql}</pre>

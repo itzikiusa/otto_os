@@ -20,6 +20,7 @@ pub mod fs;
 pub mod proof_pack;
 pub mod repo_rules;
 pub mod runs;
+pub mod personal_agents;
 pub mod scheduled_tasks;
 pub mod handover;
 pub mod impersonate;
@@ -211,6 +212,12 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(workspaces::members).put(workspaces::set_members),
         )
         .route("/settings", get(settings::get_all).put(settings::put_all))
+        // --- Dynamic model catalog (discovered per-provider model ids) ----
+        .route("/providers/models", get(crate::model_catalog::list))
+        .route(
+            "/providers/models/refresh",
+            post(crate::model_catalog::refresh),
+        )
         // --- Session name themes (auto-naming new sessions) --------------
         .route(
             "/name-themes",

@@ -14,6 +14,19 @@
   }
   let { title, width = 460, onclose, children, footer }: Props = $props();
 
+  let sheetEl = $state<HTMLElement | null>(null);
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  function focusables(): HTMLElement[] {
+    if (!sheetEl) return [];
+    // offsetParent filters display:none/collapsed elements (a fixed-position
+    // sheet still gives its children an offsetParent).
+    return Array.from(sheetEl.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+      (el) => el.offsetParent !== null || el === document.activeElement,
+    );
+  }
+
   // Register as an open overlay so the native browser webview (which paints
   // above the HTML) hides while this modal is up.
   //
@@ -28,10 +41,39 @@
     return () => untrack(() => ui.popModal());
   });
 
+  // Move focus into the sheet on open (first body control, else the close
+  // button) and hand it back to whatever had it when the modal closes.
+  $effect(() => {
+    const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const els = untrack(focusables);
+    (els.find((el) => !el.closest('header')) ?? els[0])?.focus();
+    return () => prev?.focus();
+  });
+
   function onKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.stopPropagation();
       onclose();
+    } else if (e.key === 'Tab') {
+      // Trap Tab inside the sheet: wrap at the ends, and pull focus back in if
+      // it somehow escaped (e.g. a click on the backdrop).
+      const els = focusables();
+      if (els.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const active = document.activeElement;
+      const inside = active instanceof HTMLElement && sheetEl?.contains(active);
+      const idx = inside ? els.indexOf(active as HTMLElement) : -1;
+      if (e.shiftKey) {
+        if (idx <= 0) {
+          e.preventDefault();
+          els[els.length - 1].focus();
+        }
+      } else if (idx === -1 || idx === els.length - 1) {
+        e.preventDefault();
+        els[0].focus();
+      }
     }
   }
 </script>
@@ -46,6 +88,7 @@
   }}
 >
   <div
+    bind:this={sheetEl}
     class="sheet"
     role="dialog"
     aria-modal="true"

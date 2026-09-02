@@ -50,6 +50,7 @@
   import LoopsPage from '../modules/loops/LoopsPage.svelte';
   import ProofPage from '../modules/proof/ProofPage.svelte';
   import ScheduledTasksPage from '../modules/scheduled-tasks/ScheduledTasksPage.svelte';
+  import PersonalAgentsPage from '../modules/personal-agents/PersonalAgentsPage.svelte';
   import RunWithOttoPage from '../modules/run-with-otto/RunWithOttoPage.svelte';
   import VaultPage from '../modules/vault/VaultPage.svelte';
   import { BrowserView } from '../modules/browser';
@@ -329,6 +330,9 @@
         case 'closeTab':
           ws.closeActiveTab();
           break;
+        case 'reopenTab':
+          ws.reopenClosedTab();
+          break;
         case 'nextTab':
           ws.cycleTab(1);
           break;
@@ -405,6 +409,7 @@
       { id: 'core.ask-otto', title: 'Ask Otto (plain English)', group: 'Sessions', shortcut: '⌘I', keywords: 'orchestrate natural language command free text', run: () => ui.openPalette('english') },
       { id: 'core.broadcast', title: 'Broadcast message to sessions', group: 'Sessions', shortcut: '⌘⇧B', keywords: 'send message every agent tell all selected', run: () => ui.openBroadcast() },
       { id: 'core.close-tab', title: 'Close Tab', group: 'Sessions', shortcut: '⌘W', run: () => ws.closeActiveTab() },
+      { id: 'core.reopen-tab', title: 'Reopen Closed Tab', group: 'Sessions', shortcut: '⌘⇧T', keywords: 'restore undo close tab session', run: () => ws.reopenClosedTab() },
       { id: 'core.next-session', title: 'Next Session', group: 'Sessions', shortcut: '⌘]', keywords: 'switch tab forward cycle', run: () => ws.cycleTab(1) },
       { id: 'core.prev-session', title: 'Previous Session', group: 'Sessions', shortcut: '⌘[', keywords: 'switch tab back cycle', run: () => ws.cycleTab(-1) },
       { id: 'core.split-v', title: 'Split Vertically', group: 'Sessions', shortcut: '⌘D', run: () => ws.split('col') },
@@ -423,6 +428,7 @@
       { id: 'core.go-tokens', title: 'Personal Access Tokens', group: 'Account', keywords: 'api token pat key secret cli script', run: () => router.go('settings/tokens') },
       { id: 'core.go-product', title: 'Go to Product', group: 'Navigate', keywords: 'product story jira confluence analysis rfc', run: () => router.go('product') },
       { id: 'core.go-scheduled-tasks', title: 'Go to Scheduled Tasks', group: 'Navigate', keywords: 'module scheduled task cron recurring job report cadence hourly daily', run: () => router.go('scheduled-tasks') },
+      { id: 'core.go-personal-agents', title: 'Go to Personal Agents', group: 'Navigate', keywords: 'module personal agent persona soul bot room chat schedule recap', run: () => router.go('personal-agents') },
       { id: 'core.go-run-with-otto', title: 'Go to Run with Otto', group: 'Navigate', keywords: 'run with otto one button launch jira github issue pr confluence finding test story channel review proof approval pr draft', run: () => router.go('run-with-otto') },
       { id: 'core.go-canvas', title: 'Go to Canvas', group: 'Navigate', keywords: 'canvas studio diagram sketch mockup uml sequence flowchart whiteboard excalidraw mermaid', run: () => router.go('canvas') },
       { id: 'core.go-insights', title: 'Go to Insights', group: 'Navigate', keywords: 'insights reports daily weekly monthly summary analytics activity', run: () => router.go('insights') },
@@ -623,6 +629,8 @@
       <WorkflowsPage />
     {:else if moduleName === 'scheduled-tasks'}
       <ScheduledTasksPage />
+    {:else if moduleName === 'personal-agents'}
+      <PersonalAgentsPage />
     {:else if moduleName === 'run-with-otto'}
       <RunWithOttoPage />
     {:else if moduleName === 'skills-eval'}

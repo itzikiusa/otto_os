@@ -24,8 +24,8 @@ export type FilterMode = 'set' | 'and';
 /** `\`col\` = <literal>` (or `\`col\` IS NULL`) — reuses the chip quoting so a
  *  string is `'escaped'`, a number is bare, NULL becomes `IS NULL`, identically
  *  to a quick-filter chip. */
-function sqlEquals(column: string, value: unknown): string {
-  return condToSql({ kind: 'col', column, op: 'in', values: [toFilterVal(value)] });
+function sqlEquals(column: string, value: unknown, escapeBackslash: boolean): string {
+  return condToSql({ kind: 'col', column, op: 'in', values: [toFilterVal(value)] }, escapeBackslash);
 }
 
 /** Postgres equals — double-quoted identifier (backticks are invalid in PG) with
@@ -114,7 +114,12 @@ export function applySqlFilter(
   const core = sql.trim().replace(/;\s*$/, '');
   const parts = splitStatement(core);
   if (!parts) return null;
-  const cond = engine === 'postgres' ? pgEquals(column, value) : sqlEquals(column, value);
+  // Backslash is an escape char in mysql/clickhouse string literals only —
+  // mirror the store's applyFilters so both splicers quote identically.
+  const cond =
+    engine === 'postgres'
+      ? pgEquals(column, value)
+      : sqlEquals(column, value, engine === 'mysql' || engine === 'clickhouse');
   if (!cond) return null;
   let newBody: string;
   if (mode === 'and' && parts.whereBody) {

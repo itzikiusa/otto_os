@@ -547,5 +547,3 @@ Types:
 - [`../remote-access-runbook.md`](../remote-access-runbook.md) — the concise
   operator runbook this page expands on (tunnel/PWA/share quickstart).
 - `docs/contracts/api.md` — authoritative REST/WS contract.
-- Design / plan: `docs/superpowers/specs/2026-06-19-remote-mobile-access-design.md`,
-  `docs/superpowers/plans/2026-06-19-remote-mobile-access-plan.md`.

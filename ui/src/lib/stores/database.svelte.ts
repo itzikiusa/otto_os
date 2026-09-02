@@ -9,6 +9,7 @@ import {
   dbAssistStart,
   dbAssistSummary,
   dbAssistClose,
+  dbCloseConnection,
 } from '../api/client';
 import { confirmer } from '../confirm.svelte';
 import type {
@@ -110,14 +111,46 @@ function newQueryId(): string {
   return `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+// Drop line (`-- …`) and block (`/* … */`) comments, string-aware, so the
+// trailing-LIMIT probe below only ever sees real SQL — a `LIMIT` inside a
+// trailing comment must neither satisfy nor hide the match.
+function stripSqlComments(sql: string): string {
+  let out = '';
+  const n = sql.length;
+  let i = 0;
+  while (i < n) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const q = ch;
+      out += sql[i++];
+      while (i < n) {
+        out += sql[i];
+        if (sql[i] === q) {
+          if (sql[i + 1] === q) { out += sql[i + 1]; i += 2; continue; }
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (ch === '-' && sql[i + 1] === '-') { while (i < n && sql[i] !== '\n') i++; continue; }
+    if (ch === '/' && sql[i + 1] === '*') { i += 2; while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) i++; i += 2; continue; }
+    out += sql[i++];
+  }
+  return out;
+}
+
 /**
  * Extract a trailing explicit `LIMIT` from a SQL statement so we honor what the
  * user wrote instead of clipping it. Handles `LIMIT n`, `LIMIT offset, count`,
- * and `LIMIT n OFFSET m`. Returns the row count, or null when there's no
- * trailing LIMIT.
+ * and `LIMIT n OFFSET m`. Comments are stripped first (a `-- LIMIT 10` remark
+ * is not a LIMIT). Returns the row count, or null when there's no trailing LIMIT.
  */
 export function parseExplicitLimit(sql: string): number | null {
-  const m = sql.match(/\blimit\s+(\d+)(?:\s*,\s*(\d+))?(?:\s+offset\s+\d+)?\s*;?\s*$/i);
+  const m = stripSqlComments(sql).match(
+    /\blimit\s+(\d+)(?:\s*,\s*(\d+))?(?:\s+offset\s+\d+)?\s*;?\s*$/i,
+  );
   if (!m) return null;
   return m[2] !== undefined ? Number(m[2]) : Number(m[1]);
 }
@@ -151,27 +184,35 @@ export function parseFilterValText(text: string): FilterVal {
 function quoteIdentSql(name: string): string {
   return '`' + name.replace(/`/g, '``') + '`';
 }
-function quoteFilterVal(v: FilterVal): string {
-  return v.numeric ? v.raw : `'${v.raw.replace(/'/g, "''")}'`;
+function quoteFilterVal(v: FilterVal, escapeBackslash = false): string {
+  if (v.numeric) return v.raw;
+  // MySQL/ClickHouse treat `\` as an escape inside string literals, so a value
+  // containing one must double it or the literal changes meaning (Postgres
+  // standard strings don't — the caller says which dialect it's building for).
+  const body = escapeBackslash ? v.raw.replace(/\\/g, '\\\\') : v.raw;
+  return `'${body.replace(/'/g, "''")}'`;
 }
 
 /** Render one filter condition as a SQL boolean expression (empty when it has
- * no usable values). Equals collapse to `IN`; NULLs become `IS [NOT] NULL`. */
-export function condToSql(c: FilterCond): string {
+ * no usable values). Equals collapse to `IN`; NULLs become `IS [NOT] NULL`.
+ * `escapeBackslash` doubles `\` in string literals for the dialects where it's
+ * an escape character (mysql/clickhouse); defaults off (labels, postgres). */
+export function condToSql(c: FilterCond, escapeBackslash = false): string {
   if (c.kind === 'raw') return c.text.trim();
   const col = quoteIdentSql(c.column);
+  const quote = (v: FilterVal): string => quoteFilterVal(v, escapeBackslash);
   const nonNull = c.values.filter((v) => !v.isNull);
   const hasNull = c.values.some((v) => v.isNull);
   const parts: string[] = [];
   if (c.op === 'in') {
-    if (nonNull.length === 1) parts.push(`${col} = ${quoteFilterVal(nonNull[0])}`);
-    else if (nonNull.length > 1) parts.push(`${col} IN (${nonNull.map(quoteFilterVal).join(', ')})`);
+    if (nonNull.length === 1) parts.push(`${col} = ${quote(nonNull[0])}`);
+    else if (nonNull.length > 1) parts.push(`${col} IN (${nonNull.map(quote).join(', ')})`);
     if (hasNull) parts.push(`${col} IS NULL`);
     if (parts.length === 0) return '';
     return parts.length > 1 ? `(${parts.join(' OR ')})` : parts[0];
   } else {
-    if (nonNull.length === 1) parts.push(`${col} <> ${quoteFilterVal(nonNull[0])}`);
-    else if (nonNull.length > 1) parts.push(`${col} NOT IN (${nonNull.map(quoteFilterVal).join(', ')})`);
+    if (nonNull.length === 1) parts.push(`${col} <> ${quote(nonNull[0])}`);
+    else if (nonNull.length > 1) parts.push(`${col} NOT IN (${nonNull.map(quote).join(', ')})`);
     if (hasNull) parts.push(`${col} IS NOT NULL`);
     return parts.join(' AND ');
   }
@@ -335,6 +376,13 @@ export interface QueryTab {
    * reload has no result to describe.
    */
   ran_statement: string | null;
+  /**
+   * The scope node the run that produced `result` was issued with (an explicit
+   * node, else the active DB at run time). The footer pager re-runs the RAN
+   * statement, so it must reuse the RAN scope too — the user may have switched
+   * the active database since. Transient, like `ran_statement`.
+   */
+  ran_node: string | null;
   running: boolean;
   error: string | null;
   /** Quick-filter chips that own the statement's WHERE clause. */
@@ -410,6 +458,7 @@ function blankTab(statement = ''): QueryTab {
     statement,
     result: null,
     ran_statement: null,
+    ran_node: null,
     running: false,
     error: null,
     filters: [],
@@ -459,6 +508,13 @@ interface ConnSnapshot {
   schemaLoading: boolean;
   selectedObjectPath: string | null;
   objectDetail: ObjectDetail | null;
+  objectError: string | null;
+  // Server-side object search is per connection — without snapshotting it,
+  // conn A's hits (and query) would render over conn B's tree after a switch.
+  objectSearchQuery: string;
+  objectSearchHits: ObjectHit[] | null;
+  objectSearchTruncated: boolean;
+  objectSearchScanned: number;
   builderTablesCache: Map<string, { label: string; path: string; kind: string }[]>;
   tabs: QueryTab[];
   activeTab: number;
@@ -507,6 +563,21 @@ class DatabaseStore {
   /** True while `restoreWorkbench` is re-opening persisted tabs, so the
    *  per-open-change persistence calls don't thrash localStorage mid-restore. */
   private restoring = false;
+  /**
+   * Connections closed WHILE `restoreWorkbench` was running. The restore loop
+   * (and its final `selected` re-focus) would otherwise re-open a tab the user
+   * just closed, and the closing persist was historically swallowed by the
+   * `restoring` guard — so the closed tab came back on every reload.
+   */
+  private restoreTombstones = new Set<Id>();
+  /**
+   * Per-connection open generation, bumped by `closeConnection`. Every async
+   * loader captures the epoch at start and bails after each await when it no
+   * longer matches (or the id left `openConnIds`) — so a close mid-load can't
+   * resurrect status entries, write stale singletons, or toast for a dead tab.
+   * Non-reactive bookkeeping.
+   */
+  private connEpoch = new Map<Id, number>();
   /**
    * Per-connection liveness, keyed by connection id. Persisted across tab
    * switches (parallel to `openConnIds`); deliberately NOT part of a
@@ -594,6 +665,10 @@ class DatabaseStore {
   selectedObjectPath: string | null = $state(null);
   objectDetail: ObjectDetail | null = $state(null);
   objectLoading = $state(false);
+  /** Why the selected object failed to load (null = no failure). Rendered by the
+   *  Structure view so a failed open doesn't decay into the neutral empty state
+   *  once the toast fades. Cleared on every new open / connection load. */
+  objectError: string | null = $state(null);
 
   // ── File→table import dialog (0002) ──────────────────────────────────────
   // Open state + the table to prefill, set when launched from the schema-tree
@@ -689,6 +764,8 @@ class DatabaseStore {
   assistBusy = $state(false);
   /** investigate-mode seed (statement + a small result sample); non-reactive. */
   private assistResultContext: string | null = null;
+  /** Aborts the in-flight assist POST (Stop). Non-reactive plain field. */
+  private assistAbort: AbortController | null = null;
 
   /**
    * Open the DB Assistant panel in `mode`. For `investigate`, pass a compact
@@ -734,17 +811,25 @@ class DatabaseStore {
     const q = question.trim();
     if (!q || this.assistBusy) return;
     this.assistBusy = true;
+    // Abortable: the POST is long (agent turn) and can wedge — Stop drops the
+    // HTTP wait and releases the input (the session, if started, stays live).
+    const ac = new AbortController();
+    this.assistAbort = ac;
     try {
-      const resp = await dbAssistStart(id, {
-        question: q,
-        mode: this.assistMode,
-        ...(this.activeDb ? { node: this.activeDb } : {}),
-        ...(this.assistProvider ? { provider: this.assistProvider } : {}),
-        ...(this.assistId ? { assist_id: this.assistId } : {}),
-        ...(this.assistResultContext && this.assistMode === 'investigate'
-          ? { result_context: this.assistResultContext }
-          : {}),
-      });
+      const resp = await dbAssistStart(
+        id,
+        {
+          question: q,
+          mode: this.assistMode,
+          ...(this.activeDb ? { node: this.activeDb } : {}),
+          ...(this.assistProvider ? { provider: this.assistProvider } : {}),
+          ...(this.assistId ? { assist_id: this.assistId } : {}),
+          ...(this.assistResultContext && this.assistMode === 'investigate'
+            ? { result_context: this.assistResultContext }
+            : {}),
+        },
+        ac.signal,
+      );
       this.assistId = resp.assist_id;
       // The session usually arrives first (turn START) via the event; set it from
       // the response too in case it didn't (idempotent — same id).
@@ -752,10 +837,17 @@ class DatabaseStore {
       if (resp.sql) this.assistProposedSql = resp.sql;
       if (resp.note) this.assistNote = resp.note;
     } catch (e) {
-      toasts.error('DB assistant failed', errMsg(e));
+      if (!ac.signal.aborted) toasts.error('DB assistant failed', errMsg(e));
     } finally {
+      if (this.assistAbort === ac) this.assistAbort = null;
       this.assistBusy = false;
     }
+  }
+
+  /** Stop the in-flight assist turn: abort the POST and release the input. */
+  stopAssist(): void {
+    this.assistAbort?.abort();
+    this.assistBusy = false;
   }
 
   /** `db_assist_session_started` → attach the live shell. */
@@ -844,6 +936,16 @@ class DatabaseStore {
     return ws.currentId ? `/workspaces/${ws.currentId}/db` : null;
   }
 
+  // ── Open-generation guards (see `connEpoch`) ────────────────────────────
+  private epochOf(id: Id): number {
+    return this.connEpoch.get(id) ?? 0;
+  }
+  /** Still the same open generation started at `epoch` (i.e. the connection
+   *  wasn't closed — possibly re-opened — since the caller began)? */
+  private connLive(id: Id, epoch: number): boolean {
+    return this.openConnIds.includes(id) && this.epochOf(id) === epoch;
+  }
+
   /** CodeMirror editor language for the active engine. */
   get queryLanguage(): 'sql' | 'redis' | 'mongo' {
     return this.capabilities?.query_language ?? 'sql';
@@ -867,6 +969,10 @@ class DatabaseStore {
     }
   }
   closeTab(i: number): void {
+    // A closed tab must not keep querying: cancel its in-flight run (server-side
+    // too) and drop its pending marker so the reattach loop stops polling it.
+    const closing = this.tabs[i];
+    if (closing) this.abortQuery(closing.id);
     if (this.tabs.length === 1) {
       this.tabs = [blankTab()];
       this.activeTab = 0;
@@ -934,7 +1040,27 @@ class DatabaseStore {
   private legacyTabsKey(connId: Id): string | null {
     return ws.currentId ? `otto_db_tabs:${ws.currentId}:${connId}` : null;
   }
+  /** Trailing-edge debounce handle for `persistTabs` (null = nothing queued). */
+  private persistTabsTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Debounced tab persistence — `setStatement` fires per keystroke and
+   *  stringifying every tab each time is wasted work. Flushed synchronously
+   *  before a connection switch/close (`flushPersistTabs`) so nothing is lost. */
   private persistTabs(): void {
+    if (this.persistTabsTimer !== null) clearTimeout(this.persistTabsTimer);
+    this.persistTabsTimer = setTimeout(() => {
+      this.persistTabsTimer = null;
+      this.persistTabsNow();
+    }, 300);
+  }
+  /** Write any queued (debounced) tab persistence immediately. Must run while
+   *  the owning connection is still selected — the write keys off it. */
+  private flushPersistTabs(): void {
+    if (this.persistTabsTimer === null) return;
+    clearTimeout(this.persistTabsTimer);
+    this.persistTabsTimer = null;
+    this.persistTabsNow();
+  }
+  private persistTabsNow(): void {
     if (typeof localStorage === 'undefined' || !this.selectedConnId) return;
     const key = this.tabsKey(this.selectedConnId);
     try {
@@ -947,6 +1073,9 @@ class DatabaseStore {
             vars: t.vars,
             savedQueryId: t.savedQueryId,
             pending: t.pending ?? undefined,
+            // Data-protection toggles survive a reload with the tab.
+            timeout_ms: t.timeout_ms ?? undefined,
+            mask: t.mask || undefined,
           })),
           activeTab: this.activeTab,
           activeDb: this.activeDb,
@@ -973,6 +1102,8 @@ class DatabaseStore {
           vars?: unknown;
           savedQueryId?: string;
           pending?: { queryId?: string; connId?: string } | null;
+          timeout_ms?: number;
+          mask?: boolean;
         }[];
         activeTab?: number;
         activeDb?: string | null;
@@ -982,6 +1113,8 @@ class DatabaseStore {
         name: t.name || 'Query',
         vars: normalizeVars(t.vars),
         savedQueryId: t.savedQueryId,
+        timeout_ms: typeof t.timeout_ms === 'number' && t.timeout_ms > 0 ? t.timeout_ms : null,
+        mask: t.mask === true,
         // Revive a pending run marker only when it's complete and belongs to
         // THIS connection — reattach polls it against the server.
         pending:
@@ -1050,9 +1183,11 @@ class DatabaseStore {
     return ws.currentId ? `otto_db_view:${ws.currentId}:${connId}` : null;
   }
 
-  /** Persist the open-connection set + selection. No-op during a restore. */
-  private persistWorkbench(): void {
-    if (typeof localStorage === 'undefined' || this.restoring) return;
+  /** Persist the open-connection set + selection. No-op during a restore —
+   *  except with `force` (a user CLOSE during the restore must reach storage,
+   *  or the restore's final persist writes the closed tab durably back). */
+  private persistWorkbench(force = false): void {
+    if (typeof localStorage === 'undefined' || (this.restoring && !force)) return;
     try {
       localStorage.setItem(
         this.openKey(),
@@ -1123,19 +1258,28 @@ class DatabaseStore {
     if (open.length === 0) return;
 
     this.restoring = true;
+    this.restoreTombstones.clear();
     try {
       for (const id of open) {
+        // A tab the user closed while this restore was running stays closed.
+        if (this.restoreTombstones.has(id)) continue;
         await this.openConnection(id);
       }
-      // Focus the persisted selection when still open, else the first.
+      // Focus the persisted selection when still open, else the first — never a
+      // tombstoned tab (re-opening it would resurrect the close).
+      const alive = open.filter((id) => !this.restoreTombstones.has(id));
       const selected =
-        parsed.selected && open.includes(parsed.selected) ? parsed.selected : open[0];
+        parsed.selected && alive.includes(parsed.selected) ? parsed.selected : alive[0];
       if (selected) await this.openConnection(selected);
     } finally {
       this.restoring = false;
+      this.restoreTombstones.clear();
     }
     // Persist once, now that the full set is open (converges the storage).
     this.persistWorkbench();
+    // Nothing survived the restore (or nothing was open) — land the sidebar on
+    // the picker so "open a connection" is one click away, not hidden.
+    if (this.openConnIds.length === 0) this.sideTab = 'connections';
   }
 
   /** Switch the main pane view for the active connection (persisted per conn). */
@@ -1194,6 +1338,9 @@ class DatabaseStore {
   private captureSnapshot(): void {
     const id = this.selectedConnId;
     if (id === null) return;
+    // Any debounced tab write still belongs to THIS connection — flush it while
+    // the key is still right.
+    this.flushPersistTabs();
     this.snapshots.set(id, {
       capabilities: this.capabilities,
       testResult: this.testResult,
@@ -1201,10 +1348,18 @@ class DatabaseStore {
       schemaRoot: this.schemaRoot,
       childrenCache: this.childrenCache,
       expanded: this.expanded,
-      loadingNodes: this.loadingNodes,
-      schemaLoading: this.schemaLoading,
+      // NEVER freeze in-flight loading flags: the loads they describe resolve
+      // (or are epoch-cancelled) while this snapshot is parked, so restoring
+      // them would show "Loading…" spinners nothing will ever clear.
+      loadingNodes: new Set<string>(),
+      schemaLoading: false,
       selectedObjectPath: this.selectedObjectPath,
       objectDetail: this.objectDetail,
+      objectError: this.objectError,
+      objectSearchQuery: this.objectSearchQuery,
+      objectSearchHits: this.objectSearchHits,
+      objectSearchTruncated: this.objectSearchTruncated,
+      objectSearchScanned: this.objectSearchScanned,
       builderTablesCache: this.builderTablesCache,
       tabs: this.tabs,
       activeTab: this.activeTab,
@@ -1236,6 +1391,15 @@ class DatabaseStore {
     this.schemaLoading = snap.schemaLoading;
     this.selectedObjectPath = snap.selectedObjectPath;
     this.objectDetail = snap.objectDetail;
+    this.objectError = snap.objectError;
+    // Object search is per connection; invalidate any in-flight search from the
+    // previous one so its late result can't land over this restore.
+    this.objectSearchSeq++;
+    this.objectSearching = false;
+    this.objectSearchQuery = snap.objectSearchQuery;
+    this.objectSearchHits = snap.objectSearchHits;
+    this.objectSearchTruncated = snap.objectSearchTruncated;
+    this.objectSearchScanned = snap.objectSearchScanned;
     this.builderTablesCache = snap.builderTablesCache;
     this.tabs = snap.tabs;
     this.activeTab = snap.activeTab;
@@ -1243,6 +1407,13 @@ class DatabaseStore {
     this.history = snap.history;
     this.mainTab = snap.mainTab;
     this.sideTab = snap.sideTab;
+    // A snapshot captured mid-load (a switch-away made the epoch guards drop
+    // the fetches) has an empty root — re-fetch instead of restoring a
+    // permanently empty tree.
+    if (snap.schemaRoot.length === 0) {
+      void this.loadCapabilities(id);
+      void this.loadSchemaRoot(id);
+    }
     // A tab may have lost its HTTP wait while this connection was in the
     // background (e.g. the daemon blipped and the earlier poll loop gave up) —
     // resume recovering its detached run. No-op for live/settled tabs.
@@ -1269,9 +1440,11 @@ class DatabaseStore {
     // fresh-load paths below have already updated them).
     this.persistWorkbench();
     if (this.restoreSnapshot(id)) return;
+    const epoch = this.epochOf(id);
     await this.loadConnectionFresh(id);
-    // Capture an initial snapshot so subsequent switches restore this state.
-    this.captureSnapshot();
+    // Capture an initial snapshot so subsequent switches restore this state —
+    // unless the tab was closed mid-load (snapshotting would resurrect it).
+    if (this.connLive(id, epoch) && this.selectedConnId === id) this.captureSnapshot();
   }
 
   /** Backwards-compatible alias: selecting a connection opens/focuses its tab. */
@@ -1288,18 +1461,37 @@ class DatabaseStore {
     const idx = this.openConnIds.indexOf(id);
     if (idx === -1) return;
     const wasActive = this.selectedConnId === id;
+    // A queued (debounced) tab write for the active conn still keys off it.
+    if (wasActive) this.flushPersistTabs();
+    // Stop this connection's tab runs BEFORE the snapshot is discarded: its
+    // tabs are the live set when active, else the parked snapshot's. Cancels
+    // server-side + clears `pending` so the reattach loops stop polling.
+    const closingTabs = wasActive ? this.tabs : this.snapshots.get(id)?.tabs ?? [];
+    for (const t of closingTabs) this.abortRunForTab(t);
     this.openConnIds = this.openConnIds.filter((x) => x !== id);
+    // Invalidate every in-flight loader for this connection (schema, caps,
+    // health probe, children…) — a close must be terminal, not cosmetic.
+    this.connEpoch.set(id, this.epochOf(id) + 1);
+    // A close during `restoreWorkbench` must survive the restore loop (which
+    // would otherwise re-open it) AND reach localStorage past the guard.
+    if (this.restoring) this.restoreTombstones.add(id);
     this.snapshots.delete(id);
     const cs = new Map(this.connStatus);
     cs.delete(id);
     this.connStatus = cs;
+    // Tell the daemon to tear down the connection's live resources (SSH tunnel,
+    // pooled conns, in-flight queries). Best-effort fire-and-forget — the tab
+    // closes regardless (mirrors closeSshTerminal's DELETE /sessions/{id}).
+    void dbCloseConnection(id).catch(() => {
+      /* daemon down / endpoint not deployed yet — nothing to release */
+    });
     // Drop this connection's persisted per-view entry (it's no longer open).
     if (typeof localStorage !== 'undefined') {
       const vk = this.viewKey(id);
       if (vk) localStorage.removeItem(vk);
     }
     if (!wasActive) {
-      this.persistWorkbench();
+      this.persistWorkbench(true);
       return;
     }
 
@@ -1316,14 +1508,16 @@ class DatabaseStore {
       this.loadingNodes = new Set();
       this.schemaLoading = false;
       this.objectDetail = null;
+      this.objectError = null;
       this.selectedObjectPath = null;
+      this.clearObjectSearch();
       this.tabs = [blankTab()];
       this.activeTab = 0;
       this.history = [];
       this.mainTab = 'query';
       // Back to the picker — there's no active connection to show a schema for.
       this.sideTab = 'connections';
-      this.persistWorkbench();
+      this.persistWorkbench(true);
       return;
     }
     // Focus the previous tab (or the first if we closed index 0). The active id
@@ -1371,6 +1565,7 @@ class DatabaseStore {
    * state — never `openConnIds`/`snapshots`.
    */
   private async loadConnectionFresh(id: Id): Promise<void> {
+    const epoch = this.epochOf(id);
     this.selectedConnId = id;
     this.capabilities = null;
     this.activeDb = null;
@@ -1381,8 +1576,11 @@ class DatabaseStore {
     this.nodeFilters = new Map();
     this.loadingNodes = new Set();
     this.objectDetail = null;
+    this.objectError = null;
     this.selectedObjectPath = null;
     this.testResult = null;
+    // Object search is per connection — never carry the previous one's hits.
+    this.clearObjectSearch();
     // Restore this connection's persisted query tabs (in-progress work from a
     // previous session); otherwise start with one blank tab. Never inherit the
     // previously active connection's tabs.
@@ -1401,6 +1599,9 @@ class DatabaseStore {
     // Fresh window of history for this connection.
     this.historyLimit = 100;
     await Promise.all([this.loadCapabilities(id), this.loadSchemaRoot(id), this.loadHistory(id)]);
+    // Closed (or superseded) while the loads were in flight — stop here: no
+    // reattach polling, no health probe for a tab that no longer exists.
+    if (!this.connLive(id, epoch)) return;
     // A restored tab may reference a run whose HTTP wait died with the previous
     // page (reload / app restart) while the server kept executing it detached —
     // re-attach and recover the result instead of silently dropping it.
@@ -1411,11 +1612,17 @@ class DatabaseStore {
   }
 
   private async loadCapabilities(id: Id): Promise<void> {
+    const epoch = this.epochOf(id);
     try {
-      this.capabilities = await api.get<DbCapabilities>(`${this.connBase(id)}/capabilities`);
+      const caps = await api.get<DbCapabilities>(`${this.connBase(id)}/capabilities`);
+      // Stale completion: the tab was closed, or another connection took the
+      // foreground — `capabilities` is a singleton view of the SELECTED conn.
+      if (!this.connLive(id, epoch) || this.selectedConnId !== id) return;
+      this.capabilities = caps;
       // A non-SQL engine can't use the visual JOIN builder; keep main tab valid.
       if (this.mainTab === 'builder' && !this.supportsBuilder) this.mainTab = 'query';
     } catch (e) {
+      if (!this.connLive(id, epoch)) return; // no toast for a closed tab
       toasts.error('Could not load DB capabilities', errMsg(e));
     }
   }
@@ -1433,19 +1640,29 @@ class DatabaseStore {
   }
 
   private async loadSchemaRoot(id: Id): Promise<void> {
+    const epoch = this.epochOf(id);
     this.schemaLoading = true;
     // Preserve any prior serverVersion/latency across a refresh's connecting dip.
     this.mergeConnStatus(id, { phase: 'connecting', error: undefined });
     const started =
       typeof performance !== 'undefined' ? performance.now() : Date.now();
     try {
-      this.schemaRoot = await api.get<SchemaNode[]>(`${this.connBase(id)}/schema`);
-      // Redis: default the active keyspace to the first DB (db0) so commands have
-      // a clear, visible target and the tree marks it. Won't override a restored
-      // selection. (`kind === 'keyspace'` only matches Redis.)
-      if (!this.activeDb) {
-        const ks = this.schemaRoot.find((n) => n.kind === 'keyspace');
-        if (ks) this.activeDb = ks.id;
+      const root = await api.get<SchemaNode[]>(`${this.connBase(id)}/schema`);
+      // Closed mid-fetch: write NOTHING (a status merge would resurrect the
+      // connStatus entry closeConnection just deleted).
+      if (!this.connLive(id, epoch)) return;
+      // The singleton tree belongs to the SELECTED connection only — a
+      // background load (tab switched away mid-fetch) must not clobber it; its
+      // snapshot re-fetches on restore (see restoreSnapshot's empty-root path).
+      if (this.selectedConnId === id) {
+        this.schemaRoot = root;
+        // Redis: default the active keyspace to the first DB (db0) so commands have
+        // a clear, visible target and the tree marks it. Won't override a restored
+        // selection. (`kind === 'keyspace'` only matches Redis.)
+        if (!this.activeDb) {
+          const ks = root.find((n) => n.kind === 'keyspace');
+          if (ks) this.activeDb = ks.id;
+        }
       }
       // Ready — record the schema round-trip as an immediate latency figure for
       // the health chip (the db/test probe refines it + adds the server version).
@@ -1456,11 +1673,13 @@ class DatabaseStore {
         latencyMs: Math.round(now - started),
       });
     } catch (e) {
+      if (!this.connLive(id, epoch)) return; // closed tab: no status, no toast
       // A hard failure drops any stale health data (replace, not merge).
       this.setConnStatus(id, { phase: 'error', error: errMsg(e) });
       toasts.error('Could not load schema', errMsg(e));
     } finally {
-      this.schemaLoading = false;
+      // The singleton loading flag tracks the selected connection's tree.
+      if (this.selectedConnId === id) this.schemaLoading = false;
     }
   }
 
@@ -1471,11 +1690,13 @@ class DatabaseStore {
    * failure — the chip just shows what it has (the phase already reflects errors).
    */
   private async probeHealth(id: Id): Promise<void> {
+    const epoch = this.epochOf(id);
     try {
       const started =
         typeof performance !== 'undefined' ? performance.now() : Date.now();
       const res = await api.post<DbTestResult>(`${this.connBase(id)}/test`, {});
-      if (!res.ok) return;
+      // Closed mid-probe: the merge would resurrect the deleted status entry.
+      if (!res.ok || !this.connLive(id, epoch)) return;
       const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
       this.mergeConnStatus(id, {
         serverVersion: res.server_version ?? undefined,
@@ -1595,8 +1816,13 @@ class DatabaseStore {
   setShowCounts(on: boolean): void {
     this.showCounts = on;
     saveFlag('db.showCounts', on);
-    // Cached children were fetched without (or with) counts — re-expand cleanly.
+    // Cached children were fetched without (or with) counts — drop the cache and
+    // refetch what's on screen, or every expanded node would sit childless with
+    // no spinner and no way to reload short of collapsing it by hand.
     this.childrenCache = new Map();
+    const id = this.selectedConnId;
+    if (!id) return;
+    for (const nodeId of this.expanded) void this.loadChildren(id, nodeId);
   }
 
   toggleSidebar(): void {
@@ -1652,6 +1878,11 @@ class DatabaseStore {
   private objectSearchSeq = 0;
 
   private async loadChildren(connId: string, nodeId: string): Promise<void> {
+    const epoch = this.epochOf(connId);
+    // The tree singletons (children/expanded/loading) always describe the
+    // SELECTED connection — after any await, a completion for a connection
+    // that was closed or switched away must not touch them.
+    const stale = (): boolean => !this.connLive(connId, epoch) || this.selectedConnId !== connId;
     this.loadingNodes.add(nodeId);
     this.loadingNodes = new Set(this.loadingNodes);
     try {
@@ -1661,15 +1892,19 @@ class DatabaseStore {
         filter: filter || undefined,
         counts: this.showCounts || undefined,
       });
+      if (stale()) return;
       this.childrenCache.set(nodeId, children);
       this.childrenCache = new Map(this.childrenCache);
     } catch (e) {
+      if (stale()) return; // no toast / collapse for a dead view
       toasts.error('Could not load children', errMsg(e));
       this.expanded.delete(nodeId);
       this.expanded = new Set(this.expanded);
     } finally {
-      this.loadingNodes.delete(nodeId);
-      this.loadingNodes = new Set(this.loadingNodes);
+      if (!stale()) {
+        this.loadingNodes.delete(nodeId);
+        this.loadingNodes = new Set(this.loadingNodes);
+      }
     }
   }
 
@@ -1677,20 +1912,40 @@ class DatabaseStore {
   async openObject(node: SchemaNode): Promise<void> {
     const id = this.selectedConnId;
     if (!id) return;
+    const epoch = this.epochOf(id);
+    const seq = ++this.objectOpenSeq;
     this.selectedObjectPath = node.id;
     this.objectLoading = true;
     this.objectDetail = null;
+    this.objectError = null;
     this.setMainTab('structure');
+    // Stale when the connection was closed/switched, or another object was
+    // opened while this fetch was in flight — the singletons moved on.
+    const stale = (): boolean =>
+      !this.connLive(id, epoch) ||
+      this.selectedConnId !== id ||
+      this.selectedObjectPath !== node.id;
     try {
-      this.objectDetail = await api.post<ObjectDetail>(`${this.connBase(id)}/object`, {
+      const detail = await api.post<ObjectDetail>(`${this.connBase(id)}/object`, {
         path: node.id,
       });
+      if (stale()) return;
+      this.objectDetail = detail;
     } catch (e) {
+      if (stale()) return;
+      // Keep the failure visible in the Structure view (the toast fades and the
+      // neutral "no object" empty state would misreport a load error).
+      this.objectError = errMsg(e);
       toasts.error('Could not load object', errMsg(e));
     } finally {
-      this.objectLoading = false;
+      // A NEWER openObject owns the loading flag; anything else (including a
+      // stale completion) must release it so no spinner runs forever.
+      if (seq === this.objectOpenSeq) this.objectLoading = false;
     }
   }
+
+  /** Monotonic openObject sequence — the latest call owns `objectLoading`. */
+  private objectOpenSeq = 0;
 
   /** Fetch object detail for an arbitrary table path (used by the builder). */
   async fetchObject(path: string): Promise<ObjectDetail | null> {
@@ -1908,6 +2163,7 @@ class DatabaseStore {
       }
       t.result = result;
       t.ran_statement = sql;
+      t.ran_node = scopeNode;
       this.clearPending(t);
       void this.loadHistory(id);
       return result;
@@ -1952,7 +2208,13 @@ class DatabaseStore {
     const next = Math.max(0, t.offset + delta * pageSize);
     if (next === t.offset) return;
     t.offset = next;
-    void this.runQuery(undefined, undefined, { keepOffset: true });
+    // Page the statement (and scope node) that PRODUCED the result — the editor
+    // buffer / active DB may have been edited since the run. `transient` keeps
+    // the buffer untouched.
+    void this.runQuery(t.ran_statement ?? undefined, t.ran_node ?? undefined, {
+      keepOffset: true,
+      transient: true,
+    });
   }
 
   /**
@@ -2035,6 +2297,7 @@ class DatabaseStore {
       const result = await api.post<QueryResult>(`${this.connBase(id)}/query`, body);
       t.result = result;
       t.ran_statement = stmt;
+      t.ran_node = this.activeDb || null;
       return result;
     } catch (e) {
       t.error = errMsg(e);
@@ -2096,12 +2359,36 @@ class DatabaseStore {
     const id = tabId ?? this.tab?.id;
     if (id == null) return;
     const t = this.tabs.find((x) => x.id === id);
+    if (t) {
+      this.abortRunForTab(t);
+      this.persistTabs(); // the pending marker is persisted with the tabs
+      return;
+    }
+    // No live tab (a parked/foreign run) — still drop the controller if held.
     const entry = this.runControllers.get(id);
-    // The run's identity: the live controller entry, or — when the HTTP wait
-    // was already lost and the tab is in re-attach mode — its pending marker.
-    const target = entry ?? (t?.pending ? { ...t.pending } : null);
-    if (!target) return;
+    if (!entry) return;
     this.runControllers.delete(id);
+    void api
+      .post(`${this.connBase(entry.connId)}/cancel`, { query_id: entry.queryId })
+      .catch(() => {
+        /* best-effort: server may have already finished/evicted the query */
+      });
+    entry.controller.abort();
+  }
+
+  /**
+   * Cancel one tab's run — server-side engine cancel (fire-and-forget), fetch
+   * abort, and run-state reset. Works on snapshot tabs of a BACKGROUND
+   * connection too, which is why it never persists: the localStorage key
+   * belongs to the ACTIVE connection (callers that own it persist themselves).
+   * The run's identity is the live controller entry, or — when the HTTP wait
+   * was already lost and the tab is in re-attach mode — its pending marker.
+   */
+  private abortRunForTab(t: QueryTab): void {
+    const entry = this.runControllers.get(t.id);
+    const target = entry ?? (t.pending ? { ...t.pending } : null);
+    if (!target) return;
+    this.runControllers.delete(t.id);
     // 1) Ask the server to cancel the query engine-side (fire-and-forget).
     void api
       .post(`${this.connBase(target.connId)}/cancel`, { query_id: target.queryId })
@@ -2112,10 +2399,8 @@ class DatabaseStore {
     // Stop also forgets the pending marker — re-attach must not resurrect a
     // query the user explicitly killed.
     entry?.controller.abort();
-    if (t) {
-      t.running = false;
-      this.clearPending(t);
-    }
+    t.running = false;
+    t.pending = null;
   }
 
   /** Forget a tab's pending run marker (persisted with the tabs). */
@@ -2295,7 +2580,11 @@ class DatabaseStore {
   /** Open the file→table Import dialog, prefilling the target table from a
    *  schema-tree node (the raw, unquoted table name the INSERT needs). */
   openImportDialog(node?: SchemaNode): void {
-    this.importTable = node ? this.tableRefFromNode(node)?.table ?? '' : '';
+    // Mongo tree nodes are collections (`coll:`), never `table:`/`view:` — the
+    // SQL resolver can't match them, so the prefill was always empty there.
+    this.importTable = node
+      ? (this.tableRefFromNode(node)?.table ?? this.collectionRefFromNode(node)?.coll) ?? ''
+      : '';
     this.importDialogOpen = true;
   }
 
@@ -2450,8 +2739,11 @@ class DatabaseStore {
   private applyFilters(): void {
     const t = this.tab;
     if (!t) return;
+    // Backslash is an escape char in mysql/clickhouse string literals only.
+    const kind = this.selectedConn?.kind;
+    const esc = kind === 'mysql' || kind === 'clickhouse';
     const body = t.filters
-      .map(condToSql)
+      .map((c) => condToSql(c, esc))
       .filter((s) => s.trim())
       .join(' AND ');
     t.statement = rewriteWhere(t.statement, body);
@@ -2621,10 +2913,14 @@ class DatabaseStore {
     const id = connId ?? this.selectedConnId;
     if (!id) return;
     try {
-      this.history = await api.get<DbHistoryEntry[]>(
+      const rows = await api.get<DbHistoryEntry[]>(
         `${this.connBase(id)}/history?limit=${this.historyLimit}`,
       );
+      // The singleton list shows the SELECTED connection's history — a refresh
+      // for a background conn (e.g. a reattached run landing) must not clobber it.
+      if (this.selectedConnId === id) this.history = rows;
     } catch (e) {
+      if (this.selectedConnId !== id) return; // background refresh: stay quiet
       toasts.error('Could not load history', errMsg(e));
     }
   }

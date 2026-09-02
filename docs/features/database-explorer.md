@@ -122,6 +122,16 @@ rewritten `host`/`port`.
 connection's status row (shows "Testing…" then a green/red dot). It runs a cheap
 probe (`SELECT 1` / `PING`) and reports latency and the server version.
 
+**Opening and closing.** A "+" New-connection button sits in the sidebar's
+tab strip itself so it's reachable from every side tab (Schema/Saved/History
+empty states also carry "Browse connections" / "New connection" actions, and the
+sidebar lands on Connections whenever no tab is open). **Closing a connection
+tab disconnects for real**: the UI drops the tab from its persisted workbench
+(a close clicked while tabs are still restoring wins over the restore) and calls
+`POST /connections/{id}/db/close`, which cancels the connection's in-flight
+queries, closes the driver's cached pool, and drops the SSH tunnel. A closed tab
+stays closed across app restarts.
+
 ### Profile parameters
 
 `params` is per-engine but shares a common shape (parsed in
@@ -189,8 +199,10 @@ SQL/document engines honor these:
 
 ### SSH tunnel
 
-Add an `ssh` object (`host`, `port` default 22, `user`, optional `identity_file`
-— the SSH agent / `~/.ssh` is used when no key is given) and the daemon
+Add an `ssh` object (`host`, `port` default 22, optional `user`, optional
+`identity_file` — the SSH agent / `~/.ssh` is used when no key is given; an
+empty `user` is resolved the way your terminal resolves it: `~/.ssh/config`
+`User`, else your local login name) and the daemon
 establishes the tunnel for you, transparently rewriting the endpoint the driver
 dials. Tunnels are **cached and kept alive** between operations (idle ones are
 evicted after 10 minutes, which kills the `ssh` child), so a stable local
@@ -707,6 +719,11 @@ see all — see §13).
 - **Add widget** (sheet seeded from the active query tab): a **Title**, a
   **Statement**, a **Visualization** picker, and — for charts — an **X axis** and
   **Y series** column mapping (each defaulting to "(auto)").
+- **Edit widget** — the same sheet reopens via the card's edit button / "Edit…"
+  menu entry (title, statement, viz, mapping; the connection is fixed at
+  creation and shown as a chip on the card). Widget delete asks for
+  confirmation. A failed auto-refresh shows an inline "showing last data" pill
+  and backs off exponentially instead of toasting per tick.
 
 **Visualization types** (`Chart.svelte`, hand-rolled inline-SVG, no chart
 dependency) — the `DbViz` set is **`table` · `number` · `line` · `bar` · `area`
@@ -840,8 +857,12 @@ result.
   missing key becomes `NULL`.
 - **Batched INSERTs.** Rows are parsed and inserted as
   `INSERT INTO <table> (cols) VALUES (…),(…)` of `batch_size` rows each, with
-  backtick-quoted identifiers and single-quote-escaped literals (`'` → `''`), so
-  no single statement is unbounded and nothing is injection-prone.
+  engine-aware quoting (identifiers and string literals escape `'` **and `\`**
+  per dialect — MySQL and ClickHouse honor backslash escapes), so no single
+  statement is unbounded and nothing is injection-prone. The file is capped at
+  **100 MiB**, and a delimited row whose cell count doesn't match the header is
+  **rejected with its row number** (it is never silently padded or clipped).
+  The dialog's Cancel button aborts a running import mid-stream.
 - **Same write guard.** Every batch runs **through the normal guarded `run`
   path** — there is no parallel guard — so masking/history apply and a
   **Prod/read-only connection refuses the import** until you type the connection
@@ -873,6 +894,8 @@ execution/cancel/export = `ws editor` (global connections: `Database:Edit`):
 | `POST …/db/schema-graph` | read-only ERD (`{schema, max_tables?}`; default 60, clamp 1..200) |
 | `POST …/db/query` | run a statement (`RunQueryReq` incl. `max_rows`, `node`, `query_id`, `timeout_ms`, `mask`, `confirm_write`) |
 | `POST …/db/cancel` | engine-native cancel of an in-flight `query_id` (204) |
+| `POST …/db/close` | tear down the connection's server-side state — cancel in-flight queries, close the cached driver pool, drop the SSH tunnel; idempotent (`ws viewer`; fired on tab close) |
+| `POST …/db/mcp-query` | read-only query surface for agents over MCP — writes/DDL refused before any driver call, rows capped at 200, masking forced on (`ws viewer`) |
 | `POST …/db/completion` | context-aware, index-first completion (`{prefix, suffix?, database?, node?}` → `{items:[…]}` with per-item `score`) |
 | `POST …/db/completion/refresh` | drop the cached completion snapshot for the connection (204) — wired to the schema **Refresh** button |
 | `GET …/db/history` | recent query history (per-user for non-root) |

@@ -9,6 +9,7 @@ import type {
   DbAssistReq,
   DbAssistResp,
   DbAssistSummaryResp,
+  DbCloseResp,
   ImportSource,
   SourceStatus,
   ImportScanResult,
@@ -297,8 +298,12 @@ export function dbNlToSql(connId: string, body: NlToSqlReq): Promise<NlToSqlOutc
 // agent's proposed SQL streams in via `db_assist_updated`. See db_assist.rs.
 
 /** Run ONE DB Assistant turn (start a new assist, or resume one via `assist_id`). */
-export function dbAssistStart(connId: string, body: DbAssistReq): Promise<DbAssistResp> {
-  return api.post<DbAssistResp>(`/connections/${connId}/db/assist`, body);
+export function dbAssistStart(
+  connId: string,
+  body: DbAssistReq,
+  signal?: AbortSignal,
+): Promise<DbAssistResp> {
+  return api.post<DbAssistResp>(`/connections/${connId}/db/assist`, body, signal);
 }
 
 /** Ask the assist agent to write SUMMARY.md and return its rendered markdown
@@ -310,6 +315,14 @@ export function dbAssistSummary(connId: string, assistId: string): Promise<DbAss
 /** Close an assist: kill its session + discard its working dir (Close = discard). */
 export function dbAssistClose(connId: string, assistId: string): Promise<void> {
   return api.del<void>(`/connections/${connId}/db/assist/${assistId}`);
+}
+
+/** Tear down a connection's live server-side resources (`POST …/db/close`):
+ *  drops the SSH tunnel, closes pooled engine connections, and cancels any
+ *  in-flight queries. Fire-and-forget from the workbench — closing the tab must
+ *  never block on (or surface) a failure here. */
+export function dbCloseConnection(connId: string): Promise<DbCloseResp> {
+  return api.post<DbCloseResp>(`/connections/${connId}/db/close`, {});
 }
 
 // --- Import connections from other DB tools ---------------------------------

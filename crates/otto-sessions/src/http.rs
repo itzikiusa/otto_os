@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -96,8 +96,48 @@ pub fn api_router<S: SessionsCtx>() -> Router<S> {
         .route("/sessions/{id}/restart", post(restart_session::<S>))
         .route("/sessions/{id}/archive", post(archive_session::<S>))
         .route("/sessions/{id}/unarchive", post(unarchive_session::<S>))
+        .route("/sessions/{id}/kill", post(kill_session::<S>))
+        // Static segment beats the `{id}` capture in axum's route priority.
+        .route("/sessions/bulk", post(bulk_sessions::<S>))
         // Distinct prefix so it can't collide with `/sessions/{id}`.
         .route("/app/kill-sessions", post(kill_all_sessions::<S>))
+}
+
+/// A [`Session`] as the list/get endpoints serve it: the domain row plus the
+/// manager's TRANSIENT view of it — whether a PTY is live right now and how
+/// many `/ws/term` viewers are attached. Serialize-only (never persisted); the
+/// UI needs it to say "closing this will kill a running process" truthfully.
+#[derive(serde::Serialize)]
+struct SessionOut {
+    #[serde(flatten)]
+    session: Session,
+    live: bool,
+    viewers: u32,
+}
+
+fn with_live<S: SessionsCtx>(ctx: &S, session: Session) -> SessionOut {
+    let live = ctx.manager().is_live(&session.id);
+    let viewers = ctx.manager().attached_count(&session.id) as u32;
+    SessionOut {
+        session,
+        live,
+        viewers,
+    }
+}
+
+/// Optional filters for `GET /workspaces/{id}/sessions`. All narrowing; absent
+/// params keep today's full owner-scoped list.
+#[derive(Default, serde::Deserialize)]
+struct ListSessionsQuery {
+    /// `true` → only archived rows; `false` → only active rows.
+    archived: Option<bool>,
+    /// "agent" | "connection".
+    kind: Option<String>,
+    /// Match `meta.source` exactly; the literal `"none"` matches sessions with
+    /// NO source (the user-opened foreground ones).
+    source: Option<String>,
+    /// Match the session status string ("running", "idle", "exited", …).
+    status: Option<String>,
 }
 
 /// POST /app/kill-sessions — terminate every live PTY. Called by the desktop
@@ -128,7 +168,8 @@ async fn list_sessions<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(ws_id): Path<Id>,
-) -> ApiResult<Json<Vec<Session>>> {
+    Query(q): Query<ListSessionsQuery>,
+) -> ApiResult<Json<Vec<SessionOut>>> {
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Viewer)
         .await?;
@@ -146,7 +187,31 @@ async fn list_sessions<S: SessionsCtx>(
             .list_by_workspace_for_user(&ws_id, &user.id)
             .await?
     };
+    let sessions = sessions
+        .into_iter()
+        .filter(|s| q.archived.is_none_or(|a| s.archived == a))
+        .filter(|s| q.kind.as_deref().is_none_or(|k| kind_str(s) == k))
+        .filter(|s| {
+            q.source.as_deref().is_none_or(|want| {
+                let src = s.meta.get("source").and_then(|v| v.as_str());
+                if want == "none" {
+                    src.is_none()
+                } else {
+                    src == Some(want)
+                }
+            })
+        })
+        .filter(|s| q.status.as_deref().is_none_or(|st| s.status.as_str() == st))
+        .map(|s| with_live(&ctx, s))
+        .collect();
     Ok(Json(sessions))
+}
+
+fn kind_str(s: &Session) -> &'static str {
+    match s.kind {
+        otto_core::domain::SessionKind::Agent => "agent",
+        otto_core::domain::SessionKind::Connection => "connection",
+    }
 }
 
 /// #18 POST /workspaces/{id}/sessions — editor
@@ -192,10 +257,10 @@ async fn get_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
-) -> ApiResult<Json<Session>> {
+) -> ApiResult<Json<SessionOut>> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
-    Ok(Json(session))
+    Ok(Json(with_live(&ctx, session)))
 }
 
 /// #20 PATCH /sessions/{id} — owner-or-admin
@@ -261,4 +326,87 @@ async fn unarchive_session<S: SessionsCtx>(
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
     Ok(Json(ctx.manager().unarchive(&id).await?))
+}
+
+/// POST /sessions/{id}/kill — owner-or-admin; kills the PTY but KEEPS the row
+/// un-archived ("stop the process, leave it in my list"). The session stays
+/// resumable/reopenable exactly like an idle-suspended one. Previously the
+/// only kill-but-keep path was the admin terminate route.
+async fn kill_session<S: SessionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Session>> {
+    let session = ctx.manager().get(&id).await?;
+    ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    ctx.manager().kill_session(&id).await?;
+    Ok(Json(ctx.manager().get(&id).await?))
+}
+
+/// Body for `POST /sessions/bulk`.
+#[derive(serde::Deserialize)]
+struct BulkSessionsReq {
+    /// "archive" | "delete" | "kill".
+    action: String,
+    ids: Vec<Id>,
+}
+
+/// Per-id outcome of a bulk action.
+#[derive(serde::Serialize)]
+struct BulkSessionResult {
+    id: Id,
+    ok: bool,
+    /// Set when `ok` is false: "forbidden", "not found", or the error message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// POST /sessions/bulk — owner-scoped bulk archive/delete/kill. Non-owned ids
+/// are SKIPPED (reported `ok:false, error:"forbidden"`) rather than failing
+/// the whole batch, so "clean up my exited sessions" degrades gracefully for
+/// non-admins. Capped to keep one request from tying up the manager.
+async fn bulk_sessions<S: SessionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<BulkSessionsReq>,
+) -> ApiResult<Json<Vec<BulkSessionResult>>> {
+    const BULK_CAP: usize = 200;
+    if !matches!(req.action.as_str(), "archive" | "delete" | "kill") {
+        return Err(ApiErr(Error::Invalid(
+            "action must be one of: archive, delete, kill".into(),
+        )));
+    }
+    if req.ids.len() > BULK_CAP {
+        return Err(ApiErr(Error::Invalid(format!(
+            "at most {BULK_CAP} ids per bulk request"
+        ))));
+    }
+    let mut out = Vec::with_capacity(req.ids.len());
+    for id in req.ids {
+        let outcome = async {
+            let session = ctx.manager().get(&id).await?;
+            if !session_owner_or_admin(ctx.roles().as_ref(), &user, &session).await {
+                return Err(Error::Forbidden("forbidden".into()));
+            }
+            match req.action.as_str() {
+                "archive" => ctx.manager().archive(&id).await.map(|_| ()),
+                "delete" => ctx.manager().remove(&id).await,
+                _ => ctx.manager().kill_session(&id).await,
+            }
+        }
+        .await;
+        out.push(match outcome {
+            Ok(()) => BulkSessionResult {
+                id,
+                ok: true,
+                error: None,
+            },
+            Err(e) => BulkSessionResult {
+                id,
+                ok: false,
+                error: Some(e.to_string()),
+            },
+        });
+    }
+    Ok(Json(out))
 }

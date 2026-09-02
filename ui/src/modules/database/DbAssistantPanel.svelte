@@ -16,6 +16,18 @@
 
   let draft = $state('');
 
+  // Surface a hint when a turn runs unusually long — the agent may be wedged
+  // and Stop is the way out (it releases the input; the session stays live).
+  let busyLong = $state(false);
+  $effect(() => {
+    if (!database.assistBusy) {
+      busyLong = false;
+      return;
+    }
+    const t = setTimeout(() => (busyLong = true), 20_000);
+    return () => clearTimeout(t);
+  });
+
   // Mode → the panel's title, empty-state hint, and the Ask placeholder.
   const MODE: Record<DbAssistMode, { title: string; hint: string; placeholder: string }> = {
     nl: {
@@ -86,7 +98,16 @@
         {/each}
       </select>
     {/if}
-    {#if database.assistBusy}<span class="da-working">working…</span>{/if}
+    {#if database.assistBusy}
+      <span class="da-working">working…</span>
+      <button
+        class="da-act da-stop"
+        onclick={() => database.stopAssist()}
+        title="Stop waiting on this turn — releases the input (a started session stays live)"
+      >
+        <Icon name="x" size={12} /> Stop
+      </button>
+    {/if}
     <button
       class="da-act"
       onclick={() => void database.summarizeAssist()}
@@ -141,6 +162,10 @@
             {#if database.assistBusy}Starting…{:else}<Icon name="arrowUp" size={15} /> Ask{/if}
           </button>
         </div>
+        {#if busyLong}
+          <p class="sub warn">This is taking longer than usual — the agent may be stuck.
+            You can Stop (top right) and ask again.</p>
+        {/if}
         <p class="sub">The agent's live shell appears here once it starts — you then
           keep the conversation going by typing directly in it.</p>
       </div>
@@ -238,6 +263,19 @@
   .da-act:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  /* Stop sits beside "working…", not pushed to the far end like Summarize. */
+  .da-act.da-stop {
+    margin-inline-start: 0;
+    color: var(--danger, #e5534b);
+    border-color: color-mix(in srgb, var(--danger, #e5534b) 45%, var(--border));
+  }
+  .da-act.da-stop:hover {
+    border-color: var(--danger, #e5534b);
+  }
+  .da-empty .sub.warn {
+    color: var(--status-warn, #d9a03f);
+    opacity: 1;
   }
   .da-close {
     display: inline-flex;

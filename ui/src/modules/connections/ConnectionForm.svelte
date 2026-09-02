@@ -541,9 +541,12 @@
           id="cf-user"
           class="input mono"
           bind:value={fUser}
-          placeholder="root"
+          placeholder={kind === 'ssh' ? 'default (~/.ssh/config or $USER)' : 'root'}
           spellcheck="false"
         />
+        {#if kind === 'ssh'}
+          <span class="hint">Leave empty to let ssh resolve it — a <span class="mono">Host</span>/<span class="mono">User</span> entry in <span class="mono">~/.ssh/config</span>, else your local username.</span>
+        {/if}
       </div>
     </div>
 

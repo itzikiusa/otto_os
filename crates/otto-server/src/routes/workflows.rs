@@ -90,6 +90,13 @@ pub async fn update_workflow(
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     let graph_changed = req.graph.is_some();
     let instructions_changed = req.instructions.is_some();
+    if let Some(v) = req.on_restart.as_deref() {
+        if !matches!(v, "resume" | "fail") {
+            return Err(ApiError(Error::Invalid(format!(
+                "on_restart must be 'resume' or 'fail', got '{v}'"
+            ))));
+        }
+    }
     let updated = repo(&ctx)
         .update(
             &id,
@@ -97,6 +104,7 @@ pub async fn update_workflow(
             req.description.as_deref(),
             req.instructions.as_deref(),
             req.graph.as_ref(),
+            req.on_restart.as_deref(),
         )
         .await
         .map_err(ApiError)?;
@@ -113,6 +121,7 @@ pub async fn update_workflow(
                 &updated.instructions,
                 &updated.graph,
                 "edited",
+                &updated.on_restart,
                 &user.id,
             )
             .await
@@ -168,7 +177,7 @@ pub async fn restore_version(
         // Restore rewinds the live graph AND instructions; the historical
         // name/description are recorded in the version snapshot below, not
         // applied back to the live row.
-        .update(&id, None, None, Some(&ver.instructions), Some(&ver.graph))
+        .update(&id, None, None, Some(&ver.instructions), Some(&ver.graph), Some(&ver.on_restart))
         .await
         .map_err(ApiError)?;
     let newv = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
@@ -184,6 +193,7 @@ pub async fn restore_version(
             &ver.instructions,
             &ver.graph,
             &note,
+            &ver.on_restart,
             &user.id,
         )
         .await
@@ -469,8 +479,11 @@ pub async fn run_workflow(
         wf,
         run.id.clone(),
         input,
-        req.start_node.clone(),
-        req.only_node,
+        otto_core::workflows::RunScope {
+            start_node: req.start_node.clone(),
+            only_node: req.only_node,
+            adopt_start: false,
+        },
         None,
     );
 
@@ -533,8 +546,11 @@ pub async fn retry_run_node(
         wf,
         run.id.clone(),
         run.input.clone(),
-        Some(node_id.to_string()),
-        !req.include_downstream,
+        otto_core::workflows::RunScope {
+            start_node: Some(node_id.to_string()),
+            only_node: !req.include_downstream,
+            adopt_start: false,
+        },
         Some(run.nodes.clone()),
     );
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
@@ -1347,7 +1363,10 @@ pub async fn webhook_trigger(
         .await
         .map_err(ApiError)?;
 
-    workflow_engine::spawn_run(ctx.clone(), ws, wf, run.id.clone(), input, None, false, None);
+    workflow_engine::spawn_run(
+        ctx.clone(), ws, wf, run.id.clone(), input,
+        otto_core::workflows::RunScope::default(), None,
+    );
 
     Ok(Json(run))
 }

@@ -566,6 +566,7 @@ async fn run_attempt(
                 title: Some(title.to_string()),
                 cwd: Some(cwd.to_string()),
                 connection_id: None,
+                model: None,
                 meta: Some(meta.clone()),
             };
             let ws_row = match ctx.workspaces.get(ws).await {

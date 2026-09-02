@@ -19,6 +19,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { winKey } from '../../lib/win';
 
   // Max number of tiles allowed to hold a live terminal/WS at once. Visible,
   // recently-focused tiles win the budget; everything else stays a placeholder.
@@ -47,7 +48,28 @@
   let visible = $state(new Set<string>());
   // Tiles the user explicitly attached via "click to attach" — pinned live even
   // if scrolled off-screen, so a deliberate attach is never silently dropped.
-  let pinned = $state(new Set<string>());
+  // Persisted per workspace so deliberate attaches survive view switches/reloads.
+  const pinKey = (): string => winKey(`otto_tiled_pinned_${ws.currentId ?? ''}`);
+  function loadPinned(): Set<string> {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(pinKey()) ?? '[]') as string[]);
+    } catch {
+      return new Set();
+    }
+  }
+  let pinned = $state(loadPinned());
+  function savePinned(): void {
+    try {
+      localStorage.setItem(pinKey(), JSON.stringify([...pinned]));
+    } catch {
+      /* private mode */
+    }
+  }
+  // Reload the pin set when the workspace changes.
+  $effect(() => {
+    void ws.currentId;
+    pinned = loadPinned();
+  });
   // Per-tile elements we observe for visibility.
   const tileEls = new Map<string, HTMLElement>();
   let observer: IntersectionObserver | null = null;
@@ -97,7 +119,14 @@
   // leak and stale ids never count against the live budget.
   $effect(() => {
     const ids = new Set(ws.mainSessions.map((s) => s.id));
-    for (const id of [...pinned]) if (!ids.has(id)) pinned.delete(id);
+    let pinsChanged = false;
+    for (const id of [...pinned]) {
+      if (!ids.has(id)) {
+        pinned.delete(id);
+        pinsChanged = true;
+      }
+    }
+    if (pinsChanged) savePinned();
     for (const id of [...visible]) if (!ids.has(id)) visible.delete(id);
   });
 
@@ -130,8 +159,18 @@
     // it the always-live active tile (evicting the least-prioritized one).
     pinned.add(id);
     pinned = new Set(pinned);
+    savePinned();
     ws.openSession(id);
     ws.focusedPane = 0;
+  }
+
+  /** Placeholder subline: only a session with no live PTY is "suspended" — a
+   *  running-but-over-budget/off-screen one is just not attached here. */
+  function placeholderHint(id: string, fallback: string): string {
+    const st = ws.statusMap[id] ?? fallback;
+    return st === 'working' || st === 'running' || st === 'idle'
+      ? 'Running — not attached'
+      : 'Suspended — not connected';
   }
 </script>
 
@@ -197,7 +236,7 @@
               {#if atCapacity}
                 <span class="ph-hint">Live tiles capped at {MAX_LIVE_TILES} to save memory</span>
               {:else}
-                <span class="ph-hint">Suspended — not connected</span>
+                <span class="ph-hint">{placeholderHint(s.id, s.status ?? 'idle')}</span>
               {/if}
             </div>
           </button>

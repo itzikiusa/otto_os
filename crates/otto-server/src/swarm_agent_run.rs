@@ -198,6 +198,7 @@ pub async fn run_swarm_agent(
             title: Some(title.to_string()),
             cwd: Some(cwd.to_string()),
             connection_id: None,
+            model: None,
             meta: Some(meta),
         };
         let session = match ctx.manager.create(ws, &user.id, req, None).await {

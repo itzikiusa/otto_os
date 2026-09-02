@@ -729,6 +729,16 @@ fn tool_catalog() -> Value {
                 "name": "browser_login",
                 "description": "Sign in to a stored site credential for `domain` (a Site Credential the user created and explicitly marked \"allow agent use\" — otherwise this is refused). The daemon resolves the credential server-side, drives the fill+submit over CDP, and returns only whether it worked — the password never enters this tool's arguments, result, or the audit log.",
                 "inputSchema": { "type": "object", "properties": { "domain": { "type": "string" } }, "required": ["domain"] }
+            },
+            {
+                "name": "otto_room_post",
+                "description": "Personal agents: post a message (max 16KB) into an agent room this agent is a member of. The message is persisted and shown to the user live — rooms are the only agent-to-agent channel. Your session identity determines which agent is speaking.",
+                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "text": { "type": "string" } }, "required": ["room_id", "text"] }
+            },
+            {
+                "name": "otto_room_read",
+                "description": "Personal agents: read messages from an agent room this agent is a member of, oldest first. Pass `after` (the last message id you saw) to page forward.",
+                "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "after": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["room_id"] }
             }
         ]
     })
@@ -1072,6 +1082,43 @@ fn seg(s: &str) -> String {
 /// audited row count, or an error string surfaced to the agent.
 async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<i64>), String> {
     match name {
+        // Personal-agent room tools: the calling session's id (from the spawn
+        // env, set by the daemon) is injected so the server can resolve which
+        // personal agent is speaking via the session's `meta.personal_agent`
+        // and enforce room membership. A session-less caller posts as the user.
+        "otto_room_post" => {
+            let room = arg_str(args, "room_id")?;
+            let text = arg_str(args, "text")?;
+            let mut body = json!({ "text": text });
+            if let Some(sid) = ctx.session_id.clone() {
+                body["session_id"] = json!(sid);
+            }
+            let raw = ctx
+                .post_json(&format!("/agent-rooms/{}/messages", seg(&room)), &body)
+                .await?;
+            Ok(finalize(json!({ "message": raw })))
+        }
+        "otto_room_read" => {
+            let room = arg_str(args, "room_id")?;
+            let mut q = String::new();
+            if let Some(after) = args.get("after").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                q.push_str(&format!("&after={}", seg(after)));
+            }
+            if let Some(limit) = args.get("limit").and_then(Value::as_i64) {
+                q.push_str(&format!("&limit={limit}"));
+            }
+            if let Some(sid) = ctx.session_id.clone() {
+                q.push_str(&format!("&session_id={}", seg(&sid)));
+            }
+            let raw = ctx
+                .get_json(&format!(
+                    "/agent-rooms/{}/messages?{}",
+                    seg(&room),
+                    q.trim_start_matches('&')
+                ))
+                .await?;
+            Ok(finalize(json!({ "messages": raw })))
+        }
         "otto_list_connections" => {
             let Some(ws) = ctx.workspace_id.as_deref() else {
                 return Err(

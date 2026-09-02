@@ -5,7 +5,7 @@ A **plugin** adds a new Otto app section — its own UI **and** backend — as a
 supervises the process, reverse-proxies its HTTP, serves its iframe UI, and gates
 it with RBAC. Plugins can be written in **any language**.
 
-> Design: `docs/superpowers/specs/2026-06-21-runtime-plugins-design.md`. Two
+> Two
 > complete reference plugins ship under `examples/plugins/` — `dora-metrics`
 > (Rust) and `team-performance` (Node) — read them alongside this guide.
 

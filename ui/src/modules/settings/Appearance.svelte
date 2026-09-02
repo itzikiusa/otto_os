@@ -144,6 +144,23 @@
     Only show sessions started on this device. Other devices' sessions stay hidden here (they
     still run on the daemon).
   </p>
+  <label class="switch-row">
+    <input
+      type="checkbox"
+      checked={ui.closeTabPref === ''}
+      onchange={(e) => ui.setCloseTabPref(e.currentTarget.checked ? '' : 'close')}
+    />
+    <span>Ask when closing a live session's tab</span>
+  </label>
+  <p class="hint-line">
+    {#if ui.closeTabPref === ''}
+      Closing a tab whose session is still running asks whether to keep it running or archive it.
+    {:else}
+      Currently remembered: {ui.closeTabPref === 'archive'
+        ? 'archive the session (stops it, history kept)'
+        : 'close the tab and keep the session running'}. Re-enable to be asked again.
+    {/if}
+  </p>
 
   <div class="section-title">Sidebar</div>
   <p class="hint-line">

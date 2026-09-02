@@ -13,6 +13,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { buildFilteredQuery, type FilterMode } from './query-filter';
+  import { escapeSqlString } from './sql-util';
   import { bsonScalar } from './bson';
   import JsonTree from './JsonTree.svelte';
   import type { QueryResult, DbExportFormat, ExportToPathResp, DbForeignKey } from '../../lib/api/types';
@@ -344,12 +345,23 @@
   // target the row's key regardless of filter/sort order.
   /** How many records the alt views may draw right now (batch ∩ hard cap). */
   const altCap = $derived(Math.min(altShown, VIEW_CAP));
+  // Duplicate column names (e.g. `SELECT a.id, b.id …` on an engine that keeps
+  // both as `id`) must not silently collapse when rows are objectified for the
+  // JSON / vertical views — later duplicates become `name (2)`, `name (3)`, …
+  const uniqueColNames = $derived.by<string[]>(() => {
+    const seen = new Map<string, number>();
+    return (result?.columns ?? []).map((c) => {
+      const n = (seen.get(c.name) ?? 0) + 1;
+      seen.set(c.name, n);
+      return n === 1 ? c.name : `${c.name} (${n})`;
+    });
+  });
   const objRows = $derived.by<{ obj: Record<string, unknown>; idx: number }[]>(() => {
     if (!result || viewMode === 'grid') return [];
-    const cols = result.columns;
+    const names = uniqueColNames;
     return viewRows.slice(0, altCap).map(({ row, idx }) => {
       const o: Record<string, unknown> = {};
-      cols.forEach((c, i) => (o[c.name] = row[i]));
+      names.forEach((n, i) => (o[n] = row[i]));
       return { obj: o, idx };
     });
   });
@@ -749,6 +761,15 @@
       { label: 'Expand value', icon: 'maximize', action: () => openCell(v, rowIdx, ci) },
       { label: 'Copy value', icon: 'file', action: () => copyText(v === null || v === undefined ? '' : cellStr(v)) },
     );
+    // Explicit NULL / '' — the typed editor can't express the difference (an
+    // empty draft parks as NULL). Both park a pending change, review-gated.
+    if (isEditableCell(ci)) {
+      items.push(
+        { separator: true },
+        { label: 'Set NULL', icon: 'x', disabled: v === null || v === undefined, action: () => parkValue(rowIdx, ci, SET_NULL) },
+        { label: 'Set empty string', icon: 'edit', action: () => parkValue(rowIdx, ci, SET_EMPTY) },
+      );
+    }
     // Copy as INSERT — acts on the whole selection when this row is part of it,
     // otherwise on just this row (so a single row needs no checkbox first).
     if (copyTarget) {
@@ -908,6 +929,7 @@
   const copyTarget = $derived.by((): { db: string | null; table: string } | null => {
     const sql = statement;
     if (!sql || !connectionId || !result || result.columns.length === 0) return null;
+    if (result.masked) return null; // INSERTs of redacted placeholders = data loss
     if (engine === 'mongodb') {
       const coll = mongoCollectionForEdit(sql);
       return coll ? { db: database.activeDb, table: coll } : null;
@@ -922,6 +944,10 @@
   /** Parse a simple SELECT … FROM <table>. Returns {db, table} or null. */
   function parseSimpleSelect(sql: string): { db: string | null; table: string } | null {
     const s = sql.trim().replace(/;\s*$/, '');
+    // A multi-statement batch can't be attributed to ONE table: the FROM matched
+    // below would be statement 1's even while result set 2+ is shown, so edits
+    // would target the wrong table. Mirrors the store's splitStatement rejection.
+    if (/;\s*\S/.test(s)) return null;
     if (!/^select\b/i.test(s)) return null;
     // Reject anything that makes a row non-1:1 with a base-table row.
     if (/\bjoin\b|\bgroup\s+by\b|\bunion\b|\bdistinct\b|\bhaving\b/i.test(s)) return null;
@@ -941,6 +967,9 @@
    * single-collection SELECT (which translates to a find). Null otherwise. */
   function mongoCollectionForEdit(s: string): string | null {
     const t = s.trim();
+    // Same multi-statement rejection as parseSimpleSelect — a batch's first
+    // `db.<coll>.find` must not make a LATER result set's rows "editable".
+    if (/;\s*\S/.test(t.replace(/;\s*$/, ''))) return null;
     const m = t.match(/^db\.([A-Za-z0-9_$.-]+)\.find\s*\(/i);
     if (m) return m[1];
     return parseSimpleSelect(t)?.table ?? null;
@@ -950,7 +979,8 @@
    * the prior value was one; valid JSON when editing a nested object/array;
    * empty → null; else a quoted string. */
   function mongoLiteral(raw: string, prev: unknown): string {
-    if (raw === '') return 'null';
+    if (raw === '' || raw === SET_NULL) return 'null';
+    if (raw === SET_EMPTY) return '""';
     if (typeof prev === 'number' && /^-?\d+(\.\d+)?$/.test(raw)) return raw;
     if (typeof prev === 'boolean' && (raw === 'true' || raw === 'false')) return raw;
     if (isComplex(prev)) {
@@ -986,6 +1016,19 @@
     editReason = null;
     editFks = [];
     if (!sql || !conn || !cols || cols.length === 0) return;
+
+    // A multi-statement batch is never editable — the shown result set can't be
+    // safely attributed to one statement's table (see parseSimpleSelect).
+    if (resultSets.length > 1 || /;\s*\S/.test(sql.trim().replace(/;\s*$/, ''))) {
+      editReason = 'Editing is unavailable for multi-statement batches.';
+      return;
+    }
+    // Masked values are REDACTED placeholders — writing them back would destroy
+    // the real data, so a masked result is read-only.
+    if (result?.masked) {
+      editReason = 'Editing is disabled while server-side masking is applied.';
+      return;
+    }
 
     // Mongo: a single-collection find/SELECT is editable by `_id` — no
     // object_detail lookup (which would error on a SQL-style node path).
@@ -1073,6 +1116,16 @@
     pendingEdits = new Map();
   }
 
+  /** Park a pending value directly (the context menu's Set NULL / Set empty
+   *  string) — same review flow as a typed draft, just skipping the input. */
+  function parkValue(rowIdx: number, colIdx: number, value: string): void {
+    const next = new Map(pendingEdits);
+    const row = new Map(next.get(rowIdx) ?? []);
+    row.set(colIdx, value);
+    next.set(rowIdx, row);
+    pendingEdits = next;
+  }
+
   function isEditableCell(colIdx: number): boolean {
     if (!editable) return false;
     const name = result?.columns[colIdx]?.name;
@@ -1100,8 +1153,10 @@
 
   function beginEdit(rowIdx: number, colIdx: number): void {
     if (!isEditableCell(colIdx) || reviewSql) return;
-    // Re-editing a parked cell resumes its draft, not the stored value.
-    const draft = pendingValue(rowIdx, colIdx);
+    // Re-editing a parked cell resumes its draft, not the stored value; the
+    // Set-NULL/empty sentinels resume as an empty input.
+    const parked = pendingValue(rowIdx, colIdx);
+    const draft = parked === SET_NULL || parked === SET_EMPTY ? '' : parked;
     const v = liveRows[rowIdx]?.[colIdx];
     editing = {
       rowIdx,
@@ -1113,20 +1168,34 @@
     editing = null;
   }
 
+  // MySQL (default modes) and ClickHouse treat `\` as an escape character inside
+  // a string literal — a value containing one must double it or the emitted SQL
+  // corrupts (a trailing `\` even swallows the closing quote). Postgres standard
+  // strings don't, so only the quote is doubled there.
+  const backslashEscapes = $derived(engine === 'mysql' || engine === 'clickhouse');
+
+  // Explicit NULL / empty-string pending markers (context-menu "Set NULL" /
+  // "Set empty string"). Typed text can't express the difference — an empty
+  // draft parks as NULL — so the two actions park these sentinels instead;
+  // sqlLiteral / mongoLiteral render them, the dirty cell displays them.
+  const SET_NULL = '\u0000<null>';
+  const SET_EMPTY = '\u0000<empty>';
+
   /** SQL-quote a scalar value typed into the cell editor: numbers bare (when
    * the previous value was numeric), empty → NULL, else 'escaped'. */
   function sqlLiteral(raw: string, asNumber: boolean): string {
-    if (raw === '') return 'NULL';
+    if (raw === '' || raw === SET_NULL) return 'NULL';
+    if (raw === SET_EMPTY) return "''";
     if (asNumber && /^-?\d+(\.\d+)?$/.test(raw)) return raw;
-    return `'${raw.replace(/'/g, "''")}'`;
+    return `'${escapeSqlString(raw, backslashEscapes)}'`;
   }
   /** SQL-quote an existing typed value (for WHERE / INSERT values). */
   function valueLiteral(v: unknown): string {
     if (v === null || v === undefined) return 'NULL';
     if (typeof v === 'number' || typeof v === 'bigint') return String(v);
     if (typeof v === 'boolean') return engine === 'postgres' ? (v ? 'TRUE' : 'FALSE') : v ? '1' : '0';
-    if (isComplex(v)) return `'${compactJson(v).replace(/'/g, "''")}'`;
-    return `'${String(v).replace(/'/g, "''")}'`;
+    if (isComplex(v)) return `'${escapeSqlString(compactJson(v), backslashEscapes)}'`;
+    return `'${escapeSqlString(String(v), backslashEscapes)}'`;
   }
   /** Qualified `db.table` (db optional), quoted for the active engine. */
   function tableRef(): string {
@@ -1260,8 +1329,13 @@
       }
       toasts.success('Applied', 'Statement ran successfully');
       reviewSql = null;
-      // Refresh from the DB by re-running the active tab's query.
-      await database.runQuery();
+      // Refresh what's ON SCREEN: re-run the statement that produced this grid
+      // (`statement` is the tab's ran_statement, not the live editor buffer —
+      // which may have been rewritten since) and stay on the current page.
+      await database.runQuery(statement ?? undefined, undefined, {
+        transient: true,
+        keepOffset: true,
+      });
     } catch (e) {
       toasts.error('Statement failed', e instanceof Error ? e.message : String(e));
       // keep the modal open so the user can fix the SQL and retry
@@ -1295,6 +1369,7 @@
     selected = new Set();
     lastClickedIdx = null;
     pendingEdits = new Map();
+    focusCell = null; // roving keyboard focus is positional — a new result invalidates it
   });
 
   const allInViewSelected = $derived(
@@ -1485,11 +1560,15 @@
   // ── Export / copy (reflect the current filtered + sorted view) ───────────────
   function exportText(v: unknown): string {
     if (v === null || v === undefined) return '';
-    if (isComplex(v)) return compactJson(v);
-    return String(v);
+    // Same rendering as the grid: a BSON sentinel exports as its typed form
+    // (ObjectId("…")/ISODate("…")), never as "[object Object]".
+    return cellStr(v);
   }
+  // Quick-filter chips narrow the grid too — exports must honor them (viewRows
+  // already carries chip + search filtering and the sort).
+  const chipFiltering = $derived(activeChips.length > 0);
   function exportRows(): unknown[][] {
-    return filtering || sorting ? viewRows.map((r) => r.row) : liveRows;
+    return filtering || sorting || chipFiltering ? viewRows.map((r) => r.row) : liveRows;
   }
   function toTsv(): string {
     if (!result) return '';
@@ -1500,8 +1579,12 @@
     return `${header}\n${body}`;
   }
   function csvCell(v: unknown): string {
-    const s = exportText(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    let s = exportText(v);
+    // Formula-injection guard: a STRING cell starting with = + - @ executes when
+    // the CSV lands in a spreadsheet — neutralize with a leading apostrophe.
+    // Non-string values (a bare -5 is data, not a formula) are left alone.
+    if (typeof v === 'string' && /^[=+\-@]/.test(s)) s = `'${s}`;
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
   function toCsv(): string {
     if (!result) return '';
@@ -1511,7 +1594,7 @@
   }
   function toJson(): string {
     if (!result) return '[]';
-    const names = result.columns.map((c) => c.name);
+    const names = uniqueColNames;
     const objs = exportRows().map((r) => Object.fromEntries(names.map((n, i) => [n, r[i] ?? null])));
     return JSON.stringify(objs, null, 2);
   }
@@ -1522,15 +1605,12 @@
     return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  const exportScope = $derived(
-    filtering && sorting
-      ? ' (filtered + sorted view)'
-      : filtering
-        ? ' (filtered rows only)'
-        : sorting
-          ? ' (sorted view)'
-          : '',
-  );
+  const exportScope = $derived.by(() => {
+    const parts: string[] = [];
+    if (filtering || chipFiltering) parts.push('filtered');
+    if (sorting) parts.push('sorted');
+    return parts.length ? ` (${parts.join(' + ')} view)` : '';
+  });
 
   async function copyTsv(): Promise<void> {
     try {
@@ -1602,6 +1682,8 @@
   // Live progress for the streaming export (bytes written so far). Null when no
   // export is running; drives the dialog's progress bar.
   let exportProgress = $state<{ bytes: number } | null>(null);
+  // In-flight stream controller — the dialog's Cancel aborts it while exporting.
+  let exportAbort: AbortController | null = null;
 
   // Default a filename from the statement (a leading table-ish token) or 'result'.
   function defaultExportName(): string {
@@ -1646,6 +1728,7 @@
     }
     exportingPath = true;
     exportProgress = { bytes: 0 };
+    exportAbort = new AbortController();
     let done: ExportToPathResp | null = null;
     let failed: string | null = null;
     try {
@@ -1667,6 +1750,7 @@
           else if (m.done) done = m as unknown as ExportToPathResp;
           else if (typeof m.bytes === 'number') exportProgress = { bytes: m.bytes };
         },
+        exportAbort.signal,
       );
       if (failed) throw new Error(failed);
       if (done) {
@@ -1682,10 +1766,17 @@
         );
       }
     } catch (e) {
-      toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+      // A user-initiated cancel isn't a failure — the partial file stays where
+      // the export was writing it.
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        toasts.info('Export cancelled', 'The partially written file was left in place.');
+      } else {
+        toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+      }
     } finally {
       exportingPath = false;
       exportProgress = null;
+      exportAbort = null;
     }
   }
 
@@ -1755,6 +1846,133 @@
       node.focus();
       node.select();
     });
+  }
+
+  // ── Keyboard grid navigation ─────────────────────────────────────────────────
+  // Roving focus over the VISIBLE (filtered + sorted) rows: `r` indexes viewRows,
+  // `c` the column. The scroll container owns focus + keydown; the focused cell
+  // gets a ring. Arrows/Home/End/Page move, Enter edits (or expands a complex /
+  // read-only cell), ⌘/Ctrl+C copies the cell, and ContextMenu / Shift+F10 opens
+  // the row menu anchored to the cell.
+  let focusCell = $state<{ r: number; c: number } | null>(null);
+  /** Approx sticky-header height the top of a row must clear to be visible. */
+  const HEAD_H = 27;
+
+  function ensureRowVisible(r: number): void {
+    if (!scrollEl) return;
+    const top = r * ROW_H;
+    if (top < scrollEl.scrollTop) scrollEl.scrollTop = top;
+    else if (top + ROW_H > scrollEl.scrollTop + viewportH - HEAD_H)
+      scrollEl.scrollTop = top + ROW_H - viewportH + HEAD_H;
+  }
+
+  /** Open the cell context menu for the focused cell, anchored to its element
+   *  (a synthetic MouseEvent carries the coordinates ctxMenu positions by). */
+  function openFocusMenu(): void {
+    if (!focusCell || !result) return;
+    const entry = viewRows[focusCell.r];
+    if (!entry) return;
+    const rect = scrollEl?.querySelector('td.kbd-focus')?.getBoundingClientRect();
+    const ev = new MouseEvent('contextmenu', {
+      clientX: rect ? rect.left + Math.min(rect.width, 160) / 2 : 80,
+      clientY: rect ? rect.bottom - 2 : 80,
+    });
+    cellMenu(ev, focusCell.c, entry.row[focusCell.c], entry.idx);
+  }
+
+  function onGridKeydown(e: KeyboardEvent): void {
+    if (mini || !result || editing || reviewSql || viewer || docEditor) return;
+    const nRows = viewRows.length;
+    const nCols = result.columns.length;
+    if (nRows === 0 || nCols === 0) return;
+    const cur = focusCell ?? { r: 0, c: 0 };
+    const page = Math.max(1, Math.floor((viewportH - HEAD_H) / ROW_H) - 1);
+    const setFocus = (r: number, c: number): void => {
+      focusCell = {
+        r: Math.max(0, Math.min(nRows - 1, r)),
+        c: Math.max(0, Math.min(nCols - 1, c)),
+      };
+      ensureRowVisible(focusCell.r);
+      e.preventDefault();
+    };
+    switch (e.key) {
+      case 'ArrowDown': setFocus(focusCell ? cur.r + 1 : 0, cur.c); return;
+      case 'ArrowUp': setFocus(cur.r - 1, cur.c); return;
+      case 'ArrowRight': setFocus(cur.r, focusCell ? cur.c + 1 : 0); return;
+      case 'ArrowLeft': setFocus(cur.r, cur.c - 1); return;
+      case 'Home': setFocus(cur.r, 0); return;
+      case 'End': setFocus(cur.r, nCols - 1); return;
+      case 'PageDown': setFocus(cur.r + page, cur.c); return;
+      case 'PageUp': setFocus(cur.r - page, cur.c); return;
+    }
+    if (!focusCell) return;
+    const entry = viewRows[focusCell.r];
+    if (!entry) return;
+    const v = entry.row[focusCell.c];
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (isEditableCell(focusCell.c) && !isComplex(v)) beginEdit(entry.idx, focusCell.c);
+      else openCell(v, entry.idx, focusCell.c);
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+      // A real text selection keeps the native copy.
+      if (window.getSelection()?.toString()) return;
+      e.preventDefault();
+      void copyText(v === null || v === undefined ? '' : cellStr(v));
+      toasts.success('Copied', 'Cell value copied');
+      return;
+    }
+    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+      e.preventDefault();
+      openFocusMenu();
+      return;
+    }
+    if (e.key === 'Escape') focusCell = null;
+  }
+
+  // ── Dialog keyboard behavior (cell viewer / doc editor / review modal) ───────
+  /** Minimal dialog a11y as a Svelte action: focus moves into the dialog on
+   *  open, Tab cycles inside it, Escape closes (a child that stopPropagation's
+   *  Escape — the editor textareas — wins), and focus returns on close. */
+  function dialogKeys(node: HTMLElement, onEscape: () => void) {
+    const focusables = (): HTMLElement[] =>
+      [
+        ...node.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ].filter((el) => el.offsetParent !== null);
+    const prev = document.activeElement as HTMLElement | null;
+    void tick().then(() => {
+      if (!node.contains(document.activeElement)) focusables()[0]?.focus();
+    });
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onEscape();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const els = focusables();
+      if (els.length === 0) return;
+      const first = els[0];
+      const last = els[els.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !node.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    node.addEventListener('keydown', onKey);
+    return {
+      destroy() {
+        node.removeEventListener('keydown', onKey);
+        prev?.focus?.();
+      },
+    };
   }
 </script>
 
@@ -2003,19 +2221,21 @@
                 <button class="jrec-copy" title="Edit this record (opens a review before running)" aria-label="Edit record" onclick={() => openDocEditor(idx)}><Icon name="edit" size={10} /></button>
               {/if}
             </div>
-            {#each result.columns as c (c.name)}
+            {#each result.columns as _c, vci (vci)}
+              {@const vName = uniqueColNames[vci]}
+              {@const vVal = obj[vName]}
               <div class="vrow">
-                <span class="vk mono">{c.name}</span>
-                {#if obj[c.name] === null || obj[c.name] === undefined}
+                <span class="vk mono">{vName}</span>
+                {#if vVal === null || vVal === undefined}
                   <span class="vv mono">∅</span>
-                {:else if vvTree(obj[c.name])}
+                {:else if vvTree(vVal)}
                   <!-- Embedded documents/arrays (and very long text) render as a
                        COLLAPSED tree. The old `cellStr` stringified them in full —
                        one ~87KB text node per record was the other half of the
                        freeze, and it made the record unreadable besides. -->
-                  <span class="vv mono tree"><JsonTree value={obj[c.name]} /></span>
+                  <span class="vv mono tree"><JsonTree value={vVal} /></span>
                 {:else}
-                  <span class="vv mono">{cellStr(obj[c.name])}</span>
+                  <span class="vv mono">{cellStr(vVal)}</span>
                 {/if}
               </div>
             {/each}
@@ -2028,7 +2248,18 @@
         {/if}
       </div>
     {:else}
-    <div class="grid-scroll" bind:this={scrollEl} onscroll={onScroll}>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions a11y_no_static_element_interactions -->
+    <div
+      class="grid-scroll"
+      bind:this={scrollEl}
+      onscroll={onScroll}
+      tabindex={mini ? undefined : 0}
+      role={mini ? undefined : 'group'}
+      aria-label={mini
+        ? undefined
+        : 'Results grid — arrow keys move, Enter edits or expands, ⌘C copies the cell, Shift+F10 opens the row menu'}
+      onkeydown={onGridKeydown}
+    >
       <table class="grid mono" class:expanded={expandJson} style="--last:{result.columns.length}; --row-h:{ROW_H}px">
         <thead>
           <tr>
@@ -2088,7 +2319,8 @@
           {#if padTop > 0}
             <tr class="spacer" aria-hidden="true"><td colspan={result.columns.length + 1} style="height:{padTop}px"></td></tr>
           {/if}
-          {#each windowRows as { row, idx } (idx)}
+          {#each windowRows as { row, idx }, wi (idx)}
+            {@const vpos = startIdx + wi}
             <tr class:odd={idx % 2 === 1} class:selected={selected.has(idx)}>
               <td class="rownum">
                 {#if editable}
@@ -2132,18 +2364,22 @@
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                   <td
                     class="cell dirty"
+                    class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
                     title="Pending change — Review & apply (bar below) writes it; double-click to keep editing"
                     style="width:{w}ch; max-width:{w}ch;"
+                    onclick={() => (focusCell = { r: vpos, c: ci })}
                     ondblclick={() => beginEdit(idx, ci)}
                     oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
-                  >{#if pv === ''}<span class="null-glyph">∅</span>{:else}{pv}{/if}</td>
+                  >{#if pv === '' || pv === SET_NULL}<span class="null-glyph">∅</span>{:else if pv === SET_EMPTY}<span class="null-glyph">''</span>{:else}{pv}{/if}</td>
                 {:else if v === null || v === undefined}
                   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                   <td
                     class="cell null"
                     class:editable={isEditableCell(ci)}
+                    class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
                     title="NULL"
                     style="width:{w}ch; max-width:{w}ch;"
+                    onclick={() => (focusCell = { r: vpos, c: ci })}
                     ondblclick={() => beginEdit(idx, ci)}
                     oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
                   ><span class="null-glyph">∅</span></td>
@@ -2152,9 +2388,13 @@
                   <td
                     class="cell json"
                     class:wrap={expandJson}
+                    class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
                     title="Click to expand"
                     style="width:{w}ch; max-width:{w}ch;"
-                    onclick={() => openCell(v, idx, ci)}
+                    onclick={() => {
+                      focusCell = { r: vpos, c: ci };
+                      openCell(v, idx, ci);
+                    }}
                     ondblclick={() => { openCell(v, idx, ci); startViewerEdit(); }}
                     oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
                   >{clip(expandJson ? prettyJson(v) : compactJson(v))}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
@@ -2163,7 +2403,9 @@
                   <td
                     class="cell"
                     class:editable={isEditableCell(ci)}
+                    class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
                     style="width:{w}ch; max-width:{w}ch;"
+                    onclick={() => (focusCell = { r: vpos, c: ci })}
                     ondblclick={() => beginEdit(idx, ci)}
                     oncontextmenu={(e) => cellMenu(e, ci, v, idx)}
                   >{#if filtering}{#each highlightParts(cellDisplay(v)) as part}{#if part.hit}<mark>{part.t}</mark>{:else}{part.t}{/if}{/each}{:else}{cellDisplay(v)}{/if}<button class="cell-expand" title="Expand value" aria-label="Expand value" onclick={(e) => { e.stopPropagation(); openCell(v, idx, ci); }}><Icon name="maximize" size={9} /></button></td>
@@ -2193,7 +2435,7 @@
     {/if}
     {#if !mini}
       <div class="grid-foot">
-        {#if filtering}
+        {#if filtering || chipFiltering}
           <span><strong>{viewRows.length}</strong> of {liveRows.length} row{liveRows.length === 1 ? '' : 's'}</span>
         {:else}
           <span><strong>{result.stats.row_count}</strong> row{result.stats.row_count === 1 ? '' : 's'}</span>
@@ -2265,7 +2507,13 @@
       if (e.target === e.currentTarget) viewer = null;
     }}
   >
-    <div class="cell-viewer" role="dialog" aria-modal="true" aria-label="Cell value">
+    <div
+      class="cell-viewer"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Cell value"
+      use:dialogKeys={() => (viewer = null)}
+    >
       <div class="cv-head">
         <span>Cell value</span>
         <span class="grow"></span>
@@ -2320,7 +2568,13 @@
       if (e.target === e.currentTarget) docEditor = null;
     }}
   >
-    <div class="cell-viewer" role="dialog" aria-modal="true" aria-label="Edit document">
+    <div
+      class="cell-viewer"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Edit document"
+      use:dialogKeys={() => (docEditor = null)}
+    >
       <div class="cv-head">
         <span>Edit document <span class="dim">— row is replaced/updated after review</span></span>
         <span class="grow"></span>
@@ -2348,7 +2602,14 @@
 {/if}
 
 {#if showExportDialog}
-  <Modal title="Export all rows" width={520} onclose={() => (showExportDialog = false)}>
+  <Modal
+    title="Export all rows"
+    width={520}
+    onclose={() => {
+      exportAbort?.abort();
+      showExportDialog = false;
+    }}
+  >
     <div class="exp-form">
       <p class="exp-hint">
         Runs the statement on the daemon host and <strong>streams</strong> the full result to a local
@@ -2407,7 +2668,13 @@
     </div>
 
     {#snippet footer()}
-      <button class="btn" onclick={() => (showExportDialog = false)} disabled={exportingPath}>Cancel</button>
+      <button
+        class="btn"
+        onclick={() => (exportingPath ? exportAbort?.abort() : (showExportDialog = false))}
+        title={exportingPath ? 'Stop the running export (the partial file is left in place)' : undefined}
+      >
+        {exportingPath ? 'Cancel export' : 'Cancel'}
+      </button>
       <button class="btn primary" onclick={() => void runPathExport()} disabled={exportingPath}>
         {exportingPath ? 'Exporting…' : 'Export all'}
       </button>
@@ -2437,7 +2704,13 @@
     }}
     onkeydown={onReviewKeydown}
   >
-    <div class="review-modal" role="dialog" aria-modal="true" aria-label={reviewSql.title}>
+    <div
+      class="review-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label={reviewSql.title}
+      use:dialogKeys={closeReview}
+    >
       <div class="cv-head">
         <span>{reviewSql.title}</span>
         <button class="icon-btn" onclick={closeReview} disabled={runningReview} aria-label="Close">✕</button>
@@ -3039,6 +3312,18 @@
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
+  }
+  .grid-scroll:focus {
+    outline: none;
+  }
+  .grid-scroll:focus-visible {
+    outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    outline-offset: -1px;
+  }
+  /* Roving keyboard cell cursor (see onGridKeydown). */
+  .grid tbody td.kbd-focus {
+    outline: 1.5px solid var(--accent);
+    outline-offset: -1.5px;
   }
   .grid {
     border-collapse: collapse;

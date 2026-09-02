@@ -1,6 +1,7 @@
 <script lang="ts">
   // ⌘T sheet: provider (from /meta.providers), title, cwd.
   import Modal from '../../lib/components/Modal.svelte';
+  import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import ContextPreview from './ContextPreview.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -21,6 +22,9 @@
   );
   const defaultProvider = $derived(wsDefault || (auth.meta?.default_provider ?? ''));
   let provider = $state('');
+  // Model pinned for THIS session only ('' = provider default). Reset on
+  // provider switch — model ids are provider-specific.
+  let model = $state('');
   let title = $state('');
   let cwd = $state('');
   let browser = $state(false);
@@ -83,6 +87,7 @@
   }
 
   function selectProvider(p: string, focus = false): void {
+    if (p !== provider) model = '';
     provider = p;
     if (focus) {
       const idx = providers.indexOf(p);
@@ -155,6 +160,7 @@
         title: title.trim() === '' ? null : title.trim(),
         cwd: cwd.trim() === '' ? null : cwd.trim(),
         meta: Object.keys(meta).length > 0 ? meta : null,
+        model: model.trim() === '' ? null : model.trim(),
       });
       // createSession → addSession → navigateToSession already routes to the
       // new session; no extra router.go() needed.
@@ -201,6 +207,9 @@
       {/each}
     </div>
   </div>
+
+  <!-- Hidden entirely when the provider's spec has no model-flag template. -->
+  <ModelPicker {provider} value={model} onchange={(m) => (model = m)} />
 
   <div class="field">
     <label for="ns-title">Title <span class="dim">(optional)</span></label>

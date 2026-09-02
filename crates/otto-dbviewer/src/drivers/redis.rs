@@ -45,6 +45,12 @@ const SCAN_COUNT: usize = 200;
 const SCAN_COUNT_FILTER: usize = 500;
 /// Cap on collection elements shown in an object-detail value preview.
 const PREVIEW_LIMIT: isize = 50;
+/// Cap on rows a console `run` returns when the request doesn't set `max_rows`
+/// (matches the SQL drivers' default page).
+const DEFAULT_MAX_ROWS: usize = 1000;
+/// Byte cap for a string-value preview (`GETRANGE`), matching the grid's
+/// per-cell cap so a multi-hundred-MB string never crosses the wire whole.
+const PREVIEW_STRING_BYTES: isize = 1_048_575;
 
 /// Redis driver. Caches one [`ConnectionManager`] per [`ResolvedConfig::cache_key`].
 /// `Mutex<HashMap>` is `Default`-constructible, so `#[derive(Default)]` (used
@@ -81,7 +87,7 @@ impl Driver for RedisDriver {
         let started = Instant::now();
         // Connect + PING; report ok:false (don't Err) on any failure so the UI
         // can show the reason inline.
-        let mut conn = match self.connect(cfg).await {
+        let mut conn = match self.connect(cfg, default_db(cfg)).await {
             Ok(c) => c,
             Err(e) => {
                 return Ok(TestResult {
@@ -122,7 +128,7 @@ impl Driver for RedisDriver {
     }
 
     async fn schema_root(&self, cfg: &ResolvedConfig) -> Result<Vec<SchemaNode>> {
-        let mut conn = self.connect(cfg).await?;
+        let mut conn = self.connect(cfg, default_db(cfg)).await?;
         let info: String = redis::cmd("INFO")
             .arg("keyspace")
             .query_async(&mut conn)
@@ -178,8 +184,8 @@ impl Driver for RedisDriver {
             .and_then(|s| s.parse::<i64>().ok())
             .ok_or_else(|| types::invalid("redis: expected a keyspace node (kdb:<n>)"))?;
 
-        let mut conn = self.connect(cfg).await?;
-        select_db(&mut conn, db).await?;
+        // A connection pinned to this keyspace at handshake — no SELECT races.
+        let mut conn = self.connect(cfg, db).await?;
 
         match (parent.get("ns"), filter) {
             // Children of a namespace: keys under `<prefix>:`, optionally narrowed
@@ -252,8 +258,7 @@ impl Driver for RedisDriver {
             .ok_or_else(|| types::invalid("redis: object detail requires a key (key:<k>)"))?
             .to_string();
 
-        let mut conn = self.connect(cfg).await?;
-        select_db(&mut conn, db).await?;
+        let mut conn = self.connect(cfg, db).await?;
 
         let ty = type_of(&mut conn, &key).await;
         let ttl: i64 = redis::cmd("TTL")
@@ -297,13 +302,15 @@ impl Driver for RedisDriver {
             return Err(types::invalid("redis: no command provided"));
         }
 
-        let mut conn = self.connect(cfg).await?;
-        // Honour an explicitly selected keyspace from the request node context.
-        if let Some(node) = req.node.as_deref() {
-            if let Some(db) = NodePath::parse(node).get("kdb").and_then(|s| s.parse::<i64>().ok()) {
-                select_db(&mut conn, db).await?;
-            }
-        }
+        // Honour an explicitly selected keyspace from the request node context;
+        // the connection is PINNED to that db at handshake (no shared-connection
+        // SELECT — that cross-wired concurrent requests, including writes).
+        let db = req
+            .node
+            .as_deref()
+            .and_then(|node| NodePath::parse(node).get("kdb").and_then(|s| s.parse::<i64>().ok()))
+            .unwrap_or_else(|| default_db(cfg));
+        let mut conn = self.connect(cfg, db).await?;
 
         // Per-statement timeout: applied as a per-command wall-clock deadline so
         // each command in a multi-line input gets its own budget (rather than
@@ -337,9 +344,36 @@ impl Driver for RedisDriver {
         let duration_ms = started.elapsed().as_millis() as u64;
 
         let mut result = reply_to_result(last_reply);
+        // Honour the request's row cap (a `KEYS *` / `LRANGE k 0 -1` reply can
+        // hold millions of elements) and run every cell through the shared
+        // per-cell size cap — the other engines already do both; Redis was the
+        // one path that could hand the grid a multi-hundred-MB payload.
+        let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
+        if result.rows.len() > max_rows {
+            result.rows.truncate(max_rows);
+            result.truncated = true;
+        }
+        for row in &mut result.rows {
+            for cell in row.iter_mut() {
+                *cell = types::cap_cell(std::mem::take(cell));
+            }
+        }
         result.stats.duration_ms = duration_ms;
         result.stats.row_count = result.rows.len();
         Ok(result)
+    }
+
+    /// Evict the cached connection managers for `cache_key` (connection close,
+    /// or a config change superseded them). Redis keys its cache per logical db
+    /// (`<cache_key>|db=<n>`), so every db's manager for this config is dropped
+    /// — dropping a `ConnectionManager` closes the multiplexed connection and
+    /// stops its reconnect loop.
+    async fn close(&self, cache_key: &str) {
+        let prefix = format!("{cache_key}|");
+        self.clients
+            .lock()
+            .await
+            .retain(|k, _| !k.starts_with(&prefix));
     }
 
     async fn completion(
@@ -361,15 +395,19 @@ impl Driver for RedisDriver {
 
 // --- Connection -------------------------------------------------------------
 
-/// Build a `redis::Client` for `cfg`, honouring AUTH (username/password),
-/// SELECT db, and TLS (`rediss://`).
-fn build_client(cfg: &ResolvedConfig) -> Result<Client> {
-    let db = cfg
-        .database
+/// The logical database a call defaults to when no keyspace node scopes it:
+/// the profile's configured database index, else db0.
+fn default_db(cfg: &ResolvedConfig) -> i64 {
+    cfg.database
         .as_deref()
         .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
 
+/// Build a `redis::Client` for `cfg` PINNED to logical database `db` (selected
+/// during the connection handshake), honouring AUTH (username/password) and TLS
+/// (`rediss://`).
+fn build_client(cfg: &ResolvedConfig, db: i64) -> Result<Client> {
     let tls = cfg.tls.enabled();
     let addr = if tls {
         ConnectionAddr::TcpTls {
@@ -433,38 +471,31 @@ fn build_client(cfg: &ResolvedConfig) -> Result<Client> {
 }
 
 impl RedisDriver {
-    /// Get (or lazily build + cache) the `ConnectionManager` for `cfg`, keyed by
-    /// [`ResolvedConfig::cache_key`]. A `ConnectionManager` clone shares the
-    /// underlying multiplexed connection and auto-reconnects, so reusing it
-    /// across calls avoids re-dialing + re-AUTHing. Holding the tokio mutex
-    /// across the connect await only briefly serializes concurrent *first*
-    /// connects to the same key; cache hits return immediately.
-    async fn connect(&self, cfg: &ResolvedConfig) -> Result<ConnectionManager> {
-        let cache_key = cfg.cache_key();
+    /// Get (or lazily build + cache) the `ConnectionManager` for `(cfg, db)`,
+    /// keyed by [`ResolvedConfig::cache_key`] PLUS the logical database index.
+    ///
+    /// The per-db key is load-bearing, not an optimisation: clones of one
+    /// `ConnectionManager` share a single multiplexed connection, and `SELECT`
+    /// is connection-wide state — the old shared-connection-plus-`SELECT`
+    /// scheme let two concurrent requests for different keyspaces interleave
+    /// `SELECT` + payload and land commands (including WRITES) in the wrong
+    /// database. Each cached manager is instead PINNED to its db at handshake
+    /// (`set_db`), so no `SELECT` is ever issued and a reconnect re-lands on
+    /// the same db. Holding the tokio mutex across the connect await only
+    /// briefly serializes concurrent *first* connects to the same key.
+    async fn connect(&self, cfg: &ResolvedConfig, db: i64) -> Result<ConnectionManager> {
+        let cache_key = format!("{}|db={db}", cfg.cache_key());
         let mut cache = self.clients.lock().await;
         if let Some(conn) = cache.get(&cache_key) {
             return Ok(conn.clone());
         }
-        let client = build_client(cfg)?;
+        let client = build_client(cfg, db)?;
         let manager = ConnectionManager::new(client)
             .await
             .map_err(types::upstream)?;
         cache.insert(cache_key, manager.clone());
         Ok(manager)
     }
-}
-
-async fn select_db(conn: &mut ConnectionManager, db: i64) -> Result<()> {
-    if db == 0 {
-        // The connection already starts on db0 via the handshake.
-        return Ok(());
-    }
-    redis::cmd("SELECT")
-        .arg(db)
-        .query_async::<RedisValue>(conn)
-        .await
-        .map_err(types::upstream)?;
-    Ok(())
 }
 
 // --- SCAN / type / length / preview ----------------------------------------
@@ -604,31 +635,27 @@ async fn length_of(conn: &mut ConnectionManager, key: &str, ty: &str) -> Option<
     redis::cmd(cmd).arg(key).query_async::<i64>(conn).await.ok()
 }
 
-/// A bounded value preview for the structure panel, shaped per type.
+/// A bounded value preview for the structure panel, shaped per type. Every
+/// branch is size-bounded server-side: `GETRANGE` instead of `GET` (a string
+/// value can be hundreds of MB), `HSCAN`/`SSCAN` instead of `HGETALL`/`SMEMBERS`
+/// (a hash/set can hold millions of members), and range commands with an
+/// explicit stop for list/zset.
 async fn preview_of(conn: &mut ConnectionManager, key: &str, ty: &str) -> JsonValue {
     match ty {
-        "string" => redis::cmd("GET")
+        "string" => redis::cmd("GETRANGE")
             .arg(key)
+            .arg(0)
+            .arg(PREVIEW_STRING_BYTES)
             .query_async::<RedisValue>(conn)
             .await
             .map(value_to_json)
             .unwrap_or(JsonValue::Null),
-        "hash" => redis::cmd("HGETALL")
-            .arg(key)
-            .query_async::<RedisValue>(conn)
-            .await
-            .map(value_to_json)
-            .unwrap_or(JsonValue::Null),
+        "hash" => scan_preview(conn, key, "HSCAN", true).await,
+        "set" => scan_preview(conn, key, "SSCAN", false).await,
         "list" => redis::cmd("LRANGE")
             .arg(key)
             .arg(0)
             .arg(PREVIEW_LIMIT)
-            .query_async::<RedisValue>(conn)
-            .await
-            .map(value_to_json)
-            .unwrap_or(JsonValue::Null),
-        "set" => redis::cmd("SMEMBERS")
-            .arg(key)
             .query_async::<RedisValue>(conn)
             .await
             .map(value_to_json)
@@ -643,6 +670,55 @@ async fn preview_of(conn: &mut ConnectionManager, key: &str, ty: &str) -> JsonVa
             .map(value_to_json)
             .unwrap_or(JsonValue::Null),
         _ => JsonValue::Null,
+    }
+}
+
+/// Cursor-scan a bounded preview of a hash (`HSCAN`, field/value pairs → an
+/// object) or set (`SSCAN`, members → an array), stopping at [`PREVIEW_LIMIT`]
+/// entries or [`SCAN_MAX_ROUNDS`] round-trips — never materialising the whole
+/// collection the way `HGETALL`/`SMEMBERS` did.
+async fn scan_preview(
+    conn: &mut ConnectionManager,
+    key: &str,
+    cmd: &str,
+    pairs: bool,
+) -> JsonValue {
+    let cap = PREVIEW_LIMIT as usize;
+    let mut cursor: u64 = 0;
+    let mut items: Vec<RedisValue> = Vec::new();
+    for _ in 0..SCAN_MAX_ROUNDS {
+        let reply: redis::RedisResult<(u64, Vec<RedisValue>)> = redis::cmd(cmd)
+            .arg(key)
+            .arg(cursor)
+            .arg("COUNT")
+            .arg(SCAN_COUNT)
+            .query_async(conn)
+            .await;
+        let Ok((next, batch)) = reply else {
+            return JsonValue::Null;
+        };
+        items.extend(batch);
+        cursor = next;
+        // For a hash, each entry is a field+value PAIR of reply elements.
+        let want = if pairs { cap * 2 } else { cap };
+        if cursor == 0 || items.len() >= want {
+            break;
+        }
+    }
+    if pairs {
+        let mut obj = serde_json::Map::new();
+        for chunk in items.chunks(2).take(cap) {
+            let [f, v] = chunk else { break };
+            let field = match value_to_json(f.clone()) {
+                JsonValue::String(s) => s,
+                other => other.to_string(),
+            };
+            obj.insert(field, value_to_json(v.clone()));
+        }
+        JsonValue::Object(obj)
+    } else {
+        items.truncate(cap);
+        JsonValue::Array(items.into_iter().map(value_to_json).collect())
     }
 }
 

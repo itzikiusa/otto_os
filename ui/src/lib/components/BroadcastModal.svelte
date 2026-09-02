@@ -17,10 +17,11 @@
   // freshly-spawned sessions are included by default without extra bookkeeping.
   let deselected = $state<Set<Id>>(new Set());
 
-  // Live agent sessions are the only valid broadcast targets (connections and
-  // dead/suspended sessions can't receive a prompt).
+  // Live FOREGROUND agent sessions are the only valid broadcast targets
+  // (connections, dead/suspended sessions, and background engine sessions —
+  // workflow steps, review agents, PR drafts — can't/shouldn't receive one).
   const eligible = $derived<Session[]>(
-    ws.agentSessions.filter((s) => {
+    ws.plainAgentSessions.filter((s) => {
       const st = ws.statusMap[s.id] ?? s.status;
       return st === 'running' || st === 'working' || st === 'idle';
     }),

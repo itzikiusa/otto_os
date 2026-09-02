@@ -30,7 +30,7 @@ pub use export::{ExportCounts, ExportFormat};
 pub use http::{api_router, DbViewerCtx};
 pub use import::{
     build_insert_statements, coerce_scalar, parse_rows, sql_string_literal, ImportFormat,
-    ParsedTable, SqlQuote,
+    ParsedTable, SqlFlavor,
 };
 pub use nl::{
     drive_nl_to_sql, extract_sql, DraftContext, FailedAttempt, NlToSqlOutcome, SqlDrafter,

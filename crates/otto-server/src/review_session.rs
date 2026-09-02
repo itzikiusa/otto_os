@@ -281,6 +281,7 @@ pub async fn run_agent_session(
         title: None,
         cwd: Some(cwd.to_string()),
         connection_id: None,
+        model: None,
         meta: Some(meta),
     };
     let session = match manager.create(ws, &user.id, req, None).await {

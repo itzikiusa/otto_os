@@ -135,22 +135,49 @@ fn parse_delimited(bytes: &[u8], delim: char) -> Result<ParsedTable> {
     let columns = iter
         .next()
         .ok_or_else(|| Error::Invalid("delimited file has no header row".into()))?;
-    let rows = iter
-        .map(|r| r.into_iter().map(Value::String).collect())
-        .collect();
+    // Reject mismatched arity instead of silently dropping extra cells / padding
+    // short rows with NULL — a malformed file would otherwise import skewed data
+    // with no error. Row numbers are 1-based counting the header as row 1.
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    for (i, r) in iter.enumerate() {
+        if r.len() != columns.len() {
+            return Err(Error::Invalid(format!(
+                "row {} has {} field(s) but the header has {} column(s)",
+                i + 2,
+                r.len(),
+                columns.len()
+            )));
+        }
+        rows.push(r.into_iter().map(Value::String).collect());
+    }
     Ok(ParsedTable { columns, rows })
 }
 
-/// Render a JSON value as a SQL literal. Strings are single-quoted with embedded
-/// quotes doubled (`'` → `''`); null → `NULL`; bools → `TRUE`/`FALSE`; numbers
-/// verbatim; objects/arrays → a quoted compact-JSON string.
-pub fn sql_string_literal(v: &Value) -> String {
+/// Render a JSON value as a SQL literal for `flavor`. Strings are single-quoted
+/// with embedded quotes doubled (`'` → `''`); null → `NULL`; bools →
+/// `TRUE`/`FALSE`; numbers verbatim; objects/arrays → a quoted compact-JSON
+/// string.
+///
+/// SECURITY: escaping is ENGINE-AWARE. MySQL (default sql_mode) and ClickHouse
+/// process `\` inside a single-quoted literal as an escape character, so a cell
+/// ending in `\` would swallow the closing quote and splice the next cell's
+/// bytes into raw SQL — those flavors escape `\` → `\\`. Postgres
+/// (standard-conforming strings) treats `\` literally, so only `'` is doubled.
+pub fn sql_string_literal(v: &Value, flavor: SqlFlavor) -> String {
+    let quote_str = |s: &str| -> String {
+        let escaped = if flavor.backslash_escapes_in_literals() {
+            s.replace('\\', "\\\\").replace('\'', "''")
+        } else {
+            s.replace('\'', "''")
+        };
+        format!("'{escaped}'")
+    };
     match v {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        other => format!("'{}'", other.to_string().replace('\'', "''")),
+        Value::String(s) => quote_str(s),
+        other => quote_str(&other.to_string()),
     }
 }
 
@@ -193,38 +220,56 @@ pub fn coerce_scalar(v: &Value) -> Value {
     Value::String(s.clone())
 }
 
-/// How to quote a SQL identifier — the one lexical difference between the SQL
-/// engines' `INSERT` text. MySQL/ClickHouse backtick-quote; Postgres (and the
-/// SQL standard) double-quote. Both double an embedded quote char to escape it.
+/// The SQL flavor an `INSERT` is rendered for — decides identifier quoting AND
+/// string-literal escaping (which differ between the engines in ways that are
+/// security-relevant, see [`sql_string_literal`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SqlQuote {
-    /// `` `name` `` — MySQL / ClickHouse.
-    Backtick,
-    /// `"name"` — Postgres (standard).
-    DoubleQuote,
+pub enum SqlFlavor {
+    /// `` `name` `` idents (backtick doubling; `\` is LITERAL in idents);
+    /// `\` is an escape in string literals.
+    Mysql,
+    /// `` `name` `` idents, but `\` is an escape in BOTH quoted identifiers and
+    /// string literals (ClickHouse's lexer applies string-escape rules to
+    /// backtick idents too).
+    Clickhouse,
+    /// `"name"` idents (standard doubling); `\` is literal everywhere
+    /// (standard-conforming strings).
+    Postgres,
 }
 
-impl SqlQuote {
-    /// Quote an identifier, doubling any embedded quote char.
+impl SqlFlavor {
+    /// Quote an identifier for this flavor, escaping the quote char (and, for
+    /// ClickHouse, embedded backslashes — its backtick idents honor `\` escapes,
+    /// so an unescaped trailing `\` would swallow the closing backtick).
     fn ident(self, name: &str) -> String {
         match self {
-            SqlQuote::Backtick => format!("`{}`", name.replace('`', "``")),
-            SqlQuote::DoubleQuote => format!("\"{}\"", name.replace('"', "\"\"")),
+            SqlFlavor::Mysql => format!("`{}`", name.replace('`', "``")),
+            SqlFlavor::Clickhouse => {
+                format!("`{}`", name.replace('\\', "\\\\").replace('`', "``"))
+            }
+            SqlFlavor::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
         }
+    }
+
+    /// Whether the engine treats `\` as an escape inside single-quoted string
+    /// literals (MySQL under the default sql_mode, and ClickHouse always).
+    fn backslash_escapes_in_literals(self) -> bool {
+        matches!(self, SqlFlavor::Mysql | SqlFlavor::Clickhouse)
     }
 }
 
-/// Build batched multi-row `INSERT` statements, quoting identifiers per `quote`
-/// (backtick for MySQL/ClickHouse, double-quote for Postgres). Each statement
-/// inserts at most `batch_size` rows. Returns an empty Vec for no rows. Cells
-/// align positionally with `columns`; a short row is padded with `NULL`. Value
-/// literals are engine-agnostic (single-quoted strings, `TRUE`/`FALSE`, numbers).
+/// Build batched multi-row `INSERT` statements for `flavor` (identifier quoting
+/// AND string-literal escaping are engine-aware — see [`SqlFlavor`] /
+/// [`sql_string_literal`]). Each statement inserts at most `batch_size` rows.
+/// Returns an empty Vec for no rows. Cells align positionally with `columns`; a
+/// short row is padded with `NULL` (the delimited parser rejects mismatched
+/// arity upstream; JSON key-union rows are always aligned).
 pub fn build_insert_statements(
     table: &str,
     columns: &[String],
     rows: &[Vec<Value>],
     batch_size: usize,
-    quote: SqlQuote,
+    flavor: SqlFlavor,
 ) -> Vec<String> {
     if rows.is_empty() || columns.is_empty() {
         return Vec::new();
@@ -232,7 +277,7 @@ pub fn build_insert_statements(
     let batch_size = batch_size.max(1);
     let col_list = columns
         .iter()
-        .map(|c| quote.ident(c))
+        .map(|c| flavor.ident(c))
         .collect::<Vec<_>>()
         .join(", ");
     let mut out = Vec::new();
@@ -241,14 +286,14 @@ pub fn build_insert_statements(
             .iter()
             .map(|row| {
                 let cells: Vec<String> = (0..columns.len())
-                    .map(|i| sql_string_literal(row.get(i).unwrap_or(&Value::Null)))
+                    .map(|i| sql_string_literal(row.get(i).unwrap_or(&Value::Null), flavor))
                     .collect();
                 format!("({})", cells.join(", "))
             })
             .collect();
         out.push(format!(
             "INSERT INTO {} ({}) VALUES {}",
-            quote.ident(table),
+            flavor.ident(table),
             col_list,
             values.join(", ")
         ));
@@ -300,14 +345,47 @@ mod tests {
 
     #[test]
     fn literals_escape_quotes_and_render_scalars() {
-        assert_eq!(sql_string_literal(&json!(null)), "NULL");
-        assert_eq!(sql_string_literal(&json!(true)), "TRUE");
-        assert_eq!(sql_string_literal(&json!(42)), "42");
-        assert_eq!(sql_string_literal(&json!("Ada")), "'Ada'");
-        // Single quotes are doubled (no injection).
-        assert_eq!(sql_string_literal(&json!("O'Brien")), "'O''Brien'");
-        // Objects/arrays serialize to a quoted JSON string.
-        assert_eq!(sql_string_literal(&json!({"a":1})), "'{\"a\":1}'");
+        for flavor in [SqlFlavor::Mysql, SqlFlavor::Clickhouse, SqlFlavor::Postgres] {
+            assert_eq!(sql_string_literal(&json!(null), flavor), "NULL");
+            assert_eq!(sql_string_literal(&json!(true), flavor), "TRUE");
+            assert_eq!(sql_string_literal(&json!(42), flavor), "42");
+            assert_eq!(sql_string_literal(&json!("Ada"), flavor), "'Ada'");
+            // Single quotes are doubled (no injection).
+            assert_eq!(sql_string_literal(&json!("O'Brien"), flavor), "'O''Brien'");
+            // Objects/arrays serialize to a quoted JSON string (no backslashes
+            // here, so every flavor renders identically).
+            assert_eq!(sql_string_literal(&json!({"a":1}), flavor), "'{\"a\":1}'");
+        }
+    }
+
+    /// The break-out this guards against: MySQL/ClickHouse treat `\` in a
+    /// single-quoted literal as an escape, so a trailing `\` would swallow the
+    /// closing quote and the NEXT cell's bytes would parse as raw SQL.
+    #[test]
+    fn literals_escape_backslashes_per_flavor() {
+        // MySQL/ClickHouse: `\` doubled so `\''` can't read as escaped-quote+quote.
+        assert_eq!(
+            sql_string_literal(&json!("evil\\"), SqlFlavor::Mysql),
+            "'evil\\\\'"
+        );
+        assert_eq!(
+            sql_string_literal(&json!("evil\\"), SqlFlavor::Clickhouse),
+            "'evil\\\\'"
+        );
+        // Postgres (standard-conforming strings): `\` is literal — left alone.
+        assert_eq!(
+            sql_string_literal(&json!("evil\\"), SqlFlavor::Postgres),
+            "'evil\\'"
+        );
+        // The classic payload: a cell ending in `\` followed by an injection
+        // cell stays two inert literals for MySQL.
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let rows = vec![vec![json!("x\\"), json!("),(1,(SELECT 1)) -- ")]];
+        let stmt = &build_insert_statements("t", &cols, &rows, 10, SqlFlavor::Mysql)[0];
+        assert_eq!(
+            stmt,
+            "INSERT INTO `t` (`a`, `b`) VALUES ('x\\\\', '),(1,(SELECT 1)) -- ')"
+        );
     }
 
     #[test]
@@ -318,7 +396,7 @@ mod tests {
             vec![json!(2), json!("O'Brien")],
             vec![json!(3), json!("Grace")],
         ];
-        let stmts = build_insert_statements("users", &cols, &rows, 2, SqlQuote::Backtick);
+        let stmts = build_insert_statements("users", &cols, &rows, 2, SqlFlavor::Mysql);
         // 3 rows, batch 2 → two statements.
         assert_eq!(stmts.len(), 2);
         assert_eq!(
@@ -335,7 +413,7 @@ mod tests {
     fn insert_builder_double_quotes_identifiers_for_postgres() {
         let cols = vec!["id".to_string(), "full name".to_string()];
         let rows = vec![vec![json!(1), json!("O'Brien")]];
-        let stmts = build_insert_statements("my table", &cols, &rows, 100, SqlQuote::DoubleQuote);
+        let stmts = build_insert_statements("my table", &cols, &rows, 100, SqlFlavor::Postgres);
         assert_eq!(stmts.len(), 1);
         // Identifiers double-quoted (spaces + reserved-word safe); string values
         // still single-quoted with `'` doubled — same as MySQL.
@@ -345,9 +423,31 @@ mod tests {
         );
     }
 
+    /// ClickHouse's backtick idents honor string-style `\` escapes; MySQL's
+    /// treat `\` literally — the two backtick flavors must diverge here.
+    #[test]
+    fn ident_backslash_handling_diverges_between_backtick_flavors() {
+        let cols = vec!["we`ird\\".to_string()];
+        let rows = vec![vec![json!(1)]];
+        let my = &build_insert_statements("t", &cols, &rows, 10, SqlFlavor::Mysql)[0];
+        assert!(my.contains("`we``ird\\`"), "mysql: {my}");
+        let ch = &build_insert_statements("t", &cols, &rows, 10, SqlFlavor::Clickhouse)[0];
+        assert!(ch.contains("`we``ird\\\\`"), "clickhouse: {ch}");
+    }
+
     #[test]
     fn insert_builder_empty_rows_is_no_statements() {
-        assert!(build_insert_statements("t", &["a".into()], &[], 100, SqlQuote::Backtick).is_empty());
+        assert!(build_insert_statements("t", &["a".into()], &[], 100, SqlFlavor::Mysql).is_empty());
+    }
+
+    /// A malformed delimited file (row arity ≠ header arity) is rejected with
+    /// the offending row number, not silently padded/clipped into skewed data.
+    #[test]
+    fn delimited_rows_with_wrong_arity_are_rejected() {
+        let err = parse_rows(ImportFormat::Csv, b"a,b\n1,2\n3\n").unwrap_err();
+        assert!(err.to_string().contains("row 3"), "{err}");
+        let err = parse_rows(ImportFormat::Csv, b"a,b\n1,2,3\n").unwrap_err();
+        assert!(err.to_string().contains("3 field(s)"), "{err}");
     }
 
     #[test]

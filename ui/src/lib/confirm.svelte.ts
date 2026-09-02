@@ -5,6 +5,13 @@
 // line of text instead; both resolve a promise from a real in-app modal (see
 // ConfirmDialog.svelte, mounted once in App).
 
+/** One button in a `choose(...)` dialog. */
+export interface ChoiceOption {
+  label: string;
+  value: string;
+  kind?: 'primary' | 'danger' | 'normal';
+}
+
 class ConfirmStore {
   open = $state(false);
   title = $state('Confirm');
@@ -15,13 +22,19 @@ class ConfirmStore {
   isPrompt = $state(false);
   inputValue = $state('');
   placeholder = $state('');
+  // Choice mode: N labeled buttons + an optional "remember" checkbox.
+  choices: ChoiceOption[] | null = $state(null);
+  checkboxLabel = $state('');
+  checkboxChecked = $state(false);
   private resolver: ((v: boolean | string | null) => void) | null = null;
+  private choiceResolver: ((v: { value: string | null; remember: boolean }) => void) | null = null;
 
   ask(
     message: string,
     opts?: { title?: string; confirmLabel?: string; danger?: boolean },
   ): Promise<boolean> {
     this.isPrompt = false;
+    this.choices = null;
     this.message = message;
     this.title = opts?.title ?? 'Confirm';
     this.confirmLabel = opts?.confirmLabel ?? 'Delete';
@@ -41,6 +54,7 @@ class ConfirmStore {
     opts?: { title?: string; confirmLabel?: string; initial?: string; placeholder?: string },
   ): Promise<string | null> {
     this.isPrompt = true;
+    this.choices = null;
     this.message = message;
     this.title = opts?.title ?? 'Enter a value';
     this.confirmLabel = opts?.confirmLabel ?? 'OK';
@@ -51,6 +65,37 @@ class ConfirmStore {
     return new Promise<string | null>((resolve) => {
       this.resolver = resolve as (v: boolean | string | null) => void;
     });
+  }
+
+  /**
+   * Offer several labeled actions (plus Cancel) and an optional "remember"
+   * checkbox. Resolves the picked option's `value` (`null` on cancel/dismiss)
+   * and whether the checkbox was ticked.
+   */
+  choose(
+    message: string,
+    opts: { title?: string; options: ChoiceOption[]; checkboxLabel?: string },
+  ): Promise<{ value: string | null; remember: boolean }> {
+    this.isPrompt = false;
+    this.message = message;
+    this.title = opts.title ?? 'Confirm';
+    this.choices = opts.options;
+    this.checkboxLabel = opts.checkboxLabel ?? '';
+    this.checkboxChecked = false;
+    this.open = true;
+    return new Promise((resolve) => {
+      this.choiceResolver = resolve;
+    });
+  }
+
+  /** Choice-mode resolution — one of the offered option values. */
+  pick(value: string): void {
+    this.open = false;
+    const r = this.choiceResolver;
+    this.choiceResolver = null;
+    const remember = this.checkboxChecked;
+    this.choices = null;
+    r?.({ value, remember });
   }
 
   /** Confirm-mode resolution (true on confirm). */
@@ -70,8 +115,16 @@ class ConfirmStore {
     r?.(v ? v : null);
   }
 
-  /** Backdrop / X / Cancel — false for a confirm, null for a prompt. */
+  /** Backdrop / X / Cancel — false for a confirm, null for a prompt/choice. */
   dismiss(): void {
+    if (this.choiceResolver) {
+      this.open = false;
+      const cr = this.choiceResolver;
+      this.choiceResolver = null;
+      this.choices = null;
+      cr?.({ value: null, remember: false });
+      return;
+    }
     const wasPrompt = this.isPrompt;
     this.open = false;
     const r = this.resolver;

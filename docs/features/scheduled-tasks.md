@@ -521,7 +521,6 @@ tool itself must also be enabled in the Otto Server tab.
   `Orchestrator::run_agent` primitive.
 - **[Daemon HTTP API](./daemon-http-api.md)** — auth, tokens, and calling the
   `/scheduled-tasks/*` routes yourself.
-- **Design (internal):** [`docs/design/scheduled-tasks-design.md`](../design/scheduled-tasks-design.md).
 - **Contracts (authoritative):** `docs/contracts/api.md` (Scheduled Tasks, #135–#143)
   and `docs/contracts/ws.md` (`scheduled_task_run_updated`).
 - **Source:** `crates/otto-server/src/{scheduled_tasks_engine,scheduled_tasks_scheduler,cadence}.rs`,
