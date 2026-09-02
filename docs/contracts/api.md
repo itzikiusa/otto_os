@@ -2747,7 +2747,7 @@ writes) + the workspace-role axis on the agent's workspace.
 | Method & path | Role | Body | Response |
 |---|---|---|---|
 | GET /api/v1/workspaces/{id}/personal-agents | scheduled_tasks view + ws viewer | — | `PersonalAgent[]` (first list seeds 4 disabled example agents) |
-| POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?}` | PersonalAgent |
+| POST /api/v1/workspaces/{id}/personal-agents | scheduled_tasks edit + ws editor | `{name, avatar?, soul_md?, provider?, model?, cwd?, browser?, delivery?, enabled?}` — `cwd` (also on PATCH) must be empty (default dir under data_dir) or an absolute path / `~/…` with no `..` segments, else 400; re-checked at run time | PersonalAgent |
 | GET /api/v1/personal-agents/{id} | scheduled_tasks view + ws viewer | — | PersonalAgent |
 | PATCH /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | any subset of the create body | PersonalAgent |
 | DELETE /api/v1/personal-agents/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |

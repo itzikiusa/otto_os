@@ -149,15 +149,39 @@ pub fn default_agent_dir(ctx: &ServerCtx, agent_id: &str) -> std::path::PathBuf 
     ctx.data_dir.join("personal").join(id)
 }
 
+/// Validate a user-chosen agent cwd. Empty → `None` (use the default dir
+/// under data_dir). A chosen cwd is by design (same as a session's cwd), but
+/// it must be an absolute path with no NUL / `..` segments: a relative one
+/// would resolve against the daemon's own cwd, and a `..` walk from a `~/…`
+/// prefix could land outside anything the user actually named. Shared by
+/// the create/update routes (reject at save time) and
+/// [`ensure_agent_workspace`] (re-checked at run time, since the row could
+/// predate the check).
+pub fn validate_agent_cwd(raw: &str) -> Result<Option<std::path::PathBuf>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let expanded = otto_core::paths::expand_tilde(trimmed);
+    let candidate = std::path::PathBuf::from(&expanded);
+    let escapes = candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if !candidate.is_absolute() || escapes || expanded.contains('\0') {
+        return Err(Error::Invalid(format!(
+            "agent cwd must be an absolute path without `..` segments: {trimmed}"
+        )));
+    }
+    Ok(Some(candidate))
+}
+
 /// Resolve + provision the agent's working directory: create it (and
 /// `memory/notes.md`, seeded once), then materialize `soul_md` into the cwd's
 /// CLAUDE.md/AGENTS.md (the swarm `provision` mechanism). Returns the cwd.
 pub async fn ensure_agent_workspace(ctx: &ServerCtx, agent: &PersonalAgent) -> Result<String> {
-    let trimmed = agent.cwd.trim();
-    let dir = if trimmed.is_empty() {
-        default_agent_dir(ctx, &agent.id)
-    } else {
-        std::path::PathBuf::from(otto_core::paths::expand_tilde(trimmed))
+    let dir = match validate_agent_cwd(&agent.cwd)? {
+        Some(chosen) => chosen,
+        None => default_agent_dir(ctx, &agent.id),
     };
     tokio::fs::create_dir_all(dir.join("memory"))
         .await
@@ -581,5 +605,36 @@ mod tests {
         let mut bare = agent.clone();
         bare.soul_md = String::new();
         assert!(!render_identity(&bare).contains("## Who you are"));
+    }
+}
+
+#[cfg(test)]
+mod cwd_tests {
+    use super::validate_agent_cwd;
+
+    #[test]
+    fn empty_means_default() {
+        assert!(validate_agent_cwd("").unwrap().is_none());
+        assert!(validate_agent_cwd("   ").unwrap().is_none());
+    }
+
+    #[test]
+    fn absolute_and_tilde_are_accepted() {
+        assert_eq!(
+            validate_agent_cwd("/tmp/agent").unwrap().unwrap(),
+            std::path::PathBuf::from("/tmp/agent")
+        );
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            validate_agent_cwd("~/agents/x").unwrap().unwrap(),
+            std::path::PathBuf::from(format!("{home}/agents/x"))
+        );
+    }
+
+    #[test]
+    fn relative_parent_and_nul_are_rejected() {
+        for bad in ["agents/x", "./x", "/tmp/../etc", "~/../../etc", "/tmp/a\0b"] {
+            assert!(validate_agent_cwd(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 }

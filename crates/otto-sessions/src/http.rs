@@ -381,7 +381,9 @@ async fn bulk_sessions<S: SessionsCtx>(
             "at most {BULK_CAP} ids per bulk request"
         ))));
     }
-    let mut out = Vec::with_capacity(req.ids.len());
+    // `len()` is already rejected above BULK_CAP; the `min` keeps the bound
+    // visible at the allocation itself.
+    let mut out = Vec::with_capacity(req.ids.len().min(BULK_CAP));
     for id in req.ids {
         let outcome = async {
             let session = ctx.manager().get(&id).await?;
