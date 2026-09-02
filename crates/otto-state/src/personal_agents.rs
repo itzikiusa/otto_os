@@ -803,8 +803,12 @@ impl AgentRoomsRepo {
         row_to_message(&row)
     }
 
-    /// Chronological page: messages with `id > after` (ULIDs sort by time),
-    /// oldest first, capped at `limit`. `after = None` starts from the beginning.
+    /// Chronological page: messages after the `after` message, oldest first,
+    /// capped at `limit`. `after = None` starts from the beginning. Ordering and
+    /// the cursor use the table's monotonic `rowid` (insertion order) rather than
+    /// the ULID `id` — two messages minted in the same millisecond tie on the
+    /// ULID timestamp and would otherwise sort by their random suffix, i.e.
+    /// non-deterministically.
     pub async fn list_messages(
         &self,
         room_id: &str,
@@ -812,7 +816,10 @@ impl AgentRoomsRepo {
         limit: i64,
     ) -> Result<Vec<AgentRoomMessage>> {
         let rows = sqlx::query(
-            "SELECT * FROM agent_room_messages WHERE room_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
+            "SELECT * FROM agent_room_messages \
+             WHERE room_id = ? \
+               AND rowid > COALESCE((SELECT rowid FROM agent_room_messages WHERE id = ?), 0) \
+             ORDER BY rowid ASC LIMIT ?",
         )
         .bind(room_id)
         .bind(after.unwrap_or(""))
