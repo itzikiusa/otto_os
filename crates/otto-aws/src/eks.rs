@@ -282,11 +282,10 @@ pub async fn import_kubeconfig(
         .map(str::to_string);
 
     let id = new_id();
-    let kube_dir = svc.data_dir.join("kube");
-    std::fs::create_dir_all(&kube_dir)
-        .map_err(|e| Error::Internal(format!("create {}: {e}", kube_dir.display())))?;
-    let _ = std::fs::set_permissions(&kube_dir, std::fs::Permissions::from_mode(0o700));
-    let path = kube_dir.join(format!("{id}.yaml"));
+    // Otto-owned location: <data_dir>/kube/<fresh ULID>.yaml — no request
+    // field is a path component (see crate::paths).
+    let kube_dir = crate::paths::owned_dir(&svc.data_dir, "kube")?;
+    let path = crate::paths::owned_file(&kube_dir, &id, "yaml")?;
     let path_s = path.to_string_lossy().into_owned();
 
     let res = svc

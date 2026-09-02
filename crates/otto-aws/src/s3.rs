@@ -372,10 +372,10 @@ pub async fn preview(
             binary: true,
         });
     }
-    let tmp_dir = svc.data_dir.join("tmp");
-    std::fs::create_dir_all(&tmp_dir)
-        .map_err(|e| Error::Internal(format!("create tmp dir: {e}")))?;
-    let tmp = tmp_dir.join(format!("s3-preview-{}", otto_core::new_id()));
+    // Scratch file at an Otto-owned location: <data_dir>/tmp/<fresh ULID>.
+    // `bucket`/`key` only ever travel as argv to the CLI, never into the path.
+    let tmp_dir = crate::paths::owned_dir(&svc.data_dir, "tmp")?;
+    let tmp = crate::paths::owned_file(&tmp_dir, &otto_core::new_id(), "")?;
     let tmp_s = tmp.to_string_lossy().into_owned();
     let range = format!("bytes=0-{}", max - 1);
     let res = svc
