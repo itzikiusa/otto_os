@@ -10,6 +10,7 @@
 import { api } from './client';
 import type {
   BrowserAnnotation,
+  BrowserAskReq,
   BrowserCreateCredentialReq,
   BrowserCredential,
   BrowserLoginResp,
@@ -88,6 +89,12 @@ export function summarize(ws: string, url: string) {
 
 export function sendAnnotation(ws: string, id: string, sessionId: string) {
   return api.post<void>(`${base(ws)}/annotations/${id}/send`, { session_id: sessionId });
+}
+
+/** Submit one "ask" turn into an agent session: page URL + the given marks
+ *  (fenced server-side) + the user's question. */
+export function ask(ws: string, body: BrowserAskReq) {
+  return api.post<void>(`${base(ws)}/ask`, body);
 }
 
 export function vaultSave(ws: string, body: { url: string; vault_id: number; summary?: string }) {

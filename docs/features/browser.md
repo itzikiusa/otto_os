@@ -25,12 +25,20 @@ loopback, private, and cloud-metadata addresses are refused with a `400`.
   into a few sentences for a developer notebook.
 - **Send to session** — write an annotation's `[Browser mark] …` context block
   straight into a live agent session's input.
+- **Embedded agent** — an agent session docked under the page (its real
+  terminal, the same one Agents uses — you type to it directly) plus an
+  **ask bar** that sends one turn carrying the page you're on, the marks on
+  it, and your question, so "what does the element I marked do?" needs no
+  further explanation. See "Embedded agent & the ask bar" below.
+- **Agent-mode v1/v2 switch** — the right panel's Browser tab in an agent
+  session can host either the original per-session browser (v1) or this
+  module (v2). See "Two browsers, one switch" below.
 - **Save to Vault** — write an OKF-flavored note (front-matter, summary, one
   `## Mark N` section per annotation) into a doc vault.
 - **Agent MCP tools** — `browser_navigate` / `browser_page` / `browser_query` /
-  `browser_summarize` / `browser_login`, so an agent session can drive the same
-  fetch pipeline (and, opt-in, sign in to a stored credential) without going
-  through the UI.
+  `browser_summarize` / `browser_marks` / `browser_login`, so an agent session
+  can drive the same fetch pipeline, read the user's marks, and (opt-in) sign
+  in to a stored credential without going through the UI.
 - **Site Credentials** — save a domain/username/password Otto can autofill on
   request; the password lives in the macOS Keychain, never in the database or a
   log line, and an agent only gets to use one you've explicitly opted in
@@ -92,6 +100,7 @@ fetch)" for the full request/response table. Summary:
 | `GET/POST /workspaces/{wid}/browser/credentials` | list (password never included) / create a Site Credential — password goes straight to the Keychain |
 | `PATCH/DELETE /browser/credentials/{id}` | update (optionally rotate the password) / remove a credential (also deletes its Keychain entry) |
 | `POST /browser/credentials/{id}/reveal` | `{confirm:true}` → `{password}` — the only route that ever returns the plaintext password |
+| `POST /workspaces/{wid}/browser/ask` | `{session_id,url,text,annotation_ids?}` → 200 — the ask bar's turn: page + marks + question, see below |
 | `POST /workspaces/{wid}/browser/login` | `{domain}` → `{logged_in,engine}` — governed agent sign-in, see below |
 
 WS events: `browser_tab_updated{tab}`, `browser_annotation_added{annotation}` (see
@@ -99,7 +108,7 @@ WS events: `browser_tab_updated{tab}`, `browser_annotation_added{annotation}` (s
 
 ## Agent MCP tools
 
-Every tool-capable session gets five `browser_*` tools alongside the rest of
+Every tool-capable session gets six `browser_*` tools alongside the rest of
 Otto's first-party MCP surface (`crates/ottod/src/mcp_tools.rs`), authorizing as
 the session's own owner (the same `WorkspaceRole::Editor` gate a human hits — no
 more):
@@ -110,6 +119,7 @@ more):
 | `browser_page` | `url` | `{markdown,title,engine,degraded}` |
 | `browser_query` | `url, selector` | `{matches:[{selector,outer_html,text}]}` |
 | `browser_summarize` | `url` | `{summary,engine,degraded}` |
+| `browser_marks` | `url?` | `{marks:[{id,url,selector,text,excerpt,comment,created_at}]}` — the user's marks in this workspace (one page with `url`), oldest first; `excerpt` capped at 1 000 chars per mark. "The element I marked" lives here |
 | `browser_login` | `domain` | `{logged_in,engine}` — signs in with a stored credential the user marked "allow agent use"; the password never enters the tool call, its result, or the audit log |
 
 `browser_page` drops the route's `url`/`html` fields from what the agent sees — the
@@ -144,9 +154,65 @@ isn't reachable via `browser_login` today; sign in manually in a reader/live
 tab instead. Login also requires the Lightpanda engine (`login()` runs JS) — a
 fallback-only daemon answers every `browser_login` call with a `502`.
 
+## Embedded agent & the ask bar
+
+The Browser page docks an agent session under the page — the same pattern as
+Canvas's Assistant, the DB Assistant, and the inline PR-review / workflow
+terminals: the agent's real terminal (`Terminal.svelte`, `readOnly=false`, so
+you type to it directly, resume it, and so on) rather than a chat facsimile.
+The dock (`ui/src/modules/browser/AgentDock.svelte`) starts detached:
+**New agent** creates an ordinary agent session (`title:"Browser agent"`,
+`meta.origin:"browser"`, `meta.browser:true` so the CLI also gets the browser
+MCP server, cwd = the workspace root) *without* navigating away — it shows up
+in Agents like any other session — and **Attach…** binds an existing agent
+session instead. The binding is remembered per workspace
+(`localStorage` `otto_browser_agent_<wid>`) and dropped automatically once
+the session is archived or gone. Collapse it with the chevron; drag its top
+edge to resize (persisted).
+
+The **ask bar** (`AskBar.svelte`) under the terminal is how the agent learns
+what you're looking at. ⏎ submits `POST /workspaces/{wid}/browser/ask` with
+the active tab's URL, the marks on that page (the chip toggles them; on by
+default, newest 20), and your question; the daemon writes one turn into the
+session:
+
+```text
+[Browser context] The user is viewing <url> — "<title>" in Otto's Browser and is asking you about it. 2 element(s) marked on this page follow (newest last) — "the element I marked" refers to these. Use browser_page / browser_query on the URL to read the page.
+[Browser mark 1/2]
+[Browser mark] <url> — "<title>"
+<fenced Selector / Excerpt / Note from user — see "Prompt-injection defense">
+[Browser mark 2/2]
+…
+Question from user:
+<your question>
+```
+
+Marking an element (reader click-to-annotate or the live-tab picker) focuses
+the ask bar with an "ask about the element you just marked" hint, so mark →
+question is one keystroke. Marks made *after* an ask, or a follow-up
+question typed straight into the terminal, are covered by the agent's own
+`browser_marks` tool. Typing into the terminal itself sends nothing extra —
+the ask bar is the only path that attaches page context.
+
+## Two browsers, one switch
+
+Otto currently has two in-app browsers: the original per-session one in an
+agent session's right panel (`ui/src/modules/panels/BrowserPanel.svelte` —
+native tabs, a "take over" picker whose comments post straight into the
+active session, no persistence) and this module. They are meant to converge
+on this module; until then the right panel's **Browser** tab carries a
+**v1 / v2** switch (`ui.browserPanelVersion`, persisted, default `v1` so
+nothing changes for existing users). `v2` mounts this module inside the panel
+(`BrowserPanelV2.svelte` → `BrowserView embedded`) with its tabs, marks and
+the ask bar aimed at the *active* agent session — no second dock, since the
+session is the pane beside it. The switch exists only in agent mode; the
+Browser page itself is always this module. The two hosts share the `browser`
+store but are never mounted together (the panel only exists on the Agents
+module), so they never contend for a live tab's native webview.
+
 ## Prompt-injection defense
 
-`/summarize`, `/annotations/{id}/send`, and `/vault-save` all embed
+`/summarize`, `/annotations/{id}/send`, `/ask`, and `/vault-save` all embed
 attacker-controlled page content (fetched markdown, an annotation's
 excerpt/comment) into text handed to a tool-using agent. Every embed goes through
 `fence_untrusted`/`build_context_block` in `routes/browser.rs`: it's wrapped in a

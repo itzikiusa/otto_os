@@ -590,6 +590,25 @@ class WorkspaceStore {
     return this.openInSplit(s.id);
   }
 
+  /**
+   * Like {@link createSession} but does NOT route to the new session — for
+   * hosts that embed the session where they are (the Browser page's agent
+   * dock) and must stay put. Same device stamp + list/status bookkeeping.
+   */
+  async createSessionQuiet(req: CreateSessionReq): Promise<Session> {
+    if (!this.currentId) throw new Error('no workspace selected');
+    const stamped: CreateSessionReq = {
+      ...req,
+      meta: { ...(req.meta ?? {}), client_id: clientId() },
+    };
+    const s = await api.post<Session>(`/workspaces/${this.currentId}/sessions`, stamped);
+    if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
+      this.sessions = [...this.sessions, s];
+    }
+    this.statusMap[s.id] = s.status;
+    return s;
+  }
+
   async createSession(req: CreateSessionReq): Promise<Session> {
     if (!this.currentId) throw new Error('no workspace selected');
     // Stamp the device that started this session (preserving any caller meta,

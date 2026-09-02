@@ -943,6 +943,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{wid}/browser/summarize"
         || p == "/workspaces/{wid}/browser/vault-save"
         || p == "/workspaces/{wid}/browser/annotations/{id}/send"
+        || p == "/workspaces/{wid}/browser/ask"
     {
         return Require(Browser, Edit);
     }
@@ -1873,6 +1874,10 @@ mod tests {
                 Method::POST,
                 "/api/v1/workspaces/{wid}/browser/annotations/{id}/send"
             ),
+            Require(Browser, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{wid}/browser/ask"),
             Require(Browser, Edit)
         );
     }

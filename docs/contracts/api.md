@@ -2922,6 +2922,7 @@ denylist/fallback policy with `/page`. Broadcasts `browser_tab_updated`
 | DELETE /api/v1/browser/annotations/{id} | ws editor · Browser Edit | — | 204 |
 | POST /api/v1/workspaces/{wid}/browser/summarize | ws editor · Browser Edit | `{url}` | `{summary, engine, degraded}` |
 | POST /api/v1/workspaces/{wid}/browser/annotations/{id}/send | ws editor · Browser Edit | `{session_id}` | 200 |
+| POST /api/v1/workspaces/{wid}/browser/ask | ws editor · Browser Edit | `{session_id, url, text, annotation_ids?}` | 200 — one submitted turn: `[Browser context]` (the page URL + title) + every listed mark (each a fenced `[Browser mark]` block, see below) + `Question from user:` + `text`. `text` is required (trimmed, ≤ 8 000 chars), `url` must parse, ≤ 20 `annotation_ids` — each must belong to `{wid}` (404 otherwise), as must the session |
 | POST /api/v1/workspaces/{wid}/browser/vault-save | ws editor · Browser Edit | `{url, vault_id, summary?}` | `{note_path}` |
 | GET /api/v1/workspaces/{wid}/browser/credentials | ws editor · Browser Edit | — | `BrowserCredential[]` — **never includes the password**; listing requires Edit (not View) since credentials are sensitive |
 | POST /api/v1/workspaces/{wid}/browser/credentials | ws editor · Browser Edit | `{domain, username, password, allow_agent_use?, notes?}` | `BrowserCredential` — writes the password to the Keychain (`secrets.put`), stores only the resulting `keychain_ref` |
@@ -2976,7 +2977,7 @@ thing this route logs (`tracing::info!`) is the domain and the boolean
 outcome, matching `reveal_credential`'s domain/username/password-free audit
 discipline.
 
-Both `/summarize` and `/annotations/{id}/send` embed attacker-controlled page
+`/summarize`, `/annotations/{id}/send`, and `/ask` all embed attacker-controlled page
 content (the fetched markdown; the annotation's excerpt/comment) into text
 handed to a tool-using agent session — a page/excerpt that reads "ignore
 previous instructions and…" would otherwise be indistinguishable from the

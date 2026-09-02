@@ -5,6 +5,7 @@
   import GitPanel from '../modules/git/GitPanel.svelte';
   import InfoPanel from '../modules/panels/InfoPanel.svelte';
   import BrowserPanel from '../modules/panels/BrowserPanel.svelte';
+  import BrowserPanelV2 from '../modules/panels/BrowserPanelV2.svelte';
   import FilesPanel from '../modules/panels/FilesPanel.svelte';
   import ActivityPanel from '../modules/panels/ActivityPanel.svelte';
   import CanvasPanel from '../modules/panels/CanvasPanel.svelte';
@@ -157,7 +158,33 @@
       {:else if ui.rightTab === 'info'}
         <InfoPanel />
       {:else if ui.rightTab === 'browser'}
-        <BrowserPanel />
+        <!-- Transitional v1/v2 switch: v1 is the original per-session panel,
+             v2 embeds the Browser module (persisted tabs/marks + ask bar).
+             Only here, in agent mode — the Browser page itself is always v2. -->
+        <div class="browser-host">
+          <div class="browser-ver" role="group" aria-label="Browser version">
+            <span class="dim">Browser</span>
+            <button
+              class="ver"
+              class:active={ui.browserPanelVersion === 'v1'}
+              aria-pressed={ui.browserPanelVersion === 'v1'}
+              onclick={() => ui.setBrowserPanelVersion('v1')}
+              title="v1 — per-session browser: native tabs + take-over picker"
+            >v1</button>
+            <button
+              class="ver"
+              class:active={ui.browserPanelVersion === 'v2'}
+              aria-pressed={ui.browserPanelVersion === 'v2'}
+              onclick={() => ui.setBrowserPanelVersion('v2')}
+              title="v2 — the Browser module: reader/live tabs, saved marks, ask the agent"
+            >v2</button>
+          </div>
+          {#if ui.browserPanelVersion === 'v2'}
+            <BrowserPanelV2 />
+          {:else}
+            <BrowserPanel />
+          {/if}
+        </div>
       {:else if ui.rightTab === 'api'}
         <ApiPanel />
       {:else}
@@ -280,6 +307,44 @@
     flex: 1;
     overflow-y: auto;
     min-height: 0;
+  }
+  .browser-host {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .browser-host > :global(:not(.browser-ver)) {
+    flex: 1;
+    min-height: 0;
+  }
+  .browser-ver {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.72rem;
+  }
+  .browser-ver .dim {
+    color: var(--text-dim);
+    margin-right: auto;
+  }
+  .ver {
+    height: 20px;
+    padding: 0 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 0.7rem;
+    cursor: pointer;
+  }
+  .ver.active {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .rstrip {
     width: 36px;
