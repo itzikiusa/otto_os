@@ -1222,7 +1222,7 @@ export interface NotificationSettings {
 // RBAC — features + capabilities
 // ---------------------------------------------------------------------------
 
-/** The 25 protected features (snake_case, mirrors Rust Feature enum). */
+/** The 32 protected features (snake_case, mirrors Rust Feature enum). */
 export type Feature =
   | 'agents'
   | 'connections'
@@ -1248,7 +1248,14 @@ export type Feature =
   | 'mission_control'
   | 'scheduled_tasks'
   | 'run_with_otto'
-  | 'browser';
+  | 'browser'
+  | 'aws'
+  | 'aws_s3'
+  | 'aws_sqs'
+  | 'aws_ec2'
+  | 'aws_athena'
+  | 'aws_eks'
+  | 'kubernetes';
 
 /** Capability ladder (None < View < Edit < Admin). */
 export type Capability = 'none' | 'view' | 'edit' | 'admin';

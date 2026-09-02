@@ -289,6 +289,12 @@ fn scope_of(event: &Event) -> Scope<'_> {
         Event::UsageMetricsTick { .. }
         | Event::ImprovementUpdated { .. }
         | Event::InsightReady { .. } => Scope::Everyone,
+        // AWS / Kubernetes console registries are global libraries (like
+        // connections); the install-job ticks are machine-wide.
+        Event::AwsAccountUpdated { .. }
+        | Event::AwsInstallUpdated { .. }
+        | Event::K8sClusterUpdated { .. }
+        | Event::K8sInstallUpdated { .. } => Scope::Everyone,
     }
 }
 

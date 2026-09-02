@@ -50,6 +50,66 @@ impl otto_sessions::SessionsCtx for ServerCtx {
     }
 }
 
+impl PtySpawner {
+    async fn spawn_adhoc(
+        &self,
+        ws_id: &Id,
+        user_id: &Id,
+        provider: &str,
+        spec: CommandSpec,
+        title: String,
+        meta: Option<serde_json::Value>,
+    ) -> Result<Session> {
+        let ws = self.workspaces.get(ws_id).await?;
+        let req = CreateSessionReq {
+            kind: SessionKind::Connection,
+            provider: Some(provider.to_string()),
+            title: Some(title),
+            cwd: None,
+            connection_id: None,
+            model: None,
+            meta,
+        };
+        self.manager.create(&ws, user_id, req, Some(spec)).await
+    }
+}
+
+impl otto_aws::AwsCtx for ServerCtx {
+    fn pool(&self) -> otto_state::SqlitePool {
+        self.pool.clone()
+    }
+    fn secrets(&self) -> &Arc<dyn otto_core::secrets::SecretStore> {
+        &self.secrets
+    }
+    fn events(&self) -> &tokio::sync::broadcast::Sender<otto_core::event::Event> {
+        &self.events
+    }
+    fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+    fn spawner(&self) -> &Arc<dyn Spawner> {
+        &self.spawner
+    }
+}
+
+impl otto_k8s::K8sCtx for ServerCtx {
+    fn pool(&self) -> otto_state::SqlitePool {
+        self.pool.clone()
+    }
+    fn secrets(&self) -> &Arc<dyn otto_core::secrets::SecretStore> {
+        &self.secrets
+    }
+    fn events(&self) -> &tokio::sync::broadcast::Sender<otto_core::event::Event> {
+        &self.events
+    }
+    fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+    fn spawner(&self) -> &Arc<dyn Spawner> {
+        &self.spawner
+    }
+}
+
 impl otto_connections::ConnectionsCtx for ServerCtx {
     fn connections(&self) -> &Arc<ConnectionsService> {
         &self.connections
@@ -450,6 +510,18 @@ impl Spawner for PtySpawner {
             }
             Ok(session)
         })
+    }
+
+    fn spawn_command<'a>(
+        &'a self,
+        ws_id: &'a Id,
+        user_id: &'a Id,
+        provider: &'a str,
+        spec: CommandSpec,
+        title: String,
+        meta: Option<serde_json::Value>,
+    ) -> BoxFuture<'a, Result<Session>> {
+        Box::pin(self.spawn_adhoc(ws_id, user_id, provider, spec, title, meta))
     }
 }
 
@@ -5995,6 +6067,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
     let api = vec![
         otto_sessions::api_router::<ServerCtx>(),
         otto_connections::api_router::<ServerCtx>(),
+        otto_aws::api_router::<ServerCtx>(),
+        otto_k8s::api_router::<ServerCtx>(),
         otto_dbviewer::api_router::<ServerCtx>(),
         otto_brokers::api_router::<ServerCtx>(),
         otto_mcp::api_router::<ServerCtx>(),

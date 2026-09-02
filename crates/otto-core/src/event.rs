@@ -422,6 +422,16 @@ pub enum Event {
         workspace_id: Id,
         annotation: serde_json::Value,
     },
+    /// AWS console: an account row was created/updated/deleted. Accounts are a
+    /// global library (no workspace axis) — delivered to everyone; the client
+    /// re-lists (RBAC filtering happens on the list call).
+    AwsAccountUpdated { account_id: Id, deleted: bool },
+    /// AWS console: the CLI installer job changed state (`idle|running|done|failed`).
+    AwsInstallUpdated { tool: String, state: String },
+    /// Kubernetes console: a cluster row was created/updated/deleted (global).
+    K8sClusterUpdated { cluster_id: Id, deleted: bool },
+    /// Kubernetes console: the kubectl/k9s installer job changed state.
+    K8sInstallUpdated { tool: String, state: String },
 }
 
 #[cfg(test)]

@@ -3353,6 +3353,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-aws"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "chrono",
+ "futures-util",
+ "http-body-util",
+ "otto-connections",
+ "otto-core",
+ "otto-pty",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "otto-brokers"
 version = "0.1.0"
 dependencies = [
@@ -3592,6 +3612,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-k8s"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "chrono",
+ "futures-util",
+ "http-body-util",
+ "otto-connections",
+ "otto-core",
+ "otto-pty",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "otto-keychain"
 version = "0.1.0"
 dependencies = [
@@ -3740,6 +3780,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "mime_guess",
+ "otto-aws",
  "otto-brokers",
  "otto-browser",
  "otto-canvas",
@@ -3751,6 +3792,7 @@ dependencies = [
  "otto-git",
  "otto-improve",
  "otto-issues",
+ "otto-k8s",
  "otto-keychain",
  "otto-mcp",
  "otto-memory",
