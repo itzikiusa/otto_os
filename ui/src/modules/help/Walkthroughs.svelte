@@ -13,9 +13,22 @@
     tags: string;
   }
 
-  // One entry per rendered composition in marketing/videos/ (→ ui/public/walkthroughs/).
-  // Order = recommended viewing order (Intro → features). Keep in sync with
-  // marketing/videos/src/Root.tsx + render-all.mjs.
+  // The MP4s are NOT bundled with the app (they were ~135 MB and were baked
+  // into both ottod's embed-ui and the Tauri bundle). They are hosted as assets
+  // of the rolling GitHub release tagged `walkthroughs`
+  // (packaging/publish-walkthroughs.sh re-encodes + uploads them). Override the
+  // base URL at build time with VITE_WALKTHROUGHS_BASE (e.g. a mirror / CDN).
+  const WALKTHROUGHS_BASE: string =
+    import.meta.env.VITE_WALKTHROUGHS_BASE ??
+    'https://github.com/itzikiusa/otto_os/releases/download/walkthroughs';
+
+  function videoUrl(file: string): string {
+    return `${WALKTHROUGHS_BASE.replace(/\/+$/, '')}/${file}`;
+  }
+
+  // One entry per rendered composition in marketing/videos/ (→ marketing/videos/out/,
+  // published to the `walkthroughs` release). Order = recommended viewing order
+  // (Intro → features). Keep in sync with marketing/videos/src/Root.tsx + render-all.mjs.
   const videos: VideoItem[] = [
     { file: 'Intro.mp4',          title: 'Welcome to Otto',         desc: 'Run many AI coding agents — and your whole workflow — in one native window.',                              tags: 'intro welcome overview onboarding first steps tour' },
     { file: 'Sessions.mp4',       title: 'Agent Sessions',          desc: 'claude, codex, agy & shell as live PTY sessions — tiled, broadcast, resumable, auto-trusted.',             tags: 'agent session terminal pty tiled broadcast resume trust claude codex shell' },
@@ -48,6 +61,23 @@
   let videoEl: HTMLVideoElement | null = $state(null);
   let searchQuery = $state('');
   let railEl: HTMLElement | null = $state(null);
+  // Per-file load state: files that failed to load (offline / blocked / 404)
+  // render the "unavailable" placeholder instead of a black box. Kept as a
+  // set so switching away and back doesn't re-hit a known-dead URL until the
+  // user explicitly retries.
+  let failed = $state(new Set<string>());
+  let loading = $state(false);
+
+  function onVideoError(file: string): void {
+    failed = new Set([...failed, file]);
+    loading = false;
+  }
+
+  function retry(file: string): void {
+    const next = new Set(failed);
+    next.delete(file);
+    failed = next;
+  }
 
   // ---- filtered list ----
   const filteredVideos = $derived.by(() => {
@@ -67,9 +97,12 @@
   }
 
   // Auto-play whenever a new video element is bound (after key block re-mounts).
+  // play() rejects when the stream can't be fetched (offline) or autoplay is
+  // blocked — swallow it; the `error` event drives the placeholder state.
   $effect(() => {
     if (videoEl) {
-      void videoEl.play();
+      loading = true;
+      videoEl.play().catch(() => {});
     }
   });
 
@@ -166,14 +199,42 @@
         <p class="player-desc">{current.desc}</p>
       </div>
       {#key current.file}
-        <!-- svelte-ignore a11y_media_has_caption -->
-        <video
-          bind:this={videoEl}
-          class="video-el"
-          controls
-          preload="metadata"
-          src="/walkthroughs/{current.file}"
-        ></video>
+        {#if failed.has(current.file)}
+          <div class="video-fallback" role="status">
+            <span class="fallback-icon" aria-hidden="true">▶</span>
+            <p class="fallback-title">Video unavailable offline</p>
+            <p class="fallback-sub">
+              The walkthroughs stream from GitHub and aren't bundled with Otto.
+            </p>
+            <div class="fallback-actions">
+              <a class="fallback-link" href={videoUrl(current.file)} target="_blank" rel="noopener noreferrer">
+                Open on GitHub ↗
+              </a>
+              <button class="fallback-retry" onclick={() => retry(current.file)}>Retry</button>
+            </div>
+          </div>
+        {:else}
+          <div class="video-frame" class:loading>
+            <!-- preload="metadata" (never "auto"): only the moov atom + first
+                 frame are fetched per selected video; nothing is fetched for
+                 the other 24 entries in the rail. -->
+            <!-- svelte-ignore a11y_media_has_caption -->
+            <video
+              bind:this={videoEl}
+              class="video-el"
+              controls
+              preload="metadata"
+              playsinline
+              src={videoUrl(current.file)}
+              onerror={() => onVideoError(current.file)}
+              onloadeddata={() => (loading = false)}
+              oncanplay={() => (loading = false)}
+            ></video>
+            {#if loading}
+              <div class="video-loading dim" aria-hidden="true">Loading…</div>
+            {/if}
+          </div>
+        {/if}
       {/key}
     </div>
   </div>
@@ -355,6 +416,13 @@
     margin: 0;
   }
 
+  .video-frame {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+
   .video-el {
     flex: 1;
     min-height: 0;
@@ -364,5 +432,93 @@
     background: #000;
     display: block;
     object-fit: contain;
+  }
+
+  /* Poster-less placeholder while metadata/first frame streams in. */
+  .video-loading {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-size: 12px;
+    color: color-mix(in srgb, #fff 55%, transparent);
+    pointer-events: none;
+    border-radius: var(--radius-s, 6px);
+  }
+
+  /* Offline / blocked / 404 state — same footprint as the player. */
+  .video-fallback {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    text-align: center;
+    padding: 24px;
+    border-radius: var(--radius-s, 6px);
+    border: 1px dashed var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+  }
+
+  .fallback-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 16px;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+    margin-bottom: 6px;
+  }
+
+  .fallback-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    margin: 0;
+  }
+
+  .fallback-sub {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 0;
+    max-width: 380px;
+  }
+
+  .fallback-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 10px;
+  }
+
+  .fallback-link {
+    font-size: 12.5px;
+    color: var(--accent);
+    text-decoration: none;
+    padding: 5px 10px;
+    border-radius: var(--radius-s, 5px);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+
+  .fallback-link:hover {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+
+  .fallback-retry {
+    font-size: 12.5px;
+    padding: 5px 10px;
+    border-radius: var(--radius-s, 5px);
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  .fallback-retry:hover {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
   }
 </style>
