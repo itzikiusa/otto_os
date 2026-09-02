@@ -86,7 +86,7 @@ ENCODE_ONLY=1 OUT_DIR=/tmp/wt packaging/publish-walkthroughs.sh   # just encode
 ```
 
 The script re-encodes to 1280x720 H.264 (`-crf 30 -preset slow -pix_fmt yuv420p
--movflags +faststart`, audio copied) — roughly a 3–4× reduction from the 1080p
+-movflags +faststart`, audio re-encoded to 128k AAC) — roughly a 10× reduction from the 1080p
 masters — creates the release if missing (`--prerelease`, so it never shows as
 "Latest"), and replaces the assets in place so the URLs stay stable. Asset names
 must match `file:` in `Walkthroughs.svelte`; add a row there when you add a

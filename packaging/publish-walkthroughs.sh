@@ -11,6 +11,7 @@
 #   packaging/publish-walkthroughs.sh [src-dir]        # default: marketing/videos/out
 #   ENCODE_ONLY=1 packaging/publish-walkthroughs.sh    # re-encode, skip the upload
 #   CRF=27 packaging/publish-walkthroughs.sh           # sharper (bigger) output
+#   AUDIO_KBPS=96 packaging/publish-walkthroughs.sh    # audio bitrate (AAC), default 128
 #   OUT_DIR=/path packaging/publish-walkthroughs.sh    # keep the encoded files
 #
 # Requires: ffmpeg + ffprobe on PATH (brew install ffmpeg), gh authenticated
@@ -20,6 +21,7 @@ set -euo pipefail
 REPO="${REPO:-itzikiusa/otto_os}"
 TAG="${TAG:-walkthroughs}"
 CRF="${CRF:-30}"
+AUDIO_KBPS="${AUDIO_KBPS:-128}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${1:-$ROOT/marketing/videos/out}"
 
@@ -41,9 +43,11 @@ echo "== re-encoding ${#FILES[@]} file(s) from $SRC → $OUT (1280x720 H.264 crf
 before=0; after=0
 for f in "${FILES[@]}"; do
   n="$(basename "$f")"
-  # Copy the audio track when present; Remotion emits AAC we don't need to touch.
+  # Re-encode audio to 128k AAC when a track is present. Remotion's masters carry
+  # a ~317 kbps AAC track that would otherwise dominate the 720p files (video
+  # lands around 165 kbps at crf 30).
   if ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$f" | grep -q audio; then
-    audio=(-c:a copy)
+    audio=(-c:a aac -b:a "$AUDIO_KBPS"k)
   else
     audio=(-an)
   fi
