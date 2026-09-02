@@ -723,6 +723,11 @@ async fn gc_old_worktrees(
             continue;
         };
         let path = worktrees_dir.join(&stamp);
+        // `safe_component` above already rules out separators / `..`; keep the
+        // containment explicit at the site of the recursive delete.
+        if !path.starts_with(worktrees_dir) {
+            continue;
+        }
         let branch = format!("otto/scheduled/{}/{stamp}", short(task_id));
         let _ = git.worktree_remove(&path.to_string_lossy()).await;
         let _ = git.delete_branch(&branch, true).await;

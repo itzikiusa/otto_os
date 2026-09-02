@@ -240,6 +240,9 @@ async fn create(
     check_provider(&provider)?;
     let delivery = req.delivery.unwrap_or_else(|| json!({"type":"none"}));
     check_delivery(&delivery)?;
+    if let Some(c) = req.cwd.as_deref() {
+        personal_agents_engine::validate_agent_cwd(c).map_err(ApiError)?;
+    }
     let agent = agents(&ctx)
         .create(NewPersonalAgent {
             avatar: req.avatar.unwrap_or_default(),
@@ -284,6 +287,9 @@ async fn update(
     }
     if let Some(d) = &req.delivery {
         check_delivery(d)?;
+    }
+    if let Some(c) = req.cwd.as_deref() {
+        personal_agents_engine::validate_agent_cwd(c).map_err(ApiError)?;
     }
     let updated = repo
         .update(
