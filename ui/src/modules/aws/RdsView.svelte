@@ -290,6 +290,9 @@
   }
   .tbl {
     width: 100%;
+    /* With the drawer open the pane gets narrow; keep the columns readable
+       and let .tbl-wrap scroll sideways instead of squeezing every cell. */
+    min-width: 820px;
     border-collapse: collapse;
     font-size: 12.5px;
   }
