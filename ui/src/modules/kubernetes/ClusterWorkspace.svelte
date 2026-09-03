@@ -109,6 +109,10 @@
   }
   function closeDrawer(): void {
     autoExec = false;
+    // A single click selects WITHOUT touching the URL, so navigating to the
+    // kind route alone is a no-op when nothing deeper was ever routed to —
+    // clear the selection explicitly as well.
+    k8s.select(null);
     router.go(`${base}/${kind}`);
   }
   function switchCluster(id: string): void {
