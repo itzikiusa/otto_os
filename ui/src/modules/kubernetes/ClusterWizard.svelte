@@ -124,7 +124,7 @@
         const c = await k8s.updateCluster(existing.id, {
           name: name.trim(),
           context_name: contextName.trim() || existing.context_name,
-          default_namespace: defaultNs.trim() || null,
+          default_namespace: defaultNs.trim().toLowerCase() || null,
           environment: env,
         });
         toasts.success('Cluster updated', c.name);
@@ -138,7 +138,7 @@
             name: name.trim(),
             kubeconfig_yaml: yamlText,
             context_name: pasteContext.trim() || null,
-            default_namespace: defaultNs.trim() || null,
+            default_namespace: defaultNs.trim().toLowerCase() || null,
             environment: env,
           }),
         );
@@ -149,7 +149,7 @@
             source: 'kubeconfig',
             kubeconfig_path: kubeconfigPath || null,
             context_name: contextName.trim(),
-            default_namespace: defaultNs.trim() || null,
+            default_namespace: defaultNs.trim().toLowerCase() || null,
             environment: env,
           }),
         );
@@ -161,7 +161,7 @@
               source: 'kubeconfig',
               kubeconfig_path: c.kubeconfig_path,
               context_name: c.name,
-              default_namespace: defaultNs.trim() || c.namespace || null,
+              default_namespace: defaultNs.trim().toLowerCase() || c.namespace || null,
               environment: env,
             }),
           );
@@ -253,7 +253,7 @@
       {/if}
       <div class="field">
         <label for="k8s-ns">Default namespace <span class="dim">(blank = all namespaces)</span></label>
-        <input id="k8s-ns" class="input mono" bind:value={defaultNs} placeholder="default" />
+        <input id="k8s-ns" class="input mono" bind:value={defaultNs} placeholder="default" autocapitalize="off" autocorrect="off" spellcheck={false} />
       </div>
       <div class="field">
         <span class="lbl">Environment</span>
