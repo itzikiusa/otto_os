@@ -25,7 +25,7 @@ use crate::clusters::{
     self, Clusters, ImportK8sClusterReq, PatchK8sClusterReq, UpsertK8sClusterReq,
 };
 use crate::install::{self, InstallJob, Tool, ToolStatus};
-use crate::logs::{self, LogsQuery};
+use crate::logs::{self, LogTarget, LogsQuery, SelectorLogsQuery};
 use crate::resources::{self, Kind};
 use crate::sessions::{self, ExecReq, K9sReq};
 use crate::K8sCtx;
@@ -138,6 +138,7 @@ pub fn api_router<S: K8sCtx>() -> Router<S> {
             "/k8s/clusters/{id}/pods/{ns}/{name}/logs",
             get(pod_logs::<S>),
         )
+        .route("/k8s/clusters/{id}/logs", get(selector_logs::<S>))
         .route("/k8s/clusters/{id}/metrics", get(metrics::<S>))
         .route("/k8s/clusters/{id}/exec", post(exec::<S>))
         .route("/k8s/clusters/{id}/k9s", post(k9s::<S>))
@@ -370,6 +371,35 @@ async fn pod_logs<S: K8sCtx>(
         return Ok((headers, body).into_response());
     }
     let text = logs::fetch(&k, &ns, &name, &q).await?;
+    Ok((headers, Body::from(text)).into_response())
+}
+
+/// Workload-level logs: every pod matching `selector` in `ns`, each line
+/// prefixed `[pod/<pod>/<container>] `. Same one-shot / follow semantics as
+/// the per-pod route.
+async fn selector_logs<S: K8sCtx>(
+    State(ctx): State<S>,
+    Path(id): Path<Id>,
+    Query(q): Query<SelectorLogsQuery>,
+) -> ApiResult<Response> {
+    let ns = q.ns.trim();
+    let sel = q.selector.trim();
+    if ns.is_empty() || sel.is_empty() {
+        return Err(Error::Invalid("ns and selector are required".into()).into());
+    }
+    let c = Clusters::new(&ctx).get(&id).await?;
+    let k = clusters::kubectl_for(&ctx, &c).await?;
+    let headers = [
+        (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+        (header::CACHE_CONTROL, "no-cache"),
+        (header::HeaderName::from_static("x-accel-buffering"), "no"),
+    ];
+    let lq = q.logs();
+    if lq.follow == Some(true) {
+        let body = logs::follow_target(&k, ns, LogTarget::Selector(sel), &lq)?;
+        return Ok((headers, body).into_response());
+    }
+    let text = logs::fetch_target(&k, ns, LogTarget::Selector(sel), &lq).await?;
     Ok((headers, Body::from(text)).into_response())
 }
 

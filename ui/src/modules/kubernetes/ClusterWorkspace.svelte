@@ -107,6 +107,14 @@
     if (tab) k8s.drawerTab = tab;
     router.go(`${base}/${kind}/${encodeURIComponent(r.namespace || '-')}/${encodeURIComponent(r.name)}`);
   }
+  /** From a workload drawer to one of its pods: switch the table to Pods and
+   *  route to that pod so its own drawer (Logs / Terminal / Metrics) opens. */
+  function openPod(podNs: string, pod: string, tab?: K8sDrawerTab): void {
+    autoExec = false;
+    k8s.drawerTab = tab ?? 'overview';
+    if (podNs && podNs !== k8s.namespace && k8s.namespace !== '') k8s.setNamespace(podNs);
+    router.go(`${base}/pods/${encodeURIComponent(podNs || '-')}/${encodeURIComponent(pod)}`);
+  }
   function closeDrawer(): void {
     autoExec = false;
     // A single click selects WITHOUT touching the URL, so navigating to the
@@ -164,6 +172,9 @@
     if (kind === 'pods') {
       items.push({ label: 'Logs', icon: 'file', action: () => openRow(r, 'logs') });
       if (canEdit) items.push({ label: 'Shell (exec)', icon: 'terminal', action: () => { autoExec = true; openRow(r, 'terminal'); } });
+    } else if (r.extra?.selector) {
+      items.push({ label: 'Pods', icon: 'box', action: () => openRow(r, 'pods') });
+      items.push({ label: 'Logs (all pods)', icon: 'file', action: () => openRow(r, 'logs') });
     }
     const acts = canEdit ? actionsFor(kind, r) : [];
     if (acts.length) {
@@ -410,6 +421,7 @@
               {autoExec}
               ontab={(t) => (k8s.drawerTab = t)}
               onclose={closeDrawer}
+              onopenpod={openPod}
               onaction={(a, r) => void doAction(a, r)}
             />
           {/key}

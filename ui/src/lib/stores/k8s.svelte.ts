@@ -33,7 +33,8 @@ export type K8sDrawerTab =
   | 'events'
   | 'logs'
   | 'terminal'
-  | 'metrics';
+  | 'metrics'
+  | 'pods';
 
 /** A row identity inside the current cluster+kind (the route's `<ns>/<name>`). */
 export interface K8sSelection {

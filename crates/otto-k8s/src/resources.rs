@@ -328,6 +328,25 @@ fn put(extra: &mut BTreeMap<String, String>, k: &str, v: impl ToString) {
     extra.insert(k.to_string(), v.to_string());
 }
 
+/// `spec.selector.matchLabels` as a `k=v,k=v` label selector — what the UI
+/// feeds back as `?label=` to list a workload's pods and `-l` for its logs.
+/// (`matchExpressions` are ignored: rare on workloads, and a partial equality
+/// selector still narrows correctly since pods must match ALL of them.)
+pub fn label_selector(item: &Value) -> Option<String> {
+    let m = item
+        .pointer("/spec/selector/matchLabels")
+        .and_then(Value::as_object)?;
+    let sel: Vec<String> = m
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|v| format!("{k}={v}")))
+        .collect();
+    (!sel.is_empty()).then(|| sel.join(","))
+}
+
+fn put_selector(row: &mut K8sRow, item: &Value) {
+    put_opt(&mut row.extra, "selector", label_selector(item));
+}
+
 fn put_opt(extra: &mut BTreeMap<String, String>, k: &str, v: Option<impl ToString>) {
     if let Some(v) = v {
         extra.insert(k.to_string(), v.to_string());
@@ -420,11 +439,26 @@ pub fn normalize(kind: Kind, item: &Value, now: DateTime<Utc>) -> K8sRow {
     let mut row = base_row(kind, item, now);
     match kind {
         Kind::Pods => pod(&mut row, item),
-        Kind::Deployments => deployment(&mut row, item),
-        Kind::Statefulsets => statefulset(&mut row, item),
-        Kind::Daemonsets => daemonset(&mut row, item),
-        Kind::Replicasets => replicaset(&mut row, item),
-        Kind::Jobs => job(&mut row, item),
+        Kind::Deployments => {
+            deployment(&mut row, item);
+            put_selector(&mut row, item);
+        }
+        Kind::Statefulsets => {
+            statefulset(&mut row, item);
+            put_selector(&mut row, item);
+        }
+        Kind::Daemonsets => {
+            daemonset(&mut row, item);
+            put_selector(&mut row, item);
+        }
+        Kind::Replicasets => {
+            replicaset(&mut row, item);
+            put_selector(&mut row, item);
+        }
+        Kind::Jobs => {
+            job(&mut row, item);
+            put_selector(&mut row, item);
+        }
         Kind::Cronjobs => cronjob(&mut row, item),
         Kind::Services => service(&mut row, item),
         Kind::Ingresses => ingress(&mut row, item),
@@ -432,7 +466,10 @@ pub fn normalize(kind: Kind, item: &Value, now: DateTime<Utc>) -> K8sRow {
         Kind::Secrets => secret(&mut row, item),
         Kind::Pvcs => pvc(&mut row, item),
         Kind::Hpas => hpa(&mut row, item),
-        Kind::Rollouts => rollout(&mut row, item),
+        Kind::Rollouts => {
+            rollout(&mut row, item);
+            put_selector(&mut row, item);
+        }
         Kind::Applications => application(&mut row, item),
         Kind::Events => event(&mut row, item, now),
         Kind::Nodes => {
@@ -852,7 +889,10 @@ fn key_names(item: &Value) -> Vec<String> {
 
 fn configmap(row: &mut K8sRow, item: &Value) {
     let keys = key_names(item);
-    row.status = format!("{} keys", keys.len());
+    row.status = match keys.len() {
+        1 => "1 key".to_string(),
+        n => format!("{n} keys"),
+    };
     row.health = Some(Health::Ok);
     put(&mut row.extra, "keys", keys.join(","));
     put(&mut row.extra, "key_count", keys.len());

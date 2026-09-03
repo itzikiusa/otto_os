@@ -20,6 +20,7 @@
   import LogsView from './LogsView.svelte';
   import ExecView from './ExecView.svelte';
   import MetricsView from './MetricsView.svelte';
+  import WorkloadPods from './WorkloadPods.svelte';
 
   interface Props {
     clusterId: string;
@@ -36,13 +37,29 @@
     ontab: (t: K8sDrawerTab) => void;
     onclose: () => void;
     onaction: (def: ActionDef, row: K8sRow) => void;
+    /** Workloads: jump to one of this object's pods (its own drawer). */
+    onopenpod?: (ns: string, pod: string, tab?: K8sDrawerTab) => void;
   }
-  let { clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction }: Props = $props();
+  let { clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod }: Props = $props();
 
   const isPod = $derived(kind === 'pods');
   const def = $derived(kindDef(kind));
+  /** `spec.selector` of a workload (row extra, or the manifest when the row
+   *  is gone) — unlocks the Pods + Logs tabs. */
+  const selector = $derived.by((): string => {
+    if (isPod) return '';
+    if (row?.extra?.selector) return row.extra.selector;
+    const m = (detail?.manifest as { spec?: { selector?: { matchLabels?: Record<string, string> } } } | null)?.spec?.selector?.matchLabels;
+    return m ? Object.entries(m).map(([k, v]) => `${k}=${v}`).join(',') : '';
+  });
   const TABS = $derived<{ id: K8sDrawerTab; label: string }[]>([
     { id: 'overview', label: 'Overview' },
+    ...(selector
+      ? [
+          { id: 'pods' as const, label: 'Pods' },
+          { id: 'logs' as const, label: 'Logs' },
+        ]
+      : []),
     { id: 'manifest', label: 'Manifest' },
     { id: 'describe', label: 'Describe' },
     { id: 'events', label: 'Events' },
@@ -54,6 +71,15 @@
         ]
       : []),
   ]);
+  /** Container names across the workload's pod template (Logs container filter). */
+  const templateContainers = $derived.by((): K8sContainer[] => {
+    if (isPod || !detail) return [];
+    const spec = (detail.manifest as { spec?: { template?: { spec?: { containers?: { name: string }[]; initContainers?: { name: string }[] } } } }).spec?.template?.spec;
+    const out: K8sContainer[] = [];
+    for (const c of spec?.initContainers ?? []) out.push({ name: c.name, init: true } as K8sContainer);
+    for (const c of spec?.containers ?? []) out.push({ name: c.name, init: false } as K8sContainer);
+    return out;
+  });
 
   let current: AbortController | null = null;
   let detail = $state<K8sResourceDetail | null>(null);
@@ -132,7 +158,9 @@
     if (row.ip) out.push(['IP', row.ip]);
     if (row.cpu != null) out.push(['CPU', formatMillicores(row.cpu)]);
     if (row.mem != null) out.push(['Memory', formatBytes(row.mem)]);
-    for (const [k, v] of Object.entries(row.extra ?? {})) if (v) out.push([k.replace(/_/g, ' '), v]);
+    // Extras a fixed fact / section already covers.
+    const skip = new Set(['ready', 'selector', 'phase', 'key_count']);
+    for (const [k, v] of Object.entries(row.extra ?? {})) if (v && !skip.has(k)) out.push([k.replace(/_/g, ' '), v]);
     return out;
   });
 
@@ -174,11 +202,14 @@
     {#if tab === 'overview'}
       <div class="ov">
         {#if row}
-          {#if isPod || (canEdit && actions.length)}
+          {#if isPod || selector || (canEdit && actions.length)}
             <div class="ov-actions">
               {#if isPod}
                 <button class="btn small" onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
                 {#if canEdit}<button class="btn small" onclick={() => ontab('terminal')}><Icon name="terminal" size={12} /> Shell</button>{/if}
+              {:else if selector}
+                <button class="btn small" onclick={() => ontab('pods')}><Icon name="box" size={12} /> Pods</button>
+                <button class="btn small" onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
               {/if}
               {#if canEdit}
                 {#each actions as a (a.id + a.label)}
@@ -199,6 +230,14 @@
             <div class="sec">
               <div class="sec-title">Images</div>
               {#each row.images as im (im)}<div class="mono small ell" title={im}>{im}</div>{/each}
+            </div>
+          {/if}
+          {#if selector}
+            <div class="sec">
+              <div class="sec-title">Selector</div>
+              <div class="labels">
+                {#each selector.split(',') as kv (kv)}<span class="chip mono" title={kv}>{kv}</span>{/each}
+              </div>
             </div>
           {/if}
           {#if Object.keys(row.labels ?? {}).length}
@@ -261,6 +300,10 @@
           </tbody>
         </table>
       {/if}
+    {:else if tab === 'pods'}
+      <WorkloadPods {clusterId} {ns} {selector} {canEdit} onopenpod={(pod, t) => onopenpod?.(ns, pod, t)} />
+    {:else if tab === 'logs' && !isPod}
+      <LogsView {clusterId} {ns} {selector} title={name} containers={templateContainers} onopenpod={(pod) => onopenpod?.(ns, pod, 'logs')} />
     {:else if tab === 'logs'}
       <LogsView {clusterId} {ns} pod={name} {containers} />
     {:else if tab === 'terminal'}
