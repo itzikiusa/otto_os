@@ -7104,6 +7104,11 @@ export interface K8sLogsOpts {
   timestamps?: boolean;
 }
 
+/** What a logs stream reads from: one pod, or every pod matching a
+ *  workload's label selector (`row.extra.selector`) — the latter arrives with
+ *  a `[pod/<pod>/<container>] ` prefix on every line. */
+export type K8sLogTarget = { pod: string } | { selector: string };
+
 export interface K8sContainerMetrics {
   name: string;
   cpu_millicores: number;

@@ -33,7 +33,8 @@ export type K8sDrawerTab =
   | 'events'
   | 'logs'
   | 'terminal'
-  | 'metrics';
+  | 'metrics'
+  | 'pods';
 
 /** A row identity inside the current cluster+kind (the route's `<ns>/<name>`). */
 export interface K8sSelection {
@@ -42,6 +43,13 @@ export interface K8sSelection {
 }
 
 const NS_KEY = (clusterId: string): string => `otto_k8s_ns:${clusterId}`;
+/** Namespaces this cluster is KNOWN to have — the default namespace plus every
+ *  one the user selected and could read. Rancher project-scoped users can't
+ *  `get namespaces` (cluster-scope list is forbidden), so without this the
+ *  picker would offer nothing but "All namespaces" — which is forbidden too. */
+const KNOWN_NS_KEY = (clusterId: string): string => `otto_k8s_known_ns:${clusterId}`;
+const CLUSTER_SCOPE_HINT =
+  'This kubeconfig user can\'t list across all namespaces (cluster scope). Pick a namespace (press n) — e.g. the cluster\'s default one.';
 const AUTO_KEY = 'otto_k8s_autorefresh';
 const AUTO_REFRESH_MS = 10_000;
 
@@ -57,6 +65,14 @@ function lsSet(key: string, value: string): void {
     localStorage.setItem(key, value);
   } catch {
     /* private mode / quota — the preference just doesn't stick */
+  }
+}
+function knownNamespaces(clusterId: string): string[] {
+  try {
+    const v = JSON.parse(lsGet(KNOWN_NS_KEY(clusterId)) ?? '[]');
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x !== '') : [];
+  } catch {
+    return [];
   }
 }
 
@@ -271,7 +287,10 @@ class K8sStore {
     if (!id) return;
     const remembered = lsGet(NS_KEY(id));
     const row = this.clusters.find((c) => c.id === id);
-    this.namespace = remembered ?? row?.default_namespace ?? '';
+    // Namespaces are lowercase DNS labels; normalize whatever was remembered
+    // or typed so an auto-capitalized "Mscasino" can't 403 forever.
+    this.namespace = (remembered ?? row?.default_namespace ?? '').trim().toLowerCase();
+    if (row?.default_namespace) this.rememberKnownNamespace(row.default_namespace.trim().toLowerCase());
     void this.loadNamespaces();
     void this.loadCapabilities(id);
   }
@@ -287,6 +306,7 @@ class K8sStore {
   }
 
   setNamespace(ns: string): void {
+    ns = ns.trim().toLowerCase();
     this.namespace = ns;
     this.selected = null;
     if (this.clusterId) lsSet(NS_KEY(this.clusterId), ns);
@@ -310,12 +330,36 @@ class K8sStore {
     try {
       const r = await k8sApi.namespaces(id);
       if (this.clusterId !== id) return;
-      this.namespaces = r.namespaces;
+      this.namespaces = this.mergeKnown(id, r.namespaces);
       this.namespacesError = '';
     } catch (e) {
       if (this.clusterId !== id) return;
+      // RBAC-limited user: fall back to the namespaces we know work here so
+      // the picker still has real entries to switch between.
+      this.namespaces = this.mergeKnown(id, []);
       this.namespacesError = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /** Listed namespaces ∪ known-good ones (known ones the API didn't return
+   *  are appended, e.g. when the list is RBAC-partial). */
+  private mergeKnown(clusterId: string, listed: K8sNamespace[]): K8sNamespace[] {
+    const have = new Set(listed.map((n) => n.name));
+    const extra = knownNamespaces(clusterId)
+      .filter((n) => !have.has(n))
+      .sort()
+      .map((name) => ({ name, status: '', age_seconds: 0 }));
+    return [...listed, ...extra];
+  }
+
+  private rememberKnownNamespace(ns: string): void {
+    const id = this.clusterId;
+    if (!id || !ns) return;
+    const known = knownNamespaces(id);
+    if (known.includes(ns)) return;
+    known.push(ns);
+    lsSet(KNOWN_NS_KEY(id), JSON.stringify(known));
+    if (!this.namespaces.some((n) => n.name === ns)) this.namespaces = this.mergeKnown(id, this.namespaces);
   }
 
   // --- resources ------------------------------------------------------------------------
@@ -351,9 +395,11 @@ class K8sStore {
       this.rowsKey = key;
       this.rowsError = '';
       this.rowsLoadedAt = Date.now();
+      if (ns) this.rememberKnownNamespace(ns);
     } catch (e) {
       if (ac.signal.aborted || this.currentKey !== key) return;
-      this.rowsError = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      this.rowsError = !ns && /at the cluster scope/i.test(msg) ? `${CLUSTER_SCOPE_HINT}\n\n${msg}` : msg;
       if (this.rowsKey !== key) {
         this.rows = [];
         this.rowsKey = key;

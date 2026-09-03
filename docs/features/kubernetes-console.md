@@ -140,7 +140,12 @@ large clusters); a denied verb simply comes back as a `403`.
 
 The top bar has a namespace filter (**All namespaces** ⇒ kubectl `-A`,
 remembered per cluster), a free-text filter, refresh + 10 s auto-refresh, the
-cluster switcher and the k9s button. The left rail lists the kinds:
+cluster switcher and the k9s button. Namespaces are always lowercased (they
+are DNS labels; phones auto-capitalize). When the kubeconfig user can't
+`get namespaces` (Rancher project-scoped users), the picker lists the
+namespaces the cluster is known to have — the default plus every one read
+successfully — and any other name can be typed; a cluster-scope 403 on
+"All namespaces" says so and points back at the picker. The left rail lists the kinds:
 Pods, Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs, CronJobs,
 Services, Ingresses, ConfigMaps, Secrets, PVCs, HPAs, Nodes, Events, and —
 when capabilities say so — Argo Rollouts and ArgoCD Apps.
@@ -196,6 +201,18 @@ The pod drawer adds **Containers**
 counts), **Logs**, **Terminal** and **Metrics** tabs. `Esc` closes it; `l`, `s`,
 `d` on a selected row open logs, shell and describe (k9s muscle memory).
 
+Workload drawers (Deployment, StatefulSet, DaemonSet, ReplicaSet, Job,
+Rollout) add **Pods** and **Logs** tabs, driven by the row's `extra.selector`
+(`spec.selector.matchLabels` as `k=v,k=v`; the manifest's selector is the
+fallback when the row is gone):
+
+- **Pods** — `GET …/resources?kind=pods&ns=&label=<selector>` every 10 s:
+  ready, status, restarts, CPU/MEM (when metrics-server answers) and age per
+  pod, with totals on top. A row opens that pod's own drawer; its Logs /
+  Shell buttons open it straight on those tabs. The row menu offers the same
+  as **Pods** and **Logs (all pods)**.
+- **Logs** — one stream across every matching pod (next section).
+
 ### Logs
 
 `GET …/pods/{ns}/{name}/logs?container=&tail=500&since=&previous=&follow=&timestamps=`
@@ -216,6 +233,15 @@ returns `text/plain`.
 The UI consumes the stream with `fetch` + `ReadableStream`, supports search,
 timestamps and download. Agents get the same data via the `k8s_logs` MCP tool
 (text tail, never `follow`).
+
+**Workload-level logs** — `GET /k8s/clusters/{id}/logs?ns=&selector=&…` (same
+options) runs `kubectl logs -l <selector> --prefix --max-log-requests=100
+[--all-containers | -c <c>]`, so every line starts with
+`[pod/<pod>/<container>] `. The Logs tab of a workload drawer parses that
+prefix into a colored pod tag: click it (or use the pod dropdown) to keep one
+pod's lines, ⌥-click or **Open pod** to jump to that pod's drawer, and the
+container filter defaults to all containers of the pod template. Download
+writes the currently filtered lines.
 
 ### Exec (shell in a pod) and k9s
 

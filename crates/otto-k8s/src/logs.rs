@@ -39,15 +39,78 @@ pub struct LogsQuery {
     pub timestamps: Option<bool>,
 }
 
+/// What `kubectl logs` reads from: one pod, or every pod matching a label
+/// selector (a workload's `spec.selector`) — the latter with `--prefix` so
+/// each line carries `[pod/<pod>/<container>] ` for the UI's per-pod filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogTarget<'a> {
+    Pod(&'a str),
+    Selector(&'a str),
+}
+
+/// `GET …/logs?ns=&selector=` query (workload-level logs). The log options
+/// are repeated rather than `#[serde(flatten)]`ed: serde_urlencoded can't
+/// deserialize numbers/bools through a flattened struct.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SelectorLogsQuery {
+    pub ns: String,
+    pub selector: String,
+    pub container: Option<String>,
+    pub tail: Option<i64>,
+    pub since: Option<String>,
+    #[serde(default)]
+    pub previous: Option<bool>,
+    #[serde(default)]
+    pub follow: Option<bool>,
+    #[serde(default)]
+    pub timestamps: Option<bool>,
+}
+
+impl SelectorLogsQuery {
+    pub fn logs(&self) -> LogsQuery {
+        LogsQuery {
+            container: self.container.clone(),
+            tail: self.tail,
+            since: self.since.clone(),
+            previous: self.previous,
+            follow: self.follow,
+            timestamps: self.timestamps,
+        }
+    }
+}
+
+/// Upper bound on the pods one selector stream fans out to (kubectl's
+/// `--max-log-requests`, default 5 — far too low for a real deployment).
+pub const MAX_LOG_REQUESTS: usize = 100;
+
 /// Build the `logs` argv (after the base flags) from the query.
 pub fn logs_args(ns: &str, pod: &str, q: &LogsQuery) -> Vec<String> {
-    let mut a: Vec<String> = vec!["logs".into(), pod.into(), "-n".into(), ns.into()];
-    if let Some(c) = q
+    target_args(ns, LogTarget::Pod(pod), q)
+}
+
+/// `logs_args` for either target.
+pub fn target_args(ns: &str, target: LogTarget<'_>, q: &LogsQuery) -> Vec<String> {
+    let mut a: Vec<String> = vec!["logs".into()];
+    let container = q
         .container
         .as_deref()
         .map(str::trim)
-        .filter(|c| !c.is_empty())
-    {
+        .filter(|c| !c.is_empty());
+    match target {
+        LogTarget::Pod(pod) => a.push(pod.into()),
+        LogTarget::Selector(sel) => {
+            a.push("-l".into());
+            a.push(sel.into());
+            a.push("--prefix".into());
+            a.push(format!("--max-log-requests={MAX_LOG_REQUESTS}"));
+            if container.is_none() {
+                a.push("--all-containers".into());
+            }
+        }
+    }
+    a.push("-n".into());
+    a.push(ns.into());
+    if let Some(c) = container {
         a.push("-c".into());
         a.push(c.into());
     }
@@ -97,9 +160,19 @@ pub fn cap_tail(text: String, cap: usize) -> String {
 
 /// One-shot logs (`follow` ignored): text, tail-capped.
 pub async fn fetch(k: &Kubectl, ns: &str, pod: &str, q: &LogsQuery) -> Result<String> {
+    fetch_target(k, ns, LogTarget::Pod(pod), q).await
+}
+
+/// One-shot logs for either target.
+pub async fn fetch_target(
+    k: &Kubectl,
+    ns: &str,
+    target: LogTarget<'_>,
+    q: &LogsQuery,
+) -> Result<String> {
     let mut q = q.clone();
     q.follow = Some(false);
-    let argv = k.argv(logs_args(ns, pod, &q));
+    let argv = k.argv(target_args(ns, target, &q));
     let out = cli::run(&k.program, &argv, &k.env, LOGS_TIMEOUT, None).await?;
     Ok(cap_tail(out.stdout, LOGS_CAP))
 }
@@ -107,9 +180,14 @@ pub async fn fetch(k: &Kubectl, ns: &str, pod: &str, q: &LogsQuery) -> Result<St
 /// Streaming logs: a `text/plain` body that stays open while `kubectl logs -f`
 /// runs; dropping the body kills the child.
 pub fn follow(k: &Kubectl, ns: &str, pod: &str, q: &LogsQuery) -> Result<Body> {
+    follow_target(k, ns, LogTarget::Pod(pod), q)
+}
+
+/// Streaming logs for either target.
+pub fn follow_target(k: &Kubectl, ns: &str, target: LogTarget<'_>, q: &LogsQuery) -> Result<Body> {
     let mut q = q.clone();
     q.follow = Some(true);
-    let argv = k.argv_stream(logs_args(ns, pod, &q));
+    let argv = k.argv_stream(target_args(ns, target, &q));
     let mut cmd = Command::new(&k.program);
     cmd.args(&argv)
         .envs(k.env.iter().map(|(a, b)| (a.as_str(), b.as_str())))
@@ -194,6 +272,38 @@ fn child_stream(
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+
+    #[test]
+    fn selector_argv_fans_out_with_prefix() {
+        let q = LogsQuery {
+            tail: Some(200),
+            follow: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            target_args("shop", LogTarget::Selector("app=web,tier=fe"), &q),
+            vec![
+                "logs",
+                "-l",
+                "app=web,tier=fe",
+                "--prefix",
+                "--max-log-requests=100",
+                "--all-containers",
+                "-n",
+                "shop",
+                "--tail=200",
+                "-f"
+            ]
+        );
+        // A named container replaces --all-containers.
+        let c = LogsQuery {
+            container: Some("nginx".into()),
+            ..Default::default()
+        };
+        let a = target_args("shop", LogTarget::Selector("app=web"), &c);
+        assert!(!a.iter().any(|x| x == "--all-containers"));
+        assert!(a.windows(2).any(|w| w == ["-c", "nginx"]));
+    }
 
     #[test]
     fn logs_argv_from_query() {

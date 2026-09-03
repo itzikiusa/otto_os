@@ -125,7 +125,13 @@
     align-items: center;
     column-gap: 10px;
     padding: 0 12px;
-    min-width: max-content;
+    /* Header + every row are SEPARATE grids sharing one template. They must
+       resolve against the SAME width or the `fr` tracks drift per row (a row
+       with a long node name used to grow wider than its neighbours and its
+       cells slid out from under the header). Fixed width = identical tracks;
+       the minmax() floors still force horizontal overflow on narrow panes. */
+    width: 100%;
+    box-sizing: border-box;
   }
   .rt-head {
     position: sticky;

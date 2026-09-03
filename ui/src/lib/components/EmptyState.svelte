@@ -16,7 +16,7 @@
 <div class="empty">
   <div class="empty-icon"><Icon name={icon} size={28} /></div>
   <h3>{title}</h3>
-  {#if body}<p>{body}</p>{/if}
+  {#if body}<p style="white-space:pre-line">{body}</p>{/if}
   {#if actionLabel && onaction}
     <button class="btn primary" onclick={onaction}>{actionLabel}</button>
   {/if}

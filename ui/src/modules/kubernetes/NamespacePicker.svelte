@@ -35,7 +35,9 @@
     for (const n of names) list.push({ value: n, label: n });
     // Let the user type a namespace the list doesn't know (RBAC-limited
     // `get namespaces`, or the list failed) and still select it.
-    if (q && !names.some((n) => n.toLowerCase() === q)) list.push({ value: query.trim(), label: `Use “${query.trim()}”` });
+    // Namespaces are lowercase DNS labels — normalize the free-typed one so a
+    // phone's auto-capitalized "Mscasino" doesn't turn into a 403.
+    if (q && !names.some((n) => n.toLowerCase() === q)) list.push({ value: q, label: `Use “${q}”` });
     return list;
   });
 
@@ -172,6 +174,9 @@
       aria-autocomplete="list"
       aria-activedescendant={open ? `k8s-ns-opt-${active}` : undefined}
       placeholder={shown}
+      autocapitalize="off"
+      autocorrect="off"
+      spellcheck={false}
       title={error ? `Namespaces couldn't be listed: ${error}` : shown}
       value={open ? query : shown}
       {disabled}
@@ -191,7 +196,7 @@
       aria-label="Namespaces"
       style="top:{pos.top}px;left:{pos.left}px;width:{pos.width}px;max-height:{pos.maxH}px"
     >
-      {#if error}<div class="ns-err">Couldn't list namespaces — type one to use it.</div>{/if}
+      {#if error}<div class="ns-err">Couldn't list namespaces (RBAC) — showing ones you've used; type any other to use it.</div>{/if}
       {#each options as o, i (o.value + ':' + o.label)}
         <div
           id="k8s-ns-opt-{i}"

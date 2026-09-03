@@ -16,6 +16,7 @@ import type {
   K8sInstallJob,
   K8sK9sReq,
   K8sLogsOpts,
+  K8sLogTarget,
   K8sMetricsResp,
   K8sNamespace,
   K8sNode,
@@ -98,16 +99,23 @@ export const k8sApi = {
   action: (id: string, body: K8sActionReq) =>
     api.post<K8sActionResp>(`/k8s/clusters/${enc(id)}/actions`, body),
 
-  /** The logs URL (relative to `/api/v1`) for a non-follow fetch/download. */
-  logsPath: (id: string, ns: string, pod: string, opts: K8sLogsOpts = {}): string =>
-    `/k8s/clusters/${enc(id)}/pods/${enc(ns)}/${enc(pod)}/logs${qs({
+  /** The logs URL (relative to `/api/v1`) for a non-follow fetch/download.
+   *  A `{ selector }` target hits the workload-level route (every matching
+   *  pod, `[pod/<pod>/<container>] `-prefixed lines). */
+  logsPath: (id: string, ns: string, target: string | K8sLogTarget, opts: K8sLogsOpts = {}): string => {
+    const t: K8sLogTarget = typeof target === 'string' ? { pod: target } : target;
+    const common = {
       container: opts.container || undefined,
       tail: opts.tail,
       since: opts.since || undefined,
       previous: opts.previous || undefined,
       follow: opts.follow || undefined,
       timestamps: opts.timestamps || undefined,
-    })}`,
+    };
+    return 'pod' in t
+      ? `/k8s/clusters/${enc(id)}/pods/${enc(ns)}/${enc(t.pod)}/logs${qs(common)}`
+      : `/k8s/clusters/${enc(id)}/logs${qs({ ns, selector: t.selector, ...common })}`;
+  },
 };
 
 /**
@@ -122,7 +130,7 @@ export const k8sApi = {
 export async function followLogs(
   clusterId: string,
   ns: string,
-  pod: string,
+  target: string | K8sLogTarget,
   opts: K8sLogsOpts,
   onChunk: (text: string) => void,
   signal?: AbortSignal,
@@ -132,7 +140,7 @@ export async function followLogs(
   if (token) headers['Authorization'] = `Bearer ${token}`;
   let resp: Response;
   try {
-    resp = await fetch(`${baseUrl()}/api/v1${k8sApi.logsPath(clusterId, ns, pod, opts)}`, {
+    resp = await fetch(`${baseUrl()}/api/v1${k8sApi.logsPath(clusterId, ns, target, opts)}`, {
       headers,
       signal,
     });

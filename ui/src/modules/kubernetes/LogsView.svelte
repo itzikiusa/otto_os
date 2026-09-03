@@ -15,10 +15,39 @@
   interface Props {
     clusterId: string;
     ns: string;
-    pod: string;
+    /** One pod — or, for a workload, empty with `selector` set. */
+    pod?: string;
+    /** Workload mode: stream every pod matching this label selector; lines
+     *  arrive `[pod/<pod>/<container>] `-prefixed and get a per-pod filter. */
+    selector?: string;
+    /** Display name for downloads in workload mode. */
+    title?: string;
     containers: K8sContainer[];
+    /** Workload mode: jump to one pod's own drawer (Logs tab). */
+    onopenpod?: (pod: string) => void;
   }
-  let { clusterId, ns, pod, containers }: Props = $props();
+  let { clusterId, ns, pod = '', selector = '', title = '', containers, onopenpod }: Props = $props();
+
+  const multi = $derived(!pod && !!selector);
+  /** `[pod/<pod>/<container>] rest` → parts (workload mode only). */
+  const PREFIX = /^\[pod\/([^/\]]+)\/([^\]]+)\] ?(.*)$/;
+  interface Parsed { pod: string; ctr: string; text: string }
+  function parse(line: string): Parsed {
+    const m = multi ? PREFIX.exec(line) : null;
+    return m ? { pod: m[1], ctr: m[2], text: m[3] } : { pod: '', ctr: '', text: line };
+  }
+  /** Stable color per pod so interleaved lines are scannable. */
+  const HUES = [205, 150, 30, 280, 350, 90, 240, 60];
+  const podColors = new Map<string, number>();
+  function hue(p: string): number {
+    let h = podColors.get(p);
+    if (h === undefined) {
+      h = HUES[podColors.size % HUES.length];
+      podColors.set(p, h);
+    }
+    return h;
+  }
+  let podFilter = $state('');
 
   const MAX_LINES = 20_000;
   const LINE_H = 18;
@@ -81,7 +110,7 @@
       await followLogs(
         clusterId,
         ns,
-        pod,
+        multi ? { selector } : { pod },
         { container: container || undefined, tail, since: since || undefined, previous, follow, timestamps },
         ingest,
         ac.signal,
@@ -98,9 +127,10 @@
     }
   }
 
-  // Default container once the list arrives (first non-init).
+  // Default container once the list arrives (first non-init). Workload mode
+  // defaults to ALL containers (kubectl --all-containers).
   $effect(() => {
-    const first = containers.find((c) => !c.init)?.name ?? '';
+    const first = multi ? '' : (containers.find((c) => !c.init)?.name ?? '');
     untrack(() => {
       if (!container || !containers.some((c) => c.name === container)) container = first;
     });
@@ -111,6 +141,7 @@
     void clusterId;
     void ns;
     void pod;
+    void selector;
     void container;
     void tail;
     void since;
@@ -127,7 +158,22 @@
   });
 
   const q = $derived(search.trim().toLowerCase());
-  const shown = $derived(q ? lines.filter((l) => l.toLowerCase().includes(q)) : lines);
+  /** Pods seen in the buffer (workload mode) — the pod filter's options. */
+  const pods = $derived.by(() => {
+    if (!multi) return [] as string[];
+    const set = new Set<string>();
+    for (const l of lines) {
+      const m = PREFIX.exec(l);
+      if (m) set.add(m[1]);
+    }
+    return [...set].sort();
+  });
+  const shown = $derived.by(() => {
+    let out = lines;
+    if (multi && podFilter) out = out.filter((l) => l.startsWith(`[pod/${podFilter}/`));
+    if (q) out = out.filter((l) => l.toLowerCase().includes(q));
+    return out;
+  });
   const matchCount = $derived(q ? shown.length : 0);
 
   // Stick to the bottom while following (unless the user scrolled up).
@@ -164,7 +210,8 @@
   }
 
   function download(): void {
-    downloadText(lines.join('\n') + '\n', `${safeName(pod)}${container ? '-' + safeName(container) : ''}.log`);
+    const base = pod || title || 'workload';
+    downloadText(shown.join('\n') + '\n', `${safeName(base)}${podFilter ? '-' + safeName(podFilter) : ''}${container ? '-' + safeName(container) : ''}.log`);
   }
 
   export function focusSearch(): void {
@@ -174,8 +221,18 @@
 
 <div class="logs">
   <div class="logs-bar">
-    {#if containers.length > 1}
+    {#if multi}
+      <select class="input sm" bind:value={podFilter} aria-label="Pod" title="Show one pod's lines">
+        <option value="">all pods{pods.length ? ` (${pods.length})` : ''}</option>
+        {#each pods as p (p)}<option value={p}>{p}</option>{/each}
+      </select>
+      {#if podFilter && onopenpod}
+        <button class="btn small" onclick={() => onopenpod?.(podFilter)} title="Open this pod's details"><Icon name="chevronRight" size={11} /> Open pod</button>
+      {/if}
+    {/if}
+    {#if containers.length > 1 || (multi && containers.length)}
       <select class="input sm" bind:value={container} aria-label="Container">
+        {#if multi}<option value="">all containers</option>{/if}
         {#each containers as c (c.name)}<option value={c.name}>{c.init ? `init: ${c.name}` : c.name}</option>{/each}
       </select>
     {/if}
@@ -215,14 +272,15 @@
     {:else}
       <VirtualList items={shown} estimateHeight={LINE_H} class="logs-vlist">
         {#snippet row(line, i)}
-          <div class="ln" style="height:{LINE_H}px" data-i={i}>{#each segments(line) as s, k (k)}{#if s.m}<mark>{s.t}</mark>{:else}{s.t}{/if}{/each}</div>
+          {@const pl = parse(line)}
+          <div class="ln" style="height:{LINE_H}px" data-i={i}>{#if pl.pod}<button class="podtag" style="--h:{hue(pl.pod)}" title="{pl.pod} · {pl.ctr}\nClick: only this pod · ⌥-click: open pod" onclick={(e) => { if (e.altKey) onopenpod?.(pl.pod); else podFilter = podFilter === pl.pod ? '' : pl.pod; }}>{pl.pod.length > 22 ? '…' + pl.pod.slice(-21) : pl.pod}{#if !container}<span class="ctr">/{pl.ctr}</span>{/if}</button>{/if}{#each segments(pl.text) as s, k (k)}{#if s.m}<mark>{s.t}</mark>{:else}{s.t}{/if}{/each}</div>
         {/snippet}
       </VirtualList>
     {/if}
   </div>
 
   <div class="logs-foot">
-    <span class="dim">{lines.length}{lines.length >= MAX_LINES ? '+' : ''} lines{q ? ` · ${matchCount} match` : ''}</span>
+    <span class="dim">{lines.length}{lines.length >= MAX_LINES ? '+' : ''} lines{multi && pods.length ? ` · ${pods.length} pods` : ''}{podFilter ? ` · ${shown.length} from ${podFilter}` : ''}{q ? ` · ${matchCount} match` : ''}</span>
     {#if streaming && follow}<span class="live"><span class="live-dot"></span> live</span>{/if}
     {#if !autoScroll && follow}
       <button class="btn small" onclick={() => { autoScroll = true; }}>Jump to bottom</button>
@@ -290,6 +348,26 @@
     white-space: pre;
     padding: 0 10px;
     color: var(--text);
+  }
+  .podtag {
+    display: inline-block;
+    margin-right: 8px;
+    padding: 0 6px;
+    border: none;
+    border-radius: 3px;
+    background: hsl(var(--h) 50% 50% / 0.22);
+    color: hsl(var(--h) 70% 72%);
+    font: inherit;
+    font-size: 10.5px;
+    line-height: 16px;
+    cursor: pointer;
+    vertical-align: middle;
+  }
+  .podtag:hover {
+    background: hsl(var(--h) 50% 50% / 0.38);
+  }
+  .podtag .ctr {
+    opacity: 0.7;
   }
   .ln mark {
     background: color-mix(in srgb, var(--accent) 45%, transparent);

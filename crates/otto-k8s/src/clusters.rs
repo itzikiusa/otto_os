@@ -110,6 +110,13 @@ fn clean(s: Option<String>) -> Option<String> {
     s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
+/// Namespace names are DNS-1123 labels — always lowercase. Users type them
+/// (and WebKit auto-capitalizes the first letter), so a stored "Mscasino"
+/// makes every namespaced request 403 for a namespace that doesn't exist.
+fn clean_ns(s: Option<String>) -> Option<String> {
+    clean(s).map(|v| v.to_ascii_lowercase())
+}
+
 /// `~` / `~/x` → home-relative absolute path.
 pub fn expand_tilde(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
@@ -307,7 +314,7 @@ impl<S: K8sCtx> Clusters<S> {
                 source: K8sClusterSource::Kubeconfig,
                 kubeconfig_path,
                 context_name,
-                default_namespace: clean(req.default_namespace),
+                default_namespace: clean_ns(req.default_namespace),
                 aws_account_id: None,
                 environment: req.environment.unwrap_or_default(),
                 color: clean(req.color),
@@ -394,7 +401,7 @@ impl<S: K8sCtx> Clusters<S> {
                 .map(|x| x.name.clone())
                 .expect("non-empty"),
         };
-        let default_namespace = clean(req.default_namespace).or_else(|| {
+        let default_namespace = clean_ns(req.default_namespace).or_else(|| {
             contexts
                 .iter()
                 .find(|x| x.name == context_name)
@@ -484,7 +491,7 @@ impl<S: K8sCtx> Clusters<S> {
                     name: req.name,
                     kubeconfig_path,
                     context_name: req.context_name.map(|c| c.trim().to_string()),
-                    default_namespace: req.default_namespace.map(|d| clean(Some(d))),
+                    default_namespace: req.default_namespace.map(|d| clean_ns(Some(d))),
                     environment: req.environment,
                     color: req.color.map(|c| clean(Some(c))),
                 },
@@ -786,6 +793,13 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_ns_lowercases_and_trims() {
+        assert_eq!(clean_ns(Some(" Mscasino ".into())), Some("mscasino".into()));
+        assert_eq!(clean_ns(Some("   ".into())), None);
+        assert_eq!(clean_ns(None), None);
+    }
 
     #[test]
     fn config_view_parsing_reads_only_contexts_and_servers() {
