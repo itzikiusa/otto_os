@@ -21,6 +21,7 @@ import type {
   Ec2Instance,
   Id,
   OttoEvent,
+  RdsInstance,
   S3Bucket,
   SqsQueue,
   SqsQueueAttributesResp,
@@ -41,6 +42,7 @@ export const AWS_SERVICES: { id: AwsService; label: string; icon: string }[] = [
   { id: 'ec2', label: 'EC2', icon: 'box' },
   { id: 'athena', label: 'Athena', icon: 'db' },
   { id: 'eks', label: 'EKS', icon: 'helm' },
+  { id: 'rds', label: 'RDS', icon: 'db' },
 ];
 
 const INSTALL_POLL_MS = 1500;
@@ -73,6 +75,7 @@ class AwsStore {
   sqsAttrs: Record<string, SqsQueueAttributesResp> = $state({});
   ec2: Record<string, Ec2Instance[]> = $state({});
   eks: Record<string, EksClusterSummary[]> = $state({});
+  rds: Record<string, RdsInstance[]> = $state({});
   athena: Record<Id, AthenaCatalog> = $state({});
 
   private installTimer: ReturnType<typeof setTimeout> | null = null;
@@ -214,6 +217,7 @@ class AwsStore {
     this.sqsQueues = drop(this.sqsQueues);
     this.ec2 = drop(this.ec2);
     this.eks = drop(this.eks);
+    this.rds = drop(this.rds);
     this.athena = drop(this.athena);
     if (this.login?.accountId === id) this.login = null;
   }
@@ -263,6 +267,12 @@ class AwsStore {
     const r = await awsApi.eksClusters(id, region || undefined);
     this.eks = { ...this.eks, [`${id}:${region}`]: r.clusters };
     return r.clusters;
+  }
+
+  async loadRds(id: Id, region: string): Promise<RdsInstance[]> {
+    const r = await awsApi.rdsInstances(id, region || undefined);
+    this.rds = { ...this.rds, [`${id}:${region}`]: r.instances };
+    return r.instances;
   }
 
   async loadAthenaCatalog(id: Id): Promise<AthenaCatalog> {

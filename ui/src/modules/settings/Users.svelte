@@ -146,7 +146,7 @@
     'api_client', 'workflows', 'channels', 'skill_eval', 'skills', 'insights',
     'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas',
     'proof_pack', 'mcp', 'scheduled_tasks', 'run_with_otto', 'browser',
-    'aws', 'aws_s3', 'aws_sqs', 'aws_ec2', 'aws_athena', 'aws_eks', 'kubernetes',
+    'aws', 'aws_s3', 'aws_sqs', 'aws_ec2', 'aws_athena', 'aws_eks', 'aws_rds', 'kubernetes',
   ];
   const FEATURE_LABELS: Record<Feature, string> = {
     agents: 'Agents', mission_control: 'Mission Control', connections: 'Connections', database: 'Database',
@@ -158,7 +158,7 @@
     proof_pack: 'Proof Packs', mcp: 'MCP Control Plane', scheduled_tasks: 'Scheduled Tasks',
     run_with_otto: 'Run with Otto', browser: 'Browser',
     aws: 'AWS — accounts', aws_s3: 'AWS — S3', aws_sqs: 'AWS — SQS', aws_ec2: 'AWS — EC2',
-    aws_athena: 'AWS — Athena', aws_eks: 'AWS — EKS', kubernetes: 'Kubernetes',
+    aws_athena: 'AWS — Athena', aws_eks: 'AWS — EKS', aws_rds: 'AWS — RDS', kubernetes: 'Kubernetes',
   };
   const CAP_OPTIONS: Capability[] = ['none', 'view', 'edit', 'admin'];
 

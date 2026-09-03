@@ -66,7 +66,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'browser', label: 'Browser', icon: 'globe', feature: 'browser' },
   // AWS fronts seven keys (account mgmt + one per service) — visible when ANY
   // of them is viewable, same shape as Connections/Database.
-  { id: 'aws', icon: 'cloud', label: 'AWS', featureAny: ['aws', 'aws_s3', 'aws_sqs', 'aws_ec2', 'aws_athena', 'aws_eks'] },
+  { id: 'aws', icon: 'cloud', label: 'AWS', featureAny: ['aws', 'aws_s3', 'aws_sqs', 'aws_ec2', 'aws_athena', 'aws_eks', 'aws_rds'] },
   { id: 'kubernetes', icon: 'helm', label: 'Kubernetes', feature: 'kubernetes' },
   { id: 'api', icon: 'send', label: 'API', feature: 'api_client' },
   { id: 'mcp', icon: 'plug', label: 'MCP Control Plane', feature: 'mcp' },
