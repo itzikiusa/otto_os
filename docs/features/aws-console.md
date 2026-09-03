@@ -254,6 +254,8 @@ Summary:
 | EC2 | `GET …/ec2/instances`, `GET …/ec2/instances/{instance_id}`, `POST …/ec2/instances/{instance_id}/start\|stop\|reboot` |
 | Athena | `GET …/athena/workgroups\|databases\|tables\|history`, `POST …/athena/query`, `GET …/athena/query/{qid}`, `POST …/athena/query/{qid}/cancel` |
 | EKS | `GET …/eks/clusters`, `GET …/eks/clusters/{name}`, `POST …/eks/clusters/{name}/import-kubeconfig` |
+| RDS | `GET …/rds/instances`, `GET …/rds/instances/{identifier}` (read-only) |
+| CloudWatch | `GET …/metrics?namespace=&dim_name=&dim_value=&range=` — one `cloudwatch get-metric-data` per call, cached 30 s; catalog + period rules in `docs/contracts/api.md` |
 
 Error mapping (`crates/otto-aws/src/cli.rs`):
 
@@ -286,6 +288,12 @@ Root always passes. Grant them in **Settings → Users → Feature grants**.
 | `aws_ec2` | list / describe | start / stop / reboot | — |
 | `aws_athena` | workgroups / databases / tables / history / results / cancel | execute query | — |
 | `aws_eks` | list / describe clusters + nodegroups | import kubeconfig (**also** needs `kubernetes:Admin`) | — |
+| `aws_rds` | list / describe DB instances, CloudWatch metrics | — (read-only by design) | — |
+
+CloudWatch metrics (`GET …/metrics?namespace=AWS/SQS|AWS/EC2|AWS/RDS`) are
+gated by `aws:View` in the policy table **plus** View on the namespace's own
+key (`aws_sqs` / `aws_ec2` / `aws_rds`), checked in the handler. The IAM side
+needs `cloudwatch:GetMetricData`.
 
 `peek` and `cancel` are POSTs that mutate nothing, so they are graded back
 down to View in `policy.rs` (same trick as `/db/query-plan`). Every mutation

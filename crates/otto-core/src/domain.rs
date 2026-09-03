@@ -2432,6 +2432,9 @@ pub enum Feature {
     AwsAthena,
     /// AWS EKS — cluster listing (`View`), kubeconfig import (`Edit`).
     AwsEks,
+    /// AWS RDS — DB instance listing + CloudWatch metrics (`View` only —
+    /// the console has no RDS mutations).
+    AwsRds,
     /// Kubernetes — cluster/context management (`Admin`), read (`View`),
     /// exec/restart/rollout/Argo actions (`Edit`).
     Kubernetes,
@@ -2472,6 +2475,7 @@ impl Feature {
             "aws_ec2" => Some(Self::AwsEc2),
             "aws_athena" => Some(Self::AwsAthena),
             "aws_eks" => Some(Self::AwsEks),
+            "aws_rds" => Some(Self::AwsRds),
             "kubernetes" => Some(Self::Kubernetes),
             _ => None,
         }
@@ -2511,6 +2515,7 @@ impl Feature {
             Self::AwsEc2 => "aws_ec2",
             Self::AwsAthena => "aws_athena",
             Self::AwsEks => "aws_eks",
+            Self::AwsRds => "aws_rds",
             Self::Kubernetes => "kubernetes",
         }
     }
@@ -2539,6 +2544,7 @@ mod tests {
             ("aws_ec2", Feature::AwsEc2),
             ("aws_athena", Feature::AwsAthena),
             ("aws_eks", Feature::AwsEks),
+            ("aws_rds", Feature::AwsRds),
             ("kubernetes", Feature::Kubernetes),
         ] {
             assert_eq!(Feature::parse(k), Some(f));

@@ -1,8 +1,9 @@
 <script lang="ts">
   // EC2: instances table (state pill, name, id, type, AZ, IPs, launch) with a
   // state filter + region switcher; row actions start/stop/reboot [Edit] — stop
-  // and reboot need the instance id typed; a detail sheet shows tags + the raw
-  // describe-instances JSON via JsonTree.
+  // and reboot need the instance id typed; a right-side drawer (AwsDrawer,
+  // same look as the Kubernetes ResourceDrawer) shows Overview (key fields +
+  // tags), Metrics (CloudWatch via MetricsPanel) and Raw JSON via JsonTree.
   import { untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
@@ -13,10 +14,11 @@
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
+  import AwsDrawer from './AwsDrawer.svelte';
+  import MetricsPanel from './MetricsPanel.svelte';
   import { fmtAgo, fmtDate } from './util';
   import type { AwsAccount, Ec2Action, Ec2Instance, Ec2InstanceDetail } from '../../lib/api/types';
 
@@ -105,9 +107,29 @@
     }
   }
 
-  // Detail sheet.
+  // Detail drawer. The drawer's `inst` is refreshed from the list after a
+  // power action so the state pill follows the instance.
+  type DrawerTab = 'overview' | 'metrics' | 'raw';
+  const DRAWER_TABS: { id: DrawerTab; label: string }[] = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'metrics', label: 'Metrics' },
+    { id: 'raw', label: 'Raw JSON' },
+  ];
+  let drawerTab = $state<DrawerTab>('overview');
   let detail = $state<{ inst: Ec2Instance; full: Ec2InstanceDetail | null; error: string } | null>(null);
+  const drawerInst = $derived.by(() => {
+    const d = detail;
+    if (!d) return null;
+    return instances?.find((i) => i.instance_id === d.inst.instance_id) ?? d.inst;
+  });
+  function pillClass(state: string): string {
+    if (state === 'running') return 'ok';
+    if (state === 'terminated') return 'bad';
+    if (state === 'pending' || state === 'stopping' || state === 'shutting-down') return 'warn';
+    return '';
+  }
   async function openDetail(i: Ec2Instance): Promise<void> {
+    if (detail?.inst.instance_id !== i.instance_id) drawerTab = 'overview';
     detail = { inst: i, full: null, error: '' };
     try {
       const d = await awsApi.ec2Instance(account.id, i.instance_id, region);
@@ -182,6 +204,7 @@
   </label>
 </ViewToolbar>
 
+<div class="body">
 <div class="tbl-wrap">
   {#if loading && !instances}
     <div class="pad"><Skeleton rows={8} /></div>
@@ -201,6 +224,7 @@
         {#each shown as i (i.instance_id)}
           <tr
             class="trow"
+            class:sel={detail?.inst.instance_id === i.instance_id}
             tabindex="0"
             onclick={() => void openDetail(i)}
             onkeydown={(e) => { if (e.key === 'Enter') void openDetail(i); }}
@@ -224,49 +248,71 @@
   {/if}
 </div>
 
-{#if detail}
+{#if detail && drawerInst}
   {@const d = detail}
-  <Modal title={d.inst.name ? `${d.inst.name} · ${d.inst.instance_id}` : d.inst.instance_id} width={820} onclose={() => (detail = null)}>
-    <div class="dt">
-      <div class="dt-top">
-        <span class="pill {d.inst.state}">{d.inst.state}</span>
-        <span class="mono">{d.inst.type}</span>
-        <span class="mono dim">{d.inst.az ?? ''}</span>
-        {#if canEdit}
-          <span class="spacer"></span>
-          <button class="ghost sm" onclick={() => void act(d.inst, 'start')} disabled={d.inst.state !== 'stopped' || busy[d.inst.instance_id]}><Icon name="play" size={12} /> Start</button>
-          <button class="ghost sm" onclick={() => void act(d.inst, 'reboot')} disabled={d.inst.state !== 'running' || busy[d.inst.instance_id]}><Icon name="refresh" size={12} /> Reboot</button>
-          <button class="ghost sm danger" onclick={() => void act(d.inst, 'stop')} disabled={d.inst.state !== 'running' || busy[d.inst.instance_id]}><Icon name="x" size={12} /> Stop</button>
+  {@const inst = drawerInst}
+  <AwsDrawer
+    kind="instance"
+    name={inst.name ?? inst.instance_id}
+    id={inst.instance_id}
+    status={inst.state}
+    statusClass={pillClass(inst.state)}
+    tabs={DRAWER_TABS}
+    tab={drawerTab}
+    ontab={(t) => (drawerTab = t as DrawerTab)}
+    onclose={() => (detail = null)}
+  >
+    {#if drawerTab === 'overview'}
+      <div class="dt">
+        <div class="dt-top">
+          <span class="mono">{inst.type}</span>
+          <span class="mono dim">{inst.az ?? ''}</span>
+          {#if canEdit}
+            <span class="spacer"></span>
+            <button class="ghost sm" onclick={() => void act(inst, 'start')} disabled={inst.state !== 'stopped' || busy[inst.instance_id]}><Icon name="play" size={12} /> Start</button>
+            <button class="ghost sm" onclick={() => void act(inst, 'reboot')} disabled={inst.state !== 'running' || busy[inst.instance_id]}><Icon name="refresh" size={12} /> Reboot</button>
+            <button class="ghost sm danger" onclick={() => void act(inst, 'stop')} disabled={inst.state !== 'running' || busy[inst.instance_id]}><Icon name="x" size={12} /> Stop</button>
+          {/if}
+        </div>
+        <dl class="kv">
+          <dt>Instance id</dt><dd class="mono">{inst.instance_id}</dd>
+          <dt>Type</dt><dd class="mono">{inst.type}</dd>
+          <dt>AZ</dt><dd class="mono">{inst.az ?? '—'}</dd>
+          <dt>Private IP</dt><dd class="mono">{inst.private_ip ?? '—'}</dd>
+          <dt>Public IP</dt><dd class="mono">{inst.public_ip ?? '—'}</dd>
+          <dt>VPC / subnet</dt><dd class="mono">{inst.vpc_id ?? '—'} / {inst.subnet_id ?? '—'}</dd>
+          <dt>Platform</dt><dd>{inst.platform ?? 'linux'}</dd>
+          <dt>Launched</dt><dd>{fmtDate(inst.launch_time)} <span class="dim">({fmtAgo(inst.launch_time)})</span></dd>
+        </dl>
+        <h3>Tags</h3>
+        {#if Object.keys(inst.tags ?? {}).length === 0}
+          <p class="dim">No tags.</p>
+        {:else}
+          <div class="tags">
+            {#each Object.entries(inst.tags).sort(([a], [b]) => a.localeCompare(b)) as [k, v] (k)}
+              <span class="tag" title={`${k}=${v}`}><strong>{k}</strong>={v}</span>
+            {/each}
+          </div>
         {/if}
       </div>
-      <dl class="kv">
-        <dt>Private IP</dt><dd class="mono">{d.inst.private_ip ?? '—'}</dd>
-        <dt>Public IP</dt><dd class="mono">{d.inst.public_ip ?? '—'}</dd>
-        <dt>VPC / subnet</dt><dd class="mono">{d.inst.vpc_id ?? '—'} / {d.inst.subnet_id ?? '—'}</dd>
-        <dt>Platform</dt><dd>{d.inst.platform ?? 'linux'}</dd>
-        <dt>Launched</dt><dd>{fmtDate(d.inst.launch_time)}</dd>
-      </dl>
-      <h3>Tags</h3>
-      {#if Object.keys(d.inst.tags ?? {}).length === 0}
-        <p class="dim">No tags.</p>
-      {:else}
-        <div class="tags">
-          {#each Object.entries(d.inst.tags).sort(([a], [b]) => a.localeCompare(b)) as [k, v] (k)}
-            <span class="tag" title={`${k}=${v}`}><strong>{k}</strong>={v}</span>
-          {/each}
-        </div>
-      {/if}
-      <h3>Raw</h3>
-      {#if d.error}
-        <p class="err">{d.error}</p>
-      {:else if !d.full}
-        <Skeleton rows={5} />
-      {:else}
-        <div class="raw mono"><JsonTree value={d.full.raw} /></div>
-      {/if}
-    </div>
-  </Modal>
+    {:else if drawerTab === 'metrics'}
+      {#key `${account.id}/${region}/${inst.instance_id}`}
+        <MetricsPanel accountId={account.id} namespace="AWS/EC2" dimValue={inst.instance_id} {region} instanceType={inst.type} {onsignin} />
+      {/key}
+    {:else}
+      <div class="dt">
+        {#if d.error}
+          <p class="err">{d.error}</p>
+        {:else if !d.full}
+          <Skeleton rows={5} />
+        {:else}
+          <div class="raw mono"><JsonTree value={d.full.raw} /></div>
+        {/if}
+      </div>
+    {/if}
+  </AwsDrawer>
 {/if}
+</div>
 
 <style>
   .pad {
@@ -292,13 +338,26 @@
     font-size: 12px;
     padding: 0 4px;
   }
+  .body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
+  }
   .tbl-wrap {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     overflow: auto;
   }
+  .trow.sel {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
   .tbl {
     width: 100%;
+    /* With the drawer open the pane gets narrow; keep the columns readable
+       and let .tbl-wrap scroll sideways instead of squeezing every cell. */
+    min-width: 760px;
     border-collapse: collapse;
     font-size: 12.5px;
   }
@@ -385,6 +444,7 @@
     flex-direction: column;
     gap: 10px;
     font-size: 12.5px;
+    padding: 12px 14px;
   }
   .dt-top {
     display: flex;
@@ -433,7 +493,6 @@
   }
   .raw {
     font-size: 12px;
-    max-height: 50vh;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);

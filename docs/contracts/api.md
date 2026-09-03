@@ -3060,7 +3060,8 @@ since that path never reaches the netguard-checked fetch.
 ## AWS console (`/aws/*`)
 
 Browse and operate AWS from Otto through the **`aws` CLI v2** (no SDK): S3
-(read-only), SQS, EC2, Athena and EKS, per saved **account**. An account is
+(read-only), SQS, EC2, Athena, EKS, RDS (read-only) and CloudWatch metrics for
+SQS queues / EC2 instances / RDS instances, per saved **account**. An account is
 either a named profile in `~/.aws/config` (`auth_mode: "profile"` — SSO /
 assume-role / MFA are handled by the CLI itself) or static access keys
 (`auth_mode: "access_keys"` — the secret key + optional session token live in
@@ -3070,8 +3071,8 @@ axis). Build contract: `docs/design/aws-k8s-consoles.md`; router:
 `crates/otto-aws/src/http.rs`; guide: `docs/features/aws-console.md`.
 
 Authorization is the policy table's "AWS console" block: `Aws` (accounts +
-plumbing), `AwsS3`, `AwsSqs`, `AwsEc2`, `AwsAthena`, `AwsEks` — see the RBAC
-feature table in `docs/features/rbac-multiuser-sharing.md`. Every service
+plumbing), `AwsS3`, `AwsSqs`, `AwsEc2`, `AwsAthena`, `AwsEks`, `AwsRds` — see
+the RBAC feature table in `docs/features/rbac-multiuser-sharing.md`. Every service
 route accepts `?region=` (falls back to the account's region). Errors: a
 missing CLI is `400 invalid` whose message contains `not installed`; expired /
 missing credentials are `400 invalid` whose message starts with
@@ -3092,7 +3093,7 @@ missing credentials are `400 invalid` whose message starts with
 | PATCH /aws/accounts/{id} | Aws:Admin | partial `UpsertAwsAccountReq` — omitted secret fields keep the stored secret; `session_token: ""` clears it; `endpoint_url: ""` clears the custom endpoint | `AwsAccount` |
 | DELETE /aws/accounts/{id} | Aws:Admin | — | 204 — deletes the Keychain secret; linked `k8s_clusters.aws_account_id` is set NULL by the FK |
 | POST /aws/accounts/{id}/test | Aws:View | — | `AwsTestResp { ok, latency_ms, message, identity?, login_required }` (`sts get-caller-identity`) |
-| GET /aws/accounts/{id}/permissions?refresh= | Aws:View | — | `AwsPermissions { checked_at, identity?, services: { s3, sqs, ec2, athena, eks }: "allowed"\|"denied"\|"unknown", login_required }` — six parallel 8 s probes, cached 10 min in `permissions_json` (`refresh=true` bypasses; a `login_required` snapshot is never cached) |
+| GET /aws/accounts/{id}/permissions?refresh= | Aws:View | — | `AwsPermissions { checked_at, identity?, services: { s3, sqs, ec2, athena, eks, rds }: "allowed"\|"denied"\|"unknown", login_required }` — seven parallel 8 s probes (`rds` defaults to `unknown` on snapshots cached before it existed), cached 10 min in `permissions_json` (`refresh=true` bypasses; a `login_required` snapshot is never cached) |
 | POST /aws/accounts/{id}/login | Aws:Edit | `{ workspace_id }` | `Session` — spawns `aws sso login --profile <p>` in a PTY (`Spawner::spawn_command`, provider `aws`); 400 for `access_keys` accounts |
 
 `AwsAccount { id, name, auth_mode: "profile"|"access_keys", profile?, region,
@@ -3164,6 +3165,43 @@ public_ip, launch_time, platform, vpc_id, subnet_id, tags: Record<string,string>
 | GET /aws/accounts/{id}/eks/clusters | AwsEks:View | `?region=` | `{ clusters: { name, status, version, endpoint, arn, created_at }[] }` (`list-clusters` + `describe-cluster` fan-out, first 20) |
 | GET /aws/accounts/{id}/eks/clusters/{name} | AwsEks:View | `?region=` | `{ cluster: Value, nodegroups: { name, status, desired, min, max, instance_types, ami_type }[] }` |
 | POST /aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig | AwsEks:Edit **and** `kubernetes:Admin` (checked in the handler) | `{ cluster_name_override?, default_namespace? }` (`?region=`) | 201 `K8sCluster` — `aws eks update-kubeconfig --kubeconfig <data_dir>/kube/<new_id>.yaml --alias <name>` (file 0600), then a `k8s_clusters` row `source: "eks"`, `aws_account_id: id`; emits `k8s_cluster_updated`; audited `aws.eks.import_kubeconfig` |
+
+### RDS (read-only — every route is `AwsRds:View`)
+
+| Method & path | Request | Response |
+|---|---|---|
+| GET /aws/accounts/{id}/rds/instances | `?region=&q=` (`q` filters identifier/engine/class/endpoint/db name client-side) | `{ instances: RdsInstance[] }` (`rds describe-db-instances`) |
+| GET /aws/accounts/{id}/rds/instances/{identifier} | `?region=` | `RdsInstance & { raw }` — 400 unless `identifier` is 1–63 letters/digits/hyphens starting with a letter |
+
+`RdsInstance { identifier, engine, engine_version, class, status, az,
+multi_az, storage_gb, storage_type, endpoint (host), port, db_name,
+master_username, publicly_accessible, created, tags: Record<string,string> }`.
+There are no start/stop/reboot routes for RDS by design.
+
+### CloudWatch metrics
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /aws/accounts/{id}/metrics | `Aws:View` (policy) **and** `View` on the namespace's own key — `aws_sqs` / `aws_ec2` / `aws_rds` (checked in the handler; 403 names the missing grant) | `?namespace=AWS/SQS\|AWS/EC2\|AWS/RDS&dim_name=QueueName\|InstanceId\|DBInstanceIdentifier&dim_value=&range=1h\|6h\|24h\|7d\|30d&region=&instance_type=` — `dim_name` is optional but must match the namespace; `dim_value` is a 1–256 char `[A-Za-z0-9][A-Za-z0-9._-]*` token; `range` defaults to `1h`; `instance_type` (EC2 only) drops the `CPUCredit*` series for non-burstable families (t2/t3/t3a/t4g keep them) | `MetricsResp { namespace, dim_name, dim_value, range, period_seconds, start, end, series: MetricSeries[] }` |
+
+One `aws cloudwatch get-metric-data --metric-data-queries file://<data_dir>/tmp/<ulid>.json --start-time … --end-time … --scan-by TimestampAscending` per request (the query document is written to an Otto-owned scratch file and removed afterwards — the dimension value never becomes argv or a path). **Period** from range: `1h`→60 s, `6h`/`24h`→300 s, `7d`/`30d`→3600 s, floored by CloudWatch's retention rule (data older than 15 days ≥300 s, older than 63 days ≥3600 s). `start`/`end` are aligned to the period. Answers are **cached 30 s** per (account, region, namespace, dimension value, range, instance_type).
+
+`MetricSeries { id, metric, stat: "Sum"|"Average"|"Maximum", unit:
+"count"|"bytes"|"percent"|"seconds"|"ms"|"count_per_sec"|"bytes_per_sec",
+label, points: { t: rfc3339, v: number|null }[], current, min, max, sum, avg }`
+— `points` cover every period slot of `[start, end]` in ascending order, with
+`null` for slots CloudWatch returned nothing for (gaps); off-grid timestamps
+the API did return are kept. Every catalog entry is returned even with zero
+datapoints (all-`null` points, `current`/`min`/`max`/`sum`/`avg` = `null`), so
+the UI can render "no data" per card. `current` is the latest non-null value.
+
+Catalog (id · metric · stat · unit):
+
+- **AWS/SQS** (`QueueName`): `messages_sent` NumberOfMessagesSent Sum count · `messages_received` NumberOfMessagesReceived Sum count · `messages_deleted` NumberOfMessagesDeleted Sum count · `empty_receives` NumberOfEmptyReceives Sum count · `sent_message_size` SentMessageSize Average bytes · `bytes_in` SentMessageSize Sum bytes · `oldest_message_age` ApproximateAgeOfOldestMessage Maximum seconds · `messages_visible` ApproximateNumberOfMessagesVisible Average count · `messages_not_visible` ApproximateNumberOfMessagesNotVisible Average count · `messages_delayed` ApproximateNumberOfMessagesDelayed Average count.
+- **AWS/EC2** (`InstanceId`): `cpu` CPUUtilization Average percent · `network_in`/`network_out` NetworkIn/NetworkOut Sum bytes · `packets_in`/`packets_out` NetworkPacketsIn/Out Sum count · `disk_read_bytes`/`disk_write_bytes` DiskReadBytes/DiskWriteBytes Sum bytes · `disk_read_ops`/`disk_write_ops` DiskReadOps/DiskWriteOps Sum count · `status_check_failed` StatusCheckFailed Maximum count · `cpu_credit_balance` CPUCreditBalance Average count · `cpu_credit_usage` CPUCreditUsage Sum count (the two credit series only for burstable types).
+- **AWS/RDS** (`DBInstanceIdentifier`): `cpu` CPUUtilization Average percent · `connections` DatabaseConnections Average count · `freeable_memory` FreeableMemory Average bytes · `free_storage` FreeStorageSpace Average bytes · `read_iops`/`write_iops` ReadIOPS/WriteIOPS Average count_per_sec · `read_latency`/`write_latency` ReadLatency/WriteLatency Average seconds · `read_throughput`/`write_throughput` ReadThroughput/WriteThroughput Average bytes_per_sec · `network_rx`/`network_tx` NetworkReceiveThroughput/NetworkTransmitThroughput Average bytes_per_sec · `swap_usage` SwapUsage Average bytes · `disk_queue_depth` DiskQueueDepth Average count · `burst_balance` BurstBalance Average percent.
+
+Errors follow the module rule: a denied `cloudwatch:GetMetricData` is `403 forbidden` (the UI says "needs cloudwatch:GetMetricData"); expired credentials are `400 invalid` with the `login required:` prefix.
 
 ## Kubernetes console (`/k8s/*`)
 

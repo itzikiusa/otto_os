@@ -1,6 +1,6 @@
 <script lang="ts">
   // AWS console module. Routes: `#/aws` (accounts overview) ·
-  // `#/aws/<accountId>/<service>` (service ∈ s3|sqs|ec2|athena|eks) · deep link
+  // `#/aws/<accountId>/<service>` (service ∈ s3|sqs|ec2|athena|eks|rds) · deep link
   // `#/aws/<id>/s3/<bucket>?prefix=<encoded>` (the S3 browser reads/writes it).
   // First run: when `/aws/status` says the CLI is missing the InstallPanel takes
   // over the whole page. Layout: account/service rail + content; on mobile the
@@ -26,10 +26,11 @@
   import Ec2View from './Ec2View.svelte';
   import AthenaView from './AthenaView.svelte';
   import EksView from './EksView.svelte';
+  import RdsView from './RdsView.svelte';
   import EnvPill from './EnvPill.svelte';
   import type { AwsAccount, AwsService, Feature } from '../../lib/api/types';
 
-  const SERVICES: readonly AwsService[] = ['s3', 'sqs', 'ec2', 'athena', 'eks'];
+  const SERVICES: readonly AwsService[] = ['s3', 'sqs', 'ec2', 'athena', 'eks', 'rds'];
 
   const routeAccountId = $derived(router.parts[1] ?? null);
   const routeService = $derived.by<AwsService | null>(() => {
@@ -175,8 +176,10 @@
               <Ec2View {account} onsignin={() => void signIn(account)} />
             {:else if routeService === 'athena'}
               <AthenaView {account} onsignin={() => void signIn(account)} />
-            {:else}
+            {:else if routeService === 'eks'}
               <EksView {account} onsignin={() => void signIn(account)} />
+            {:else}
+              <RdsView {account} onsignin={() => void signIn(account)} />
             {/if}
           {/key}
         {/if}

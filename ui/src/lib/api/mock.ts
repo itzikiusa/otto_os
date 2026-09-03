@@ -6,6 +6,8 @@
 import type {
   AwsAccount,
   AwsPermissions,
+  MetricUnit,
+  RdsInstance,
   AwsStatus,
   AthenaExecution,
   BranchInfo,
@@ -627,9 +629,76 @@ function newSessionFor(workspaceId: Id, req: any): Session {
 const awsPermsOk: AwsPermissions = {
   checked_at: ago(4),
   identity: { account: '123456789012', arn: 'arn:aws:sts::123456789012:assumed-role/Admin/dana', user_id: 'AROA…' },
-  services: { s3: 'allowed', sqs: 'allowed', ec2: 'allowed', athena: 'allowed', eks: 'allowed' },
+  services: { s3: 'allowed', sqs: 'allowed', ec2: 'allowed', athena: 'allowed', eks: 'allowed', rds: 'allowed' },
   login_required: false,
 };
+function rdsFixtures(region: string): RdsInstance[] {
+  return [
+    {
+      identifier: 'orders-db', engine: 'postgres', engine_version: '15.4', class: 'db.r6g.large', status: 'available',
+      az: `${region}a`, multi_az: true, storage_gb: 200, storage_type: 'gp3', endpoint: `orders-db.abc123.${region}.rds.amazonaws.com`, port: 5432,
+      db_name: 'orders', master_username: 'app', publicly_accessible: false, created: ago(60 * 24 * 120), tags: { env: 'dev', team: 'payments' },
+    },
+    {
+      identifier: 'analytics-replica', engine: 'mysql', engine_version: '8.0.35', class: 'db.t3.medium', status: 'backing-up',
+      az: `${region}b`, multi_az: false, storage_gb: 50, storage_type: 'gp2', endpoint: `analytics-replica.abc123.${region}.rds.amazonaws.com`, port: 3306,
+      db_name: null, master_username: 'admin', publicly_accessible: false, created: ago(60 * 24 * 30), tags: { env: 'dev' },
+    },
+    {
+      identifier: 'scratch', engine: 'mariadb', engine_version: '10.11', class: 'db.t4g.micro', status: 'stopped',
+      az: `${region}a`, multi_az: false, storage_gb: 20, storage_type: 'gp3', endpoint: null, port: null,
+      db_name: 'scratch', master_username: 'root', publicly_accessible: true, created: ago(60 * 24 * 2), tags: {},
+    },
+  ];
+}
+
+/** Mirror of the daemon's per-namespace catalog (docs/contracts/api.md). */
+const METRIC_CATALOG: Record<string, { id: string; metric: string; stat: string; unit: MetricUnit; label: string }[]> = {
+  'AWS/SQS': [
+    { id: 'messages_sent', metric: 'NumberOfMessagesSent', stat: 'Sum', unit: 'count', label: 'Sent' },
+    { id: 'messages_received', metric: 'NumberOfMessagesReceived', stat: 'Sum', unit: 'count', label: 'Received' },
+    { id: 'messages_deleted', metric: 'NumberOfMessagesDeleted', stat: 'Sum', unit: 'count', label: 'Deleted' },
+    { id: 'empty_receives', metric: 'NumberOfEmptyReceives', stat: 'Sum', unit: 'count', label: 'Empty receives' },
+    { id: 'sent_message_size', metric: 'SentMessageSize', stat: 'Average', unit: 'bytes', label: 'Avg message size' },
+    { id: 'bytes_in', metric: 'SentMessageSize', stat: 'Sum', unit: 'bytes', label: 'Bytes in' },
+    { id: 'oldest_message_age', metric: 'ApproximateAgeOfOldestMessage', stat: 'Maximum', unit: 'seconds', label: 'Age of oldest message' },
+    { id: 'messages_visible', metric: 'ApproximateNumberOfMessagesVisible', stat: 'Average', unit: 'count', label: 'Visible' },
+    { id: 'messages_not_visible', metric: 'ApproximateNumberOfMessagesNotVisible', stat: 'Average', unit: 'count', label: 'In flight' },
+    { id: 'messages_delayed', metric: 'ApproximateNumberOfMessagesDelayed', stat: 'Average', unit: 'count', label: 'Delayed' },
+  ],
+  'AWS/EC2': [
+    { id: 'cpu', metric: 'CPUUtilization', stat: 'Average', unit: 'percent', label: 'CPU' },
+    { id: 'network_in', metric: 'NetworkIn', stat: 'Sum', unit: 'bytes', label: 'Network in' },
+    { id: 'network_out', metric: 'NetworkOut', stat: 'Sum', unit: 'bytes', label: 'Network out' },
+    { id: 'packets_in', metric: 'NetworkPacketsIn', stat: 'Sum', unit: 'count', label: 'Packets in' },
+    { id: 'packets_out', metric: 'NetworkPacketsOut', stat: 'Sum', unit: 'count', label: 'Packets out' },
+    { id: 'disk_read_bytes', metric: 'DiskReadBytes', stat: 'Sum', unit: 'bytes', label: 'Disk read' },
+    { id: 'disk_write_bytes', metric: 'DiskWriteBytes', stat: 'Sum', unit: 'bytes', label: 'Disk write' },
+    { id: 'disk_read_ops', metric: 'DiskReadOps', stat: 'Sum', unit: 'count', label: 'Disk read ops' },
+    { id: 'disk_write_ops', metric: 'DiskWriteOps', stat: 'Sum', unit: 'count', label: 'Disk write ops' },
+    { id: 'status_check_failed', metric: 'StatusCheckFailed', stat: 'Maximum', unit: 'count', label: 'Status check failed' },
+    { id: 'cpu_credit_balance', metric: 'CPUCreditBalance', stat: 'Average', unit: 'count', label: 'CPU credit balance' },
+    { id: 'cpu_credit_usage', metric: 'CPUCreditUsage', stat: 'Sum', unit: 'count', label: 'CPU credit usage' },
+  ],
+  'AWS/RDS': [
+    { id: 'cpu', metric: 'CPUUtilization', stat: 'Average', unit: 'percent', label: 'CPU' },
+    { id: 'connections', metric: 'DatabaseConnections', stat: 'Average', unit: 'count', label: 'Connections' },
+    { id: 'freeable_memory', metric: 'FreeableMemory', stat: 'Average', unit: 'bytes', label: 'Freeable memory' },
+    { id: 'free_storage', metric: 'FreeStorageSpace', stat: 'Average', unit: 'bytes', label: 'Free storage' },
+    { id: 'read_iops', metric: 'ReadIOPS', stat: 'Average', unit: 'count_per_sec', label: 'Read IOPS' },
+    { id: 'write_iops', metric: 'WriteIOPS', stat: 'Average', unit: 'count_per_sec', label: 'Write IOPS' },
+    { id: 'read_latency', metric: 'ReadLatency', stat: 'Average', unit: 'seconds', label: 'Read latency' },
+    { id: 'write_latency', metric: 'WriteLatency', stat: 'Average', unit: 'seconds', label: 'Write latency' },
+    { id: 'read_throughput', metric: 'ReadThroughput', stat: 'Average', unit: 'bytes_per_sec', label: 'Read throughput' },
+    { id: 'write_throughput', metric: 'WriteThroughput', stat: 'Average', unit: 'bytes_per_sec', label: 'Write throughput' },
+    { id: 'network_rx', metric: 'NetworkReceiveThroughput', stat: 'Average', unit: 'bytes_per_sec', label: 'Network receive' },
+    { id: 'network_tx', metric: 'NetworkTransmitThroughput', stat: 'Average', unit: 'bytes_per_sec', label: 'Network transmit' },
+    { id: 'swap_usage', metric: 'SwapUsage', stat: 'Average', unit: 'bytes', label: 'Swap usage' },
+    { id: 'disk_queue_depth', metric: 'DiskQueueDepth', stat: 'Average', unit: 'count', label: 'Disk queue depth' },
+    { id: 'burst_balance', metric: 'BurstBalance', stat: 'Average', unit: 'percent', label: 'Burst balance' },
+  ],
+};
+
 const awsAccounts: AwsAccount[] = [
   {
     id: 'aws_sandbox',
@@ -659,7 +728,7 @@ const awsAccounts: AwsAccount[] = [
     identity: { account: '999999999999', arn: 'arn:aws:sts::999999999999:assumed-role/ReadOnly/otto', user_id: 'AROA…' },
     permissions: {
       checked_at: ago(12),
-      services: { s3: 'allowed', sqs: 'denied', ec2: 'allowed', athena: 'unknown', eks: 'denied' },
+      services: { s3: 'allowed', sqs: 'denied', ec2: 'allowed', athena: 'unknown', eks: 'denied', rds: 'unknown' },
       login_required: false,
     },
     created_by: 'usr_root',
@@ -1947,6 +2016,76 @@ const routes: Route[] = [
     method: 'POST',
     re: /^\/aws\/accounts\/([^/]+)\/ec2\/instances\/([^/]+)\/(start|stop|reboot)$/,
     handle: (m) => ({ json: { previous_state: m[3] === 'start' ? 'stopped' : 'running', current_state: m[3] === 'start' ? 'pending' : m[3] === 'stop' ? 'stopping' : 'running' } }),
+  },
+  // RDS (read-only)
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/rds\/instances$/,
+    handle: (_m, _b, query) => {
+      const region = query.get('region') ?? 'eu-west-1';
+      return { json: { instances: rdsFixtures(region) } };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/rds\/instances\/([^/]+)$/,
+    handle: (m, _b, query) => {
+      const inst = rdsFixtures(query.get('region') ?? 'eu-west-1').find((i) => i.identifier === m[2]);
+      if (!inst) return problem(404, 'not_found', `db instance ${m[2]}`);
+      return { json: { ...inst, raw: { DBInstanceIdentifier: inst.identifier, Engine: inst.engine, DBInstanceClass: inst.class, DBInstanceStatus: inst.status, Endpoint: { Address: inst.endpoint, Port: inst.port }, VpcSecurityGroups: [{ VpcSecurityGroupId: 'sg-db', Status: 'active' }] } } };
+    },
+  },
+  // CloudWatch metrics
+  {
+    method: 'GET',
+    re: /^\/aws\/accounts\/([^/]+)\/metrics$/,
+    handle: (_m, _b, query) => {
+      const namespace = query.get('namespace') ?? '';
+      const catalog = METRIC_CATALOG[namespace];
+      if (!catalog) return problem(400, 'invalid', `unknown namespace '${namespace}' (AWS/SQS, AWS/EC2 or AWS/RDS)`);
+      const range = query.get('range') ?? '1h';
+      const period = range === '1h' ? 60 : range === '6h' || range === '24h' ? 300 : 3600;
+      const span = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 }[range] ?? 3600;
+      const end = Math.floor(Date.now() / 1000 / period) * period;
+      const start = end - span;
+      const n = Math.floor(span / period) + 1;
+      const burst = /^t[234]/.test(query.get('instance_type') ?? 't3');
+      const series = catalog
+        .filter((d) => burst || !d.metric.startsWith('CPUCredit'))
+        .map((d, k) => {
+          const base = d.unit === 'percent' ? 40 : d.unit === 'bytes' || d.unit === 'bytes_per_sec' ? 4_000_000 : d.unit === 'seconds' ? 0.02 : 120;
+          const empty = d.id === 'status_check_failed' || d.id === 'messages_delayed';
+          const points = Array.from({ length: n }, (_, i) => {
+            const t = new Date((start + i * period) * 1000).toISOString();
+            if (empty || i % 17 === 5) return { t, v: null };
+            const v = Math.max(0, base * (1 + 0.35 * Math.sin((i + k * 3) / 4) + 0.1 * Math.cos(i / 1.7)));
+            return { t, v: d.unit === 'count' && d.stat === 'Sum' ? Math.round(v) : Number(v.toFixed(4)) };
+          });
+          const vals = points.map((p) => p.v).filter((v): v is number => v != null);
+          const sum = vals.reduce((a, b) => a + b, 0);
+          return {
+            ...d,
+            points,
+            current: vals.length ? vals[vals.length - 1] : null,
+            min: vals.length ? Math.min(...vals) : null,
+            max: vals.length ? Math.max(...vals) : null,
+            sum: vals.length ? sum : null,
+            avg: vals.length ? sum / vals.length : null,
+          };
+        });
+      return {
+        json: {
+          namespace,
+          dim_name: namespace === 'AWS/SQS' ? 'QueueName' : namespace === 'AWS/EC2' ? 'InstanceId' : 'DBInstanceIdentifier',
+          dim_value: query.get('dim_value') ?? '',
+          range,
+          period_seconds: period,
+          start: new Date(start * 1000).toISOString(),
+          end: new Date(end * 1000).toISOString(),
+          series,
+        },
+      };
+    },
   },
   // Athena
   { method: 'GET', re: /^\/aws\/accounts\/([^/]+)\/athena\/workgroups$/, handle: () => ({ json: { workgroups: [{ name: 'primary', state: 'ENABLED', output_location: 's3://acme-athena-results/' }, { name: 'analytics', state: 'ENABLED', output_location: null }] } }) },

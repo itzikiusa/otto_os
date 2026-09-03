@@ -26,7 +26,7 @@ Effective access = the request passes the feature gate **and** the workspace gat
 
 `Agents, Connections, Database, Git, Issues, Product, Swarm, ApiClient, Workflows,
 Channels, SkillEval, Skills, Insights, Usage, SelfImprovement, Context, Settings, Users,
-Aws, AwsS3, AwsSqs, AwsEc2, AwsAthena, AwsEks, Kubernetes`
+Aws, AwsS3, AwsSqs, AwsEc2, AwsAthena, AwsEks, AwsRds, Kubernetes`
 
 - **Database** — *View*: `SELECT`/`SHOW`/`EXPLAIN`, schema, read history/saved queries.
   *Edit*: run mutating SQL, manage saved queries/dashboards. *Admin*: manage connections.
@@ -38,7 +38,10 @@ Aws, AwsS3, AwsSqs, AwsEc2, AwsAthena, AwsEks, Kubernetes`
   (*View*: list/attributes/peek · *Edit*: send/delete-message/purge/redrive),
   **AwsEc2** (*View*: describe · *Edit*: start/stop/reboot), **AwsAthena** (*View*:
   catalog/history/results/cancel · *Edit*: execute a query), **AwsEks** (*View*:
-  describe · *Edit*: import kubeconfig).
+  describe · *Edit*: import kubeconfig), **AwsRds** (View only — list/describe
+  DB instances + CloudWatch metrics; RDS is read-only by design). CloudWatch
+  metrics (`GET …/metrics`) need `Aws:View` plus View on the namespace's own
+  key (`AwsSqs` / `AwsEc2` / `AwsRds`).
 - **Kubernetes** — *View*: clusters, resources, describe, events, logs, top. *Edit*:
   exec / k9s PTY sessions and every action (restart, scale, delete pod, rollout +
   Argo verbs). *Admin*: manage the cluster registry, install kubectl/k9s.

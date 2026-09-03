@@ -1,0 +1,31 @@
+{
+  "MetricDataResults": [
+    {
+      "Id": "messages_sent",
+      "Label": "Sent",
+      "Timestamps": [
+        "2024-06-01T10:00:00+00:00",
+        "2024-06-01T10:02:00+00:00",
+        "2024-06-01T10:01:00+00:00",
+        "2024-06-01T10:04:00+00:00"
+      ],
+      "Values": [12.0, 7.0, 3.0, 20.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "messages_received",
+      "Label": "Received",
+      "Timestamps": ["2024-06-01T10:00:00+00:00", "2024-06-01T10:02:30+00:00"],
+      "Values": [1.0, 5.0],
+      "StatusCode": "Complete"
+    },
+    {
+      "Id": "oldest_message_age",
+      "Label": "Age of oldest message",
+      "Timestamps": [],
+      "Values": [],
+      "StatusCode": "Complete"
+    }
+  ],
+  "Messages": []
+}

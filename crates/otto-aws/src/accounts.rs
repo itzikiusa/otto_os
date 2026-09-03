@@ -68,11 +68,12 @@ pub struct AwsIdentity {
     pub user_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PermState {
     Allowed,
     Denied,
+    #[default]
     Unknown,
 }
 
@@ -83,6 +84,10 @@ pub struct AwsServicePerms {
     pub ec2: PermState,
     pub athena: PermState,
     pub eks: PermState,
+    /// Added after the first release — cached `permissions_json` snapshots
+    /// without it deserialize as `unknown`.
+    #[serde(default)]
+    pub rds: PermState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -912,13 +917,15 @@ impl AwsService {
                 cli::run_raw(&bin, &argv, &env, PROBE_TIMEOUT, None).await
             }
         };
-        let (sts, s3, sqs, ec2, athena, eks) = tokio::join!(
+        let (sts, s3, sqs, ec2, athena, eks, rds) = tokio::join!(
             probe(&["sts", "get-caller-identity"]),
             probe(&["s3api", "list-buckets", "--max-items", "1"]),
             probe(&["sqs", "list-queues", "--max-results", "1"]),
             probe(&["ec2", "describe-instances", "--max-results", "5"]),
             probe(&["athena", "list-work-groups", "--max-results", "1"]),
             probe(&["eks", "list-clusters", "--max-results", "1"]),
+            // `--max-records` floors at 20 for describe-db-instances.
+            probe(&["rds", "describe-db-instances", "--max-records", "20"]),
         );
         let mut login_required = false;
         let mut cls = |r: &Result<CliOutput>| {
@@ -932,6 +939,7 @@ impl AwsService {
             ec2: cls(&ec2),
             athena: cls(&athena),
             eks: cls(&eks),
+            rds: cls(&rds),
         };
         let (_, sts_lr) = classify_probe(&sts);
         login_required |= sts_lr;

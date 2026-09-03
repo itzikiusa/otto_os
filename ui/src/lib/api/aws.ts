@@ -24,7 +24,12 @@ import type {
   EksImportReq,
   EksImportResp,
   InstallJob,
+  MetricsNamespace,
+  MetricsRange,
+  MetricsResp,
   Problem,
+  RdsInstance,
+  RdsInstanceDetail,
   S3Bucket,
   S3ListObjectsResp,
   S3ObjectHead,
@@ -162,6 +167,35 @@ export const awsApi = {
     api.post<EksImportResp>(
       `${acct(id)}/eks/clusters/${encodeURIComponent(name)}/import-kubeconfig${qs({ region })}`,
       body,
+    ),
+
+  // --- RDS (read-only) ---
+  rdsInstances: (id: string, region?: string, q?: string) =>
+    api.get<{ instances: RdsInstance[] }>(`${acct(id)}/rds/instances${qs({ region, q })}`),
+  rdsInstance: (id: string, identifier: string, region?: string) =>
+    api.get<RdsInstanceDetail>(
+      `${acct(id)}/rds/instances/${encodeURIComponent(identifier)}${qs({ region })}`,
+    ),
+
+  // --- CloudWatch metrics ---
+  /** One `get-metric-data` per call (server-cached 30 s). `instanceType` lets
+   *  the daemon drop the CPU-credit series for non-burstable EC2 families. */
+  metrics: (
+    id: string,
+    namespace: MetricsNamespace,
+    dimValue: string,
+    range: MetricsRange,
+    opts: { region?: string; instanceType?: string | null; signal?: AbortSignal } = {},
+  ) =>
+    api.get<MetricsResp>(
+      `${acct(id)}/metrics${qs({
+        namespace,
+        dim_value: dimValue,
+        range,
+        region: opts.region,
+        instance_type: opts.instanceType,
+      })}`,
+      opts.signal,
     ),
 };
 

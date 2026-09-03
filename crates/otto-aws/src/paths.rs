@@ -46,6 +46,13 @@ pub fn owned_file(dir: &Path, stem: &str, ext: &str) -> Result<PathBuf> {
         format!("{stem}.{ext}")
     };
     let path = dir.join(&leaf);
+    // Literal traversal check on the joined string. Redundant with the
+    // component checks below, but it is the one sanitizer static analysis
+    // (CodeQL's Rust path-injection query) recognizes for a path that
+    // originates from request state.
+    if path.to_string_lossy().contains("..") {
+        return Err(Error::Internal("owned file path contains '..'".into()));
+    }
     let mut comps = path.components().rev();
     let last_is_leaf = matches!(comps.next(), Some(Component::Normal(c)) if c == leaf.as_str());
     if !last_is_leaf || path.parent() != Some(dir) {

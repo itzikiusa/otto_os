@@ -976,6 +976,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //   EC2    — describe is View; start/stop/reboot Edit.
     //   Athena — catalog/history/results/cancel View; executing a query Edit.
     //   EKS    — describe is View; kubeconfig import Edit.
+    //   RDS    — read-only by design: list/describe instances are View.
+    //   Metrics — `/metrics` (CloudWatch get-metric-data) is a read under the
+    //            account key; the handler additionally requires View on the
+    //            namespace's own service key (SQS/EC2/RDS), which the path
+    //            alone cannot express.
     // "Peek" and "cancel" are POSTs that do not mutate user data, so they are
     // explicitly graded back down to View (same trick as `/db/query-plan`).
     // Order: the per-service sub-prefixes are matched BEFORE the generic
@@ -997,6 +1002,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         }
         if rest.starts_with("eks/") {
             return Require(AwsEks, if get { View } else { Edit });
+        }
+        if rest.starts_with("rds/") {
+            return Require(AwsRds, View);
+        }
+        if rest == "metrics" {
+            return Require(Aws, View);
         }
         // Account-level probes: `test` (sts get-caller-identity), `permissions`
         // (per-service capability probe) are reads; `login` spawns an

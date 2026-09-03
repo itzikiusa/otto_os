@@ -2,7 +2,8 @@
   // SQS: queue list with approximate counts → queue detail tabs: Messages
   // (Peek N, JSON-pretty body viewer, delete-message per row [Edit]), Send
   // (body + attributes, FIFO fields only for `.fifo`) [Edit], Attributes,
-  // Redrive (DLQ → source) [Edit]. Purge lives in the ⋯ menu [Edit, typed].
+  // Metrics (CloudWatch via MetricsPanel), Redrive (DLQ → source) [Edit].
+  // Purge lives in the ⋯ menu [Edit, typed].
   import { untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
@@ -17,6 +18,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
+  import MetricsPanel from './MetricsPanel.svelte';
   import { prettyJson } from './util';
   import type { AwsAccount, SqsMessage, SqsQueue } from '../../lib/api/types';
 
@@ -35,7 +37,7 @@
   let selectedUrl = $state<string | null>(null);
   const selected = $derived(queues?.find((q) => q.url === selectedUrl) ?? null);
   const attrs = $derived(selectedUrl ? (aws.sqsAttrs[selectedUrl] ?? null) : null);
-  type Tab = 'messages' | 'send' | 'attributes' | 'redrive';
+  type Tab = 'messages' | 'send' | 'attributes' | 'metrics' | 'redrive';
   let tab = $state<Tab>('messages');
 
   const shown = $derived.by(() => {
@@ -285,7 +287,7 @@
           <button class="more" onclick={(e) => selected && queueMenu(e, selected)} aria-label="Queue actions" title="Actions">⋯</button>
         </div>
         <div class="tabs" role="tablist">
-          {#each [['messages', 'Messages'], ['send', 'Send'], ['attributes', 'Attributes'], ['redrive', 'Redrive']] as const as [id, label] (id)}
+          {#each [['messages', 'Messages'], ['send', 'Send'], ['attributes', 'Attributes'], ['metrics', 'Metrics'], ['redrive', 'Redrive']] as const as [id, label] (id)}
             <button role="tab" aria-selected={tab === id} class:on={tab === id} onclick={() => (tab = id)} disabled={(id === 'send' || id === 'redrive') && !canEdit} title={(id === 'send' || id === 'redrive') && !canEdit ? 'Needs Edit on SQS' : ''}>{label}</button>
           {/each}
         </div>
@@ -371,6 +373,10 @@
                 </tbody>
               </table>
             {/if}
+          {:else if tab === 'metrics'}
+            {#key `${account.id}/${selected.name}`}
+              <MetricsPanel accountId={account.id} namespace="AWS/SQS" dimValue={selected.name} {onsignin} />
+            {/key}
           {:else}
             <div class="form">
               <p class="dim">
