@@ -122,6 +122,7 @@ and their snake_case strings (used as the `feature` key in grants & in
 | `AwsEc2` | `aws_ec2` | AWS — EC2 | View: list/describe instances · Edit: start/stop/reboot |
 | `AwsAthena` | `aws_athena` | AWS — Athena | View: workgroups, databases, tables, history, results, cancel · Edit: execute a query (billed per byte scanned) |
 | `AwsEks` | `aws_eks` | AWS — EKS | View: list/describe clusters + nodegroups · Edit: import kubeconfig (creates a Kubernetes cluster row — also needs `kubernetes:Admin`) |
+| `AwsRds` | `aws_rds` | AWS — RDS | View: list/describe DB instances + CloudWatch metrics — RDS is **read-only by design**, there is no Edit surface. (CloudWatch metrics for SQS / EC2 use the matching service key's View.) |
 | `Kubernetes` | `kubernetes` | Kubernetes | View: list clusters, status, discover, test, namespaces, nodes, resources, describe, events, logs, top, capabilities · Edit: exec, k9s, actions (restart/scale/delete pod/rollout + Argo verbs) · Admin: create/import/update/delete clusters, install kubectl/k9s |
 
 > The grant matrix in **Settings → Users** renders these 25 features against the

@@ -14,7 +14,9 @@ pub mod ec2;
 pub mod eks;
 pub mod http;
 pub mod install;
+pub mod metrics;
 pub mod paths;
+pub mod rds;
 pub mod s3;
 pub mod sqs;
 

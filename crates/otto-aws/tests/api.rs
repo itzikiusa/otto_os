@@ -60,6 +60,12 @@ case "$1 $2" in
     echo '{"WorkGroups": [{"Name": "primary", "State": "ENABLED"}]}'; exit 0;;
   "eks list-clusters")
     echo '{"clusters": ["prod-eu"]}'; exit 0;;
+  "rds describe-db-instances")
+    echo '{"DBInstances": [{"DBInstanceIdentifier": "orders-db", "DBInstanceClass": "db.r6g.large", "Engine": "postgres", "EngineVersion": "15.4", "DBInstanceStatus": "available", "AvailabilityZone": "eu-west-1a", "MultiAZ": true, "AllocatedStorage": 100, "Endpoint": {"Address": "orders-db.abc.eu-west-1.rds.amazonaws.com", "Port": 5432}, "InstanceCreateTime": "2024-01-10T08:00:00+00:00", "TagList": [{"Key": "env", "Value": "prod"}]}]}'; exit 0;;
+  "cloudwatch get-metric-data")
+    # keep a copy of the --metric-data-queries file:// document for assertions
+    prev=""; for a in "$@"; do if [ "$prev" = "--metric-data-queries" ]; then cp "${a#file://}" "$dir/queries.json"; fi; prev="$a"; done
+    echo '{"MetricDataResults": [{"Id": "messages_sent", "Label": "Sent", "Timestamps": ["2024-06-01T10:00:00+00:00"], "Values": [3.0], "StatusCode": "Complete"}], "Messages": []}'; exit 0;;
   "eks update-kubeconfig")
     # find --kubeconfig <path> and write a stub file there
     prev=""; for a in "$@"; do if [ "$prev" = "--kubeconfig" ]; then echo "apiVersion: v1" > "$a"; fi; prev="$a"; done
@@ -529,6 +535,7 @@ async fn permissions_probe_classifies_and_caches() {
     assert_eq!(p["services"]["ec2"], "denied");
     assert_eq!(p["services"]["athena"], "allowed");
     assert_eq!(p["services"]["eks"], "allowed");
+    assert_eq!(p["services"]["rds"], "allowed");
     assert_eq!(p["login_required"], false);
     assert_eq!(p["identity"]["account"], "123456789012");
     let probes_before = calls_log()
@@ -710,4 +717,187 @@ async fn import_kubeconfig_requires_kubernetes_admin_and_creates_cluster_row() {
             .await
             .unwrap();
     assert_eq!(n.0, 1);
+}
+
+#[tokio::test]
+async fn rds_list_and_describe_are_read_only() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let (_, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("rds", "rds-profile")),
+    )
+    .await;
+    let id = a["id"].as_str().unwrap();
+
+    let (st, b, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/rds/instances?region=us-east-1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(b["instances"][0]["identifier"], "orders-db");
+    assert_eq!(b["instances"][0]["engine"], "postgres");
+    assert_eq!(b["instances"][0]["port"], 5432);
+    assert_eq!(b["instances"][0]["multi_az"], true);
+    assert_eq!(b["instances"][0]["tags"]["env"], "prod");
+    assert!(calls_log()
+        .lines()
+        .any(|l| l.contains("PROFILE=rds-profile REGION=us-east-1")
+            && l.contains("ARGS=rds describe-db-instances")));
+
+    let (st, d, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/rds/instances/orders-db"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["identifier"], "orders-db");
+    assert_eq!(d["raw"]["DBInstanceClass"], "db.r6g.large");
+
+    // Bad identifiers never reach the CLI.
+    let (st, _, _) = call(
+        &ctx,
+        &root,
+        "GET",
+        &format!("/aws/accounts/{id}/rds/instances/bad_name"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
+    otto_aws::metrics::cache_clear();
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let (_, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("cw", "cw-profile")),
+    )
+    .await;
+    let id = a["id"].as_str().unwrap();
+
+    let uri = format!(
+        "/aws/accounts/{id}/metrics?namespace=AWS/SQS&dim_name=QueueName&dim_value=orders.fifo&range=6h"
+    );
+    let (st, m, _) = call(&ctx, &root, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    assert_eq!(m["namespace"], "AWS/SQS");
+    assert_eq!(m["dim_name"], "QueueName");
+    assert_eq!(m["dim_value"], "orders.fifo");
+    assert_eq!(m["range"], "6h");
+    assert_eq!(m["period_seconds"], 300);
+    let series = m["series"].as_array().unwrap();
+    assert_eq!(series.len(), otto_aws::metrics::SQS_CATALOG.len());
+    let sent = series.iter().find(|s| s["id"] == "messages_sent").unwrap();
+    assert_eq!(sent["metric"], "NumberOfMessagesSent");
+    assert_eq!(sent["unit"], "count");
+    // The fake returns one (off-window) point of 3.0: kept, so current = 3.
+    assert_eq!(sent["current"], 3.0);
+    // A metric the fake never returned still comes back, empty.
+    let delayed = series.iter().find(|s| s["id"] == "messages_delayed").unwrap();
+    assert!(delayed["current"].is_null());
+    assert!(delayed["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["v"].is_null()));
+
+    // Exactly one get-metric-data call, with the whole catalog in ONE
+    // file:// document keyed on the queue name.
+    let cw_calls = || {
+        calls_log()
+            .lines()
+            .filter(|l| {
+                l.contains("PROFILE=cw-profile") && l.contains("ARGS=cloudwatch get-metric-data")
+            })
+            .count()
+    };
+    assert_eq!(cw_calls(), 1);
+    let line = calls_log()
+        .lines()
+        .find(|l| l.contains("ARGS=cloudwatch get-metric-data"))
+        .unwrap()
+        .to_string();
+    assert!(line.contains("--metric-data-queries file://"), "{line}");
+    assert!(
+        line.contains("--start-time ") && line.contains("--end-time "),
+        "{line}"
+    );
+    assert!(line.contains("--scan-by TimestampAscending"), "{line}");
+    let queries: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(fake_aws_dir().join("queries.json")).unwrap(),
+    )
+    .unwrap();
+    let arr = queries.as_array().unwrap();
+    assert_eq!(arr.len(), otto_aws::metrics::SQS_CATALOG.len());
+    assert_eq!(arr[0]["MetricStat"]["Metric"]["Namespace"], "AWS/SQS");
+    assert_eq!(
+        arr[0]["MetricStat"]["Metric"]["Dimensions"][0]["Name"],
+        "QueueName"
+    );
+    assert_eq!(
+        arr[0]["MetricStat"]["Metric"]["Dimensions"][0]["Value"],
+        "orders.fifo"
+    );
+    assert_eq!(arr[0]["MetricStat"]["Period"], 300);
+    // The scratch document was removed after the call.
+    let tmp = ctx.data_dir.join("tmp");
+    let leftovers = std::fs::read_dir(&tmp)
+        .map(|d| d.filter_map(|e| e.ok()).count())
+        .unwrap_or(0);
+    assert_eq!(leftovers, 0, "tmp queries file must be cleaned up");
+
+    // Second identical request within 30 s is served from the cache.
+    let (st, m2, _) = call(&ctx, &root, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(m2["start"], m["start"]);
+    assert_eq!(cw_calls(), 1, "cached");
+
+    // Validation happens before any CLI call.
+    for bad in [
+        format!("/aws/accounts/{id}/metrics?namespace=AWS/Lambda&dim_value=fn"),
+        format!("/aws/accounts/{id}/metrics?namespace=AWS/SQS&dim_value=orders&range=2h"),
+        format!("/aws/accounts/{id}/metrics?namespace=AWS/SQS&dim_name=InstanceId&dim_value=orders"),
+        format!("/aws/accounts/{id}/metrics?namespace=AWS/EC2&dim_value=i-1%20--debug"),
+    ] {
+        let (st, e, _) = call(&ctx, &root, "GET", &bad, None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {e}");
+    }
+    assert_eq!(cw_calls(), 1);
+
+    // A viewer with `aws:view` but no `aws_ec2` grant is refused for EC2
+    // metrics in-handler; the same user with `aws_sqs:view` gets SQS metrics.
+    let viewer = seed_user(&ctx.pool, "viewer", false).await;
+    grant(&ctx.pool, &viewer, "aws", "view").await;
+    grant(&ctx.pool, &viewer, "aws_sqs", "view").await;
+    let (st, e, _) = call(
+        &ctx,
+        &viewer,
+        "GET",
+        &format!("/aws/accounts/{id}/metrics?namespace=AWS/EC2&dim_value=i-0abc123456789def0"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
+    assert!(
+        e["message"].as_str().unwrap().contains("aws_ec2:View"),
+        "{e}"
+    );
+    let (st, _, _) = call(&ctx, &viewer, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK);
 }

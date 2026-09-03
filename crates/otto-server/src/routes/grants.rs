@@ -75,6 +75,7 @@ const ALL_FEATURES: &[Feature] = &[
     Feature::AwsEc2,
     Feature::AwsAthena,
     Feature::AwsEks,
+    Feature::AwsRds,
     Feature::Kubernetes,
 ];
 

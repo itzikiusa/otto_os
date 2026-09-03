@@ -24,7 +24,7 @@ use crate::accounts::{
 };
 use crate::discover::{self, DiscoverResp};
 use crate::install::{self, AwsStatus, InstallJob};
-use crate::{athena, ec2, eks, s3, sqs, AwsCtx};
+use crate::{athena, ec2, eks, metrics, rds, s3, sqs, AwsCtx};
 
 /// Local problem-details mapper (orphan rule: cannot impl IntoResponse for
 /// `otto_core::Error` here). Same table as otto-connections.
@@ -167,6 +167,14 @@ pub fn api_router<S: AwsCtx>() -> Router<S> {
             "/aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig",
             post(eks_import_kubeconfig::<S>),
         )
+        // --- RDS (View) ---
+        .route("/aws/accounts/{id}/rds/instances", get(rds_instances::<S>))
+        .route(
+            "/aws/accounts/{id}/rds/instances/{identifier}",
+            get(rds_instance::<S>),
+        )
+        // --- CloudWatch metrics (View) ---
+        .route("/aws/accounts/{id}/metrics", get(cloudwatch_metrics::<S>))
 }
 
 /// Best-effort audit row (failure is logged, never propagated).
@@ -874,6 +882,63 @@ async fn eks_import_kubeconfig<S: AwsCtx>(
             deleted: false,
         });
     Ok((StatusCode::CREATED, Json(cluster)))
+}
+
+// ---------------------------------------------------------------------------
+// RDS
+// ---------------------------------------------------------------------------
+
+/// GET /aws/accounts/{id}/rds/instances?region=&q= — AwsRds:View
+async fn rds_instances<S: AwsCtx>(
+    State(ctx): State<S>,
+    Path(id): Path<Id>,
+    Query(q): Query<rds::InstancesQuery>,
+) -> ApiResult<Json<rds::InstancesResp>> {
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    Ok(Json(rds::list_instances(&svc, &a, &q).await?))
+}
+
+/// GET /aws/accounts/{id}/rds/instances/{identifier}?region= — AwsRds:View
+async fn rds_instance<S: AwsCtx>(
+    State(ctx): State<S>,
+    Path((id, identifier)): Path<(Id, String)>,
+    Query(q): Query<rds::RegionQuery>,
+) -> ApiResult<Json<rds::InstanceDetail>> {
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    Ok(Json(
+        rds::describe_instance(&svc, &a, &identifier, q.region.as_deref()).await?,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// CloudWatch metrics
+// ---------------------------------------------------------------------------
+
+/// GET /aws/accounts/{id}/metrics?namespace=&dim_name=&dim_value=&range=&region=&instance_type=
+/// — Aws:View (policy) **and** View on the namespace's service key
+/// (`aws_sqs` / `aws_ec2` / `aws_rds`, checked here: the path alone cannot
+/// tell which service the metrics belong to).
+async fn cloudwatch_metrics<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+    Query(q): Query<metrics::MetricsQuery>,
+) -> ApiResult<Json<metrics::MetricsResp>> {
+    let (ns, _) = metrics::resolve(&q)?;
+    let feature = ns.feature();
+    GrantsRepo::new(ctx.pool())
+        .check_global(
+            &user,
+            feature,
+            Capability::View,
+            &format!("{} metrics require {}:View", ns.as_str(), feature.as_str()),
+        )
+        .await?;
+    let svc = AwsService::from_ctx(&ctx);
+    let a = svc.get_row(&id).await?;
+    Ok(Json(metrics::get_metrics(&svc, &a, &q).await?))
 }
 
 #[cfg(test)]

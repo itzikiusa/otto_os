@@ -1282,6 +1282,7 @@ export type Feature =
   | 'aws_ec2'
   | 'aws_athena'
   | 'aws_eks'
+  | 'aws_rds'
   | 'kubernetes';
 
 /** Capability ladder (None < View < Edit < Admin). */
@@ -6568,7 +6569,7 @@ export interface ModelCatalogResp {
 // ---------------------------------------------------------------------------
 
 export type AwsAuthMode = 'profile' | 'access_keys';
-export type AwsService = 's3' | 'sqs' | 'ec2' | 'athena' | 'eks';
+export type AwsService = 's3' | 'sqs' | 'ec2' | 'athena' | 'eks' | 'rds';
 export type InstallTool = 'aws' | 'kubectl' | 'k9s';
 export type InstallJobState = 'idle' | 'running' | 'done' | 'failed';
 
@@ -6879,6 +6880,81 @@ export interface EksImportResp {
   id: Id;
   name: string;
   [extra: string]: unknown;
+}
+
+// --- RDS (read-only) ---
+
+export interface RdsInstance {
+  identifier: string;
+  engine?: string | null;
+  engine_version?: string | null;
+  class?: string | null;
+  status: string;
+  az?: string | null;
+  multi_az: boolean;
+  storage_gb?: number | null;
+  storage_type?: string | null;
+  /** Endpoint host (port is separate). */
+  endpoint?: string | null;
+  port?: number | null;
+  db_name?: string | null;
+  master_username?: string | null;
+  publicly_accessible: boolean;
+  created?: string | null;
+  tags: Record<string, string>;
+}
+
+export interface RdsInstanceDetail extends RdsInstance {
+  raw: unknown;
+}
+
+// --- CloudWatch metrics (`GET …/metrics`) ---
+
+export type MetricsNamespace = 'AWS/SQS' | 'AWS/EC2' | 'AWS/RDS';
+export type MetricsDimension = 'QueueName' | 'InstanceId' | 'DBInstanceIdentifier';
+export type MetricsRange = '1h' | '6h' | '24h' | '7d' | '30d';
+export type MetricUnit =
+  | 'count'
+  | 'bytes'
+  | 'percent'
+  | 'seconds'
+  | 'ms'
+  | 'count_per_sec'
+  | 'bytes_per_sec';
+
+export interface MetricPoint {
+  /** RFC 3339. */
+  t: string;
+  /** `null` = CloudWatch returned nothing for this period slot (a gap). */
+  v: number | null;
+}
+
+export interface MetricSeries {
+  /** Catalog id (`messages_sent`, `cpu`, …) — stable across calls. */
+  id: string;
+  metric: string;
+  stat: 'Sum' | 'Average' | 'Maximum' | string;
+  unit: MetricUnit;
+  label: string;
+  /** Every period slot of `[start, end]`, ascending; gaps are `null`. */
+  points: MetricPoint[];
+  /** Latest non-null value; `null` when the series has no data. */
+  current: number | null;
+  min: number | null;
+  max: number | null;
+  sum: number | null;
+  avg: number | null;
+}
+
+export interface MetricsResp {
+  namespace: MetricsNamespace;
+  dim_name: MetricsDimension;
+  dim_value: string;
+  range: MetricsRange;
+  period_seconds: number;
+  start: string;
+  end: string;
+  series: MetricSeries[];
 }
 
 // ---------------------------------------------------------------------------
