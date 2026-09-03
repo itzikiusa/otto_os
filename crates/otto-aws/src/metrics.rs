@@ -775,9 +775,14 @@ pub async fn get_metrics(
     // Scratch file at an Otto-owned location: <data_dir>/tmp/<fresh ULID>.json.
     let tmp_dir = crate::paths::owned_dir(&svc.data_dir, "tmp")?;
     let tmp = crate::paths::owned_file(&tmp_dir, &otto_core::new_id(), "json")?;
+    let tmp_s = tmp.to_string_lossy().into_owned();
+    if tmp_s.contains("..") {
+        return Err(Error::Internal("scratch path contains '..'".into()));
+    }
+    let tmp = std::path::PathBuf::from(&tmp_s);
     std::fs::write(&tmp, serde_json::to_vec(&queries)?)
         .map_err(|e| Error::Internal(format!("write metric queries: {e}")))?;
-    let file_arg = format!("file://{}", tmp.to_string_lossy());
+    let file_arg = format!("file://{tmp_s}");
     let start_s = start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let end_s = end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let res = svc
