@@ -290,14 +290,17 @@ class UiStore {
   termCopyOnSelect = $state(lsGet(LS.termCopyOnSelect) === '1');
   /** Show the desktop terminal toolbar (font zoom + copy-on-select). */
   termToolbar = $state(lsGet(LS.termToolbar) !== '0'); // default on
-  /** Remembered close-tab choice for LIVE sessions: '' = ask every time,
-   *  'close' = close the tab and keep the session running, 'archive' = stop
-   *  the session (history kept). Set from the close-confirm dialog's
-   *  "remember" checkbox; resettable in Settings → Appearance. */
-  closeTabPref: '' | 'close' | 'archive' = $state(
-    ((): '' | 'close' | 'archive' => {
+  /** Remembered close-tab choice: '' = ask every time, 'archive' = stop the
+   *  session and keep its history, 'delete' = stop it and drop the history.
+   *  Closing a tab always ENDS its session (there is no "keep running"
+   *  outcome — a legacy stored 'close' is treated as unset, so users who had
+   *  remembered it are asked again under the new semantics). Set from the
+   *  close-confirm dialog's "remember" checkbox; resettable in Settings →
+   *  Appearance. */
+  closeTabPref: '' | 'archive' | 'delete' = $state(
+    ((): '' | 'archive' | 'delete' => {
       const v = lsGet(LS.closeTabPref);
-      return v === 'close' || v === 'archive' ? v : '';
+      return v === 'archive' || v === 'delete' ? v : '';
     })(),
   );
 
@@ -604,7 +607,7 @@ class UiStore {
     lsSet(LS.termToolbar, on ? '1' : '0');
   }
 
-  setCloseTabPref(pref: '' | 'close' | 'archive'): void {
+  setCloseTabPref(pref: '' | 'archive' | 'delete'): void {
     this.closeTabPref = pref;
     lsSet(LS.closeTabPref, pref);
   }

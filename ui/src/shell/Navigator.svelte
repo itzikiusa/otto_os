@@ -754,11 +754,11 @@
       {#if ws.myRole !== 'viewer'}
         <button
           class="row-action"
-          title="Archive session"
-          aria-label="Archive session"
-          onclick={() => ws.archiveSession(s.id)}
+          title="Close session (archive or delete)"
+          aria-label="Close session"
+          onclick={() => void ws.requestCloseTab(s.id)}
         >
-          <Icon name="archive" size={12} />
+          <Icon name="x" size={12} />
         </button>
       {/if}
     {/if}

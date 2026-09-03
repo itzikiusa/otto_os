@@ -144,23 +144,25 @@
     Only show sessions started on this device. Other devices' sessions stay hidden here (they
     still run on the daemon).
   </p>
-  <label class="switch-row">
-    <input
-      type="checkbox"
-      checked={ui.closeTabPref === ''}
-      onchange={(e) => ui.setCloseTabPref(e.currentTarget.checked ? '' : 'close')}
-    />
-    <span>Ask when closing a live session's tab</span>
-  </label>
+  <div class="section-title">Closing a session tab</div>
   <p class="hint-line">
-    {#if ui.closeTabPref === ''}
-      Closing a tab whose session is still running asks whether to keep it running or archive it.
-    {:else}
-      Currently remembered: {ui.closeTabPref === 'archive'
-        ? 'archive the session (stops it, history kept)'
-        : 'close the tab and keep the session running'}. Re-enable to be asked again.
-    {/if}
+    Closing a tab (×, ⌘W, sidebar ×) ends the session — the same as Archive or Delete from its
+    menu. Choose what happens, or be asked each time.
   </p>
+  <div class="radio-col" role="radiogroup" aria-label="When closing a session tab">
+    <label class="switch-row">
+      <input type="radio" name="close-tab-pref" checked={ui.closeTabPref === ''} onchange={() => ui.setCloseTabPref('')} />
+      <span>Ask every time (Archive / Delete)</span>
+    </label>
+    <label class="switch-row">
+      <input type="radio" name="close-tab-pref" checked={ui.closeTabPref === 'archive'} onchange={() => ui.setCloseTabPref('archive')} />
+      <span>Always archive — stop it, keep the history (resumable from Archived)</span>
+    </label>
+    <label class="switch-row">
+      <input type="radio" name="close-tab-pref" checked={ui.closeTabPref === 'delete'} onchange={() => ui.setCloseTabPref('delete')} />
+      <span>Always delete — stop it and remove its history</span>
+    </label>
+  </div>
 
   <div class="section-title">Sidebar</div>
   <p class="hint-line">
@@ -277,6 +279,12 @@
     color: var(--text);
     cursor: pointer;
     user-select: none;
+  }
+  .radio-col {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
   }
   .switch-row input {
     width: 15px;
