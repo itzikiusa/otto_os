@@ -101,7 +101,7 @@
       {/if}
       {#if agentExpanded[agent.name] && agent.findings}
         <ul class="rp-agent-findings">
-          {#each agent.findings as f (f.code + f.title)}
+          {#each agent.findings as f, i (i + f.code)}
             <li class="rp-finding">
               <span class="severity-chip {sevClass(f.severity)}">{f.severity}</span>
               {#if f.code}<span class="mono rp-loc">{f.code}</span>{/if}

@@ -347,7 +347,7 @@
             </table>
             {#if sr.findings.length > 0}
               <ul class="lr-findings">
-                {#each sr.findings as f (f.code + f.title)}
+                {#each sr.findings as f, i (i + f.code)}
                   <li class="rp-finding">
                     <span class="severity-chip {sevClass(f.severity)}">{f.severity}</span>
                     <span class="mono rp-loc">{f.code}</span>
@@ -385,7 +385,7 @@
             {#if sm.findings.length > 0}
               <h5>Findings ({sm.findings.length})</h5>
               <ul class="lr-findings">
-                {#each sm.findings as f (f.code + f.title)}
+                {#each sm.findings as f, i (i + f.code)}
                   <li class="rp-finding">
                     <span class="severity-chip {sevClass(f.severity)}">{f.severity}</span>
                     <span class="mono rp-loc">{f.code}</span>
