@@ -56,6 +56,34 @@
   let telegramOpen = $state(false);
   let slackOpen = $state(false);
   let archivedOpen = $state(false);
+  // Multi-select in the Archived list: checked ids → one "Delete selected"
+  // confirm instead of N single-row deletes.
+  let archSel = $state<Set<string>>(new Set());
+  const archSelCount = $derived([...archSel].filter((id) => ws.archivedSessions.some((s) => s.id === id)).length);
+  function toggleArchSel(id: string): void {
+    const next = new Set(archSel);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    archSel = next;
+  }
+  function archSelectAll(): void {
+    archSel = archSelCount === ws.archivedSessions.length ? new Set() : new Set(ws.archivedSessions.map((s) => s.id));
+  }
+  async function deleteSelectedArchived(): Promise<void> {
+    const ids = ws.archivedSessions.filter((s) => archSel.has(s.id)).map((s) => s.id);
+    if (ids.length === 0) return;
+    const ok = await confirmer.ask(
+      `Delete ${ids.length} archived session${ids.length === 1 ? '' : 's'} and their entire history? This cannot be undone.`,
+      { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
+    );
+    if (!ok) return;
+    let failed = 0;
+    for (const id of ids) {
+      try { await ws.killSession(id); } catch { failed++; }
+    }
+    archSel = new Set();
+    if (failed) toasts.error('Delete failed', `${failed} session${failed === 1 ? '' : 's'} could not be deleted.`);
+  }
   let renamingId: string | null = $state(null);
   let draft = $state('');
 
@@ -115,14 +143,17 @@
     }
   }
 
-  /** Delete = PTY killed, row + full history gone — always confirm first
-   *  (mirrors the workspace-delete confirm; one mis-click must not destroy a
-   *  session's history). */
+  /** Delete = PTY killed, row + full history gone — confirm first (mirrors
+   *  the workspace-delete confirm; one mis-click must not destroy a session's
+   *  history) unless the user chose "Always delete" for closing tabs, in
+   *  which case Delete is the answer they already gave. */
   async function deleteSession(id: string): Promise<void> {
-    const ok = await confirmer.ask(
-      'Delete this session and its entire history? This cannot be undone.',
-      { title: 'Delete session', confirmLabel: 'Delete' },
-    );
+    const ok =
+      ui.closeTabPref === 'delete' ||
+      (await confirmer.ask(
+        'Delete this session and its entire history? This cannot be undone.',
+        { title: 'Delete session', confirmLabel: 'Delete' },
+      ));
     if (!ok) return;
     try {
       await ws.killSession(id);
@@ -362,8 +393,22 @@
         </button>
         {#if archivedOpen}
           <div class="nested">
+            {#if ws.myRole !== 'viewer' && ws.archivedSessions.length > 1}
+              <div class="arch-tools">
+                <label class="arch-all" title="Select all archived sessions">
+                  <input type="checkbox" checked={archSelCount > 0 && archSelCount === ws.archivedSessions.length} indeterminate={archSelCount > 0 && archSelCount < ws.archivedSessions.length} onchange={archSelectAll} />
+                  <span>{archSelCount > 0 ? `${archSelCount} selected` : 'Select all'}</span>
+                </label>
+                <button class="row-action danger arch-del-sel" disabled={archSelCount === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="archived-delete-selected" onclick={() => void deleteSelectedArchived()}>
+                  <Icon name="trash" size={11} /><span>Delete{archSelCount > 0 ? ` (${archSelCount})` : ''}</span>
+                </button>
+              </div>
+            {/if}
             {#each ws.archivedSessions as s (s.id)}
-              <div class="nested-row">
+              <div class="nested-row" class:selected={archSel.has(s.id)}>
+                {#if ws.myRole !== 'viewer'}
+                  <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
+                {/if}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div
                   class="nav-item nested-item archived"
@@ -1014,6 +1059,13 @@
     color: #febc2e;
     background: color-mix(in srgb, #febc2e 16%, transparent);
   }
+  .arch-tools { display: flex; align-items: center; gap: 6px; padding: 2px 6px 4px 8px; font-size: 11px; color: var(--text-dim); }
+  .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
+  .arch-all input, .arch-check { margin: 0; accent-color: var(--accent); }
+  .arch-check { flex-shrink: 0; }
+  .arch-del-sel { display: inline-flex; align-items: center; gap: 4px; opacity: 1; }
+  .arch-del-sel:disabled { opacity: 0.4; cursor: default; }
+  .nested-row.selected .nested-item { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .row-action {
     display: grid;
     place-items: center;

@@ -106,3 +106,48 @@ test('remembered choice applies to later closes without a dialog (tab × and sid
   await expect(page.locator('.cf-msg')).toHaveCount(0);
   await expect.poll(() => isArchived(idByTitle.Gattuso), { timeout: 15_000 }).toBe(true);
 });
+
+test('archived list: multi-select deletes the checked sessions in one confirm', async ({ page }) => {
+  // Archive two sessions via the API so the Archived list has ≥2 rows.
+  for (const t of ['Kaka', 'Nesta']) {
+    const r = await ctx.post(`${base}/api/v1/sessions/${idByTitle[t]}/archive`);
+    if (!r.ok()) throw new Error(`archive ${t} → ${r.status()}`);
+  }
+  await page.reload();
+  await expect(page.getByText('Maldini').first()).toBeVisible({ timeout: 20_000 });
+  await page.getByRole('button', { name: /^Archived/ }).click();
+  await page.getByLabel('Select Kaka').check();
+  await page.getByLabel('Select Nesta').check();
+  const del = page.getByTestId('archived-delete-selected');
+  await expect(del).toContainText('Delete (2)');
+  await del.click();
+  await expect(page.locator('.cf-msg')).toContainText('2 archived sessions');
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect.poll(() => exists(idByTitle.Kaka), { timeout: 15_000 }).toBe(false);
+  await expect.poll(() => exists(idByTitle.Nesta), { timeout: 15_000 }).toBe(false);
+  expect(await exists(idByTitle.Maldini)).toBe(true);
+});
+
+test('"Always delete" pref: split-pane header × ends the session without a dialog', async ({ page }) => {
+  // Remember "Delete" through the tab × dialog (the beforeEach init script
+  // clears the pref on every load, so it must be set in-page).
+  const tab = await openTab(page, 'Kaka');
+  await tab.locator('.tab-close').click();
+  await page.locator('.cf-remember input[type=checkbox]').check();
+  await page.getByRole('button', { name: 'Delete session' }).click();
+  await expect(tab).toBeHidden({ timeout: 10_000 });
+  await expect.poll(() => exists(idByTitle.Kaka), { timeout: 15_000 }).toBe(false);
+
+  await openTab(page, 'Maldini');
+  await openTab(page, 'Gattuso');
+  // ⌘D splits the focused session into a second pane → header × shows.
+  await page.keyboard.press('Meta+d');
+  const hdrClose = page.locator('button[aria-label="Close session (⌘W)"]').first();
+  await expect(hdrClose).toBeVisible({ timeout: 10_000 });
+  await hdrClose.click();
+  await expect(page.locator('.cf-msg')).toHaveCount(0);
+  // Exactly one of the two panes' sessions is gone; the other survives.
+  await expect
+    .poll(async () => (await exists(idByTitle.Gattuso)) !== (await exists(idByTitle.Maldini)), { timeout: 15_000 })
+    .toBe(true);
+});

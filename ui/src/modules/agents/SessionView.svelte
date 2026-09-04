@@ -31,10 +31,12 @@
     showClose: boolean;
     onfocus: () => void;
     onclosepane: () => void;
+    /** Tooltip for the header ×; the split view ends the session, embedded viewers only hide it. */
+    closeTitle?: string;
     /** Show a maximize/restore (zoom) control (tiled view). */
     showZoom?: boolean;
   }
-  let { sessionId, focused, showClose, onfocus, onclosepane, showZoom = false }: Props = $props();
+  let { sessionId, focused, showClose, onfocus, onclosepane, showZoom = false, closeTitle = 'Close pane (keeps running)' }: Props = $props();
 
   const maximized = $derived(ws.maximizedId === sessionId);
 
@@ -239,11 +241,15 @@
     }
   }
 
+  // "Always delete" (Settings → Appearance) is the answer to this confirm
+  // already, so it skips the dialog — same as the tab ×.
   async function del(): Promise<void> {
-    const ok = await confirmer.ask(
-      'Delete this session and its entire history? This cannot be undone.',
-      { title: 'Delete session', confirmLabel: 'Delete' },
-    );
+    const ok =
+      ui.closeTabPref === 'delete' ||
+      (await confirmer.ask(
+        'Delete this session and its entire history? This cannot be undone.',
+        { title: 'Delete session', confirmLabel: 'Delete' },
+      ));
     if (!ok) return;
     try {
       await ws.killSession(sessionId);
@@ -455,7 +461,7 @@
       >⋯</button>
     {/if}
     {#if showClose}
-      <button class="icon-btn" onclick={onclosepane} title="Close pane (keeps running)"><Icon name="x" size={12} /></button>
+      <button class="icon-btn" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
     {/if}
   </header>
   <div class="pane-term">

@@ -160,7 +160,8 @@
           focused={ws.focusedPane === i && ws.panes.length > 1}
           showClose={ws.panes.length > 1}
           onfocus={() => ws.focusPane(i)}
-          onclosepane={() => ws.closePane(i)}
+          closeTitle="Close session (⌘W)"
+          onclosepane={() => void ws.requestCloseTab(paneId)}
         />
       {/if}
     {/each}
