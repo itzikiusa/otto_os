@@ -30,6 +30,12 @@ use scraper::{Html, Selector};
 /// straight to the fallback engine.
 const DENYLIST_THRESHOLD: u32 = 3;
 
+/// One transient `Unavailable` (typically the CDP socket of a sidecar that
+/// only just started accepting TCP) is retried once after this pause before
+/// the request degrades to plain fetch. Keeps the very first page after a
+/// daemon restart from silently losing JavaScript.
+const UNAVAILABLE_RETRY_DELAY: Duration = Duration::from_millis(400);
+
 /// Plain-fetch backend: a bare `reqwest` GET, readability-cleaned and
 /// converted to markdown. Never runs scripts, so every page it returns is
 /// `degraded: true`.
@@ -214,12 +220,21 @@ impl BrowserService {
         if self.is_denylisted(&host) {
             return self.fallback.fetch_page(url).await;
         }
-        match self.engine.fetch_page(url).await {
+        let mut attempt = self.engine.fetch_page(url).await;
+        if let Err(EngineError::Unavailable(_)) = attempt {
+            tokio::time::sleep(UNAVAILABLE_RETRY_DELAY).await;
+            attempt = self.engine.fetch_page(url).await;
+        }
+        match attempt {
             Ok(page) => {
                 self.clear_failures(&host);
                 Ok(page)
             }
-            Err(EngineError::Unavailable(_)) => {
+            Err(EngineError::Unavailable(why)) => {
+                tracing::warn!(
+                    "browser: {} unavailable for {host} ({why}); degrading to plain fetch",
+                    self.engine.name()
+                );
                 self.record_failure(&host);
                 self.fallback.fetch_page(url).await
             }
@@ -244,12 +259,21 @@ impl BrowserService {
         if self.is_denylisted(&host) {
             return self.fallback.query(url, selector).await.map(cap_matches);
         }
-        match self.engine.query(url, selector).await {
+        let mut attempt = self.engine.query(url, selector).await;
+        if let Err(EngineError::Unavailable(_)) = attempt {
+            tokio::time::sleep(UNAVAILABLE_RETRY_DELAY).await;
+            attempt = self.engine.query(url, selector).await;
+        }
+        match attempt {
             Ok(matches) => {
                 self.clear_failures(&host);
                 Ok(cap_matches(matches))
             }
-            Err(EngineError::Unavailable(_)) => {
+            Err(EngineError::Unavailable(why)) => {
+                tracing::warn!(
+                    "browser: {} unavailable for {host} ({why}); degrading query to plain fetch",
+                    self.engine.name()
+                );
                 self.record_failure(&host);
                 self.fallback.query(url, selector).await.map(cap_matches)
             }
@@ -407,6 +431,60 @@ mod tests {
         fn name(&self) -> &'static str {
             "mock"
         }
+    }
+
+    /// `Unavailable` once (a just-spawned sidecar whose CDP socket isn't up
+    /// yet), healthy from then on.
+    struct FlakyOnce(std::sync::atomic::AtomicU32);
+
+    #[async_trait::async_trait]
+    impl BrowserEngine for FlakyOnce {
+        async fn fetch_page(&self, url: &str) -> Result<Page, EngineError> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err(EngineError::Unavailable("warming up".into()));
+            }
+            Ok(Page {
+                url: url.into(),
+                title: "Live".into(),
+                html: String::new(),
+                markdown: "js ran".into(),
+                degraded: false,
+                engine: "mock".into(),
+            })
+        }
+        async fn query(&self, _: &str, _: &str) -> Result<Vec<MatchedNode>, EngineError> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err(EngineError::Unavailable("warming up".into()));
+            }
+            Ok(vec![])
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    #[tokio::test]
+    async fn service_retries_once_before_falling_back() {
+        let flaky = Arc::new(FlakyOnce(std::sync::atomic::AtomicU32::new(0)));
+        let svc =
+            BrowserService::with_engines(flaky.clone(), FallbackEngine::from_static("<h1>Hi</h1>"));
+        let page = svc.page("https://example.com").await.unwrap();
+        assert!(
+            !page.degraded,
+            "a single transient Unavailable must not degrade the page"
+        );
+        assert_eq!(page.engine, "mock");
+        assert_eq!(flaky.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // Same policy for query().
+        let flaky = Arc::new(FlakyOnce(std::sync::atomic::AtomicU32::new(0)));
+        let svc =
+            BrowserService::with_engines(flaky.clone(), FallbackEngine::from_static("<p>x</p>"));
+        assert!(svc
+            .query("https://example.com", "p")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(flaky.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

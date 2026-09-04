@@ -178,17 +178,27 @@ fn spawn_lightpanda(bin: &Path, data_dir: &Path, port: u16) -> Result<Child, Eng
         .map_err(|e| EngineError::Unavailable(format!("spawn lightpanda: {e}")))
 }
 
-/// Poll a loopback TCP connect to `port` until it succeeds or `timeout`
-/// elapses — lightpanda has no HTTP `/ping`, so "accepts a connection" is
-/// the readiness signal.
+/// Poll until a CDP websocket handshake on `port` succeeds or `timeout`
+/// elapses. lightpanda has no HTTP `/ping`, and a bare TCP accept lands a
+/// beat before the websocket upgrade is served — the first navigate then
+/// failed with `Connect` and silently degraded to plain fetch — so the
+/// readiness signal is the handshake itself.
 async fn wait_ready(port: u16, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
+    let url = format!("ws://127.0.0.1:{port}");
     while tokio::time::Instant::now() < deadline {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
         {
-            return true;
+            let hs = tokio::time::timeout(
+                Duration::from_secs(2),
+                tokio_tungstenite::connect_async(&url),
+            )
+            .await;
+            if matches!(hs, Ok(Ok(_))) {
+                return true; // dropping the stream closes the probe socket
+            }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
