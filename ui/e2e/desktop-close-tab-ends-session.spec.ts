@@ -151,3 +151,23 @@ test('"Always delete" pref: split-pane header × ends the session without a dial
     .poll(async () => (await exists(idByTitle.Gattuso)) !== (await exists(idByTitle.Maldini)), { timeout: 15_000 })
     .toBe(true);
 });
+
+test('agents list: select mode archives / deletes the checked sessions in bulk', async ({ page }) => {
+  await page.getByTestId('agents-select-toggle').click();
+  await page.getByLabel('Select Kaka').check();
+  await page.getByLabel('Select Nesta').check();
+  await page.getByTestId('agents-archive-selected').click();
+  await expect.poll(() => isArchived(idByTitle.Kaka), { timeout: 15_000 }).toBe(true);
+  await expect.poll(() => isArchived(idByTitle.Nesta), { timeout: 15_000 }).toBe(true);
+  expect(await isArchived(idByTitle.Maldini)).toBe(false);
+  // Select mode exits after the batch.
+  await expect(page.getByTestId('agents-select-tools')).toHaveCount(0);
+
+  await page.getByTestId('agents-select-toggle').click();
+  await page.getByLabel('Select Maldini').check();
+  await page.getByTestId('agents-delete-selected').click();
+  await expect(page.locator('.cf-msg')).toContainText('Delete 1 session');
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect.poll(() => exists(idByTitle.Maldini), { timeout: 15_000 }).toBe(false);
+  expect(await exists(idByTitle.Gattuso)).toBe(true);
+});

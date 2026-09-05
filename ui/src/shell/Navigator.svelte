@@ -59,6 +59,40 @@
   // Multi-select in the Archived list: checked ids → one "Delete selected"
   // confirm instead of N single-row deletes.
   let archSel = $state<Set<string>>(new Set());
+  // Select mode on the Agents list: header toggle → per-row checkboxes → one
+  // Archive / Delete for the whole selection (delete confirms once).
+  let agentSelMode = $state(false);
+  let agentSel = $state<Set<string>>(new Set());
+  function toggleAgentSel(id: string): void {
+    const next = new Set(agentSel);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    agentSel = next;
+  }
+  function agentSelectAll(): void {
+    agentSel = agentSelIds.length === fAgents.length ? new Set() : new Set(fAgents.map((s) => s.id));
+  }
+  function setAgentSelMode(on: boolean): void {
+    agentSelMode = on;
+    if (!on) agentSel = new Set();
+  }
+  async function archiveSelectedAgents(): Promise<void> {
+    const ids = agentSelIds;
+    if (ids.length === 0) return;
+    await ws.archiveSessions(ids);
+    setAgentSelMode(false);
+  }
+  async function deleteSelectedAgents(): Promise<void> {
+    const ids = agentSelIds;
+    if (ids.length === 0) return;
+    const ok = await confirmer.ask(
+      `Delete ${ids.length} session${ids.length === 1 ? '' : 's'} and their entire history? This cannot be undone.`,
+      { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
+    );
+    if (!ok) return;
+    await ws.killSessions(ids);
+    setAgentSelMode(false);
+  }
   const archSelCount = $derived([...archSel].filter((id) => ws.archivedSessions.some((s) => s.id === id)).length);
   function toggleArchSel(id: string): void {
     const next = new Set(archSel);
@@ -77,12 +111,8 @@
       { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
     );
     if (!ok) return;
-    let failed = 0;
-    for (const id of ids) {
-      try { await ws.killSession(id); } catch { failed++; }
-    }
+    await ws.killSessions(ids);
     archSel = new Set();
-    if (failed) toasts.error('Delete failed', `${failed} session${failed === 1 ? '' : 's'} could not be deleted.`);
   }
   let renamingId: string | null = $state(null);
   let draft = $state('');
@@ -103,6 +133,7 @@
     return q === '' || s.title.toLowerCase().includes(q);
   };
   const fAgents = $derived(ws.plainAgentSessions.filter(matches));
+  const agentSelIds = $derived(fAgents.filter((s) => agentSel.has(s.id)).map((s) => s.id));
   const fTelegram = $derived(ws.telegramSessions.filter(matches));
   const fSlack = $derived(ws.slackSessions.filter(matches));
   // Capped views (full list when searching or "show all" toggled).
@@ -606,6 +637,19 @@
         <span class="count-chip working">{ws.workingCount}</span>
       {/if}
     </button>
+    {#if ws.myRole !== 'viewer' && fAgents.length > 0}
+      <button
+        class="icon-btn twisty sel-toggle"
+        class:on={agentSelMode}
+        onclick={() => setAgentSelMode(!agentSelMode)}
+        title={agentSelMode ? 'Done selecting' : 'Select sessions to archive or delete'}
+        aria-label="Select sessions"
+        aria-pressed={agentSelMode}
+        data-testid="agents-select-toggle"
+      >
+        <Icon name={agentSelMode ? 'check' : 'square'} size={12} />
+      </button>
+    {/if}
     <button
       class="icon-btn twisty all-ws-toggle"
       class:on={ws.allWorkspaces}
@@ -629,6 +673,20 @@
 
   {#if q ? fAgents.length > 0 : agentsOpen}
     <div class="nested">
+      {#if agentSelMode}
+        <div class="arch-tools" data-testid="agents-select-tools">
+          <label class="arch-all" title="Select all sessions">
+            <input type="checkbox" checked={agentSelIds.length > 0 && agentSelIds.length === fAgents.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < fAgents.length} onchange={agentSelectAll} />
+            <span>{agentSelIds.length > 0 ? `${agentSelIds.length} selected` : 'Select all'}</span>
+          </label>
+          <button class="row-action arch-del-sel" disabled={agentSelIds.length === 0} title="Archive selected sessions" aria-label="Archive selected sessions" data-testid="agents-archive-selected" onclick={() => void archiveSelectedAgents()}>
+            <Icon name="archive" size={11} /><span>Archive</span>
+          </button>
+          <button class="row-action danger arch-del-sel" disabled={agentSelIds.length === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="agents-delete-selected" onclick={() => void deleteSelectedAgents()}>
+            <Icon name="trash" size={11} /><span>Delete</span>
+          </button>
+        </div>
+      {/if}
       {#each fAgents as s (s.id)}
         {@render sessionRow(s)}
       {:else}
@@ -726,7 +784,10 @@
   {@const sum = activity.summary(s.id)}
   {@const proofRow = proof.summaryFor('session', s.id)}
   {@const needsYou = ws.needsYou[s.id] === true}
-  <div class="nested-row" class:needs-you={needsYou}>
+  <div class="nested-row" class:needs-you={needsYou} class:selected={agentSelMode && agentSel.has(s.id)}>
+    {#if agentSelMode && !otherWs}
+      <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
+    {/if}
     {#if renamingId === s.id}
       <!-- svelte-ignore a11y_autofocus -->
       <input
@@ -1064,6 +1125,7 @@
   .arch-all input, .arch-check { margin: 0; accent-color: var(--accent); }
   .arch-check { flex-shrink: 0; }
   .arch-del-sel { display: inline-flex; align-items: center; gap: 4px; opacity: 1; }
+  .sel-toggle.on { color: var(--accent); }
   .arch-del-sel:disabled { opacity: 0.4; cursor: default; }
   .nested-row.selected .nested-item { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .row-action {

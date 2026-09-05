@@ -939,6 +939,38 @@ class WorkspaceStore {
     this.clearNeedsYou(id);
   }
 
+  /** Bulk archive (sidebar multi-select): one toast for the batch instead of
+   *  N, and one error report — never stops at the first failure. */
+  async archiveSessions(ids: Id[]): Promise<number> {
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        const s = await api.post<Session>(`/sessions/${id}/archive`);
+        this.closeTab(id);
+        this.sessions = this.sessions.map((x) => (x.id === id ? s : x));
+        this.otherWsSessions = this.otherWsSessions.filter((x) => x.id !== id);
+        this.statusMap[id] = s.status;
+        this.clearNeedsYou(id);
+      } catch {
+        failed++;
+      }
+    }
+    const ok = ids.length - failed;
+    if (ok > 0) toasts.info(`${ok} session${ok === 1 ? '' : 's'} archived`);
+    if (failed > 0) toasts.error('Archive failed', `${failed} session${failed === 1 ? '' : 's'} could not be archived.`);
+    return failed;
+  }
+
+  /** Bulk delete (sidebar multi-select): caller confirms first. */
+  async killSessions(ids: Id[]): Promise<number> {
+    let failed = 0;
+    for (const id of ids) {
+      try { await this.killSession(id); } catch { failed++; }
+    }
+    if (failed > 0) toasts.error('Delete failed', `${failed} session${failed === 1 ? '' : 's'} could not be deleted.`);
+    return failed;
+  }
+
   /** Archive: kill the PTY but keep the row + history in the Archived section. */
   async archiveSession(id: Id): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/archive`);
