@@ -106,11 +106,10 @@ pub fn latest_memory_sql(cluster_ids: &[String], ns: Option<&str>, lookback_secs
 /// Last memory gauge per pod inside `[now-back, now-until)` (trend baseline).
 pub fn memory_between_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
     format!(
-        "SELECT cluster_id, namespace, workload, pod, argMax(value, ts) AS mem, argMax(metric, ts) AS metric \
-         FROM k8s_samples \
-         WHERE cluster_id IN ({cids}) AND metric IN ({gauges}) AND {range}{ns} \
-         GROUP BY cluster_id, namespace, workload, pod \
-         FORMAT JSONEachRow",
+        "SELECT cluster_id, namespace, workload, pod, argMax(value, ts) AS mem, argMax(metric, ts) AS metric
+         FROM k8s_samples
+         WHERE cluster_id IN ({cids}) AND metric IN ({gauges}) AND {range}{ns}
+         GROUP BY cluster_id, namespace, workload, pod",
         cids = in_list_owned(cluster_ids),
         gauges = in_list(&MEMORY_GAUGES),
         range = ts_range(back_secs, until_secs),
@@ -121,11 +120,10 @@ pub fn memory_between_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i
 /// Restart / churn counts per class → `(cluster_id, workload, kind, class, n)`.
 pub fn restart_counts_sql(cluster_ids: &[String], ns: Option<&str>, window: Duration) -> String {
     format!(
-        "SELECT cluster_id, workload, kind, class, count() AS n \
-         FROM k8s_events \
-         WHERE cluster_id IN ({cids}) AND kind IN ('restart', 'churn') AND {range}{ns} \
-         GROUP BY cluster_id, workload, kind, class \
-         FORMAT JSONEachRow",
+        "SELECT cluster_id, workload, kind, class, count() AS n
+         FROM k8s_events
+         WHERE cluster_id IN ({cids}) AND kind IN ('restart', 'churn') AND {range}{ns}
+         GROUP BY cluster_id, workload, kind, class",
         cids = in_list_owned(cluster_ids),
         range = ts_range(window.num_seconds(), 0),
         ns = ns_filter(ns),
@@ -137,15 +135,14 @@ pub fn restart_counts_sql(cluster_ids: &[String], ns: Option<&str>, window: Dura
 pub fn request_rates_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
     let secs = (back_secs - until_secs).max(1);
     format!(
-        "SELECT cluster_id, namespace, workload, sum(delta) / {secs} AS rps, sumIf(delta, is5xx) / {secs} AS err_rps \
-         FROM ( \
-           SELECT cluster_id, namespace, workload, pod, labels, startsWith({code}, '5') AS is5xx, \
-                  greatest(0, max(value) - min(value)) AS delta \
-           FROM k8s_samples \
-           WHERE cluster_id IN ({cids}) AND metric IN ({counters}) AND {range}{ns} \
-           GROUP BY cluster_id, namespace, workload, pod, labels \
-         ) GROUP BY cluster_id, namespace, workload \
-         FORMAT JSONEachRow",
+        "SELECT cluster_id, namespace, workload, sum(delta) / {secs} AS rps, sumIf(delta, is5xx) / {secs} AS err_rps
+         FROM (
+           SELECT cluster_id, namespace, workload, pod, labels, startsWith({code}, '5') AS is5xx,
+                  greatest(0, max(value) - min(value)) AS delta
+           FROM k8s_samples
+           WHERE cluster_id IN ({cids}) AND metric IN ({counters}) AND {range}{ns}
+           GROUP BY cluster_id, namespace, workload, pod, labels
+         ) GROUP BY cluster_id, namespace, workload",
         code = CODE_EXPR,
         cids = in_list_owned(cluster_ids),
         counters = in_list(&REQUEST_COUNTERS),
@@ -158,14 +155,13 @@ pub fn request_rates_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i6
 /// p95 is derived in Rust ([`p95_from_buckets`]).
 pub fn latency_buckets_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
     format!(
-        "SELECT cluster_id, workload, le, sum(delta) AS delta \
-         FROM ( \
-           SELECT cluster_id, workload, pod, labels['le'] AS le, labels, greatest(0, max(value) - min(value)) AS delta \
-           FROM k8s_samples \
-           WHERE cluster_id IN ({cids}) AND metric IN ({buckets}) AND {range}{ns} \
-           GROUP BY cluster_id, workload, pod, labels \
-         ) GROUP BY cluster_id, workload, le \
-         FORMAT JSONEachRow",
+        "SELECT cluster_id, workload, le, sum(delta) AS delta
+         FROM (
+           SELECT cluster_id, workload, pod, labels['le'] AS le, labels, greatest(0, max(value) - min(value)) AS delta
+           FROM k8s_samples
+           WHERE cluster_id IN ({cids}) AND metric IN ({buckets}) AND {range}{ns}
+           GROUP BY cluster_id, workload, pod, labels
+         ) GROUP BY cluster_id, workload, le",
         cids = in_list_owned(cluster_ids),
         buckets = in_list(&LATENCY_BUCKETS),
         range = ts_range(back_secs, until_secs),
@@ -176,16 +172,15 @@ pub fn latency_buckets_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: 
 /// Mean latency fallback (`_sum` / `_count` deltas) → `(cluster_id, workload, avg_ms)`.
 pub fn latency_avg_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
     format!(
-        "SELECT cluster_id, workload, \
-                if(sumIf(delta, is_count) > 0, 1000 * sumIf(delta, NOT is_count) / sumIf(delta, is_count), 0) AS avg_ms \
-         FROM ( \
-           SELECT cluster_id, workload, pod, labels, metric IN ({counts}) AS is_count, \
-                  greatest(0, max(value) - min(value)) AS delta \
-           FROM k8s_samples \
-           WHERE cluster_id IN ({cids}) AND metric IN ({sums}, {counts}) AND {range}{ns} \
-           GROUP BY cluster_id, workload, pod, labels, metric \
-         ) GROUP BY cluster_id, workload \
-         FORMAT JSONEachRow",
+        "SELECT cluster_id, workload,
+                if(sumIf(delta, is_count) > 0, 1000 * sumIf(delta, NOT is_count) / sumIf(delta, is_count), 0) AS avg_ms
+         FROM (
+           SELECT cluster_id, workload, pod, labels, metric IN ({counts}) AS is_count,
+                  greatest(0, max(value) - min(value)) AS delta
+           FROM k8s_samples
+           WHERE cluster_id IN ({cids}) AND metric IN ({sums}, {counts}) AND {range}{ns}
+           GROUP BY cluster_id, workload, pod, labels, metric
+         ) GROUP BY cluster_id, workload",
         counts = in_list(&LATENCY_COUNTS),
         sums = in_list(&LATENCY_SUMS),
         cids = in_list_owned(cluster_ids),
@@ -198,11 +193,10 @@ pub fn latency_avg_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64,
 /// (one per pod); drift = workloads with >1 distinct version.
 pub fn versions_sql(cluster_ids: &[String], ns: Option<&str>, lookback_secs: i64) -> String {
     format!(
-        "SELECT cluster_id, workload, pod, argMax(labels['version'], ts) AS version \
-         FROM k8s_samples \
-         WHERE cluster_id IN ({cids}) AND labels['version'] != '' AND {range}{ns} \
-         GROUP BY cluster_id, workload, pod \
-         FORMAT JSONEachRow",
+        "SELECT cluster_id, workload, pod, argMax(labels['version'], ts) AS version
+         FROM k8s_samples
+         WHERE cluster_id IN ({cids}) AND labels['version'] != '' AND {range}{ns}
+         GROUP BY cluster_id, workload, pod",
         cids = in_list_owned(cluster_ids),
         range = ts_range(lookback_secs, 0),
         ns = ns_filter(ns),
@@ -231,13 +225,12 @@ pub fn series_sql(
         "avg(value)".to_string()
     };
     format!(
-        "SELECT t, sum(v) AS v FROM ( \
-           SELECT toStartOfInterval(ts, INTERVAL {step} SECOND) AS t, pod, labels, {inner_agg} AS v \
-           FROM k8s_samples \
-           WHERE cluster_id = {cid} AND metric = {metric} AND {range}{wl}{pod} \
-           GROUP BY t, pod, labels \
-         ) GROUP BY t ORDER BY t \
-         FORMAT JSONEachRow",
+        "SELECT t, sum(v) AS v FROM (
+           SELECT toStartOfInterval(ts, INTERVAL {step} SECOND) AS t, pod, labels, {inner_agg} AS v
+           FROM k8s_samples
+           WHERE cluster_id = {cid} AND metric = {metric} AND {range}{wl}{pod}
+           GROUP BY t, pod, labels
+         ) GROUP BY t ORDER BY t",
         cid = sql_str(cluster_id),
         metric = sql_str(metric),
         range = ts_range(window.num_seconds(), 0),
@@ -255,13 +248,12 @@ pub fn workload_spark_sql(cluster_id: &str, ns: Option<&str>, metrics: &[&str], 
         "avg(value)".to_string()
     };
     format!(
-        "SELECT workload, t, sum(v) AS v FROM ( \
-           SELECT workload, toStartOfInterval(ts, INTERVAL {step} SECOND) AS t, pod, labels, {inner_agg} AS v \
-           FROM k8s_samples \
-           WHERE cluster_id = {cid} AND metric IN ({metrics}) AND {range}{ns} \
-           GROUP BY workload, t, pod, labels \
-         ) GROUP BY workload, t ORDER BY workload, t \
-         FORMAT JSONEachRow",
+        "SELECT workload, t, sum(v) AS v FROM (
+           SELECT workload, toStartOfInterval(ts, INTERVAL {step} SECOND) AS t, pod, labels, {inner_agg} AS v
+           FROM k8s_samples
+           WHERE cluster_id = {cid} AND metric IN ({metrics}) AND {range}{ns}
+           GROUP BY workload, t, pod, labels
+         ) GROUP BY workload, t ORDER BY workload, t",
         cid = sql_str(cluster_id),
         metrics = in_list(metrics),
         range = ts_range(window.num_seconds(), 0),
@@ -278,11 +270,10 @@ pub fn events_sql(cluster_id: &str, window: Duration, class: Option<&str>, workl
         None => " AND kind IN ('restart', 'churn', 'version')".to_string(),
     };
     format!(
-        "SELECT ts, namespace, workload, pod, container, kind, class, reason, exit_code, detail, actor \
-         FROM k8s_events \
-         WHERE cluster_id = {cid} AND {range}{kind}{wl} \
-         ORDER BY ts DESC LIMIT {limit} \
-         FORMAT JSONEachRow",
+        "SELECT ts, namespace, workload, pod, container, kind, class, reason, exit_code, detail, actor
+         FROM k8s_events
+         WHERE cluster_id = {cid} AND {range}{kind}{wl}
+         ORDER BY ts DESC LIMIT {limit}",
         cid = sql_str(cluster_id),
         range = ts_range(window.num_seconds(), 0),
         kind = kind_f,

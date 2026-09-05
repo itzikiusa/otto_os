@@ -187,7 +187,19 @@ async fn spawn_forward(k: &Kubectl, target: &ScrapeTarget) -> Result<(tokio::pro
     })
     .await;
     match port {
-        Ok(Some(p)) => Ok((child, p)),
+        Ok(Some(p)) => {
+            // Keep draining stdout for the life of the forward: kubectl logs
+            // "Handling connection for <port>" per request, and a closed read
+            // end would SIGPIPE it mid-scrape (the requests then fail with
+            // "error sending request"). The task ends at EOF when we kill the
+            // child.
+            tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+            if let Some(stderr) = child.stderr.take() {
+                let mut err_lines = BufReader::new(stderr).lines();
+                tokio::spawn(async move { while let Ok(Some(_)) = err_lines.next_line().await {} });
+            }
+            Ok((child, p))
+        }
         Ok(None) => {
             let stderr = drain_stderr(&mut child).await;
             let _ = child.kill().await;
