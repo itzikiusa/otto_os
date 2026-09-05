@@ -312,15 +312,15 @@
             {#each visible as r (`${r.namespace}/${r.workload}`)}
               {@const key = `${r.namespace}/${r.workload}`}
               {@const total = restartsTotal(r)}
-              <tr class="row" class:open={expanded === key} onclick={() => void toggle(r)}>
+              <tr class="wl-row" class:open={expanded === key} onclick={() => void toggle(r)}>
                 <td>
                   <div class="wlname"><b>{r.workload}</b><span class="dim small"> {r.kind}{namespaces.length > 1 ? ` · ${r.namespace}` : ''}</span></div>
                   {#if r.crashloop}<span class="chip bad">CrashLoopBackOff ×{r.crashloop}</span>{/if}
                 </td>
                 <td class="num mono">{r.ready}<span class="dim">/{r.pods}</span></td>
                 <td class="num mono">
-                  {formatBytes(r.mem_bytes)}
-                  {#if r.mem_limit > 0}<div class="pct" class:warn={r.mem_pct >= 85}>{fmtPct(r.mem_pct, 0)} of {formatBytes(r.mem_limit)}</div>{/if}
+                  {#if r.mem_bytes > 0}{formatBytes(r.mem_bytes)}{:else}<span class="dim" title="No memory sample yet — configure a memory probe (e.g. the Go actuator preset) or grant metrics-server">—</span>{/if}
+                  {#if r.mem_limit > 0}<div class="pct" class:warn={r.mem_bytes > 0 && r.mem_pct >= 85}>{#if r.mem_bytes > 0}{fmtPct(r.mem_pct, 0)} of {/if}limit {formatBytes(r.mem_limit)}</div>{/if}
                   {#if r.mem_trend_pct !== null && r.mem_trend_pct !== undefined && Math.abs(r.mem_trend_pct) >= 5}<div class="pct" class:warn={r.mem_trend_pct >= 25}>{r.mem_trend_pct > 0 ? '+' : ''}{r.mem_trend_pct.toFixed(0)}% / {window}</div>{/if}
                 </td>
                 <td class="spark"><Sparkline points={r.spark.mem} label="memory trend" /></td>
@@ -497,13 +497,13 @@
     border-bottom: 1px solid var(--border);
     vertical-align: top;
   }
-  .row {
+  .wl-row {
     cursor: pointer;
   }
-  .row:hover {
+  .wl-row:hover {
     background: color-mix(in srgb, var(--accent) 4%, transparent);
   }
-  .row.open {
+  .wl-row.open {
     background: var(--surface-2);
   }
   .num {
