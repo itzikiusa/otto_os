@@ -172,4 +172,4 @@ shapes in `docs/contracts/api.md`.
 cycle against the current kubeconfig context (intended for minikube) using an
 in-memory sink; without the variable the test is a no-op. Router-level tests
 run through the fake kubectl in `crates/otto-k8s/tests/fake_kubectl.rs`
-(`monitor_*`). UI: `cd ui && npx playwright test e2e/k8s-monitor.spec.ts --project=desktop-browser`.
+(`monitor_*`). UI: `cd ui && OTTO_E2E_BIN=target/debug/ottod npx playwright test desktop-k8s-monitor --project=desktop-browser`.
