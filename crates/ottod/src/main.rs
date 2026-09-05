@@ -977,6 +977,12 @@ async fn run(cfg: Config) -> Result<(), String> {
         otto_server::workflow_trigger_scheduler::start(ctx.clone());
     tracing::info!("workflow schedule-trigger scheduler started");
 
+    // --- Kubernetes monitor supervisor ---
+    // One collector loop per cluster with monitoring enabled; reconciles every
+    // 15 s against `k8s_monitor_configs` and restarts a loop on config change.
+    let _k8s_monitor_handle = otto_server::k8s_monitor_scheduler::start(ctx.clone());
+    tracing::info!("k8s monitor scheduler started");
+
     // --- Mission Control / work-graph projector ---
     // Subscribes to the daemon event bus and materializes every agentic activity
     // into the unified work graph (live), plus a 60 s reconcile + boot backfill

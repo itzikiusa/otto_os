@@ -40,6 +40,7 @@ pub mod modules;
 pub mod monitor;
 pub mod plugins;
 pub mod personal_agents_engine;
+pub mod k8s_monitor_scheduler;
 pub mod personal_agents_scheduler;
 pub mod policy;
 pub mod proof;

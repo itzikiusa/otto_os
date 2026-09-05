@@ -505,6 +505,17 @@ impl<S: K8sCtx> Clusters<S> {
     /// `imported` / `eks` sources; user files are never touched.
     pub async fn delete(&self, id: &Id) -> Result<()> {
         let c = self.repo.delete(id).await?;
+        // Monitoring rows cascade in SQLite; the ClickHouse partitions do not —
+        // best-effort purge so a re-imported cluster never inherits old series.
+        if let Some(sink) = self.ctx.monitor_sink() {
+            if sink.available() {
+                for q in crate::monitor::schema::purge_cluster_sql(id.as_str(), None) {
+                    if let Err(e) = sink.exec(&q).await {
+                        tracing::debug!("k8s monitor purge on delete: {e}");
+                    }
+                }
+            }
+        }
         if c.source.otto_owned_kubeconfig() {
             if let Some(p) = c.kubeconfig_path.as_deref() {
                 let path = PathBuf::from(p);

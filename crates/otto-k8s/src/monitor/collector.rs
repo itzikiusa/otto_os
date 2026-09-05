@@ -477,15 +477,20 @@ pub async fn run_cycle<S: K8sCtx>(
             let transport = scrape::pick_transport(&k, cfg.transport, &sample, &probe0.path).await;
             status.transport_used = transport.as_str().into();
 
-            // 5. Scrape with bounded concurrency.
+            // 5. Scrape with bounded concurrency. The futures are built up
+            // front (owned pod copies) so no closure borrows across the
+            // `'static` boundary tokio::spawn demands of the enclosing loop.
             let concurrency = cfg.concurrency.clamp(1, probes::MAX_CONCURRENCY) as usize;
-            let k_ref = &k;
-            let cid_ref = cid.as_str();
-            let results: Vec<(bool, u32, u32, String)> = stream::iter(targets.iter().copied())
-                .map(|p| async move { scrape_pod(k_ref, cid_ref, transport, cfg, p, now).await })
-                .buffer_unordered(concurrency)
-                .collect()
-                .await;
+            let futs: Vec<_> = targets
+                .iter()
+                .map(|p| {
+                    let pod: PodSnap = (*p).clone();
+                    let (k, cid, cfg) = (&k, cid.as_str(), cfg);
+                    async move { scrape_pod(k, cid, transport, cfg, &pod, now).await }
+                })
+                .collect();
+            let results: Vec<(bool, u32, u32, String)> =
+                stream::iter(futs).buffer_unordered(concurrency).collect().await;
             for (ok, pe, cp, nd) in results {
                 if ok {
                     status.pods_scraped += 1;
