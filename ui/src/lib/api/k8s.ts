@@ -13,11 +13,20 @@ import type {
   K8sContainersResp,
   K8sDiscoverResp,
   K8sExecReq,
+  K8sHealthDigest,
   K8sInstallJob,
   K8sK9sReq,
   K8sLogsOpts,
   K8sLogTarget,
   K8sMetricsResp,
+  K8sMonitorConfig,
+  K8sMonitorEvent,
+  K8sMonitorOverviewRow,
+  K8sMonitorResp,
+  K8sMonitorSeries,
+  K8sMonitorStatus,
+  K8sMonitorTestResp,
+  K8sMonitorWorkloadsResp,
   K8sNamespace,
   K8sNode,
   K8sResourceDetail,
@@ -92,6 +101,24 @@ export const k8sApi = {
     ),
   metrics: (id: string, ns?: string, signal?: AbortSignal) =>
     api.get<K8sMetricsResp>(`/k8s/clusters/${enc(id)}/metrics${qs({ ns: ns ?? '' })}`, signal),
+
+  // --- monitoring (contract "Kubernetes monitoring") ---
+  monitor: (id: string) => api.get<K8sMonitorResp>(`/k8s/clusters/${enc(id)}/monitor`),
+  monitorSave: (id: string, body: K8sMonitorConfig) =>
+    api.put<K8sMonitorResp>(`/k8s/clusters/${enc(id)}/monitor`, body),
+  monitorTest: (id: string, body: { ns?: string; pod?: string }) =>
+    api.post<K8sMonitorTestResp>(`/k8s/clusters/${enc(id)}/monitor/test`, body),
+  monitorRun: (id: string) => api.post<K8sMonitorStatus>(`/k8s/clusters/${enc(id)}/monitor/run`, {}),
+  monitorOverview: (window = '24h', signal?: AbortSignal) =>
+    api.get<K8sMonitorOverviewRow[]>(`/k8s/monitor/overview${qs({ window })}`, signal),
+  monitorWorkloads: (id: string, window: string, ns?: string, signal?: AbortSignal) =>
+    api.get<K8sMonitorWorkloadsResp>(`/k8s/clusters/${enc(id)}/monitor/workloads${qs({ window, ns: ns || undefined })}`, signal),
+  monitorSeries: (id: string, p: { metric: string; workload?: string; pod?: string; window: string; step?: number }) =>
+    api.get<K8sMonitorSeries>(`/k8s/clusters/${enc(id)}/monitor/series${qs(p)}`),
+  monitorEvents: (id: string, p: { window: string; class?: string; workload?: string; limit?: number }) =>
+    api.get<K8sMonitorEvent[]>(`/k8s/clusters/${enc(id)}/monitor/events${qs(p)}`),
+  monitorHealth: (id: string, window = '1h') =>
+    api.get<K8sHealthDigest>(`/k8s/clusters/${enc(id)}/monitor/health${qs({ window })}`),
 
   // --- writes (Edit) ----------------------------------------------------------
   exec: (id: string, body: K8sExecReq) => api.post<Session>(`/k8s/clusters/${enc(id)}/exec`, body),

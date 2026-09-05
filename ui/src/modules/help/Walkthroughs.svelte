@@ -4,8 +4,13 @@
   // Videos are also registered as palette commands so they're reachable from ⌘K.
   import { registry } from '../../lib/commands.svelte';
   import { router } from '../../lib/router.svelte';
+  import { api } from '../../lib/api/client';
+  import type { ResolveWalkthroughResp } from '../../lib/api/types';
+  import cinematicCatalog from '../../lib/walkthroughs/catalog.json';
 
   interface VideoItem {
+    duration?: number;
+    chapters?: { id: string; title: string; start: number; duration: number; doc: string }[];
     file: string;
     title: string;
     desc: string;
@@ -37,7 +42,10 @@
   // of the rolling GitHub release tagged `walkthroughs`
   // (packaging/publish-walkthroughs.sh re-encodes + uploads them). Override the
   // base URL at build time with VITE_WALKTHROUGHS_BASE (e.g. a mirror / CDN).
-  const WALKTHROUGHS_BASE: string =
+  // Opt in after the v2 assets are published, or point this at a local screening
+  // server. The installed app keeps its working catalog until that release is ready.
+  const cinematicBase: string | undefined = import.meta.env.VITE_WALKTHROUGHS_V2_BASE?.trim() || undefined;
+  const WALKTHROUGHS_BASE: string = cinematicBase ??
     import.meta.env.VITE_WALKTHROUGHS_BASE ??
     'https://github.com/itzikiusa/otto_os/releases/download/walkthroughs';
 
@@ -52,7 +60,7 @@
   // `desc`/`tags` describe the feature as it ships TODAY (so search finds current
   // terminology) — where a video's captions lag, the note says so and the guide
   // link is the truth. Caption fixes live in marketing/videos/UPDATE_PLAN.md.
-  const videos: VideoItem[] = [
+  const legacyVideos: VideoItem[] = [
     { file: 'Intro.mp4',          title: 'Welcome to Otto',           desc: 'Run many AI coding agents — and your whole workflow — in one native window.',                                                             tags: 'intro welcome overview onboarding first steps tour ade agentic development environment',                              doc: 'README.md' },
     { file: 'Sessions.mp4',       title: 'Agent Sessions',            desc: 'claude, codex, agy (Antigravity), custom providers & shell as live PTY sessions — tiled, split, broadcast, resumable, auto-trusted.',       tags: 'agent session terminal pty tiled split broadcast resume trust claude codex agy antigravity shell custom provider model picker names', doc: 'agent-sessions.md' },
     { file: 'MissionControl.mp4', title: 'Mission Control',           desc: 'One live work graph over sessions, swarms, goal loops, workflows, reviews, product stories, PRs & external triggers.',                       tags: 'mission control work graph nodes overview unified status workflow pr external trigger feed',                          doc: 'mission-control.md' },
@@ -80,6 +88,8 @@
     { file: 'Platform.mp4',       title: 'Platform & Shortcuts',      desc: '⌘K palette, ⌘I Ask Otto, themes, RTL, a customizable sidebar, multi-window, and daily CLI auto-update.',                                  tags: 'platform shortcut command palette theme rtl sidebar settings auto-update multi window',                               doc: 'rtl-and-responsive.md' },
   ];
 
+  const videos: VideoItem[] = cinematicBase ? cinematicCatalog : legacyVideos;
+
   // Modules that ship today but have no walkthrough yet — listed so the page
   // is an honest map of Otto, not just of what was filmed. Each links to its
   // feature guide; a later render pass turns these into videos.
@@ -95,6 +105,31 @@
   ];
 
   let activeIndex = $state(0);
+  let currentTime = $state(0);
+  let pendingSeek = $state<number | null>(null);
+
+  function timeLabel(seconds: number): string {
+    return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+  }
+
+  function seekChapter(seconds: number): void {
+    currentTime = seconds;
+    if (videoEl && videoEl.readyState >= 1) {
+      videoEl.currentTime = seconds;
+      void videoEl.play().catch(() => {});
+    } else {
+      pendingSeek = seconds;
+    }
+  }
+
+  function onMetadata(): void {
+    loading = false;
+    if (videoEl && pendingSeek !== null) {
+      videoEl.currentTime = pendingSeek;
+      pendingSeek = null;
+      void videoEl.play().catch(() => {});
+    }
+  }
   let videoEl: HTMLVideoElement | null = $state(null);
   let searchQuery = $state('');
   let railEl: HTMLElement | null = $state(null);
@@ -105,6 +140,36 @@
   let failed = $state(new Set<string>());
   let loading = $state(false);
 
+  // GitHub serves release assets through a 302 to a short-lived signed URL,
+  // and WebKit (the desktop webview) refuses a <video src> that redirects
+  // (MEDIA_ERR_SRC_NOT_SUPPORTED — Chromium tolerates it, which is why this
+  // only bites in the app). The daemon resolves the hop; the element gets the
+  // final URL. Falls back to the raw URL when the daemon can't resolve it
+  // (offline, remote browser without the route…). Keyed by file so a stale
+  // resolution never lands on a different video.
+  let resolvedSrc = $state<{ file: string; url: string } | null>(null);
+  let resolveNonce = 0;
+  async function resolveSrc(file: string): Promise<void> {
+    const raw = videoUrl(file);
+    const nonce = ++resolveNonce;
+    let url = raw;
+    if (raw.startsWith('https://github.com/')) {
+      try {
+        url = (await api.get<ResolveWalkthroughResp>(`/walkthroughs/resolve?url=${encodeURIComponent(raw)}`)).url || raw;
+      } catch {
+        url = raw;
+      }
+    }
+    if (nonce === resolveNonce) resolvedSrc = { file, url };
+  }
+  $effect(() => {
+    const file = current?.file;
+    if (!file) return;
+    if (resolvedSrc?.file === file) return;
+    resolvedSrc = null;
+    void resolveSrc(file);
+  });
+
   function onVideoError(file: string): void {
     failed = new Set([...failed, file]);
     loading = false;
@@ -114,6 +179,9 @@
     const next = new Set(failed);
     next.delete(file);
     failed = next;
+    // The signed URL expires (~1h) — re-resolve rather than re-hit a dead one.
+    resolvedSrc = null;
+    void resolveSrc(file);
   }
 
   // ---- filtered list ----
@@ -131,6 +199,7 @@
 
   const filteredGuides = $derived.by(() => {
     const q = searchQuery.trim().toLowerCase();
+    if (cinematicBase) return [];
     if (!q) return guides;
     return guides.filter((g) =>
       g.title.toLowerCase().includes(q) ||
@@ -141,6 +210,8 @@
 
   function select(i: number): void {
     activeIndex = i;
+    currentTime = 0;
+    pendingSeek = null;
   }
 
   // Auto-play whenever a new video element is bound (after key block re-mounts).
@@ -149,7 +220,8 @@
   $effect(() => {
     if (videoEl) {
       loading = true;
-      videoEl.play().catch(() => {});
+      // Narrated films start on user intent so switching pages never starts sound.
+      if (!cinematicBase) videoEl.play().catch(() => {});
     }
   });
 
@@ -159,17 +231,17 @@
   $effect(() => {
     function onRailKey(e: KeyboardEvent): void {
       // Only intercept when focus is inside the rail container.
-      if (!railEl?.contains(document.activeElement)) return;
+      if (!railEl?.contains(document.activeElement) || e.target instanceof HTMLInputElement) return;
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
         const visible = filteredVideos.map((x) => x.i);
         const cur = visible.indexOf(activeIndex);
         if (e.key === 'ArrowDown') {
           const next = visible[Math.min(cur + 1, visible.length - 1)];
-          if (next !== undefined) activeIndex = next;
+          if (next !== undefined) select(next);
         } else {
           const prev = visible[Math.max(cur - 1, 0)];
-          if (prev !== undefined) activeIndex = prev;
+          if (prev !== undefined) select(prev);
         }
       }
     }
@@ -187,7 +259,7 @@
       group: 'Help',
       keywords: `${v.tags} video tour`,
       run: () => {
-        activeIndex = i;
+        select(i);
         router.go('walkthroughs');
       },
     }));
@@ -201,7 +273,18 @@
         window.open(docUrl(g.doc), '_blank', 'noopener,noreferrer');
       },
     }));
-    const unreg = registry.register('walkthroughs', [...cmds, ...guideCmds]);
+    const chapterCmds = videos.flatMap((v, i) => (v.chapters ?? []).map(chapter => ({
+      id: `walkthrough.chapter.${chapter.id}`, title: `Walkthrough: ${chapter.title}`,
+      group: 'Help', keywords: `${v.tags} ${chapter.title} chapter video tour`,
+      run: () => {
+        const sameFilm = activeIndex === i;
+        select(i);
+        if (sameFilm) seekChapter(chapter.start);
+        else pendingSeek = chapter.start;
+        router.go('walkthroughs');
+      },
+    })));
+    const unreg = registry.register('walkthroughs', [...cmds, ...guideCmds, ...chapterCmds]);
     return unreg;
   });
 </script>
@@ -209,7 +292,7 @@
 <div class="walkthroughs">
   <div class="page-header">
     <h1 class="page-title">Walkthroughs</h1>
-    <p class="page-sub">Short tours of Otto's features. Search or use ⌘K → "Walkthrough:".</p>
+    <p class="page-sub">{cinematicBase ? 'Eight films. One complete workflow. Narration, sound, and chapters you can jump into.' : 'Short tours of Otto’s features. Search or use ⌘K → “Walkthrough:”.'}</p>
   </div>
 
   <div class="layout">
@@ -241,6 +324,7 @@
           <span class="item-num">{i + 1}</span>
           <span class="item-text">
             <span class="item-title">{v.title}</span>
+            {#if v.duration}<span class="film-duration">{timeLabel(v.duration)} · {v.chapters?.length} chapters</span>{/if}
             <span class="item-desc">{v.desc}</span>
           </span>
         </button>
@@ -284,13 +368,13 @@
         {#if failed.has(current.file)}
           <div class="video-fallback" role="status">
             <span class="fallback-icon" aria-hidden="true">▶</span>
-            <p class="fallback-title">Video unavailable offline</p>
+            <p class="fallback-title">Video unavailable</p>
             <p class="fallback-sub">
-              The walkthroughs stream from GitHub and aren't bundled with Otto.
+              This video could not be loaded. Check your connection or retry.
             </p>
             <div class="fallback-actions">
               <a class="fallback-link" href={videoUrl(current.file)} target="_blank" rel="noopener noreferrer">
-                Open on GitHub ↗
+                Open video ↗
               </a>
               <button class="fallback-retry" onclick={() => retry(current.file)}>Retry</button>
             </div>
@@ -307,23 +391,57 @@
               controls
               preload="metadata"
               playsinline
-              src={videoUrl(current.file)}
+              crossorigin={cinematicBase ? 'anonymous' : undefined}
+              poster={cinematicBase ? videoUrl(current.file.replace(/\.mp4$/, '.jpg')) : undefined}
+              onloadedmetadata={onMetadata}
+              ontimeupdate={() => { currentTime = videoEl?.currentTime ?? 0; }}
+              src={resolvedSrc?.file === current.file ? resolvedSrc.url : undefined}
               onerror={() => onVideoError(current.file)}
               onloadeddata={() => (loading = false)}
               oncanplay={() => (loading = false)}
-            ></video>
+            >
+              {#if cinematicBase}
+                <track kind="captions" srclang="en" label="English" src={videoUrl(current.file.replace(/\.mp4$/, '.vtt'))} />
+              {/if}
+            </video>
             {#if loading}
               <div class="video-loading dim" aria-hidden="true">Loading…</div>
             {/if}
           </div>
         {/if}
       {/key}
+      {#if current.chapters}
+        <nav class="chapter-list" aria-label="Film chapters">
+          {#each current.chapters as chapter (chapter.id)}
+            <div class="chapter-entry">
+              <button class="chapter-button"
+                class:chapter-active={currentTime >= chapter.start && currentTime < chapter.start + chapter.duration}
+                aria-current={currentTime >= chapter.start && currentTime < chapter.start + chapter.duration ? 'step' : undefined}
+                onclick={() => seekChapter(chapter.start)}>
+                <span class="chapter-time">{timeLabel(chapter.start)}</span>
+                <span>{chapter.title}</span>
+              </button>
+              <a class="chapter-guide" href={docUrl(chapter.doc)} target="_blank" rel="noopener noreferrer" aria-label={`Read the guide for ${chapter.title}`}>Guide ↗</a>
+            </div>
+          {/each}
+        </nav>
+      {/if}
     </div>
   </div>
 </div>
 
 <style>
+  .film-duration { color: var(--text-dim); font-size: 10.5px; margin: 3px 0; }
+  .chapter-list { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; max-height: 160px; overflow-y: auto; padding: 2px; }
+  .chapter-entry { display: flex; align-items: center; border: 1px solid var(--border); border-radius: 6px; }
+  .chapter-button { display: flex; align-items: center; gap: 8px; padding: 9px 10px; background: transparent; border: 0; color: var(--text); cursor: pointer; text-align: start; font-size: 12px; border-radius: 5px; }
+  .chapter-active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+  .chapter-time { color: var(--text-dim); font-variant-numeric: tabular-nums; font-size: 11px; }
+  .chapter-guide { color: var(--text-dim); font-size: 10px; padding: 9px; white-space: nowrap; text-decoration: none; }
+  .chapter-button:focus-visible, .chapter-guide:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
   .walkthroughs {
+    container-type: inline-size;
     height: 100%;
     display: flex;
     flex-direction: column;
@@ -648,5 +766,18 @@
 
   .fallback-retry:hover {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+  }
+  @container (max-width: 800px) {
+    .layout { flex-direction: column; overflow-y: auto; }
+    .player-area { order: -1; flex: none; overflow: visible; }
+    .video-frame { flex: none; aspect-ratio: 16 / 9; min-height: 160px; }
+    .video-el { height: 100%; }
+    .video-rail { width: 100%; max-height: 260px; min-height: 160px; }
+    .chapter-list { max-height: 130px; }
+    .player-desc { line-height: 1.5; }
+  }
+  @media (max-width: 600px) {
+    .walkthroughs { padding: 18px 16px 12px; }
+    .page-header { margin-bottom: 14px; }
   }
 </style>

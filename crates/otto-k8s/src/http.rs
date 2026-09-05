@@ -143,10 +143,11 @@ pub fn api_router<S: K8sCtx>() -> Router<S> {
         .route("/k8s/clusters/{id}/exec", post(exec::<S>))
         .route("/k8s/clusters/{id}/k9s", post(k9s::<S>))
         .route("/k8s/clusters/{id}/actions", post(run_action::<S>))
+        .merge(crate::monitor::http::routes::<S>())
 }
 
 /// Best-effort audit row (failure is logged, never propagated).
-async fn audit<S: K8sCtx>(ctx: &S, user: &User, action: &str, target: &Id, detail: Value) {
+pub(crate) async fn audit<S: K8sCtx>(ctx: &S, user: &User, action: &str, target: &Id, detail: Value) {
     if let Err(e) = AuditRepo::new(ctx.pool())
         .insert(NewAuditEntry {
             user_id: Some(user.id.clone()),

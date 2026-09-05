@@ -26,6 +26,7 @@ pub mod improvements;
 pub mod integrations;
 pub mod issues;
 pub mod k8s_clusters;
+pub mod k8s_monitor;
 pub mod mcp_audit;
 pub mod mcp_control;
 pub mod goal_loops;
@@ -114,6 +115,7 @@ pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
 pub use issues::{IssuesRepo, NewIssueAccount};
 pub use k8s_clusters::{K8sCluster, K8sClusterPatch, K8sClusterSource, K8sClustersRepo, NewK8sCluster};
+pub use k8s_monitor::{K8sMonitorConfigRow, K8sMonitorRepo, K8sMonitorStatusRow};
 pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
 pub use mcp_control::{
     CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval, McpApprovalRepo,
