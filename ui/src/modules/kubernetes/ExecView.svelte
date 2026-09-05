@@ -9,7 +9,7 @@
   import { api } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { auth } from '../../lib/stores/auth.svelte';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import type { K8sContainer, SessionStatus } from '../../lib/api/types';
 
   interface Props {
@@ -22,7 +22,8 @@
   }
   let { clusterId, ns, pod, containers, autoOpen = false }: Props = $props();
 
-  const canExec = $derived(auth.can('kubernetes', 'edit'));
+  $effect(() => { void resourceAccess.load('k8s_cluster', clusterId, `namespace:${ns}`); });
+  const canExec = $derived(resourceAccess.can('k8s_cluster', clusterId, 'exec', 'kubernetes', 'edit', `namespace:${ns}`));
   let container = $state('');
   let sessionId = $state<string | null>(null);
   let status = $state<SessionStatus | null>(null);

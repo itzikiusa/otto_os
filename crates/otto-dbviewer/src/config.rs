@@ -99,7 +99,8 @@ pub fn parse(conn: &Connection, secret: Option<String>) -> Result<ParsedProfile>
         password: secret,
         database,
         tls,
-        params: conn.params.clone(),
+        // Internal authorization flags never come from stored/user JSON.
+        params: { let mut params=conn.params.clone(); if let Some(map)=params.as_object_mut(){map.retain(|key,_|!key.starts_with("__"));} params },
     };
 
     Ok(ParsedProfile { config, ssh })
@@ -208,4 +209,12 @@ mod tests {
         let c = conn(ConnectionKind::Ssh, json!({"host":"h"}));
         assert!(parse(&c, None).is_err());
     }
+    #[test]
+    fn profile_json_cannot_supply_internal_execution_authority() {
+        let c=conn(ConnectionKind::Postgres,json!({"host":"h","__read_only_execution":false,"__access_scope":"fake"}));
+        let parsed=parse(&c,None).unwrap();
+        assert!(parsed.config.params.get("__read_only_execution").is_none());
+        assert!(parsed.config.params.get("__access_scope").is_none());
+    }
+
 }

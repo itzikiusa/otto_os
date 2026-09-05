@@ -112,7 +112,7 @@ impl McpServersRepo {
     /// Only the enabled servers for a workspace — the set merged into `.mcp.json`.
     pub async fn list_enabled(&self, ws: &Id) -> Result<Vec<McpServer>> {
         let rows = sqlx::query(
-            "SELECT * FROM mcp_servers WHERE workspace_id = ? AND enabled = 1 ORDER BY name",
+            "SELECT * FROM mcp_servers WHERE workspace_id = ? AND enabled = 1 AND NOT EXISTS (SELECT 1 FROM resource_access_policies p WHERE p.resource_kind = 'mcp_server' AND p.resource_id = mcp_servers.id AND p.mode = 'enforced') ORDER BY name",
         )
         .bind(ws)
         .fetch_all(&self.pool)
@@ -298,6 +298,12 @@ mod tests {
             .await
             .unwrap();
         assert!(s.enabled);
+        // Enabling a governed resource must never distribute raw upstream secrets.
+        assert!(repo.list_enabled(&ws).await.unwrap().is_empty());
+        let access = crate::ResourceAccessRepo::new(pool.clone());
+        let old = access.get_policy(otto_core::access::ResourceKind::McpServer,&s.id).await.unwrap();
+        let mut legacy = old.clone(); legacy.mode = otto_core::access::AccessMode::Legacy;
+        access.put_policy(&legacy,old.revision,&otto_core::access::AccessActor {real_user_id:user.clone(),effective_user_id:None}).await.unwrap();
         assert_eq!(repo.list_enabled(&ws).await.unwrap().len(), 1);
 
         // Rename + retarget args.

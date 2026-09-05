@@ -289,7 +289,12 @@ async fn ws_auth_gate<S: SessionsCtx>(
         }
     };
 
+    if let Err(e) = st.ctx.check_resource(&user,&session).await {
+        return problem(StatusCode::FORBIDDEN,&e);
+    }
+
     // Propagate auth results to the handler via extensions.
+    req.extensions_mut().insert(LiveTerminalAuth { user:user.clone(),token,auth:st.auth.clone() });
     req.extensions_mut().insert(AuthUser(user));
     req.extensions_mut().insert(CanInput(can_input));
     // Tell term_ws whether the client used the subprotocol path so it can echo
@@ -303,6 +308,29 @@ async fn ws_auth_gate<S: SessionsCtx>(
 #[derive(Clone, Copy)]
 struct CanInput(bool);
 
+#[derive(Clone)]
+struct LiveTerminalAuth {
+    user: otto_core::domain::User,
+    token: String,
+    auth: Arc<dyn TokenAuthenticator>,
+}
+impl LiveTerminalAuth {
+    async fn check<S: SessionsCtx>(&self,ctx:&S,session:&otto_core::domain::Session)->otto_core::Result<bool> {
+        let auth=self.auth.authenticate(&self.token).await?;
+        if auth.effective_user.id != self.user.id || auth.mcp_only { return Err(Error::Unauthorized); }
+        let can_input=if let Some(scope)=auth.scope {
+            if scope.session_id != session.id || scope.otp_pending { return Err(Error::Unauthorized); }
+            scope.role==WorkspaceRole::Editor
+        } else {
+            if !session_owner_or_admin(ctx.roles().as_ref(),&auth.effective_user,session).await {return Err(Error::Forbidden("session access revoked".into()));}
+            ctx.roles().check(&auth.effective_user,&session.workspace_id,WorkspaceRole::Editor).await.is_ok()
+        };
+        ctx.check_resource(&auth.effective_user,session).await?;
+        Ok(can_input)
+    }
+}
+
+
 /// Newtype extension: true iff the client presented the token via the
 /// `Sec-WebSocket-Protocol: otto-bearer, <token>` header. When set, `term_ws`
 /// echoes the `otto-bearer` subprotocol in the upgrade response so the browser
@@ -314,7 +342,7 @@ async fn term_ws<S: SessionsCtx>(
     ws: WebSocketUpgrade,
     Path(session_id): Path<Id>,
     State(st): State<WsState<S>>,
-    axum::Extension(AuthUser(_user)): axum::Extension<AuthUser>,
+    axum::Extension(live_auth): axum::Extension<LiveTerminalAuth>,
     axum::Extension(CanInput(can_input)): axum::Extension<CanInput>,
     axum::Extension(UsedSubprotocol(used_subprotocol)): axum::Extension<UsedSubprotocol>,
 ) -> Response {
@@ -330,11 +358,11 @@ async fn term_ws<S: SessionsCtx>(
     if used_subprotocol {
         ws.protocols([BEARER_SUBPROTOCOL])
             .on_upgrade(move |socket| async move {
-                serve_terminal(socket, st.ctx, session_id, initial_status, can_input).await;
+                serve_terminal(socket, st.ctx, session_id, initial_status, can_input, live_auth).await;
             })
     } else {
         ws.on_upgrade(move |socket| async move {
-            serve_terminal(socket, st.ctx, session_id, initial_status, can_input).await;
+            serve_terminal(socket, st.ctx, session_id, initial_status, can_input, live_auth).await;
         })
     }
 }
@@ -382,7 +410,8 @@ async fn serve_terminal<S: SessionsCtx>(
     ctx: S,
     session_id: Id,
     initial_status: otto_core::domain::SessionStatus,
-    can_input: bool,
+    mut can_input: bool,
+    live_auth: LiveTerminalAuth,
 ) {
     // Track this viewer for the whole connection. The guard decrements the
     // session's attached-viewer count on EVERY return path below (clean close,
@@ -400,6 +429,8 @@ async fn serve_terminal<S: SessionsCtx>(
     // Read-only viewers (shares) never trigger a resume: watching must not
     // spawn a process on the host. (`ensure_live` itself also refuses archived
     // sessions, so an archived row can no longer come back live via attach.)
+    let Ok(current)=ctx.manager().get(&session_id).await else {return;};
+    match live_auth.check(&ctx,&current).await {Ok(allowed)=>can_input &= allowed,Err(_)=>return}
     if can_input {
         if let Err(e) = ctx.manager().ensure_live(&session_id).await {
             tracing::warn!(session = %session_id, "ensure_live on ws attach: {e}");
@@ -440,8 +471,18 @@ async fn serve_terminal<S: SessionsCtx>(
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ping.reset(); // skip the immediate first tick
 
+    let mut resource_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     loop {
         tokio::select! {
+            _ = resource_tick.tick() => {
+                let Ok(current) = ctx.manager().get(&session_id).await else { return; };
+                if live_auth.check(&ctx,&current).await.is_err() {
+                    if current.created_by == live_auth.user.id { let _ = ctx.manager().kill_session(&session_id).await; }
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+            }
+
             // Live PTY output → binary frames. Coalesce rapid bursts into one
             // frame by draining any immediately-available chunks with try_recv.
             chunk = next_output(&mut out_rx) => {
@@ -562,6 +603,8 @@ async fn serve_terminal<S: SessionsCtx>(
             }
             // Client control frames.
             msg = socket.recv() => {
+                let Ok(current)=ctx.manager().get(&session_id).await else {return;};
+                match live_auth.check(&ctx,&current).await {Ok(allowed)=>can_input &= allowed,Err(_)=>return}
                 let Some(Ok(msg)) = msg else { return };
                 let Message::Text(text) = msg else {
                     if matches!(msg, Message::Close(_)) { return; }

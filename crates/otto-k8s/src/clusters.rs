@@ -280,6 +280,7 @@ impl<S: K8sCtx> Clusters<S> {
 
     /// `POST /k8s/clusters` — register an existing kubeconfig context.
     pub async fn create(&self, user: &User, req: UpsertK8sClusterReq) -> Result<K8sCluster> {
+        crate::access::require_setup_authority(user)?;
         let name = req.name.trim().to_string();
         if name.is_empty() {
             return Err(Error::Invalid("name is required".into()));
@@ -322,6 +323,7 @@ impl<S: K8sCtx> Clusters<S> {
                 created_by: Some(user.id.clone()),
             })
             .await?;
+        crate::access::initialize(&self.ctx.pool(), user, &c.id).await?;
         self.broadcast(&c.id, false);
         Ok(c)
     }
@@ -329,6 +331,7 @@ impl<S: K8sCtx> Clusters<S> {
     /// `POST /k8s/clusters/import` — persist pasted YAML as an Otto-owned
     /// kubeconfig, validated by kubectl before the row exists.
     pub async fn import(&self, user: &User, req: ImportK8sClusterReq) -> Result<K8sCluster> {
+        crate::access::require_setup_authority(user)?;
         let name = req.name.trim().to_string();
         if name.is_empty() {
             return Err(Error::Invalid("name is required".into()));
@@ -425,6 +428,7 @@ impl<S: K8sCtx> Clusters<S> {
             .await;
         match created {
             Ok(c) => {
+                crate::access::initialize(&self.ctx.pool(), user, &c.id).await?;
                 self.broadcast(&c.id, false);
                 Ok(c)
             }
@@ -451,8 +455,46 @@ impl<S: K8sCtx> Clusters<S> {
     }
 
     /// `PATCH /k8s/clusters/{id}`.
-    pub async fn update(&self, id: &Id, req: PatchK8sClusterReq) -> Result<K8sCluster> {
+    pub async fn update(
+        &self,
+        id: &Id,
+        user: &User,
+        mut req: PatchK8sClusterReq,
+    ) -> Result<K8sCluster> {
+        crate::access::check(&self.ctx.pool(), user, id, "configure", None).await?;
         let cur = self.repo.get(id).await?;
+        if !user.is_root {
+            let path_changed = req.kubeconfig_path.as_deref().is_some_and(|p| {
+                let p = p.trim();
+                let normalized = if p.is_empty() {
+                    None
+                } else {
+                    Some(expand_tilde(p).to_string_lossy().to_string())
+                };
+                normalized != cur.kubeconfig_path
+            });
+            if path_changed
+                || req
+                    .context_name
+                    .as_deref()
+                    .is_some_and(|name| name.trim() != cur.context_name)
+                || req
+                    .default_namespace
+                    .as_ref()
+                    .is_some_and(|ns| clean_ns(Some(ns.clone())) != cur.default_namespace)
+                || req
+                    .environment
+                    .is_some_and(|environment| environment != cur.environment)
+            {
+                return Err(Error::Forbidden(
+                    "only root can change Kubernetes identity or execution configuration".into(),
+                ));
+            }
+            req.kubeconfig_path = None;
+            req.context_name = None;
+            req.default_namespace = None;
+            req.environment = None;
+        }
         let kubeconfig_path = match req.kubeconfig_path {
             None => None,
             Some(p) => {
@@ -505,6 +547,17 @@ impl<S: K8sCtx> Clusters<S> {
     /// `imported` / `eks` sources; user files are never touched.
     pub async fn delete(&self, id: &Id) -> Result<()> {
         let c = self.repo.delete(id).await?;
+        // Monitoring rows cascade in SQLite; the ClickHouse partitions do not —
+        // best-effort purge so a re-imported cluster never inherits old series.
+        if let Some(sink) = self.ctx.monitor_sink() {
+            if sink.available() {
+                for q in crate::monitor::schema::purge_cluster_sql(id.as_str(), None) {
+                    if let Err(e) = sink.exec(&q).await {
+                        tracing::debug!("k8s monitor purge on delete: {e}");
+                    }
+                }
+            }
+        }
         if c.source.otto_owned_kubeconfig() {
             if let Some(p) = c.kubeconfig_path.as_deref() {
                 let path = PathBuf::from(p);

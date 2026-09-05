@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 otto-core = { workspace = true }
+otto-rbac = { workspace = true }
 otto-state = { workspace = true }
 otto-pty = { workspace = true }
 otto-connections = { workspace = true }
@@ -16,6 +17,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
+reqwest = { workspace = true }
 # Direct `aws_accounts` lookup for eks-source clusters (env injection) — the
 # full AWS repo lives in otto-aws; see `clusters::aws_env_for`.
 sqlx = { workspace = true }

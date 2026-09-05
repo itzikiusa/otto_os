@@ -1,10 +1,11 @@
 <script lang="ts">
   // Register a governed MCP server. Two transports:
   //   stdio — Otto spawns `command args` (with env + secret env) as the daemon.
-  //           This runs an ARBITRARY local command and requires MCP Admin.
+  //           This runs an ARBITRARY local command and requires the owner.
   //   http  — Otto POSTs JSON-RPC to `url` with headers (+ secret headers).
   // Secret env/header values are write-only: they go to the macOS Keychain and
   // are never returned — responses only carry their key names + has_secret.
+  import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
@@ -83,6 +84,7 @@
   }
 
   async function save(): Promise<void> {
+    if (!auth.isRoot) return;
     if (!name.trim()) {
       toasts.error('A server name is required');
       return;
@@ -168,7 +170,7 @@
     {#if transport === 'stdio'}
       <p class="warn">
         ⚠ A stdio server runs an arbitrary command <strong>as the Otto daemon</strong>. Registering
-        one requires MCP Admin and is audited.
+        one requires the owner and is audited.
       </p>
       <label class="field">
         <span>Command</span>

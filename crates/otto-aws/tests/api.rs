@@ -45,7 +45,7 @@ case "$1 $2" in
     fi
     echo '{"UserId": "AROAEXAMPLE:otto", "Account": "123456789012", "Arn": "arn:aws:sts::123456789012:assumed-role/Dev/otto"}'; exit 0;;
   "s3api list-buckets")
-    echo '{"Buckets": [{"Name": "logs-prod", "CreationDate": "2021-03-01T10:00:00+00:00"}], "Owner": {"ID": "x"}}'; exit 0;;
+    echo '{"Buckets": [{"Name": "logs-prod", "CreationDate": "2021-03-01T10:00:00+00:00"}, {"Name": "unrelated-private", "CreationDate": "2021-03-01T10:00:00+00:00"}], "Owner": {"ID": "x"}}'; exit 0;;
   "s3api list-objects-v2")
     echo '{"Contents": [{"Key": "logs/app.log", "LastModified": "2024-01-02T00:00:00+00:00", "ETag": "\"abc\"", "Size": 11, "StorageClass": "STANDARD"}], "CommonPrefixes": [{"Prefix": "logs/2024/"}], "IsTruncated": false}'; exit 0;;
   "s3api head-object")
@@ -148,6 +148,32 @@ async fn grant(pool: &SqlitePool, user: &User, feature: &str, cap: &str) {
         .execute(pool)
         .await
         .expect("seed grant");
+}
+
+async fn allow_account(ctx: &TestCtx, root: &User, user: &User, id: &Id, operation: &str) {
+    use otto_core::access::{AccessActor, AccessRule, ResourceKind, RuleEffect, SubjectKind};
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(ctx.pool.clone());
+    let mut policy = repo.get_policy(ResourceKind::AwsAccount, id).await.unwrap();
+    policy.rules.push(AccessRule {
+        id: otto_core::new_id(),
+        subject_kind: SubjectKind::User,
+        subject_id: user.id.clone(),
+        effect: RuleEffect::Allow,
+        operations: vec![operation.to_string()],
+        children: None,
+        credential_connection_id: None,
+        grantable_operations: vec![],
+    });
+    repo.put_policy(
+        &policy,
+        policy.revision,
+        &AccessActor {
+            real_user_id: root.id.clone(),
+            effective_user_id: None,
+        },
+    )
+    .await
+    .unwrap();
 }
 
 #[derive(Default)]
@@ -657,7 +683,7 @@ async fn s3_list_and_streamed_download() {
 }
 
 #[tokio::test]
-async fn import_kubeconfig_requires_kubernetes_admin_and_creates_cluster_row() {
+async fn import_kubeconfig_requires_root_and_creates_cluster_row() {
     let ctx = TestCtx::new().await;
     let root = seed_user(&ctx.pool, "root", true).await;
     let (_, a, _) = call(
@@ -672,15 +698,20 @@ async fn import_kubeconfig_requires_kubernetes_admin_and_creates_cluster_row() {
 
     // A user with aws_eks:Edit but no kubernetes grant is refused in-handler.
     let editor = seed_user(&ctx.pool, "editor", false).await;
+    grant(&ctx.pool, &editor, "aws", "view").await;
     grant(&ctx.pool, &editor, "aws_eks", "edit").await;
+    allow_account(&ctx, &root, &editor, &id, "discover").await;
+    allow_account(&ctx, &root, &editor, &id, "eks_import").await;
     let uri = format!("/aws/accounts/{id}/eks/clusters/prod-eu/import-kubeconfig");
     let (st, e, _) = call(&ctx, &editor, "POST", &uri, Some(serde_json::json!({}))).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
 
-    // kubernetes:Admin passes; the kubeconfig lands under <data_dir>/kube 0600
-    // and a k8s_clusters row links back to the account.
+    // Even delegated page Admin cannot attach a native alias. Root can import
+    // an EKS cluster, with a private kubeconfig linked to this account.
     grant(&ctx.pool, &editor, "kubernetes", "admin").await;
-    let (st, c, _) = call(&ctx, &editor, "POST", &uri, Some(serde_json::json!({ "cluster_name_override": "prod-eu-otto", "default_namespace": "apps" }))).await;
+    let (st, _, _) = call(&ctx, &editor, "POST", &uri, Some(serde_json::json!({}))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, c, _) = call(&ctx, &root, "POST", &uri, Some(serde_json::json!({ "cluster_name_override": "prod-eu-otto", "default_namespace": "apps" }))).await;
     assert_eq!(st, StatusCode::CREATED, "{c}");
     assert_eq!(c["source"], "eks");
     assert_eq!(c["name"], "prod-eu-otto");
@@ -809,7 +840,10 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
     // The fake returns one (off-window) point of 3.0: kept, so current = 3.
     assert_eq!(sent["current"], 3.0);
     // A metric the fake never returned still comes back, empty.
-    let delayed = series.iter().find(|s| s["id"] == "messages_delayed").unwrap();
+    let delayed = series
+        .iter()
+        .find(|s| s["id"] == "messages_delayed")
+        .unwrap();
     assert!(delayed["current"].is_null());
     assert!(delayed["points"]
         .as_array()
@@ -872,7 +906,9 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
     for bad in [
         format!("/aws/accounts/{id}/metrics?namespace=AWS/Lambda&dim_value=fn"),
         format!("/aws/accounts/{id}/metrics?namespace=AWS/SQS&dim_value=orders&range=2h"),
-        format!("/aws/accounts/{id}/metrics?namespace=AWS/SQS&dim_name=InstanceId&dim_value=orders"),
+        format!(
+            "/aws/accounts/{id}/metrics?namespace=AWS/SQS&dim_name=InstanceId&dim_value=orders"
+        ),
         format!("/aws/accounts/{id}/metrics?namespace=AWS/EC2&dim_value=i-1%20--debug"),
     ] {
         let (st, e, _) = call(&ctx, &root, "GET", &bad, None).await;
@@ -885,6 +921,8 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
     let viewer = seed_user(&ctx.pool, "viewer", false).await;
     grant(&ctx.pool, &viewer, "aws", "view").await;
     grant(&ctx.pool, &viewer, "aws_sqs", "view").await;
+    allow_account(&ctx, &root, &viewer, &id.to_string(), "discover").await;
+    allow_account(&ctx, &root, &viewer, &id.to_string(), "metrics").await;
     let (st, e, _) = call(
         &ctx,
         &viewer,
@@ -900,4 +938,228 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
     );
     let (st, _, _) = call(&ctx, &viewer, "GET", &uri, None).await;
     assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn new_accounts_are_private_and_guessed_bucket_reads_are_denied() {
+    let ctx = TestCtx::new().await;
+    let owner = seed_user(&ctx.pool, "owner", true).await;
+    let outsider = seed_user(&ctx.pool, "outsider", false).await;
+    let (st, account, _) = call(
+        &ctx,
+        &owner,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("private", "dev")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let id = account["id"].as_str().unwrap();
+    let (st, list, _) = call(&ctx, &outsider, "GET", "/aws/accounts", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(list, serde_json::json!([]), "ungranted account leaked");
+    for suffix in [
+        "",
+        "/s3/buckets/logs-prod/preview?key=logs/app.log",
+        "/s3/buckets/logs-prod/objects",
+    ] {
+        let (st, _, _) = call(
+            &ctx,
+            &outsider,
+            "GET",
+            &format!("/aws/accounts/{id}{suffix}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{suffix}");
+    }
+}
+
+#[tokio::test]
+async fn bucket_allow_and_read_deny_override_account_administrator() {
+    use otto_core::access::{AccessActor, AccessRule, ResourceKind, RuleEffect, SubjectKind};
+    let ctx = TestCtx::new().await;
+    let owner = seed_user(&ctx.pool, "root", true).await;
+    let user = seed_user(&ctx.pool, "limited-admin", false).await;
+    grant(&ctx.pool, &user, "aws", "admin").await;
+    let (_, account, _) = call(
+        &ctx,
+        &owner,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("private", "dev")),
+    )
+    .await;
+    let id = account["id"].as_str().unwrap().to_string();
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(ctx.pool.clone());
+    let mut policy = repo
+        .get_policy(ResourceKind::AwsAccount, &id)
+        .await
+        .unwrap();
+    for (effect, operations, children) in [
+        (RuleEffect::Allow, vec!["discover"], None),
+        (
+            RuleEffect::Allow,
+            vec!["s3_list", "s3_read"],
+            Some(vec!["bucket:logs-prod"]),
+        ),
+        (
+            RuleEffect::Deny,
+            vec!["s3_read"],
+            Some(vec!["bucket:logs-prod"]),
+        ),
+    ] {
+        policy.rules.push(AccessRule {
+            id: otto_core::new_id(),
+            subject_kind: SubjectKind::User,
+            subject_id: user.id.clone(),
+            effect,
+            operations: operations.into_iter().map(str::to_string).collect(),
+            children: children.map(|c| c.into_iter().map(str::to_string).collect()),
+            credential_connection_id: None,
+            grantable_operations: vec![],
+        });
+    }
+    let actor = AccessActor {
+        real_user_id: owner.id,
+        effective_user_id: None,
+    };
+    repo.put_policy(&policy, policy.revision, &actor)
+        .await
+        .unwrap();
+    let (st, buckets, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/aws/accounts/{id}/s3/buckets"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(buckets["buckets"][0]["name"], "logs-prod");
+    assert_eq!(buckets["buckets"].as_array().unwrap().len(), 1);
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/aws/accounts/{id}/s3/buckets/logs-prod/objects"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    for suffix in [
+        "/s3/buckets/other/objects",
+        "/s3/buckets/logs-prod/download?key=logs/app.log",
+        "/s3/buckets/logs-prod/preview?key=logs/app.log",
+        "/metrics?namespace=AWS/EC2&dim_name=InstanceId&dim_value=i-123",
+    ] {
+        let (st, _, _) = call(
+            &ctx,
+            &user,
+            "GET",
+            &format!("/aws/accounts/{id}{suffix}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{suffix}");
+    }
+}
+
+#[tokio::test]
+async fn delegated_aws_admin_cannot_attach_or_repoint_ambient_credentials() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let user = seed_user(&ctx.pool, "delegated", false).await;
+    grant(&ctx.pool, &user, "aws", "admin").await;
+    let (_, account, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("visible", "dev")),
+    )
+    .await;
+    let id = account["id"].as_str().unwrap().to_string();
+    allow_account(&ctx, &root, &user, &id, "discover").await;
+    allow_account(&ctx, &root, &user, &id, "configure").await;
+    for patch in [
+        serde_json::json!({"profile":"hidden-admin"}),
+        serde_json::json!({"role_arn":"arn:aws:iam::123456789012:role/Hidden"}),
+        serde_json::json!({"endpoint_url":"https://hidden.example"}),
+        serde_json::json!({"auth_mode":"access_keys", "access_key_id":"x", "secret_access_key":"y"}),
+    ] {
+        let (st, _, _) = call(
+            &ctx,
+            &user,
+            "PATCH",
+            &format!("/aws/accounts/{id}"),
+            Some(patch),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+    }
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("alias", "hidden-admin")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, updated, _) = call(
+        &ctx,
+        &user,
+        "PATCH",
+        &format!("/aws/accounts/{id}"),
+        Some(profile_req("renamed", "dev")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{updated}");
+    assert_eq!(updated["name"], "renamed");
+}
+
+#[tokio::test]
+async fn aws_parent_page_is_required_and_discovery_redacts_configuration() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let user = seed_user(&ctx.pool, "reader", false).await;
+    grant(&ctx.pool, &user, "aws_s3", "view").await;
+    let (_, account, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("visible", "dev")),
+    )
+    .await;
+    let id = account["id"].as_str().unwrap().to_string();
+    for operation in ["discover", "s3_list", "s3_read"] {
+        allow_account(&ctx, &root, &user, &id, operation).await;
+    }
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/aws/accounts/{id}/s3/buckets/logs-prod/objects"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::NOT_FOUND,
+        "no parent page must hide the resource"
+    );
+    grant(&ctx.pool, &user, "aws", "view").await;
+    let (st, account, _) = call(&ctx, &user, "GET", &format!("/aws/accounts/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(account["profile"].is_null());
+    assert!(account["identity"].is_null());
+    assert!(account["permissions"].is_null());
+    let (_, list, _) = call(&ctx, &user, "GET", "/aws/accounts", None).await;
+    assert!(list[0]["profile"].is_null());
+    let (st, probe, _) = call(&ctx, &user, "POST", &format!("/aws/accounts/{id}/test"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(probe["identity"].is_null());
+    assert_eq!(probe["message"], "Connection succeeded");
 }

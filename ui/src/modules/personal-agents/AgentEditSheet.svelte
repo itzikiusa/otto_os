@@ -8,13 +8,36 @@
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { PersonalAgent } from '../../lib/api/types';
+  import { agentTemplates, templateById } from './templates';
 
   interface Props {
     /** null = create a new agent. */
     agent: PersonalAgent | null;
+    /** Pre-select a template (id from `templates.ts`) when creating. */
+    template?: string | null;
     onclose: () => void;
   }
-  let { agent, onclose }: Props = $props();
+  let { agent, template = null, onclose }: Props = $props();
+
+  // Templates only apply to a brand-new agent: they pre-fill the form and, on
+  // create, add the template's first schedule.
+  const TEMPLATES = agentTemplates();
+  // svelte-ignore state_referenced_locally
+  let fTemplate = $state<string>(agent ? '' : (template ?? ''));
+  let scheduleNote = $state('');
+
+  function applyTemplate(id: string): void {
+    fTemplate = id;
+    const t = templateById(id);
+    if (!t) {
+      scheduleNote = '';
+      return;
+    }
+    fName = t.name;
+    fAvatar = t.avatar;
+    fSoul = t.soul_md;
+    scheduleNote = `Adds a schedule: every ${t.schedule.every_min} min — “${t.directive}”`;
+  }
 
   let busy = $state(false);
   let error = $state('');
@@ -42,6 +65,9 @@
   let fChatId = $state((d.chat_id as string) ?? '');
   let fEmailTo = $state((d.to as string) ?? '');
   let fUrl = $state((d.url as string) ?? '');
+  // Template pre-fill runs after every form field exists (they are `let`s above).
+  // svelte-ignore state_referenced_locally
+  if (!agent && template) applyTemplate(template);
 
   // Live registry (built-ins + custom), never dropping a saved custom slug.
   const PROVIDERS = $derived(agentProvidersWith(agent?.provider));
@@ -88,7 +114,18 @@
     busy = true;
     try {
       if (agent) await personalAgents.update(agent.id, body);
-      else if (ws.currentId) await personalAgents.create(ws.currentId, body);
+      else if (ws.currentId) {
+        const created = await personalAgents.create(ws.currentId, body);
+        const t = templateById(fTemplate);
+        if (t) {
+          await personalAgents.createSchedule(created.id, {
+            schedule: t.schedule,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            directive: t.directive,
+            enabled: true,
+          });
+        }
+      }
       onclose();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Save failed';
@@ -101,6 +138,17 @@
 <Modal title={agent ? `Edit ${agent.name}` : 'New personal agent'} width={620} {onclose}>
   <div class="sheet">
     {#if error}<div class="err" role="alert">{error}</div>{/if}
+
+    {#if !agent}
+      <label class="fld">
+        <span>Start from a template (optional)</span>
+        <select value={fTemplate} onchange={(e) => applyTemplate((e.currentTarget as HTMLSelectElement).value)} data-testid="agent-template">
+          <option value="">Blank agent</option>
+          {#each TEMPLATES as t (t.id)}<option value={t.id}>{t.avatar} {t.title} — {t.description}</option>{/each}
+        </select>
+        {#if scheduleNote}<span class="note">{scheduleNote}</span>{/if}
+      </label>
+    {/if}
 
     <div class="row">
       <label class="fld grow">
@@ -196,6 +244,10 @@
     background: color-mix(in srgb, var(--status-exited) 12%, transparent);
     color: var(--status-exited); padding: 0.5rem 0.75rem;
     border-radius: var(--radius-s); font-size: 0.85rem;
+  }
+  .note {
+    font-size: 0.78rem;
+    color: var(--accent);
   }
   .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
   .row .fld { flex: 1; min-width: 180px; }

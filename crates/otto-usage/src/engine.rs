@@ -301,6 +301,37 @@ impl UsageEngine {
         res
     }
 
+    // ── Raw passthroughs (sibling stores: k8s monitor) ──────────────────────
+
+    /// Raw DDL/DML for sibling stores. Errors (instead of no-op) when the
+    /// engine is degraded so callers can surface "usage engine offline".
+    pub async fn exec_sql(&self, sql: &str) -> Result<()> {
+        let Some(ch) = self.ch() else {
+            return Err(otto_core::Error::Upstream("usage engine offline".into()));
+        };
+        ch.exec(sql).await
+    }
+
+    /// Raw NDJSON insert into `table` (self-heal flagged like `store_metric`).
+    pub async fn insert_ndjson(&self, table: &str, ndjson: &str) -> Result<()> {
+        let Some(ch) = self.ch() else {
+            return Err(otto_core::Error::Upstream("usage engine offline".into()));
+        };
+        let res = ch.insert_ndjson(table, ndjson).await;
+        if res.is_err() && !ch.server_alive() {
+            self.heal.store(true, Ordering::SeqCst);
+        }
+        res
+    }
+
+    /// Raw `SELECT … FORMAT JSONEachRow` passthrough.
+    pub async fn query_rows(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
+        let Some(ch) = self.ch() else {
+            return Err(otto_core::Error::Upstream("usage engine offline".into()));
+        };
+        ch.query_rows(sql).await
+    }
+
     // ── Config ───────────────────────────────────────────────────────────────
 
     /// Apply a new retention window live (updates in-memory config + alters the

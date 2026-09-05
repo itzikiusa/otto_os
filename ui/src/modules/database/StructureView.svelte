@@ -2,6 +2,8 @@
   // Object structure: a columns table (name/type/nullable/default/key), primary
   // key, indexes, foreign keys, and a collapsible DDL block. For Redis keys /
   // Mongo collections (no columns) it renders the `extra` JSON.
+  import { databaseAccessChild } from '../../lib/access-options';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import TableDesigner from './TableDesigner.svelte';
@@ -11,6 +13,9 @@
   import type { DbForeignKey, DbIndexDef, SchemaNode } from '../../lib/api/types';
   import { copyTextOrThrow } from '../../lib/clipboard';
 
+  const scope = $derived(databaseAccessChild(database.selectedObjectPath ?? database.activeDb));
+  const canSchema = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_schema','database','edit',scope));
+  $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,scope);});
   const detail = $derived(database.objectDetail);
 
   /** Re-issue the failed openObject for the still-selected path. openObject only
@@ -656,7 +661,7 @@
       </div>
       <div class="st-head-actions">
         {#if isSql && detail.kind === 'table'}
-          <button class="btn small ghost" onclick={() => (designerOpen = true)} title="Edit columns → generates ALTER TABLE for review">
+          <button class="btn small ghost" disabled={!canSchema} onclick={() => (designerOpen = true)} title="Edit columns → generates ALTER TABLE for review">
             <Icon name="edit" size={11} />Design
           </button>
         {/if}
@@ -730,7 +735,7 @@
                   </td>
                   <td class="fld-act">
                     {#if canIndex}
-                      <button class="mini-btn" onclick={() => indexField(f.path)}>
+                      <button class="mini-btn" disabled={!canSchema} onclick={() => indexField(f.path)}>
                         <Icon name="plus" size={10} />Index
                       </button>
                     {/if}
@@ -761,7 +766,7 @@
           Indexes <span class="count">{detail.indexes.length}</span>
           <span class="grow"></span>
           {#if canIndex}
-            <button class="mini-btn" onclick={startNewIndex}>
+            <button class="mini-btn" disabled={!canSchema} onclick={startNewIndex}>
               <Icon name="plus" size={11} />New index
             </button>
           {/if}
@@ -795,7 +800,7 @@
                       <button
                         class="idx-act"
                         aria-label="Edit index {idx.name}"
-                        disabled={locked}
+                        disabled={locked || !canSchema}
                         title={locked
                           ? "MongoDB's _id_ index can't be changed"
                           : 'Edit — prepares a drop + recreate for you to review and run'}
@@ -806,7 +811,7 @@
                       <button
                         class="idx-act danger"
                         aria-label="Drop index {idx.name}"
-                        disabled={locked}
+                        disabled={locked || !canSchema}
                         title={locked
                           ? "MongoDB's _id_ index can't be dropped"
                           : 'Drop — prepares the statement for you to review and run'}
@@ -1001,7 +1006,7 @@
             {/if}
             <div class="ib-actions">
               <button class="btn small" onclick={resetIdxBuilder}>Cancel</button>
-              <button class="btn small primary" disabled={idxCols.length === 0} onclick={buildIndex}>
+              <button class="btn small primary" disabled={!canSchema || idxCols.length === 0} onclick={buildIndex}>
                 {#if idxEditing}
                   Prepare drop + recreate →
                 {:else}

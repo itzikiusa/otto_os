@@ -1,8 +1,9 @@
 //! `/aws/*` REST router (contract: `docs/design/aws-k8s-consoles.md` §2,
 //! mirrored in `docs/contracts/api.md` "AWS console").
 //!
-//! Authorization is the server's policy table (`otto-server/src/policy.rs`,
-//! "AWS console" block) — handlers do not re-check feature grants, with one
+//! Resource authorization is checked before loading credentials or invoking AWS.
+//! Page-level authorization is the server's policy table (`otto-server/src/policy.rs`,
+//! "AWS console" block). Handlers additionally enforce resource grants, with one
 //! exception: `import-kubeconfig` also creates a Kubernetes cluster row, so it
 //! additionally requires `kubernetes:Admin` (checked here via
 //! `GrantsRepo::check_global`). Mutations write audit rows.
@@ -215,10 +216,14 @@ async fn install_cli<S: AwsCtx>(State(ctx): State<S>) -> (StatusCode, Json<Insta
 }
 
 /// GET /aws/discover — Aws:View. Names + metadata only, never key values.
-async fn discover_profiles<S: AwsCtx>(State(_ctx): State<S>) -> Json<DiscoverResp> {
-    Json(DiscoverResp {
+async fn discover_profiles<S: AwsCtx>(
+    State(_ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+) -> ApiResult<Json<DiscoverResp>> {
+    crate::access::require_setup_authority(&user)?;
+    Ok(Json(DiscoverResp {
         profiles: discover::discover(),
-    })
+    }))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,8 +288,20 @@ async fn regions<S: AwsCtx>(State(_ctx): State<S>) -> Json<RegionsResp> {
 // ---------------------------------------------------------------------------
 
 /// GET /aws/accounts — Aws:View
-async fn list_accounts<S: AwsCtx>(State(ctx): State<S>) -> ApiResult<Json<Vec<AwsAccount>>> {
-    Ok(Json(AwsService::from_ctx(&ctx).list().await?))
+async fn list_accounts<S: AwsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+) -> ApiResult<Json<Vec<AwsAccount>>> {
+    let mut visible = Vec::new();
+    for mut account in AwsService::from_ctx(&ctx).list().await? {
+        if crate::access::allowed(&ctx.pool(), &user, &account.id, "discover", None).await? {
+            if !crate::access::can_configure(&ctx.pool(), &user, &account.id).await? {
+                account.redact_configuration();
+            }
+            visible.push(account);
+        }
+    }
+    Ok(Json(visible))
 }
 
 /// POST /aws/accounts — Aws:Admin
@@ -300,25 +317,37 @@ async fn create_account<S: AwsCtx>(
 /// GET /aws/accounts/{id} — Aws:View
 async fn get_account<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<AwsAccount>> {
-    Ok(Json(AwsService::from_ctx(&ctx).get(&id).await?))
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
+    let mut account = AwsService::from_ctx(&ctx).get(&id).await?;
+    if !crate::access::can_configure(&ctx.pool(), &user, &id).await? {
+        account.redact_configuration();
+    }
+    Ok(Json(account))
 }
 
 /// PATCH /aws/accounts/{id} — Aws:Admin
 async fn update_account<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Json(req): Json<UpsertAwsAccountReq>,
 ) -> ApiResult<Json<AwsAccount>> {
-    Ok(Json(AwsService::from_ctx(&ctx).update(&id, req).await?))
+    crate::access::check(&ctx.pool(), &user, &id, "configure", None).await?;
+    Ok(Json(
+        AwsService::from_ctx(&ctx).update(&id, &user, req).await?,
+    ))
 }
 
 /// DELETE /aws/accounts/{id} — Aws:Admin → 204
 async fn delete_account<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
+    crate::access::check(&ctx.pool(), &user, &id, "configure", None).await?;
     AwsService::from_ctx(&ctx).delete(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -326,9 +355,16 @@ async fn delete_account<S: AwsCtx>(
 /// POST /aws/accounts/{id}/test — Aws:View
 async fn test_account<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<AwsTestResp>> {
-    Ok(Json(AwsService::from_ctx(&ctx).test(&id).await?))
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
+    let mut result = AwsService::from_ctx(&ctx).test(&id).await?;
+    if !crate::access::can_configure(&ctx.pool(), &user, &id).await? {
+        result.identity = None;
+        result.message = if result.ok { "Connection succeeded" } else { "Connection failed" }.into();
+    }
+    Ok(Json(result))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -339,9 +375,11 @@ struct RefreshQuery {
 /// GET /aws/accounts/{id}/permissions?refresh= — Aws:View
 async fn permissions<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<RefreshQuery>,
 ) -> ApiResult<Json<AwsPermissions>> {
+    crate::access::check(&ctx.pool(), &user, &id, "configure", None).await?;
     Ok(Json(
         AwsService::from_ctx(&ctx)
             .permissions(&id, q.refresh.unwrap_or(false))
@@ -356,6 +394,7 @@ async fn login<S: AwsCtx>(
     Path(id): Path<Id>,
     Json(req): Json<LoginReq>,
 ) -> ApiResult<Json<Session>> {
+    crate::access::check(&ctx.pool(), &user, &id, "configure", None).await?;
     Ok(Json(
         AwsService::from_ctx(&ctx)
             .login(&id, &req.workspace_id, &user.id)
@@ -375,20 +414,32 @@ struct RegionQ {
 /// GET /aws/accounts/{id}/s3/buckets — AwsS3:View
 async fn s3_buckets<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<RegionQ>,
 ) -> ApiResult<Json<s3::BucketsResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    Ok(Json(s3::list_buckets(&svc, &a, q.region.as_deref()).await?))
+    let mut response = s3::list_buckets(&svc, &a, q.region.as_deref()).await?;
+    let mut visible = Vec::new();
+    for bucket in response.buckets {
+        if crate::access::allowed(&ctx.pool(), &user, &id, "s3_list", Some(&bucket.name)).await? {
+            visible.push(bucket);
+        }
+    }
+    response.buckets = visible;
+    Ok(Json(response))
 }
 
 /// GET /aws/accounts/{id}/s3/buckets/{bucket}/objects?prefix=&token=&max= — AwsS3:View
 async fn s3_objects<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, bucket)): Path<(Id, String)>,
     Query(q): Query<s3::ObjectsQuery>,
 ) -> ApiResult<Json<s3::ObjectsResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "s3_list", Some(&bucket)).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(s3::list_objects(&svc, &a, &bucket, &q).await?))
@@ -397,9 +448,11 @@ async fn s3_objects<S: AwsCtx>(
 /// GET /aws/accounts/{id}/s3/buckets/{bucket}/object?key= — AwsS3:View
 async fn s3_head<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, bucket)): Path<(Id, String)>,
     Query(q): Query<s3::KeyQuery>,
 ) -> ApiResult<Json<s3::HeadResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "s3_read", Some(&bucket)).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(
@@ -410,9 +463,11 @@ async fn s3_head<S: AwsCtx>(
 /// GET /aws/accounts/{id}/s3/buckets/{bucket}/preview?key=&max_bytes= — AwsS3:View
 async fn s3_preview<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, bucket)): Path<(Id, String)>,
     Query(q): Query<s3::KeyQuery>,
 ) -> ApiResult<Json<s3::PreviewResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "s3_read", Some(&bucket)).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(
@@ -443,12 +498,15 @@ fn attachment_name(key: &str) -> String {
 /// Streams `aws s3 cp s3://… -`; the child dies with the response body.
 async fn s3_download<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, bucket)): Path<(Id, String)>,
     Query(q): Query<s3::KeyQuery>,
 ) -> ApiResult<Response> {
+    crate::access::check(&ctx.pool(), &user, &id, "s3_read", Some(&bucket)).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
-    let dl = s3::download(&svc, &a, &bucket, &q.key, q.region.as_deref()).await?;
+    let mut dl = s3::download(&svc, &a, &bucket, &q.key, q.region.as_deref()).await?;
+    dl.body = crate::access::guard_body(dl.body, ctx.pool(), user, id, Some(bucket), "s3_read");
     let ct = dl
         .head
         .content_type
@@ -481,9 +539,11 @@ async fn s3_download<S: AwsCtx>(
 /// GET /aws/accounts/{id}/sqs/queues?prefix= — AwsSqs:View
 async fn sqs_queues<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<sqs::QueuesQuery>,
 ) -> ApiResult<Json<sqs::QueuesResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "sqs_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(sqs::list_queues(&svc, &a, &q).await?))
@@ -492,9 +552,11 @@ async fn sqs_queues<S: AwsCtx>(
 /// GET /aws/accounts/{id}/sqs/queues/attributes?url= — AwsSqs:View
 async fn sqs_attributes<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<sqs::UrlQuery>,
 ) -> ApiResult<Json<sqs::AttributesResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "sqs_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(
@@ -505,10 +567,12 @@ async fn sqs_attributes<S: AwsCtx>(
 /// POST /aws/accounts/{id}/sqs/queues/peek — AwsSqs:View (non-mutating POST)
 async fn sqs_peek<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(rq): Query<sqs::RegionQuery>,
     Json(req): Json<sqs::PeekReq>,
 ) -> ApiResult<Json<sqs::PeekResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "sqs_receive", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(sqs::peek(&svc, &a, &req, rq.region.as_deref()).await?))
@@ -522,6 +586,7 @@ async fn sqs_send<S: AwsCtx>(
     Query(rq): Query<sqs::RegionQuery>,
     Json(req): Json<sqs::SendReq>,
 ) -> ApiResult<Json<sqs::SendResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "sqs_send", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     let resp = sqs::send(&svc, &a, &req, rq.region.as_deref()).await?;
@@ -544,6 +609,7 @@ async fn sqs_delete_message<S: AwsCtx>(
     Query(rq): Query<sqs::RegionQuery>,
     Json(req): Json<sqs::DeleteMessageReq>,
 ) -> ApiResult<StatusCode> {
+    crate::access::check(&ctx.pool(), &user, &id, "sqs_delete", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     sqs::delete_message(&svc, &a, &req, rq.region.as_deref()).await?;
@@ -566,6 +632,7 @@ async fn sqs_purge<S: AwsCtx>(
     Query(rq): Query<sqs::RegionQuery>,
     Json(req): Json<sqs::PurgeReq>,
 ) -> ApiResult<StatusCode> {
+    crate::access::check(&ctx.pool(), &user, &id, "sqs_purge", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     sqs::purge(&svc, &a, &req, rq.region.as_deref()).await?;
@@ -588,6 +655,7 @@ async fn sqs_redrive<S: AwsCtx>(
     Query(rq): Query<sqs::RegionQuery>,
     Json(req): Json<sqs::RedriveReq>,
 ) -> ApiResult<Json<sqs::RedriveResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "sqs_redrive", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     let resp = sqs::redrive(&svc, &a, &req, rq.region.as_deref()).await?;
@@ -609,9 +677,11 @@ async fn sqs_redrive<S: AwsCtx>(
 /// GET /aws/accounts/{id}/ec2/instances?region=&state=&q= — AwsEc2:View
 async fn ec2_instances<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<ec2::InstancesQuery>,
 ) -> ApiResult<Json<ec2::InstancesResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "ec2_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(ec2::list_instances(&svc, &a, &q).await?))
@@ -620,9 +690,11 @@ async fn ec2_instances<S: AwsCtx>(
 /// GET /aws/accounts/{id}/ec2/instances/{instance_id}?region= — AwsEc2:View
 async fn ec2_instance<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, instance_id)): Path<(Id, String)>,
     Query(q): Query<ec2::RegionQuery>,
 ) -> ApiResult<Json<ec2::InstanceDetail>> {
+    crate::access::check(&ctx.pool(), &user, &id, "ec2_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(
@@ -662,6 +734,7 @@ async fn ec2_start<S: AwsCtx>(
     Query(q): Query<ec2::RegionQuery>,
     body: Option<Json<ec2::ConfirmReq>>,
 ) -> ApiResult<Json<ec2::StateChangeResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "ec2_start", None).await?;
     ec2_power(
         &ctx,
         &user.id,
@@ -682,6 +755,7 @@ async fn ec2_stop<S: AwsCtx>(
     Query(q): Query<ec2::RegionQuery>,
     body: Option<Json<ec2::ConfirmReq>>,
 ) -> ApiResult<Json<ec2::StateChangeResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "ec2_stop", None).await?;
     ec2_power(
         &ctx,
         &user.id,
@@ -702,6 +776,7 @@ async fn ec2_reboot<S: AwsCtx>(
     Query(q): Query<ec2::RegionQuery>,
     body: Option<Json<ec2::ConfirmReq>>,
 ) -> ApiResult<Json<ec2::StateChangeResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "ec2_reboot", None).await?;
     ec2_power(
         &ctx,
         &user.id,
@@ -721,9 +796,11 @@ async fn ec2_reboot<S: AwsCtx>(
 /// GET /aws/accounts/{id}/athena/workgroups — AwsAthena:View
 async fn athena_workgroups<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<athena::RegionQuery>,
 ) -> ApiResult<Json<athena::WorkgroupsResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "athena_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(
@@ -734,9 +811,11 @@ async fn athena_workgroups<S: AwsCtx>(
 /// GET /aws/accounts/{id}/athena/databases?catalog= — AwsAthena:View
 async fn athena_databases<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<athena::CatalogQuery>,
 ) -> ApiResult<Json<athena::DatabasesResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "athena_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(athena::databases(&svc, &a, &q).await?))
@@ -745,9 +824,11 @@ async fn athena_databases<S: AwsCtx>(
 /// GET /aws/accounts/{id}/athena/tables?database=&catalog= — AwsAthena:View
 async fn athena_tables<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<athena::CatalogQuery>,
 ) -> ApiResult<Json<athena::TablesResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "athena_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(athena::tables(&svc, &a, &q).await?))
@@ -756,9 +837,11 @@ async fn athena_tables<S: AwsCtx>(
 /// GET /aws/accounts/{id}/athena/history?workgroup=&max= — AwsAthena:View
 async fn athena_history<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<athena::HistoryQuery>,
 ) -> ApiResult<Json<athena::HistoryResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "athena_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(athena::history(&svc, &a, &q).await?))
@@ -772,6 +855,7 @@ async fn athena_query<S: AwsCtx>(
     Query(rq): Query<athena::RegionQuery>,
     Json(req): Json<athena::QueryReq>,
 ) -> ApiResult<Json<athena::QueryStartedResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "athena_query", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     let resp = athena::start_query(&svc, &a, &req, rq.region.as_deref()).await?;
@@ -794,9 +878,11 @@ async fn athena_query<S: AwsCtx>(
 /// GET /aws/accounts/{id}/athena/query/{qid}?token=&max= — AwsAthena:View
 async fn athena_status<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, qid)): Path<(Id, String)>,
     Query(q): Query<athena::StatusQuery>,
 ) -> ApiResult<Json<athena::AthenaQueryStatus>> {
+    crate::access::check(&ctx.pool(), &user, &id, "athena_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(athena::status(&svc, &a, &qid, &q).await?))
@@ -805,9 +891,11 @@ async fn athena_status<S: AwsCtx>(
 /// POST /aws/accounts/{id}/athena/query/{qid}/cancel — AwsAthena:View → 204
 async fn athena_cancel<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, qid)): Path<(Id, String)>,
     Query(q): Query<athena::RegionQuery>,
 ) -> ApiResult<StatusCode> {
+    crate::access::check(&ctx.pool(), &user, &id, "athena_query", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     athena::cancel(&svc, &a, &qid, q.region.as_deref()).await?;
@@ -821,9 +909,11 @@ async fn athena_cancel<S: AwsCtx>(
 /// GET /aws/accounts/{id}/eks/clusters?region= — AwsEks:View
 async fn eks_clusters<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<eks::RegionQuery>,
 ) -> ApiResult<Json<eks::ClustersResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "eks_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(
@@ -834,9 +924,11 @@ async fn eks_clusters<S: AwsCtx>(
 /// GET /aws/accounts/{id}/eks/clusters/{name}?region= — AwsEks:View
 async fn eks_cluster<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, name)): Path<(Id, String)>,
     Query(q): Query<eks::RegionQuery>,
 ) -> ApiResult<Json<eks::ClusterDetail>> {
+    crate::access::check(&ctx.pool(), &user, &id, "eks_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(
@@ -853,6 +945,7 @@ async fn eks_import_kubeconfig<S: AwsCtx>(
     Query(q): Query<eks::RegionQuery>,
     body: Option<Json<eks::ImportReq>>,
 ) -> ApiResult<(StatusCode, Json<eks::K8sCluster>)> {
+    crate::access::check(&ctx.pool(), &user, &id, "eks_import", None).await?;
     GrantsRepo::new(ctx.pool())
         .check_global(
             &user,
@@ -891,9 +984,11 @@ async fn eks_import_kubeconfig<S: AwsCtx>(
 /// GET /aws/accounts/{id}/rds/instances?region=&q= — AwsRds:View
 async fn rds_instances<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<rds::InstancesQuery>,
 ) -> ApiResult<Json<rds::InstancesResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "rds_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(rds::list_instances(&svc, &a, &q).await?))
@@ -902,9 +997,11 @@ async fn rds_instances<S: AwsCtx>(
 /// GET /aws/accounts/{id}/rds/instances/{identifier}?region= — AwsRds:View
 async fn rds_instance<S: AwsCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, identifier)): Path<(Id, String)>,
     Query(q): Query<rds::RegionQuery>,
 ) -> ApiResult<Json<rds::InstanceDetail>> {
+    crate::access::check(&ctx.pool(), &user, &id, "rds_view", None).await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(
@@ -926,6 +1023,7 @@ async fn cloudwatch_metrics<S: AwsCtx>(
     Path(id): Path<Id>,
     Query(q): Query<metrics::MetricsQuery>,
 ) -> ApiResult<Json<metrics::MetricsResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "metrics", None).await?;
     let (ns, _) = metrics::resolve(&q)?;
     let feature = ns.feature();
     GrantsRepo::new(ctx.pool())

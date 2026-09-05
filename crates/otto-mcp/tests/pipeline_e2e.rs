@@ -49,6 +49,8 @@ async fn seed_ws(pool: &SqlitePool) -> (String, String) {
         .bind(&user).bind(&now).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w', '/tmp', ?)")
         .bind(&ws).bind(&now).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO user_feature_grants (user_id,feature,capability) VALUES (?, 'mcp', 'edit')").bind(&user).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO workspace_members (workspace_id,user_id,role) VALUES (?, ?, 'editor')").bind(&ws).bind(&user).execute(pool).await.unwrap();
     (ws, user)
 }
 
@@ -64,8 +66,8 @@ while IFS= read -r line; do
 done
 "#;
 
-async fn register_mock(svc: &McpService, ws: &str, user: &str) -> otto_state::McpServerDetail {
-    svc.registry()
+async fn register_mock(svc: &McpService, pool: &SqlitePool, ws: &str, user: &str) -> otto_state::McpServerDetail {
+    let server = svc.registry()
         .create(NewServerRow {
             workspace_id: ws.into(),
             name: "mock".into(),
@@ -85,7 +87,12 @@ async fn register_mock(svc: &McpService, ws: &str, user: &str) -> otto_state::Mc
             created_by: user.into(),
         })
         .await
-        .unwrap()
+        .unwrap();
+    let repo = otto_state::ResourceAccessRepo::new(pool.clone());
+    let old = repo.get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await.unwrap();
+    let mut legacy = old.clone(); legacy.mode = otto_core::access::AccessMode::Legacy;
+    repo.put_policy(&legacy,old.revision,&otto_core::access::AccessActor {real_user_id:user.into(),effective_user_id:None}).await.unwrap();
+    server
 }
 
 fn ctx(ws: &str, dry_run: bool) -> InvokeCtx {
@@ -103,7 +110,7 @@ async fn discover_labels_risk_and_health_probes() {
     let pool = pool().await;
     let (ws, user) = seed_ws(&pool).await;
     let svc = McpService::new(pool.clone(), Arc::new(MemSecrets::default()));
-    let server = register_mock(&svc, &ws, &user).await;
+    let server = register_mock(&svc, &pool, &ws, &user).await;
 
     // Discovery (req 3) + risk labeling (req 7).
     let tools = svc.discover(&server.id).await.unwrap();
@@ -125,7 +132,7 @@ async fn full_governance_flow() {
     let pool = pool().await;
     let (ws, user) = seed_ws(&pool).await;
     let svc = McpService::new(pool.clone(), Arc::new(MemSecrets::default()));
-    let server = register_mock(&svc, &ws, &user).await;
+    let server = register_mock(&svc, &pool, &ws, &user).await;
     svc.discover(&server.id).await.unwrap();
 
     // 1. A read tool runs straight through (req 12 stats source is populated).
@@ -180,7 +187,7 @@ async fn allowlist_and_policy_deny() {
     let pool = pool().await;
     let (ws, user) = seed_ws(&pool).await;
     let svc = McpService::new(pool.clone(), Arc::new(MemSecrets::default()));
-    let server = register_mock(&svc, &ws, &user).await;
+    let server = register_mock(&svc, &pool, &ws, &user).await;
     svc.discover(&server.id).await.unwrap();
 
     // Per-workspace allowlist (req 5): deny list_items in this workspace.
@@ -216,4 +223,108 @@ async fn allowlist_and_policy_deny() {
         InvokeOutcome::Denied { reason } => assert!(reason.contains("policy"), "got: {reason}"),
         other => panic!("expected policy deny, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn resource_denial_blocks_even_readonly_tool_and_dry_run() {
+    use otto_core::access::{AccessActor, AccessMode, AccessPolicy, AccessRule, ResourceKind, RuleEffect, SubjectKind};
+    use otto_state::resource_access::ResourceAccessRepo;
+    let pool = pool().await;
+    let (ws, uid) = seed_ws(&pool).await;
+    let svc = McpService::new(pool.clone(), Arc::new(MemSecrets::default()));
+    let server = register_mock(&svc, &pool, &ws, &uid).await;
+    svc.discover(&server.id).await.unwrap();
+    let repo = ResourceAccessRepo::new(pool.clone());
+    let old = repo.get_policy(ResourceKind::McpServer,&server.id).await.unwrap();
+    let policy = AccessPolicy { kind:ResourceKind::McpServer,resource_id:server.id.clone(),mode:AccessMode::Enforced,revision:old.revision,
+        rules:vec![AccessRule { id:"navigation-only".into(),subject_kind:SubjectKind::User,subject_id:uid.clone(),effect:RuleEffect::Allow,
+            operations:vec!["discover".into()],children:None,grantable_operations:vec![],credential_connection_id:None }] };
+    repo.put_policy(&policy,old.revision,&AccessActor { real_user_id:uid.clone(),effective_user_id:None }).await.unwrap();
+    for dry_run in [false,true] {
+        let mut context = ctx(&ws,dry_run);context.caller_user_id=Some(uid.clone());
+        let out=svc.invoke(&server.id,"list_items",&serde_json::json!({}),&context).await.unwrap();
+        assert!(matches!(out,InvokeOutcome::Denied{..}),"navigation access must not authorize invocation: {out:?}");
+    }
+}
+
+#[derive(Clone)]
+struct HttpCtx {
+    service: Arc<McpService>, pool:SqlitePool, secrets:Arc<dyn SecretStore>, roles:Arc<dyn otto_core::auth::RoleChecker>,
+}
+impl otto_mcp::McpCtx for HttpCtx {
+    fn mcp(&self)->&Arc<McpService> {&self.service}
+    fn mcp_pool(&self)->&SqlitePool {&self.pool}
+    fn mcp_secrets(&self)->&Arc<dyn SecretStore> {&self.secrets}
+    fn roles(&self)->&Arc<dyn otto_core::auth::RoleChecker> {&self.roles}
+}
+#[tokio::test]
+async fn http_filters_servers_tools_configuration_and_guessed_actions() {
+    use otto_core::access::*;
+    use tower::ServiceExt;
+    let pool=pool().await;
+    let (ws,uid)=seed_ws(&pool).await;
+    let secrets:Arc<dyn SecretStore>=Arc::new(MemSecrets::default());
+    let svc=Arc::new(McpService::new(pool.clone(),secrets.clone()));
+    let visible=register_mock(&svc,&pool,&ws,&uid).await;
+    svc.discover(&visible.id).await.unwrap();
+    sqlx::query("UPDATE mcp_servers SET name='visible' WHERE id=?").bind(&visible.id).execute(&pool).await.unwrap();
+    let hidden=register_mock(&svc,&pool,&ws,&uid).await;
+    let repo=otto_state::ResourceAccessRepo::new(pool.clone());
+    for id in [&visible.id,&hidden.id] {
+        let mut p=repo.get_policy(ResourceKind::McpServer,id).await.unwrap();
+        p.mode=AccessMode::Enforced;
+        if id==&visible.id { p.rules.push(AccessRule {id:"reader".into(),subject_kind:SubjectKind::User,subject_id:uid.clone(),effect:RuleEffect::Allow,operations:vec!["discover".into(),"invoke".into()],children:Some(vec!["list_items".into()]),grantable_operations:vec![],credential_connection_id:None}); }
+        repo.put_policy(&p,p.revision,&AccessActor {real_user_id:uid.clone(),effective_user_id:None}).await.unwrap();
+    }
+    sqlx::query("UPDATE mcp_servers SET managed=0 WHERE id=?").bind(&visible.id).execute(&pool).await.unwrap();
+    let mut invoke_ctx=ctx(&ws,false); invoke_ctx.caller_user_id=Some(uid.clone());
+    assert!(matches!(svc.invoke(&visible.id,"list_items",&serde_json::json!({}),&invoke_ctx).await.unwrap(),InvokeOutcome::Executed {..}),"an enforced raw registration must use the gateway even if its legacy managed flag is false");
+    let user=otto_state::UsersRepo::new(pool.clone()).get(&uid).await.unwrap();
+    let ctx=HttpCtx {service:svc,pool:pool.clone(),secrets,roles:Arc::new(otto_rbac::RbacRoleChecker::new(pool))};
+    let app=otto_mcp::api_router::<HttpCtx>().layer(axum::Extension(otto_core::auth::AuthUser(user))).with_state(ctx);
+    for (method,path,expected) in [
+        ("GET",format!("/workspaces/{ws}/mcp/servers"),200),
+        ("GET",format!("/mcp/servers/{}",visible.id),200),
+        ("GET",format!("/mcp/servers/{}",hidden.id),404),
+        ("POST",format!("/mcp/servers/{}/tools/delete_thing/invoke",visible.id),404),
+        ("DELETE",format!("/mcp/servers/{}",visible.id),403),
+    ] {
+        let response=app.clone().oneshot(axum::http::Request::builder().method(method).uri(&path).header("content-type","application/json").body(axum::body::Body::from("{} ")).unwrap()).await.unwrap();
+        assert_eq!(response.status().as_u16(),expected,"{method} {path}");
+        let data=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+        let value:serde_json::Value=serde_json::from_slice(&data).unwrap();
+        if expected==200 && path.ends_with("/servers") { assert_eq!(value.as_array().unwrap().len(),1); assert_eq!(value[0]["command"],""); }
+        if expected==200 && path.ends_with(&visible.id) { assert_eq!(value["tools"].as_array().unwrap().len(),1); assert_eq!(value["tools"][0]["name"],"list_items"); assert_eq!(value["server"]["command"],""); }
+    }
+}
+
+#[tokio::test]
+async fn delegated_configure_cannot_attach_or_repoint_native_mcp_credentials() {
+    use otto_core::access::*;
+    use tower::ServiceExt;
+    let pool=pool().await;
+    let (ws,uid)=seed_ws(&pool).await;
+    let secrets:Arc<dyn SecretStore>=Arc::new(MemSecrets::default());
+    let svc=Arc::new(McpService::new(pool.clone(),secrets.clone()));
+    let server=register_mock(&svc,&pool,&ws,&uid).await;
+    let repo=otto_state::ResourceAccessRepo::new(pool.clone());
+    let mut p=repo.get_policy(ResourceKind::McpServer,&server.id).await.unwrap();
+    p.mode=AccessMode::Enforced;
+    p.rules=vec![AccessRule{id:"configure".into(),subject_kind:SubjectKind::User,subject_id:uid.clone(),effect:RuleEffect::Allow,operations:vec!["discover".into(),"configure".into()],children:None,grantable_operations:vec![],credential_connection_id:None}];
+    repo.put_policy(&p,p.revision,&AccessActor{real_user_id:uid.clone(),effective_user_id:None}).await.unwrap();
+    let user=otto_state::UsersRepo::new(pool.clone()).get(&uid).await.unwrap();
+    let ctx=HttpCtx{service:svc,pool:pool.clone(),secrets,roles:Arc::new(otto_rbac::RbacRoleChecker::new(pool))};
+    let app=otto_mcp::api_router::<HttpCtx>().layer(axum::Extension(otto_core::auth::AuthUser(user))).with_state(ctx);
+    for (body,expected) in [
+        (serde_json::json!({"command":"hidden-command"}),403),
+        (serde_json::json!({"env":{"AWS_PROFILE":"hidden"}}),403),
+        (serde_json::json!({"url":"https://example.com/hidden"}),403),
+        (serde_json::json!({"secret_env":{"TOKEN":"replacement"}}),403),
+        (serde_json::json!({"description":"cosmetic change"}),200),
+    ] {
+        let response=app.clone().oneshot(axum::http::Request::builder().method("PATCH").uri(format!("/mcp/servers/{}",server.id)).header("content-type","application/json").body(axum::body::Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status().as_u16(),expected,"{body}");
+    }
+    let response=app.oneshot(axum::http::Request::builder().method("POST").uri(format!("/workspaces/{ws}/mcp/servers")).header("content-type","application/json").body(axum::body::Body::from(serde_json::json!({"name":"alias","transport":"stdio","command":"hidden-command"}).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status().as_u16(),403);
 }

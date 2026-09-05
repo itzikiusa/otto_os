@@ -16,6 +16,8 @@
   import { escapeSqlString } from './sql-util';
   import { bsonScalar } from './bson';
   import JsonTree from './JsonTree.svelte';
+  import { databaseAccessChild } from '../../lib/access-options';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import type { QueryResult, DbExportFormat, ExportToPathResp, DbForeignKey } from '../../lib/api/types';
   import { api, postNdjsonStream } from '../../lib/api/client';
   import Modal from '../../lib/components/Modal.svelte';
@@ -916,7 +918,11 @@
   // Populated alongside the PK in the editability $effect; reused (no extra fetch).
   let editFks = $state<DbForeignKey[]>([]);
 
-  const editable = $derived(editPkCols.length > 0 && editTable !== null);
+  const accessChild = $derived(databaseAccessChild(connectionId === database.selectedConnId ? database.activeDb : undefined));
+  const canModify = $derived(!!connectionId && resourceAccess.can('connection',connectionId,'db_data','database','edit',accessChild));
+  const canExport = $derived(!!connectionId && resourceAccess.can('connection',connectionId,'db_export','database','view',accessChild));
+  $effect(()=>{if(connectionId)void resourceAccess.load('connection',connectionId,accessChild);});
+  const editable = $derived(canModify && editPkCols.length > 0 && editTable !== null);
 
   /** Target table/collection for "Copy as INSERT".
    *
@@ -1632,9 +1638,11 @@
     setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
   function exportCsv(): void {
+    if (!canExport) return;
     download(toCsv(), 'result.csv', 'text/csv');
   }
   function exportJson(): void {
+    if (!canExport) return;
     download(toJson(), 'result.json', 'application/json');
   }
 
@@ -1693,6 +1701,7 @@
   }
 
   function openExportDialog(): void {
+    if (!canExport) return;
     exportFormat = loadFormat();
     exportDir = loadDir();
     exportName = defaultExportName();
@@ -1717,6 +1726,7 @@
   }
 
   async function runPathExport(): Promise<void> {
+    if (!canExport) return;
     if (!connectionId || !statement || exportingPath) return;
     const name = exportName.trim() || defaultExportName();
     const dir = exportDir.trim() || '~/Downloads';
@@ -2095,13 +2105,13 @@
           <button class="tb-btn" onclick={examineWithAi} title="Investigate this result with the DB Assistant agent (read-only, side-by-side)"><Icon name="zap" size={11} />Examine with AI</button>
         {/if}
         <button class="tb-btn" onclick={copyTsv} title="Copy as TSV{exportScope}"><Icon name="file" size={11} />Copy</button>
-        <button class="tb-btn" onclick={exportCsv} title="Export CSV{exportScope}"><Icon name="arrowDown" size={11} />CSV</button>
-        <button class="tb-btn" onclick={exportJson} title="Export JSON{exportScope}"><Icon name="arrowDown" size={11} />JSON</button>
+        <button class="tb-btn" disabled={!canExport} onclick={exportCsv} title="Export CSV{exportScope}"><Icon name="arrowDown" size={11} />CSV</button>
+        <button class="tb-btn" disabled={!canExport} onclick={exportJson} title="Export JSON{exportScope}"><Icon name="arrowDown" size={11} />JSON</button>
         {#if connectionId && statement}
           <button
             class="tb-btn"
             class:accent={result?.truncated}
-            onclick={openExportDialog}
+            disabled={!canExport} onclick={openExportDialog}
             title="Export ALL rows — streams the full (uncapped) result to a file on the daemon host, in a selectable format, with live progress"
           ><Icon name="arrowDown" size={11} />Export all rows…</button>
         {/if}

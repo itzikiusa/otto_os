@@ -490,7 +490,8 @@ class EventsClient {
           personalAgents.applyRoomEvent(parsed);
         } else if (
           parsed.type === 'k8s_cluster_updated' ||
-          parsed.type === 'k8s_install_updated'
+          parsed.type === 'k8s_install_updated' ||
+          parsed.type === 'k8s_monitor_cycle'
         ) {
           // Kubernetes console: cluster list refetch / installer state tick.
           k8s.applyEvent(parsed);

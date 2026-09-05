@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {"resolveJsonModule": true},
+  "include": ["./**/*.tsx", "./**/*.ts", "../../../ui/src/lib/walkthroughs/catalog.json"]
+}

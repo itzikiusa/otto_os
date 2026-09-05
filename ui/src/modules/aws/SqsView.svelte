@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // SQS: queue list with approximate counts → queue detail tabs: Messages
   // (Peek N, JSON-pretty body viewer, delete-message per row [Edit]), Send
   // (body + attributes, FIFO fields only for `.fifo`) [Edit], Attributes,
@@ -7,7 +8,6 @@
   import { untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -28,7 +28,12 @@
   }
   let { account, onsignin }: Props = $props();
 
-  const canEdit = $derived(auth.can('aws_sqs', 'edit'));
+  $effect(() => { void resourceAccess.load('aws_account', account.id); });
+  const canSend = $derived(resourceAccess.can('aws_account', account.id, 'sqs_send', 'aws_sqs', 'edit'));
+  const canDelete = $derived(resourceAccess.can('aws_account', account.id, 'sqs_delete', 'aws_sqs', 'edit'));
+  const canPurge = $derived(resourceAccess.can('aws_account', account.id, 'sqs_purge', 'aws_sqs', 'edit'));
+  const canRedrive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_redrive', 'aws_sqs', 'edit'));
+  const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_receive', 'aws_sqs', 'view'));
   const queues = $derived(aws.sqsQueues[account.id] ?? null);
   let loading = $state(false);
   let error = $state('');
@@ -203,7 +208,7 @@
       { label: 'Open', icon: 'send', action: () => select(q) },
       { label: 'Refresh counts', icon: 'refresh', action: () => void aws.loadSqsAttrs(account.id, q.url) },
       { label: 'Copy URL', icon: 'copy', action: () => void copy(q.url, 'queue URL') },
-      ...(canEdit ? [{ separator: true }, { label: 'Purge queue…', icon: 'trash', danger: true, action: () => void purge(q) }] : []),
+      ...(canPurge ? [{ separator: true }, { label: 'Purge queue…', icon: 'trash', danger: true, action: () => void purge(q) }] : []),
     ]);
   }
 
@@ -288,7 +293,7 @@
         </div>
         <div class="tabs" role="tablist">
           {#each [['messages', 'Messages'], ['send', 'Send'], ['attributes', 'Attributes'], ['metrics', 'Metrics'], ['redrive', 'Redrive']] as const as [id, label] (id)}
-            <button role="tab" aria-selected={tab === id} class:on={tab === id} onclick={() => (tab = id)} disabled={(id === 'send' || id === 'redrive') && !canEdit} title={(id === 'send' || id === 'redrive') && !canEdit ? 'Needs Edit on SQS' : ''}>{label}</button>
+            <button role="tab" aria-selected={tab === id} class:on={tab === id} onclick={() => (tab = id)} disabled={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive))} title={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive)) ? 'Needs Edit on SQS' : ''}>{label}</button>
           {/each}
         </div>
 
@@ -296,7 +301,7 @@
           {#if tab === 'messages'}
             <div class="bar">
               <label>Peek <select bind:value={peekN}>{#each [1, 2, 5, 10] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
-              <button class="primary sm" onclick={() => void peek()} disabled={peeking}>{peeking ? 'Peeking…' : 'Peek'}</button>
+              <button class="primary sm" onclick={() => void peek()} disabled={!canReceive || peeking}>{peeking ? 'Peeking…' : 'Peek'}</button>
               <span class="dim">Non-destructive (visibility timeout 0). Messages may appear in any order.</span>
             </div>
             {#if messages.length === 0}
@@ -315,7 +320,7 @@
                       <span class="dim mono">{m.attributes.SentTimestamp ? new Date(Number(m.attributes.SentTimestamp)).toLocaleString() : ''}</span>
                       {#if m.attributes.ApproximateReceiveCount}<span class="tag dim" title="ApproximateReceiveCount">rx {m.attributes.ApproximateReceiveCount}</span>{/if}
                       <button class="icon-btn" onclick={() => void copy(m.body, 'body')} title="Copy body" aria-label="Copy body"><Icon name="copy" size={12} /></button>
-                      {#if canEdit}
+                      {#if canDelete}
                         <button class="icon-btn danger" onclick={() => void deleteMessage(m)} title="Delete message" aria-label="Delete message"><Icon name="trash" size={12} /></button>
                       {/if}
                     </div>
@@ -358,7 +363,7 @@
               </div>
               <div class="bar">
                 <button class="ghost sm" onclick={() => (sendBody = prettyJson(sendBody))}>Pretty JSON</button>
-                <button class="primary sm" onclick={() => void send()} disabled={sending || !sendBody.trim() || (selected.fifo && !sendGroup.trim())}>{sending ? 'Sending…' : 'Send message'}</button>
+                <button class="primary sm" onclick={() => void send()} disabled={!canSend || sending || !sendBody.trim() || (selected.fifo && !sendGroup.trim())}>{sending ? 'Sending…' : 'Send message'}</button>
               </div>
             </div>
           {:else if tab === 'attributes'}
@@ -387,7 +392,7 @@
               {#if dlqSource.length}<p class="dim">Known source queues: {dlqSource.join(', ')}</p>{/if}
               <label class="field"><span>Destination ARN <em>(blank = original source)</em></span><input class="mono" bind:value={redriveDest} placeholder="arn:aws:sqs:…" /></label>
               <div class="bar">
-                <button class="primary sm" onclick={() => void redrive()} disabled={redriving || !attrs}>{redriving ? 'Starting…' : 'Start redrive'}</button>
+                <button class="primary sm" onclick={() => void redrive()} disabled={!canRedrive || redriving || !attrs}>{redriving ? 'Starting…' : 'Start redrive'}</button>
               </div>
             </div>
           {/if}

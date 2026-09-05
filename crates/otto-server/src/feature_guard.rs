@@ -43,9 +43,12 @@ use crate::state::ServerCtx;
 /// guard can be exercised without assembling the full server context.
 pub trait HasGrants {
     fn grants(&self) -> GrantsRepo;
+    /// Optional resource-policy storage; minimal legacy test states omit it.
+    fn resource_pool(&self) -> Option<otto_state::SqlitePool> { None }
 }
 
 impl HasGrants for ServerCtx {
+    fn resource_pool(&self) -> Option<otto_state::SqlitePool> { Some(self.pool.clone()) }
     fn grants(&self) -> GrantsRepo {
         GrantsRepo::new(self.pool.clone())
     }
@@ -181,6 +184,30 @@ where
             if user.is_root {
                 return next.run(req).await;
             }
+            let (feature,needed)=if let Some(pool)=state.resource_pool() {
+                match bound_session_feature(&pool,&template,req.uri().path()).await {
+                    Ok(Some(feature))=>(feature,Capability::View),
+                    Ok(None)=>(feature,needed),
+                    Err(e)=>return ApiError(e).into_response(),
+                }
+            } else {(feature,needed)};
+            // An enforced resource uses the feature only as its page entry
+            // gate. Its handler/service must authorize the exact operation.
+            // Legacy resources keep their existing coarse tier unchanged.
+            let resource = if let Some(pool) = state.resource_pool() {
+                match indirect_resource_route(&pool,&template,req.uri().path()).await {
+                    Ok(value) => value,
+                    Err(e) => return ApiError(e).into_response(),
+                }
+            } else { resource_route(&template,req.uri().path()) };
+            let needed = match (state.resource_pool(), resource) {
+                (Some(pool), Some((kind,id))) => match otto_state::resource_access::ResourceAccessRepo::new(pool).get_policy(kind,&id).await {
+                    Ok(policy) if policy.mode == otto_core::access::AccessMode::Enforced => Capability::View,
+                    Ok(_) => needed,
+                    Err(e) => return ApiError(e).into_response(),
+                },
+                _ => needed,
+            };
             match state.grants().capability_of(&user, feature).await {
                 Ok(have) if have >= needed => next.run(req).await,
                 Ok(_) => forbidden(&format!(
@@ -434,5 +461,61 @@ mod scope_tests {
                 );
             }
         }
+    }
+}
+
+async fn bound_session_feature(pool:&otto_state::SqlitePool,template:&str,path:&str)->otto_core::Result<Option<otto_core::domain::Feature>> {
+    use otto_core::domain::Feature;
+    use otto_core::access::{AccessMode,ResourceKind};
+    let t=template.strip_prefix("/api/v1").unwrap_or(template);
+    if !matches!(t,"/sessions/{id}"|"/sessions/{id}/input"|"/sessions/{id}/restart"|"/sessions/{id}/archive"|"/sessions/{id}/unarchive"|"/sessions/{id}/kill") {return Ok(None);}
+    let p=path.strip_prefix("/api/v1").unwrap_or(path);
+    let id=p.split('/').nth(2).unwrap_or_default().to_string();
+    let session=otto_state::SessionsRepo::new(pool.clone()).get(&id).await?;
+    let Some((resource,op))=crate::resource_sessions::binding(&session) else {return Ok(None);};
+    let policy=otto_state::ResourceAccessRepo::new(pool.clone()).get_live_policy(resource.kind,&resource.id).await?;
+    if policy.mode!=AccessMode::Enforced {return Ok(None);}
+    Ok(Some(match resource.kind {ResourceKind::K8sCluster=>Feature::Kubernetes,ResourceKind::AwsAccount=>Feature::Aws,ResourceKind::Connection if op=="db_query"=>Feature::Database,ResourceKind::Connection=>Feature::Connections,ResourceKind::McpServer=>Feature::Mcp}))
+}
+
+async fn indirect_resource_route(pool: &otto_state::SqlitePool, template: &str, path: &str) -> otto_core::Result<Option<(otto_core::access::ResourceKind,String)>> {
+    if let Some(resource) = resource_route(template,path) { return Ok(Some(resource)); }
+    let t = template.strip_prefix("/api/v1").unwrap_or(template);
+    let p = path.strip_prefix("/api/v1").unwrap_or(path);
+    let id = p.split('/').nth(3).unwrap_or_default().to_string();
+    let server = match t {
+        "/mcp/tools/{tool_id}" => Some(otto_state::McpToolsRepo::new(pool.clone()).get(&id).await?.server_id),
+        "/mcp/approvals/{id}/decide" => otto_state::McpApprovalRepo::new(pool.clone()).get(&id).await?.server_id,
+        _ => None,
+    };
+    Ok(server.map(|id| (otto_core::access::ResourceKind::McpServer,id)))
+}
+
+/// Bind only explicitly resource-keyed templates. Collection/create routes must
+/// never acquire a lower feature tier by looking like an ID in a raw URL.
+fn resource_route(template: &str, path: &str) -> Option<(otto_core::access::ResourceKind, String)> {
+    use otto_core::access::ResourceKind;
+    let template = template.strip_prefix("/api/v1").unwrap_or(template);
+    let path = path.strip_prefix("/api/v1").unwrap_or(path);
+    for (prefix, kind) in [("/connections/",ResourceKind::Connection), ("/mcp/servers/",ResourceKind::McpServer),
+        ("/mcp-servers/",ResourceKind::McpServer), ("/aws/accounts/",ResourceKind::AwsAccount),
+        ("/k8s/clusters/",ResourceKind::K8sCluster)] {
+        if template.strip_prefix(prefix).is_some_and(|tail| tail == "{id}" || tail.starts_with("{id}/")) {
+            let id = path.strip_prefix(prefix)?.split('/').next()?;
+            if !id.is_empty() { return Some((kind,id.to_string())); }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod resource_route_tests {
+    use super::*;
+    #[test]
+    fn creates_and_imports_do_not_lower_feature_tiers() {
+        assert!(resource_route("/api/v1/aws/accounts","/api/v1/aws/accounts").is_none());
+        assert!(resource_route("/api/v1/k8s/clusters/import","/api/v1/k8s/clusters/import").is_none());
+        assert!(resource_route("/api/v1/connections/unsaved/db/test","/api/v1/connections/unsaved/db/test").is_none());
+        assert_eq!(resource_route("/api/v1/k8s/clusters/{id}/exec","/api/v1/k8s/clusters/cluster-y/exec"),Some((otto_core::access::ResourceKind::K8sCluster,"cluster-y".into())));
     }
 }

@@ -4,6 +4,8 @@
   // (alongside Otto's own managed entries, e.g. the browser server). Nothing is
   // auto-enabled — each server is off until you flip it on, and it's only written
   // to `.mcp.json` the next time a session spawns in the workspace.
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { mcpApi } from '../../lib/api/mcp';
   import { api } from '../../lib/api/client';
   import type { McpServer, CreateMcpServerReq } from '../../lib/api/types';
@@ -54,6 +56,15 @@
 
   let servers: McpServer[] = $state([]);
   let loading = $state(false);
+  let loadGeneration = 0;
+  const canConfigure = (id: string) => resourceAccess.can('mcp_server', id, 'configure', 'mcp', 'admin');
+  $effect(() => { for (const server of servers) void resourceAccess.load('mcp_server', server.id); });
+  $effect(() => resourceAccess.subscribe(change => {
+    if (change.type === 'reset' || (change.kind === 'mcp_server' && change.before?.operations.configure?.allowed && !change.after?.operations.configure?.allowed)) {
+      loadGeneration++; servers = []; closeForm();
+      if (ws.currentId) void load(ws.currentId);
+    }
+  }));
   let busyId: string | null = $state(null);
 
   // Add/edit form state. `editing` holds the id being edited (null = creating a
@@ -81,9 +92,11 @@
   });
 
   async function load(id: string): Promise<void> {
+    const generation = ++loadGeneration;
     loading = true;
     try {
-      servers = await mcpApi.list(id);
+      const result = await mcpApi.list(id);
+      if (generation === loadGeneration) servers = result;
     } catch (e) {
       toasts.error('Could not load MCP servers', errMsg(e));
     } finally {
@@ -102,6 +115,7 @@
   }
 
   function openCreate(): void {
+    if (!auth.isRoot) return;
     resetForm();
     formOpen = true;
   }
@@ -149,10 +163,10 @@
   }
 
   async function save(): Promise<void> {
-    if (!wsId) return;
+    if (!wsId || (!editing && !auth.isRoot)) return;
     const name = fName.trim();
     const command = fCommand.trim();
-    if (!name || !command) {
+    if (!name || (auth.isRoot && !command)) {
       toasts.error('Name and command are required');
       return;
     }
@@ -182,7 +196,7 @@
     saving = true;
     try {
       if (editing) {
-        await mcpApi.update(editing, body);
+        await mcpApi.update(editing, auth.isRoot ? body : { name, enabled: fEnabled });
         toasts.success('MCP server updated', name);
       } else {
         await mcpApi.create(wsId, body);
@@ -238,7 +252,7 @@
       </div>
     </div>
     {#if wsId}
-      <button class="btn primary" onclick={openCreate}>Add server</button>
+      <button class="btn primary" disabled={!auth.isRoot} onclick={openCreate}>Add server</button>
     {/if}
   </div>
 
@@ -292,6 +306,7 @@
           />
           <span class="hint">The key under <code>mcpServers</code> in <code>.mcp.json</code> (unique per workspace).</span>
         </div>
+        {#if !auth.isRoot}<p class="hint">Owner manages credentials and the native server command.</p>{/if}
         <div class="field">
           <label for="mcp-command">Command</label>
           <input
@@ -389,13 +404,13 @@
               {/if}
             </div>
             <div class="server-actions">
-              <button class="btn small" disabled={busyId === s.id} onclick={() => toggleEnabled(s)}>
+              <button class="btn small" disabled={busyId === s.id || !canConfigure(s.id)} onclick={() => toggleEnabled(s)}>
                 {s.enabled ? 'Disable' : 'Enable'}
               </button>
-              <button class="btn small" disabled={busyId === s.id} onclick={() => openEdit(s)}>
+              <button class="btn small" disabled={busyId === s.id || !canConfigure(s.id)} onclick={() => openEdit(s)}>
                 Edit
               </button>
-              <button class="btn small danger" disabled={busyId === s.id} onclick={() => remove(s)}>
+              <button class="btn small danger" disabled={busyId === s.id || !canConfigure(s.id)} onclick={() => remove(s)}>
                 Remove
               </button>
             </div>

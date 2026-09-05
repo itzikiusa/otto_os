@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // EKS: clusters table (region switcher) + detail sheet with nodegroups and the
   // raw describe-cluster JSON. "Open in Kubernetes" [aws_eks Edit + kubernetes
   // Admin] imports a kubeconfig into an Otto-owned file (creates a k8s cluster
@@ -27,7 +28,8 @@
   }
   let { account, onsignin }: Props = $props();
 
-  const canImport = $derived(auth.can('aws_eks', 'edit') && auth.can('kubernetes', 'admin'));
+  $effect(() => { void resourceAccess.load('aws_account', account.id); });
+  const canImport = $derived(resourceAccess.can('aws_account', account.id, 'eks_import', 'aws_eks', 'edit') && auth.isRoot);
   // The view is remounted per account (AwsPage {#key}s on account+service), so
   // seeding the region from the initial account is intentional.
   // svelte-ignore state_referenced_locally

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { actionOperation } from './permissions';
   // Detail drawer for the selected row: Overview (normalized fields + action
   // buttons) / Manifest (YAML, read-only CodeEditor; secrets already redacted
   // server-side) / Describe / Events, and for pods Logs / Terminal / Metrics.
@@ -42,6 +44,16 @@
   }
   let { clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod }: Props = $props();
 
+  $effect(() => {
+    void resourceAccess.load('k8s_cluster', clusterId);
+    if (ns) void resourceAccess.load('k8s_cluster', clusterId, `namespace:${ns}`);
+  });
+  function canOperation(op: string): boolean {
+    return resourceAccess.can('k8s_cluster', clusterId, op, 'kubernetes',
+      ['exec', 'apply', 'scale', 'restart', 'delete'].includes(op) ? 'edit' : 'view', ns ? `namespace:${ns}` : undefined);
+  }
+  const canLogs = $derived(canOperation('logs'));
+  const canExec = $derived(canOperation('exec'));
   const isPod = $derived(kind === 'pods');
   const def = $derived(kindDef(kind));
   /** `spec.selector` of a workload (row extra, or the manifest when the row
@@ -53,16 +65,16 @@
     return m ? Object.entries(m).map(([k, v]) => `${k}=${v}`).join(',') : '';
   });
   const TABS = $derived<{ id: K8sDrawerTab; label: string }[]>([
-    { id: 'overview', label: 'Overview' },
+    { id: 'overview' as const, label: 'Overview' },
     ...(selector
       ? [
           { id: 'pods' as const, label: 'Pods' },
           { id: 'logs' as const, label: 'Logs' },
         ]
       : []),
-    { id: 'manifest', label: 'Manifest' },
-    { id: 'describe', label: 'Describe' },
-    { id: 'events', label: 'Events' },
+    { id: 'manifest' as const, label: 'Manifest' },
+    { id: 'describe' as const, label: 'Describe' },
+    { id: 'events' as const, label: 'Events' },
     ...(isPod
       ? [
           { id: 'logs' as const, label: 'Logs' },
@@ -70,7 +82,7 @@
           { id: 'metrics' as const, label: 'Metrics' },
         ]
       : []),
-  ]);
+  ].filter(t => t.id === 'logs' ? canLogs : t.id === 'terminal' ? canExec : t.id === 'metrics' ? canOperation('metrics') : true));
   /** Container names across the workload's pod template (Logs container filter). */
   const templateContainers = $derived.by((): K8sContainer[] => {
     if (isPod || !detail) return [];
@@ -144,7 +156,7 @@
     }
   });
 
-  const actions = $derived(row ? actionsFor(kind, row) : []);
+  const actions = $derived(row ? actionsFor(kind, row).filter(a => a.id.startsWith('argocd_') ? resourceAccess.can('k8s_cluster', clusterId, actionOperation(a.id), 'kubernetes', 'edit') : canOperation(actionOperation(a.id))) : []);
 
   /** Overview facts: normalized row fields first, then kind-specific extras. */
   const facts = $derived.by(() => {
@@ -205,11 +217,11 @@
           {#if isPod || selector || (canEdit && actions.length)}
             <div class="ov-actions">
               {#if isPod}
-                <button class="btn small" onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
-                {#if canEdit}<button class="btn small" onclick={() => ontab('terminal')}><Icon name="terminal" size={12} /> Shell</button>{/if}
+                <button class="btn small" disabled={!canLogs} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
+                {#if canExec}<button class="btn small" onclick={() => ontab('terminal')}><Icon name="terminal" size={12} /> Shell</button>{/if}
               {:else if selector}
                 <button class="btn small" onclick={() => ontab('pods')}><Icon name="box" size={12} /> Pods</button>
-                <button class="btn small" onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
+                <button class="btn small" disabled={!canLogs} onclick={() => ontab('logs')}><Icon name="file" size={12} /> Logs</button>
               {/if}
               {#if canEdit}
                 {#each actions as a (a.id + a.label)}
@@ -301,14 +313,14 @@
         </table>
       {/if}
     {:else if tab === 'pods'}
-      <WorkloadPods {clusterId} {ns} {selector} {canEdit} onopenpod={(pod, t) => onopenpod?.(ns, pod, t)} />
-    {:else if tab === 'logs' && !isPod}
+      <WorkloadPods {clusterId} {ns} {selector} canEdit={canExec} onopenpod={(pod, t) => onopenpod?.(ns, pod, t)} />
+    {:else if tab === 'logs' && !isPod && canLogs}
       <LogsView {clusterId} {ns} {selector} title={name} containers={templateContainers} onopenpod={(pod) => onopenpod?.(ns, pod, 'logs')} />
-    {:else if tab === 'logs'}
+    {:else if tab === 'logs' && canLogs}
       <LogsView {clusterId} {ns} pod={name} {containers} />
-    {:else if tab === 'terminal'}
+    {:else if tab === 'terminal' && canExec}
       <ExecView {clusterId} {ns} pod={name} {containers} autoOpen={autoExec} />
-    {:else if tab === 'metrics'}
+    {:else if tab === 'metrics' && canOperation('metrics')}
       <MetricsView {clusterId} {ns} pod={name} />
     {/if}
   </div>

@@ -256,27 +256,27 @@ pub struct PodMetrics {
 // JSON helpers
 // ---------------------------------------------------------------------------
 
-fn s<'a>(v: &'a Value, ptr: &str) -> Option<&'a str> {
+pub(crate) fn s<'a>(v: &'a Value, ptr: &str) -> Option<&'a str> {
     v.pointer(ptr).and_then(Value::as_str)
 }
 
-fn i(v: &Value, ptr: &str) -> Option<i64> {
+pub(crate) fn i(v: &Value, ptr: &str) -> Option<i64> {
     v.pointer(ptr)
         .and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)))
 }
 
-fn b(v: &Value, ptr: &str) -> Option<bool> {
+pub(crate) fn b(v: &Value, ptr: &str) -> Option<bool> {
     v.pointer(ptr).and_then(Value::as_bool)
 }
 
-fn arr<'a>(v: &'a Value, ptr: &str) -> &'a [Value] {
+pub(crate) fn arr<'a>(v: &'a Value, ptr: &str) -> &'a [Value] {
     v.pointer(ptr)
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[])
 }
 
-fn string_map(v: Option<&Value>) -> BTreeMap<String, String> {
+pub(crate) fn string_map(v: Option<&Value>) -> BTreeMap<String, String> {
     v.and_then(Value::as_object)
         .map(|m| {
             m.iter()

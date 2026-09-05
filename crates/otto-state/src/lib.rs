@@ -2,6 +2,7 @@
 //!
 //! Repositories map rows to `otto_core::domain` structs.
 
+pub mod database_changes;
 pub mod activity;
 pub mod api_client;
 pub mod audit;
@@ -26,6 +27,7 @@ pub mod improvements;
 pub mod integrations;
 pub mod issues;
 pub mod k8s_clusters;
+pub mod k8s_monitor;
 pub mod mcp_audit;
 pub mod mcp_control;
 pub mod goal_loops;
@@ -44,6 +46,7 @@ pub mod finding_events;
 pub mod proof;
 pub mod provider_models;
 pub mod repo_rules;
+pub mod resource_access;
 pub mod review_findings;
 pub mod review_proof_packs;
 pub mod reviews;
@@ -114,6 +117,7 @@ pub use improvements::{ImprovementsRepo, NewEdit};
 pub use integrations::IntegrationsRepo;
 pub use issues::{IssuesRepo, NewIssueAccount};
 pub use k8s_clusters::{K8sCluster, K8sClusterPatch, K8sClusterSource, K8sClustersRepo, NewK8sCluster};
+pub use k8s_monitor::{K8sMonitorConfigRow, K8sMonitorRepo, K8sMonitorStatusRow};
 pub use mcp_audit::{McpAuditRepo, McpToolCallRow, NewMcpToolCall};
 pub use mcp_control::{
     CallLogQuery, DiscoveredTool, McpAllowlistEntry, McpAllowlistRepo, McpApproval, McpApprovalRepo,
@@ -139,6 +143,7 @@ pub use product_refinement::{
 };
 pub use finding_events::FindingEventsRepo;
 pub use repo_rules::RepoRulesRepo;
+pub use resource_access::ResourceAccessRepo;
 pub use review_findings::{
     compute_fingerprint, FindingPatch, FindingState, NewFinding, ReviewFindingRow,
     ReviewFindingsRepo,

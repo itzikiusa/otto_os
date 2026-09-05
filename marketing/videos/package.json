@@ -2,11 +2,21 @@
   "name": "otto-videos",
   "private": true,
   "version": "1.0.0",
-  "description": "Remotion feature-walkthrough videos for Otto ADE",
+  "description": "Original narrated Remotion walkthrough films for Otto",
   "scripts": {
-    "studio": "remotion studio",
-    "render": "remotion render",
-    "render-all": "node render-all.mjs"
+    "studio": "remotion studio studio-v2/index.tsx",
+    "render": "remotion render studio-v2/index.tsx",
+    "render-all": "node studio-v2/scripts/render.mjs",
+    "studio:legacy": "remotion studio src/index.ts",
+    "render-all:legacy": "node render-all.mjs",
+    "check": "tsc -p studio-v2/tsconfig.json && node studio-v2/scripts/validate.mjs",
+    "soundtrack": "python3 studio-v2/scripts/soundtrack.py",
+    "stills": "node studio-v2/scripts/render.mjs --stills",
+    "package:films": "node studio-v2/scripts/package.mjs --master",
+    "screening": "node studio-v2/scripts/serve.mjs",
+    "verify:media": "node studio-v2/scripts/validate.mjs --media",
+    "verify:player": "node studio-v2/scripts/check-player.mjs",
+    "verify:frames": "python3 studio-v2/scripts/verify-frames.py"
   },
   "dependencies": {
     "@remotion/cli": "^4.0.0",

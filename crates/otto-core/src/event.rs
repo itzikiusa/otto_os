@@ -437,6 +437,15 @@ pub enum Event {
     K8sClusterUpdated { cluster_id: Id, deleted: bool },
     /// Kubernetes console: the kubectl/k9s installer job changed state.
     K8sInstallUpdated { tool: String, state: String },
+    /// Kubernetes monitoring: a collector cycle finished for `cluster_id`
+    /// (dashboards refresh; `ok` = samples were written).
+    K8sMonitorCycle {
+        cluster_id: Id,
+        ok: bool,
+        pods_scraped: u32,
+        pods_failed: u32,
+        cycle_ms: u64,
+    },
 }
 
 #[cfg(test)]

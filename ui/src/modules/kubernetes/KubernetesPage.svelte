@@ -14,9 +14,16 @@
   import InstallPanel from './InstallPanel.svelte';
   import ClustersOverview from './ClustersOverview.svelte';
   import ClusterWorkspace from './ClusterWorkspace.svelte';
+  import MonitorOverview from './monitor/MonitorOverview.svelte';
+  import MonitorCluster from './monitor/MonitorCluster.svelte';
   import { isKind } from './k8s-util';
 
-  const routeClusterId = $derived(router.parts[1] ?? null);
+  // `#/kubernetes/monitor[/<clusterId>[/<tab>]]` is the Monitor dashboard; it
+  // never selects a cluster in the console store.
+  const isMonitor = $derived(router.parts[1] === 'monitor');
+  const monitorClusterId = $derived(isMonitor ? (router.parts[2] ?? null) : null);
+  const monitorTab = $derived(router.parts[3] ?? 'workloads');
+  const routeClusterId = $derived(isMonitor ? null : (router.parts[1] ?? null));
   const routeKind = $derived(router.parts[2] ?? '');
   const routeNs = $derived(router.parts[3]);
   const routeName = $derived(router.parts[4]);
@@ -27,6 +34,7 @@
   let skipInstall = $state(false);
 
   $effect(() => {
+    void k8s.accessRevision;
     void k8s.loadStatus();
     void k8s.loadClusters();
     return () => k8s.suspend();
@@ -35,6 +43,7 @@
   // Route → store. Only the route is a dependency; every store write is
   // untracked so a store change can never re-trigger this effect.
   $effect(() => {
+    void k8s.accessRevision;
     const id = routeClusterId;
     const kind = routeKind;
     const ns = routeNs;
@@ -56,6 +65,9 @@
   const cluster = $derived(
     routeClusterId ? (k8s.clusters.find((c) => c.id === routeClusterId) ?? null) : null,
   );
+  const monitorCluster = $derived(
+    monitorClusterId ? (k8s.clusters.find((c) => c.id === monitorClusterId) ?? null) : null,
+  );
 </script>
 
 <div class="k8s-page" data-testid="k8s-page">
@@ -71,9 +83,25 @@
     <div class="k8s-boot"><Skeleton rows={4} height={48} /></div>
   {:else if needsInstall}
     <InstallPanel tool="kubectl" oncontinue={() => (skipInstall = true)} />
+  {:else if isMonitor && monitorClusterId}
+    {#if monitorCluster}
+      <MonitorCluster cluster={monitorCluster} tab={monitorTab} />
+    {:else if k8s.clustersLoaded}
+      <EmptyState
+        icon="helm"
+        title="Cluster not found"
+        body="It may have been removed. Pick another cluster from the Monitor overview."
+        actionLabel="Back to Monitor"
+        onaction={() => router.go('kubernetes/monitor')}
+      />
+    {:else}
+      <div class="k8s-boot"><Skeleton rows={6} height={40} /></div>
+    {/if}
+  {:else if isMonitor}
+    <MonitorOverview />
   {:else if routeClusterId}
     {#if cluster}
-      <ClusterWorkspace {cluster} />
+      {#key `${cluster.id}/${k8s.accessRevision}`}<ClusterWorkspace {cluster} />{/key}
     {:else if k8s.clustersLoaded}
       <EmptyState
         icon="helm"
@@ -86,7 +114,7 @@
       <div class="k8s-boot"><Skeleton rows={6} height={40} /></div>
     {/if}
   {:else}
-    <ClustersOverview />
+    {#key k8s.accessRevision}<ClustersOverview />{/key}
   {/if}
 </div>
 

@@ -789,6 +789,7 @@ async fn send_annotation(
     if session.workspace_id != wid {
         return Err(ApiError(Error::NotFound(format!("session {}", req.session_id))));
     }
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
 
     // The mark's title: the owning tab's title when it still exists, else the
     // annotation's URL (annotations carry no title of their own).
@@ -857,6 +858,7 @@ async fn ask_session(
     if session.workspace_id != wid {
         return Err(ApiError(Error::NotFound(format!("session {}", req.session_id))));
     }
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
 
     // `len()` is already rejected above ASK_MAX_MARKS; the `min` keeps the
     // bound visible at the allocation itself.
@@ -2412,6 +2414,44 @@ mod tests {
     /// is exactly what `manager.input` wrote — the same test double / pattern
     /// the existing agent-session tests rely on for observing PTY input.
     #[tokio::test]
+    async fn browser_input_aliases_reject_resource_denied_session() {
+        let (_tmp, pool, ctx, app) = test_ctx_and_app().await;
+        seed_user(&pool, "reader").await;
+        seed_workspace(&pool, "ws1").await;
+        set_member(&pool, "ws1", "reader", "editor").await;
+        sqlx::query("INSERT INTO connections (id,name,kind,params_json,created_by,created_at) VALUES ('restricted','Restricted','ssh','{}','reader','2026-09-05T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_feature_grants (user_id,feature,capability) VALUES ('reader','connections','view')")
+            .execute(&pool).await.unwrap();
+        let ws = ctx.workspaces.get(&"ws1".into()).await.unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let cwd = session_dir.path().to_string_lossy().to_string();
+        let session = ctx.manager.create(&ws, &"reader".into(), otto_core::api::CreateSessionReq {
+            kind: otto_core::domain::SessionKind::Connection,
+            provider: Some("shell".into()), model: None, title: None,
+            cwd: Some(cwd.clone()), connection_id: Some("restricted".into()), meta: None,
+        }, Some(otto_pty::CommandSpec {
+            program: "/bin/sh".into(), args: vec!["-c".into(), "exec cat".into()],
+            cwd: Some(cwd), env: vec![],
+        })).await.unwrap();
+        let (_, body) = post_json(&app, "/workspaces/ws1/browser/annotations", serde_json::json!({
+            "url":"https://a.io", "selector":"#x", "excerpt":"test", "text":"test", "comment":"test"
+        })).await;
+        let annotation = json(&body)["id"].as_str().unwrap().to_owned();
+        let user = non_root_user("reader");
+        let (ask_status, _) = send_as(&app, Method::POST, "/workspaces/ws1/browser/ask", Some(serde_json::json!({
+            "session_id":session.id, "url":"https://a.io", "text":"INPUT_MUST_NOT_REACH_PTY"
+        })), &user).await;
+        let (send_status, _) = send_as(&app, Method::POST, &format!("/workspaces/ws1/browser/annotations/{annotation}/send"),
+            Some(serde_json::json!({"session_id":session.id})), &user).await;
+        let output = ctx.manager.live_handle(&session.id).unwrap().scrollback(10_000);
+        ctx.manager.kill_session(&session.id).await.unwrap();
+        assert_eq!(ask_status, StatusCode::FORBIDDEN);
+        assert_eq!(send_status, StatusCode::FORBIDDEN);
+        assert!(!String::from_utf8_lossy(&output).contains("INPUT_MUST_NOT_REACH_PTY"));
+    }
+
+    #[tokio::test]
     async fn send_writes_context_block_into_live_session() {
         let (_tmp, pool, ctx, app) = test_ctx_and_app().await;
         // `sessions.created_by` FKs to `users.id` — root_user() is a synthetic
@@ -2468,12 +2508,15 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
 
-        // Poll the pty's scrollback until `cat` has echoed the write back.
+        // Poll the pty's scrollback until `cat` has echoed the WHOLE block
+        // back — the fence closer is the last line written, so waiting for the
+        // first line alone races the echo on slow runners (CI saw the block
+        // cut off right after "<<<u").
         let mut seen = String::new();
-        for _ in 0..100 {
+        for _ in 0..200 {
             if let Some(handle) = ctx.manager.live_handle(&session.id) {
                 seen = String::from_utf8_lossy(&handle.scrollback(10_000)).to_string();
-                if seen.contains("Browser mark") {
+                if seen.contains("<<<end-untrusted-page-content-") && seen.contains("Note from user:") {
                     break;
                 }
             }
