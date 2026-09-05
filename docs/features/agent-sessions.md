@@ -74,16 +74,32 @@ modal (`NewSession.svelte`) offers:
 - **Provider** — cards for `claude` ("Claude Code CLI"), `codex` ("Codex CLI"),
   `shell` ("Plain shell"), plus any custom providers from `GET /meta.providers`.
   The configured default provider is pre-selected and carries a **default**
-  badge.
+  badge. Clicking a card (or `←`/`→`) selects it exclusively, as always.
+- **How many — the `−` / `+` stepper on each card** (`+`/`-` on the keyboard for
+  the focused card). Counts add up ACROSS cards, so "2 codex, 3 claude and 1
+  shell" is one trip through the sheet: the footer button becomes **Start 6
+  Sessions**, a line under the grid spells the batch out, and the sessions are
+  started provider by provider in grid order, then opened **tiled** (exactly
+  where a `spawn 3 claude agents` command-palette plan lands them). Capped at 20
+  per provider. A typed **Title** becomes a base name numbered per session
+  (`"fix flaky tests 1" … "fix flaky tests 6"`); the **model** pin is only
+  offered for a batch that targets a single provider, since model ids are
+  provider-specific.
 - **Title (optional)** — placeholder shows the auto-generated name. If left
   blank the daemon names the session `"{provider} #{n}"`, where `n` is one more
   than the current count of that provider in the workspace.
-- **Working directory** — *"Defaults to the workspace root"* if blank. The
-  daemon `mkdir -p`s the directory if it does not exist (a missing cwd would
-  otherwise make the child fall back to `$HOME`).
+- **Working directory** — *"Defaults to the workspace root"* if blank. Any
+  folder on the daemon host works; it does **not** have to be inside a
+  workspace, so a one-off job somewhere else needs no new workspace. **Browse…**
+  opens the shared daemon-side folder picker (`GET /fs/browse`, sandboxed to
+  `$HOME` + the data dir — see [daemon-http-api](./daemon-http-api.md)), and the
+  field offers your recently used directories (this workspace's root first, then
+  the cwds of its existing sessions) as a datalist. The daemon `mkdir -p`s the
+  directory if it does not exist (a missing cwd would otherwise make the child
+  fall back to `$HOME`).
 - **Additional directories (optional)** — extra repos the agent may access,
   *"passed as `--add-dir`"*. Stored in `meta.extra_dirs` (an array). Honored by
-  `claude` / `codex` / `agy`; ignored for `shell`.
+  `claude` / `codex` / `agy`; ignored for `shell`. Same **Browse…** picker.
 - **Browser tools** — shown only for `claude` / `codex`: *"Give the agent a real
   browser via MCP (navigate, click, read pages)."* Stored as `meta.browser:
   true`; wires an MCP browser server into the workspace `.mcp.json`.

@@ -290,12 +290,12 @@ test('New Session: selecting claude/codex reveals agent-only options', async ({ 
 
   // shell selected → no Browser-tools toggle.
   if (await shellCard.count()) {
-    await shellCard.first().click();
+    await shellCard.first().locator('.card-main').click();
     await expect(page.locator('.toggle-row')).toBeHidden();
   }
   // claude selected → Browser-tools toggle + context preview appear.
   if (await claudeCard.count()) {
-    await claudeCard.first().click();
+    await claudeCard.first().locator('.card-main').click();
     await expect(page.locator('.toggle-row')).toBeVisible();
     await expect(page.locator('.preview-toggle')).toBeVisible();
     // Still fits — the extra fields must not blow out the layout.
@@ -314,7 +314,7 @@ test('opening a plain shell from the sheet launches a live terminal', async ({ p
   await expect(page.locator('.sheet[role="dialog"]')).toBeVisible();
   const shellCard = page.locator('.provider-card', { hasText: 'shell' });
   test.skip(!(await shellCard.count()), 'shell provider not advertised by this daemon');
-  await shellCard.first().click();
+  await shellCard.first().locator('.card-main').click();
   await startSessionBtn(page).click();
 
   // Sheet closes, a new tab is added, and its terminal mounts with real height.
@@ -337,7 +337,7 @@ test('opening a claude agent renders a correct pane (best-effort)', async ({ pag
   await expect(page.locator('.sheet[role="dialog"]')).toBeVisible();
   const claudeCard = page.locator('.provider-card', { hasText: 'claude' });
   test.skip(!(await claudeCard.count()), 'claude provider not advertised by this daemon');
-  await claudeCard.first().click();
+  await claudeCard.first().locator('.card-main').click();
   await startSessionBtn(page).click();
 
   await expect(page.locator('.sheet[role="dialog"]')).toBeHidden({ timeout: 10_000 });
