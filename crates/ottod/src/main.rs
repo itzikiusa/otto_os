@@ -901,6 +901,16 @@ async fn run(cfg: Config) -> Result<(), String> {
     spawn_session_event_listener(ctx.clone());
     tracing::info!("credential monitor + session-event notices started");
 
+    // --- Conversation view (docs/design/conversation-view.md) ---
+    // Board→agent nudge sweep: hands `POST /sessions/{id}/tasks` rows to the
+    // agent's PTY once the session is idle (SessionStatus events + a 15 s tick).
+    // History index: a low-priority boot walk of ~/.claude/projects and
+    // ~/.codex/sessions (skips unchanged files); `POST …/history/rescan`
+    // re-runs it on demand.
+    let _nudge_handle = otto_server::agent_tasks_nudge::spawn(ctx.clone());
+    otto_server::history_index::spawn_scan(ctx.clone(), None);
+    tracing::info!("conversation view: nudge sweep + history index scan started");
+
     // --- Orphan reaper: auto-resume analysis agents stranded by a restart ---
     // Runs once at startup; any analysis agent still 'running'/'waiting' has no
     // surviving task, so it is re-run (capped) or marked errored + notified.

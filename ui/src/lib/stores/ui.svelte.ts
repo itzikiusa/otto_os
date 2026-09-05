@@ -4,7 +4,16 @@
 export type ThemeName = 'native' | 'pro-dark' | 'warm';
 export type SchemePref = 'auto' | 'light' | 'dark';
 export type Direction = 'ltr' | 'rtl';
-export type RightTab = 'git' | 'files' | 'notes' | 'activity' | 'info' | 'browser' | 'api' | 'canvas';
+export type RightTab =
+  | 'git'
+  | 'files'
+  | 'notes'
+  | 'activity'
+  | 'outputs'
+  | 'info'
+  | 'browser'
+  | 'api'
+  | 'canvas';
 /** Which browser the agent-mode right panel's Browser tab hosts: `v1` is the
  *  original per-session panel (native tabs + take-over picker), `v2` is the
  *  Browser module (reader/live tabs, persisted marks, ask bar) embedded in the

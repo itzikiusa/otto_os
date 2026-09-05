@@ -10,6 +10,7 @@ are the real, chained steps; the full gated checklist lives in
 | `make-cert.sh` | One-time: create the long-lived self-signed code-signing cert **"Otto Dev Signing"** in your login keychain and **trust it for code signing**. |
 | `sign.sh` | Sign `ottod` + `Otto.app` with that cert. **Also re-asserts code-signing trust** (idempotent) so it can't silently drift. |
 | `deploy.sh` | One command: rebuild → bundle → sign → replace `/Applications/Otto.app` → relaunch → verify. |
+| `prune-target.sh` | Delete superseded `<crate>-<hash>` build artifacts under `target/`, keeping the newest generation of each crate. Run by `deploy.sh` step 5; `--dry-run` reports without deleting. |
 | `dmg.sh` | Package a signed `Otto.app` into a `.dmg`. |
 | `publish-walkthroughs.sh` | Re-encode `marketing/videos/out/*.mp4` to 720p and upload them (`--clobber`) to the rolling `walkthroughs` GitHub release the in-app Walkthroughs page streams from. Not part of the DMG. |
 | `com.otto.daemon.plist` | `launchd` user-agent template for the daemon (port `7700`). |
@@ -26,7 +27,7 @@ packaging/deploy.sh
 
 `deploy.sh` reuses an existing frontend build with `SKIP_UI=1 packaging/deploy.sh`.
 
-**Running it from inside Otto (an agent/shell session):** steps 5–6 (install →
+**Running it from inside Otto (an agent/shell session):** steps 6–7 (install →
 relaunch → verify) run as a one-shot launchd agent, `com.otto.deploy-finish`,
 because the relaunch restarts the daemon and the daemon hangs up every session
 PTY — a script running inline there dies with exit 137 mid-verify. The
@@ -34,6 +35,22 @@ foreground only tails `~/Library/Logs/Otto/deploy-finish-<ts>.log`; if it gets
 killed, the phase still completes. Read the outcome with
 `packaging/deploy.sh --status` (exit 0 = deployed and healthy). `DETACH=0`
 runs the phase inline (fine from a plain Terminal).
+
+**Disk:** step 5 prunes the build cache. Cargo never removes the artifacts of a
+previous build — each changed feature set or dependency graph writes another
+`<crate>-<hash>` file beside the old one, and with ~285 MB test binaries in this
+workspace that reached **43 GB of unreachable duplicates against 6.5 GB of live
+ones** before it showed up as a full disk.
+
+It prunes by *generation*, not by hash: cargo keeps several hashes of the same
+crate live at once (one per feature unification, plus host/build-script builds),
+so "keep the newest hash" would delete live artifacts on every run and make the
+next build recompile them. Instead it keeps every variant of a crate written
+within `PRUNE_WINDOW_SECS` (default 1h) of that crate's newest artifact — the
+co-live variants of one build — and drops the older generations. Running right
+after the last `cargo` step means the generation kept is the one this deploy just
+produced. Anything removed is simply rebuilt if it's ever needed again, and the
+script no-ops if a build is in flight. `PRUNE=0` skips it.
 
 ## The recurring "enter your password" keychain prompt — why, and the fix
 

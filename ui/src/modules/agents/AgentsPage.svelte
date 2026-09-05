@@ -6,8 +6,13 @@
   import FirstRunCoach from './FirstRunCoach.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { router } from '../../lib/router.svelte';
+  // Importing the History module here (not only from App's `#/history` branch)
+  // registers its palette command at boot, so "Go to History" works from any page.
+  import '../agents/history';
 
   const tiled = $derived(ws.viewMode === 'tiled');
   const mission = $derived(ws.viewMode === 'mission');
@@ -28,6 +33,20 @@
 </script>
 
 <div class="agents">
+  <!-- Slim header: the one place every Agents view (tabs / tiled / mission)
+       shares; hosts the History entry point (⌘K "Go to History" and the
+       sidebar row are the others). -->
+  <div class="agents-bar">
+    <button
+      class="bar-btn"
+      onclick={() => router.go('history')}
+      title="Browse past conversations — every Claude/Codex session, resumable"
+      data-testid="agents-history-btn"
+    >
+      <Icon name="clock" size={12} /> History
+    </button>
+  </div>
+  <div class="agents-body">
   {#if ws.sessionsLoading && ws.sessions.length === 0}
     <div style="padding: 16px">
       <Skeleton rows={3} height={48} />
@@ -59,11 +78,47 @@
   {:else}
     <Splits />
   {/if}
+  </div>
 </div>
 
 <style>
   .agents {
     height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .agents-bar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    height: 26px;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .bar-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 20px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .bar-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .agents-body {
+    flex: 1;
     min-height: 0;
   }
 </style>

@@ -183,6 +183,67 @@ impl SessionsRepo {
         Ok(())
     }
 
+    /// Persist the resolved on-disk transcript path (conversation view, design
+    /// §4.2). Written the moment a capture / first transcript read resolves it
+    /// so later lookups are O(1) — Codex rollouts are otherwise only found by
+    /// scanning `~/.codex/sessions`.
+    pub async fn set_transcript_path(&self, id: &Id, path: &str) -> Result<()> {
+        sqlx::query("UPDATE sessions SET transcript_path = ? WHERE id = ?")
+            .bind(path)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("update session transcript path"))?;
+        Ok(())
+    }
+
+    /// The persisted transcript path for `id` (`None` when never resolved).
+    pub async fn transcript_path(&self, id: &Id) -> Result<Option<String>> {
+        let r = sqlx::query("SELECT transcript_path FROM sessions WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("session"))?;
+        Ok(r.get("transcript_path"))
+    }
+
+    /// `(session id, transcript_path)` for every session in `ws` — the History
+    /// merge joins these onto the workspace's session list.
+    pub async fn transcript_paths_for_workspace(&self, ws: &Id) -> Result<Vec<(Id, Option<String>)>> {
+        let rows = sqlx::query("SELECT id, transcript_path FROM sessions WHERE workspace_id = ?")
+            .bind(ws)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("sessions"))?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<String, _>("id"), r.get::<Option<String>, _>("transcript_path")))
+            .collect())
+    }
+
+    /// Every non-null `transcript_path` across all sessions — with
+    /// [`Self::provider_session_ids`] this is the "claimed" set that keeps an
+    /// indexed on-disk transcript from ALSO showing up as an `on_disk` History
+    /// entry.
+    pub async fn transcript_paths(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT transcript_path FROM sessions WHERE transcript_path IS NOT NULL")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("sessions"))?;
+        Ok(rows.iter().map(|r| r.get("transcript_path")).collect())
+    }
+
+    /// The session (any workspace) that already owns `provider_session_id`, if
+    /// one does — History import returns it instead of minting a duplicate.
+    pub async fn find_by_provider_session(&self, provider_session_id: &str) -> Result<Option<Session>> {
+        let r = sqlx::query("SELECT * FROM sessions WHERE provider_session_id = ? LIMIT 1")
+            .bind(provider_session_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(dberr("session"))?;
+        r.as_ref().map(row_to_session).transpose()
+    }
+
     /// Every non-null `provider_session_id` currently recorded — the "claimed"
     /// set. Used by the codex session-id capture task to avoid two sessions
     /// grabbing the same on-disk rollout (a provider id is unique to one session).

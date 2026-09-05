@@ -170,6 +170,7 @@ mod tests {
             aws_account_id: None,
             environment: Environment::Prod,
             color: None,
+            known_namespaces: Vec::new(),
             params: json!({}),
             capabilities: None,
             created_by: None,

@@ -399,7 +399,8 @@ class K8sStore {
   private mergeKnown(clusterId: string, listed: K8sNamespace[]): K8sNamespace[] {
     if(!auth.isRoot && resourceAccess.get('k8s_cluster',clusterId)?.mode!=='legacy')return listed;
     const have = new Set(listed.map((n) => n.name));
-    const extra = knownNamespaces(clusterId)
+    const persisted = this.clusters.find((c) => c.id === clusterId)?.known_namespaces ?? [];
+    const extra = [...new Set([...persisted, ...knownNamespaces(clusterId)])]
       .filter((n) => !have.has(n))
       .sort()
       .map((name) => ({ name, status: '', age_seconds: 0 }));
@@ -414,6 +415,15 @@ class K8sStore {
     known.push(ns);
     lsSet(KNOWN_NS_KEY(id), JSON.stringify(known));
     if (!this.namespaces.some((n) => n.name === ns)) this.namespaces = this.mergeKnown(id, this.namespaces);
+    // Persist on the cluster row too (the registry is Admin-only; everyone
+    // else keeps the localStorage copy).
+    if (auth.isRoot || auth.can('kubernetes', 'admin')) {
+      const c = this.clusters.find((x) => x.id === id);
+      const persisted = c?.known_namespaces ?? [];
+      if (!persisted.includes(ns)) {
+        void this.updateCluster(id, { known_namespaces: [...persisted, ns] }).catch(() => {});
+      }
+    }
   }
 
   // --- resources ------------------------------------------------------------------------

@@ -375,6 +375,11 @@ impl PtyHandle {
         self.exit_rx.clone()
     }
 
+    /// Time since the PTY was spawned.
+    pub fn uptime(&self) -> Duration {
+        self.epoch.elapsed()
+    }
+
     /// Instant of the most recent output chunk (spawn time when none yet).
     pub fn last_output_at(&self) -> Instant {
         self.epoch + Duration::from_millis(self.last_output_ms.load(Ordering::Relaxed))

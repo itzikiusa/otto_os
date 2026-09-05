@@ -15,7 +15,8 @@ pub mod trust;
 pub mod ws;
 
 pub use http::{api_router, SessionsCtx};
-pub use lifecycle::{check_resumability, Resumability};
+pub use lifecycle::{check_resumability, transcript_path, transcript_path_in_roots, Resumability};
+pub use manager::{codex_rollout_path, codex_rollout_path_under, codex_sessions_root};
 pub use manager::{OutputScanner, SessionManager};
 pub use prompt_guard::{CompositeScanner, PromptGuard};
 pub use providers::{ProviderRegistry, ProviderSpec};

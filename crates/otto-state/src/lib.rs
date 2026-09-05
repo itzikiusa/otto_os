@@ -54,6 +54,7 @@ pub mod runs;
 pub mod saved_views;
 pub mod scheduled_tasks;
 pub mod sessions;
+pub mod transcript_index;
 pub mod settings;
 pub mod skill_evals;
 pub mod skill_reviews;
@@ -65,7 +66,7 @@ pub mod workflows;
 pub mod workgraph;
 pub mod workspaces;
 
-pub use activity::{ActivityRepo, NewTask, NewTrail};
+pub use activity::{normalize_title, ActivityRepo, NewTask, NewTrail, PendingNudge};
 pub use audit::{AuditRepo, NewAuditEntry};
 pub use aws_accounts::{AwsAccountPatch, AwsAccountRow, AwsAccountsRepo, NewAwsAccount};
 pub use browser::{
@@ -152,6 +153,7 @@ pub use review_proof_packs::ReviewProofPacksRepo;
 pub use reviews::ReviewsRepo;
 pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use sessions::{NewSession, SessionsRepo, UsageAttrRow};
+pub use transcript_index::{TranscriptIndexRepo, TranscriptIndexRow};
 pub use vault_docs_runs::{VaultDocsRunRow, VaultDocsRunsRepo};
 pub use settings::{
     otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, OTTO_MCP_ENABLED_KEY,

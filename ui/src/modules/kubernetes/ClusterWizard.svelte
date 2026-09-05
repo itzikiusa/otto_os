@@ -57,6 +57,8 @@
   let contextName = $state(init?.context_name ?? '');
   let kubeconfigPath = $state(init?.kubeconfig_path ?? '');
   let defaultNs = $state(init?.default_namespace ?? '');
+  let knownNsText = $state((init?.known_namespaces ?? []).join(', '));
+  const knownNsList = (): string[] => [...new Set(knownNsText.split(/[,\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean))];
   let env = $state<Environment>(init?.environment ?? 'dev');
 
   $effect(() => {
@@ -125,6 +127,7 @@
       if (existing) {
         const c = await k8s.updateCluster(existing.id, {
           name: name.trim(),
+          known_namespaces: knownNsList(),
           ...(auth.isRoot ? {context_name:contextName.trim() || existing.context_name,default_namespace:defaultNs.trim().toLowerCase() || null,environment:env} : {}),
         });
         toasts.success('Cluster updated', c.name);
@@ -151,6 +154,7 @@
             context_name: contextName.trim(),
             default_namespace: defaultNs.trim().toLowerCase() || null,
             environment: env,
+            known_namespaces: knownNsList(),
           }),
         );
       } else {
@@ -255,6 +259,10 @@
       <div class="field">
         <label for="k8s-ns">Default namespace <span class="dim">(blank = all namespaces)</span></label>
         <input id="k8s-ns" disabled={!auth.isRoot} class="input mono" bind:value={defaultNs} placeholder="default" autocapitalize="off" autocorrect="off" spellcheck={false} />
+      </div>
+      <div class="field">
+        <label for="k8s-known-ns">Namespaces <span class="dim">(comma-separated; offered in the picker even when the cluster forbids listing them — saved with the cluster)</span></label>
+        <input id="k8s-known-ns" class="input mono" bind:value={knownNsText} placeholder="koala-staging, koala-jobs" autocapitalize="off" autocorrect="off" spellcheck={false} data-testid="k8s-known-ns" />
       </div>
       <div class="field">
         <span class="lbl">Environment</span>

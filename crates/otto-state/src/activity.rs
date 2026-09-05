@@ -74,7 +74,32 @@ fn row_to_task(r: &sqlx::sqlite::SqliteRow) -> Result<AgentTask> {
         position: r.get::<i64, _>("position"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
+        source: r.get("source"),
+        description: r.get("description"),
+        nudge_pending: r.get::<i64, _>("nudge_pending") != 0,
+        nudged_at: match r.get::<Option<String>, _>("nudged_at") {
+            Some(s) => Some(ts(&s)?),
+            None => None,
+        },
     })
+}
+
+/// Title match key for the task merge: case-folded, whitespace-collapsed.
+/// A user-added "Fix the  Login bug" and the agent's later "fix the login bug"
+/// are the same task and must keep one row.
+pub fn normalize_title(t: &str) -> String {
+    t.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// A task row still waiting for its nudge prompt (design §4.5).
+#[derive(Debug, Clone)]
+pub struct PendingNudge {
+    pub task_id: Id,
+    pub session_id: Id,
+    pub workspace_id: Id,
+    pub title: String,
+    pub description: Option<String>,
+    pub created_at: chrono::DateTime<Utc>,
 }
 
 impl ActivityRepo {
@@ -316,9 +341,18 @@ impl ActivityRepo {
         rows.iter().map(row_to_task).collect()
     }
 
-    /// Replace a session's whole task list (provider full-sync semantics — e.g.
-    /// Claude's TodoWrite sends the complete list each call). Preserves
-    /// `created_at` for tasks whose title is unchanged so age stays meaningful.
+    /// Sync the provider's FULL plan (Claude's TodoWrite sends the complete list
+    /// each call) into the session's task rows — design §4.5 merge semantics:
+    ///
+    /// * every existing row is matched to an incoming task by `ext_id` (when
+    ///   both have one) else by normalized title, and UPDATED in place — ids
+    ///   stay stable, no regenerate-on-sync;
+    /// * unmatched incoming tasks are INSERTED as `source = 'agent'`;
+    /// * unmatched `'agent'` rows are DELETED (the plan dropped them);
+    /// * unmatched `'user'` rows (added from the board) are KEPT, positioned
+    ///   after the plan, so a board task survives every plan update; a user
+    ///   row the agent adopted takes the agent's status + `ext_id`.
+    ///
     /// Returns the resulting list in order.
     pub async fn replace_tasks(
         &self,
@@ -329,47 +363,284 @@ impl ActivityRepo {
         let now = fmt(Utc::now());
         let mut tx = self.pool.begin().await.map_err(dberr("tasks tx"))?;
 
-        // Snapshot existing created_at by title for age preservation.
-        let prior = sqlx::query("SELECT title, created_at FROM agent_tasks WHERE session_id = ?")
-            .bind(session_id)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(dberr("tasks prior"))?;
-        let mut created_by_title = std::collections::HashMap::<String, String>::new();
-        for r in &prior {
-            created_by_title.insert(r.get::<String, _>("title"), r.get::<String, _>("created_at"));
+        let existing = sqlx::query(
+            "SELECT id, ext_id, title, source FROM agent_tasks WHERE session_id = ? ORDER BY position, id",
+        )
+        .bind(session_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(dberr("tasks prior"))?;
+        struct Row {
+            id: String,
+            ext_id: Option<String>,
+            norm: String,
+            source: String,
         }
-
-        sqlx::query("DELETE FROM agent_tasks WHERE session_id = ?")
-            .bind(session_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(dberr("clear tasks"))?;
+        let mut rows: Vec<Row> = existing
+            .iter()
+            .map(|r| Row {
+                id: r.get("id"),
+                ext_id: r.get("ext_id"),
+                norm: normalize_title(&r.get::<String, _>("title")),
+                source: r.get("source"),
+            })
+            .collect();
+        let mut matched: Vec<bool> = vec![false; rows.len()];
 
         for (i, t) in tasks.iter().enumerate() {
-            let id = new_id();
-            let created = created_by_title.get(&t.title).cloned().unwrap_or_else(|| now.clone());
-            sqlx::query(
-                "INSERT INTO agent_tasks
-                    (id, session_id, workspace_id, ext_id, title, status, position, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&id)
-            .bind(session_id)
-            .bind(workspace_id)
-            .bind(&t.ext_id)
-            .bind(&t.title)
-            .bind(t.status.as_str())
-            .bind(i as i64)
-            .bind(&created)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await
-            .map_err(dberr("insert task"))?;
+            let norm = normalize_title(&t.title);
+            let hit = rows
+                .iter()
+                .enumerate()
+                .position(|(j, r)| {
+                    !matched[j]
+                        && ((t.ext_id.is_some() && r.ext_id.is_some() && r.ext_id == t.ext_id) || r.norm == norm)
+                });
+            match hit {
+                Some(j) => {
+                    matched[j] = true;
+                    // A user row the agent adopted keeps its id + source but takes
+                    // the agent's status and ext_id; an agent row is simply updated.
+                    sqlx::query(
+                        "UPDATE agent_tasks
+                            SET title = ?, status = ?, position = ?, updated_at = ?,
+                                ext_id = COALESCE(?, ext_id)
+                          WHERE id = ?",
+                    )
+                    .bind(&t.title)
+                    .bind(t.status.as_str())
+                    .bind(i as i64)
+                    .bind(&now)
+                    .bind(&t.ext_id)
+                    .bind(&rows[j].id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(dberr("update task"))?;
+                }
+                None => {
+                    let id = new_id();
+                    sqlx::query(
+                        "INSERT INTO agent_tasks
+                            (id, session_id, workspace_id, ext_id, title, status, position, created_at, updated_at, source)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent')",
+                    )
+                    .bind(&id)
+                    .bind(session_id)
+                    .bind(workspace_id)
+                    .bind(&t.ext_id)
+                    .bind(&t.title)
+                    .bind(t.status.as_str())
+                    .bind(i as i64)
+                    .bind(&now)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(dberr("insert task"))?;
+                }
+            }
+        }
+        // Drop agent rows the plan no longer has; push surviving user rows after it.
+        let mut tail = tasks.len() as i64;
+        for (j, r) in rows.iter_mut().enumerate() {
+            if matched[j] {
+                continue;
+            }
+            if r.source == "agent" {
+                sqlx::query("DELETE FROM agent_tasks WHERE id = ?")
+                    .bind(&r.id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(dberr("delete task"))?;
+            } else {
+                sqlx::query("UPDATE agent_tasks SET position = ? WHERE id = ?")
+                    .bind(tail)
+                    .bind(&r.id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(dberr("reposition task"))?;
+                tail += 1;
+            }
         }
 
         tx.commit().await.map_err(dberr("tasks commit"))?;
         self.list_tasks(session_id).await
+    }
+
+    /// Incremental provider update (Claude `TaskCreate` / `TaskUpdate`, which
+    /// carry a provider task id instead of the whole list): update the row with
+    /// that `ext_id` — or, for a create, a same-titled row (a user task the agent
+    /// picked up) — else insert a new `'agent'` row at the end. `status`
+    /// `None` keeps the current one. Returns the resulting list.
+    pub async fn upsert_task(
+        &self,
+        session_id: &Id,
+        workspace_id: &Id,
+        ext_id: &str,
+        title: Option<&str>,
+        status: Option<TaskStatus>,
+    ) -> Result<Vec<AgentTask>> {
+        let now = fmt(Utc::now());
+        let existing = self.list_tasks(session_id).await?;
+        let by_ext = existing.iter().find(|t| t.ext_id.as_deref() == Some(ext_id));
+        let by_title = title.and_then(|t| {
+            let n = normalize_title(t);
+            existing.iter().find(|x| x.ext_id.is_none() && normalize_title(&x.title) == n)
+        });
+        match by_ext.or(by_title) {
+            Some(row) => {
+                sqlx::query(
+                    "UPDATE agent_tasks
+                        SET ext_id = ?, title = COALESCE(?, title), status = COALESCE(?, status), updated_at = ?
+                      WHERE id = ?",
+                )
+                .bind(ext_id)
+                .bind(title)
+                .bind(status.map(|s| s.as_str()))
+                .bind(&now)
+                .bind(&row.id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("update task"))?;
+            }
+            None => {
+                let position = existing.iter().map(|t| t.position + 1).max().unwrap_or(0);
+                sqlx::query(
+                    "INSERT INTO agent_tasks
+                        (id, session_id, workspace_id, ext_id, title, status, position, created_at, updated_at, source)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent')",
+                )
+                .bind(new_id())
+                .bind(session_id)
+                .bind(workspace_id)
+                .bind(ext_id)
+                .bind(title.unwrap_or("(task)"))
+                .bind(status.unwrap_or(TaskStatus::Pending).as_str())
+                .bind(position)
+                .bind(&now)
+                .bind(&now)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("insert task"))?;
+            }
+        }
+        self.list_tasks(session_id).await
+    }
+
+    /// Add a board task (`source = 'user'`, `nudge_pending = 1`) at the end of
+    /// the list. Returns the new row.
+    pub async fn insert_user_task(
+        &self,
+        session_id: &Id,
+        workspace_id: &Id,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<AgentTask> {
+        let now = fmt(Utc::now());
+        let id = new_id();
+        let position: i64 = sqlx::query("SELECT COALESCE(MAX(position) + 1, 0) AS p FROM agent_tasks WHERE session_id = ?")
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("task position"))?
+            .get("p");
+        sqlx::query(
+            "INSERT INTO agent_tasks
+                (id, session_id, workspace_id, ext_id, title, status, position, created_at, updated_at,
+                 source, description, nudge_pending)
+             VALUES (?, ?, ?, NULL, ?, 'pending', ?, ?, ?, 'user', ?, 1)",
+        )
+        .bind(&id)
+        .bind(session_id)
+        .bind(workspace_id)
+        .bind(title)
+        .bind(position)
+        .bind(&now)
+        .bind(&now)
+        .bind(description)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("insert user task"))?;
+        let r = sqlx::query("SELECT * FROM agent_tasks WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("task"))?;
+        row_to_task(&r)
+    }
+
+    /// Every task still waiting for its nudge, oldest first (optionally for one
+    /// session).
+    pub async fn pending_nudges(&self, session_id: Option<&Id>) -> Result<Vec<PendingNudge>> {
+        let rows = match session_id {
+            Some(sid) => sqlx::query(
+                "SELECT id, session_id, workspace_id, title, description, created_at FROM agent_tasks
+                 WHERE nudge_pending = 1 AND session_id = ? ORDER BY created_at, id",
+            )
+            .bind(sid)
+            .fetch_all(&self.pool)
+            .await,
+            None => sqlx::query(
+                "SELECT id, session_id, workspace_id, title, description, created_at FROM agent_tasks
+                 WHERE nudge_pending = 1 ORDER BY created_at, id",
+            )
+            .fetch_all(&self.pool)
+            .await,
+        }
+        .map_err(dberr("pending nudges"))?;
+        rows.iter()
+            .map(|r| {
+                Ok(PendingNudge {
+                    task_id: r.get("id"),
+                    session_id: r.get("session_id"),
+                    workspace_id: r.get("workspace_id"),
+                    title: r.get("title"),
+                    description: r.get("description"),
+                    created_at: ts(&r.get::<String, _>("created_at"))?,
+                })
+            })
+            .collect()
+    }
+
+    /// Atomically claim a pending nudge: flips `nudge_pending` 1 → 0 and stamps
+    /// `nudged_at`; `Ok(true)` only for the one caller that won (two sweeps
+    /// racing on the same row deliver it once). Undo with [`Self::unclaim_nudge`]
+    /// when the submit fails.
+    pub async fn claim_nudge(&self, task_id: &Id) -> Result<bool> {
+        let now = fmt(Utc::now());
+        let res = sqlx::query(
+            "UPDATE agent_tasks SET nudge_pending = 0, nudged_at = ?, updated_at = ?
+              WHERE id = ? AND nudge_pending = 1",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("claim nudge"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Put a claimed nudge back in the queue (the PTY write failed).
+    pub async fn unclaim_nudge(&self, task_id: &Id) -> Result<()> {
+        sqlx::query("UPDATE agent_tasks SET nudge_pending = 1, nudged_at = NULL WHERE id = ?")
+            .bind(task_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("unclaim nudge"))?;
+        Ok(())
+    }
+
+    /// The nudge for `task_id` was submitted to the session.
+    pub async fn mark_nudged(&self, task_id: &Id) -> Result<()> {
+        let now = fmt(Utc::now());
+        sqlx::query("UPDATE agent_tasks SET nudge_pending = 0, nudged_at = ?, updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&now)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("mark nudged"))?;
+        Ok(())
     }
 }
 
@@ -562,5 +833,108 @@ mod tests {
             .await
             .expect("carol summary");
         assert!(carol.is_empty(), "carol with no sessions must get an empty summary");
+    }
+
+    fn nt(title: &str, status: TaskStatus, ext_id: Option<&str>) -> NewTask {
+        NewTask {
+            ext_id: ext_id.map(str::to_string),
+            title: title.into(),
+            status,
+        }
+    }
+
+    /// Design §4.5: a plan sync replaces only `agent` rows, merges into `user`
+    /// rows by normalized title / ext_id, and never regenerates ids.
+    #[tokio::test]
+    async fn replace_tasks_merges_user_rows_and_keeps_ids_stable() {
+        let pool = mk_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let sid = seed_session(&pool, "ws1", "alice").await;
+        let repo = ActivityRepo::new(pool.clone());
+        let ws: Id = "ws1".into();
+
+        let first = repo
+            .replace_tasks(&sid, &ws, &[nt("design", TaskStatus::Completed, None), nt("build", TaskStatus::InProgress, None)])
+            .await
+            .unwrap();
+        let build_id = first.iter().find(|t| t.title == "build").unwrap().id.clone();
+        let user = repo.insert_user_task(&sid, &ws, "Fix the  Login bug", Some("see ticket")).await.unwrap();
+        assert_eq!(user.source, "user");
+        assert!(user.nudge_pending);
+        assert_eq!(user.description.as_deref(), Some("see ticket"));
+
+        // Plan update: design dropped, build completed, the agent adopted the
+        // user's task (different casing) with an ext_id, plus a new one.
+        let second = repo
+            .replace_tasks(
+                &sid,
+                &ws,
+                &[
+                    nt("build", TaskStatus::Completed, None),
+                    nt("fix the login bug", TaskStatus::InProgress, Some("7")),
+                    nt("test", TaskStatus::Pending, None),
+                ],
+            )
+            .await
+            .unwrap();
+        let titles: Vec<&str> = second.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["build", "fix the login bug", "test"], "design deleted, order = plan order");
+        let build = second.iter().find(|t| t.title == "build").unwrap();
+        assert_eq!(build.id, build_id, "agent row updated in place");
+        assert_eq!(build.status, TaskStatus::Completed);
+        let fix = second.iter().find(|t| t.ext_id.as_deref() == Some("7")).unwrap();
+        assert_eq!(fix.id, user.id, "user row adopted, id stable");
+        assert_eq!(fix.source, "user");
+        assert_eq!(fix.status, TaskStatus::InProgress);
+        assert_eq!(fix.description.as_deref(), Some("see ticket"));
+
+        // A plan that drops the adopted task keeps the user row (after the plan).
+        let third = repo.replace_tasks(&sid, &ws, &[nt("test", TaskStatus::Completed, None)]).await.unwrap();
+        assert_eq!(third.len(), 2);
+        assert_eq!(third[0].title, "test");
+        assert_eq!(third[1].id, user.id);
+
+        // Summary counts ALL rows (user-added tasks included).
+        let sum = repo.workspace_summary(&ws).await.unwrap();
+        assert_eq!(sum[0].total, 2);
+        assert_eq!(sum[0].done, 1);
+
+        // Nudge queue.
+        let pending = repo.pending_nudges(Some(&sid)).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].task_id, user.id);
+        // Atomic claim: exactly one winner; unclaim re-queues.
+        assert!(repo.claim_nudge(&user.id).await.unwrap());
+        assert!(!repo.claim_nudge(&user.id).await.unwrap());
+        repo.unclaim_nudge(&user.id).await.unwrap();
+        assert_eq!(repo.pending_nudges(Some(&sid)).await.unwrap().len(), 1);
+        repo.mark_nudged(&user.id).await.unwrap();
+        assert!(repo.pending_nudges(None).await.unwrap().is_empty());
+        let after = repo.list_tasks(&sid).await.unwrap();
+        assert!(after.iter().all(|t| !t.nudge_pending));
+        assert!(after.iter().any(|t| t.nudged_at.is_some()));
+    }
+
+    /// `TaskCreate` / `TaskUpdate` update by ext_id (or adopt a same-titled row).
+    #[tokio::test]
+    async fn upsert_task_by_ext_id() {
+        let pool = mk_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let sid = seed_session(&pool, "ws1", "alice").await;
+        let repo = ActivityRepo::new(pool.clone());
+        let ws: Id = "ws1".into();
+        let user = repo.insert_user_task(&sid, &ws, "Write docs", None).await.unwrap();
+        let l = repo.upsert_task(&sid, &ws, "1", Some("write docs"), None).await.unwrap();
+        assert_eq!(l.len(), 1, "same-titled user row adopted");
+        assert_eq!(l[0].id, user.id);
+        assert_eq!(l[0].ext_id.as_deref(), Some("1"));
+        let l = repo.upsert_task(&sid, &ws, "1", None, Some(TaskStatus::Completed)).await.unwrap();
+        assert_eq!(l[0].status, TaskStatus::Completed);
+        let l = repo.upsert_task(&sid, &ws, "2", Some("Ship it"), None).await.unwrap();
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[1].source, "agent");
+        assert_eq!(l[1].position, 1);
     }
 }

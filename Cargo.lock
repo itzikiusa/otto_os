@@ -3820,6 +3820,7 @@ dependencies = [
  "otto-ssh",
  "otto-state",
  "otto-swarm",
+ "otto-transcript",
  "otto-usage",
  "otto-vault",
  "otto-workgraph",
@@ -3861,6 +3862,7 @@ dependencies = [
  "otto-rbac",
  "otto-sandbox",
  "otto-state",
+ "otto-transcript",
  "serde",
  "serde_json",
  "shell-words",
@@ -3934,12 +3936,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-transcript"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "otto-usage"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "dirs",
  "otto-core",
+ "otto-transcript",
  "reqwest",
  "serde",
  "serde_json",

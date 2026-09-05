@@ -17,6 +17,9 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { router } from '../../lib/router.svelte';
+  import { untrack } from 'svelte';
+  import { transcript, type SessionViewMode } from '../../lib/stores/transcript.svelte';
+  import ConversationView from './conversation/ConversationView.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
 
   // Default idle-suspend grace period (5 minutes) used for the "suspends in N"
@@ -129,6 +132,83 @@
   // --- Additional directories editor (meta.extra_dirs → `--add-dir` args) -----
   // Only agent sessions launch a CLI that honors `--add-dir`.
   const isAgent = $derived(session?.kind === 'agent');
+
+  // --- Terminal · Chat · Split (docs/design/conversation-view.md §5.1) --------
+  // The chat is rebuilt from the provider transcript; probing it once per agent
+  // session (cheap 200, `unavailable_reason` when nothing resolves) also picks
+  // the default view: Chat when a transcript resolves, else Terminal. The
+  // user's choice is persisted per session (`otto_session_view:<id>`, winKey).
+  const conv = $derived(isAgent ? transcript.conversation({ sessionId }) : null);
+  $effect(() => {
+    if (conv) transcript.ensure(conv.src);
+  });
+  const defaultView = $derived<SessionViewMode>(
+    conv?.transcript && conv.unavailable == null ? 'chat' : 'terminal',
+  );
+  const savedView = $derived(isAgent ? transcript.view(sessionId) : null);
+  const view = $derived<SessionViewMode>(isAgent ? (savedView ?? defaultView) : 'terminal');
+  // Below 1200px the window can't hold chat + terminal (+ the right panel):
+  // Split degrades to Chat, with Terminal one tab away in the segmented control.
+  let wide = $state(typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1200px)').matches);
+  $effect(() => {
+    const mq = window.matchMedia('(min-width: 1200px)');
+    const sync = () => (wide = mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
+  const effView = $derived<SessionViewMode>(view === 'split' && !wide ? 'chat' : view);
+  function setView(mode: SessionViewMode): void {
+    transcript.setView(sessionId, mode);
+  }
+  /** ⌘⇧C cycles Terminal → Chat → Split (Split skipped when the window is narrow). */
+  function cycleView(): void {
+    const order: SessionViewMode[] = wide ? ['terminal', 'chat', 'split'] : ['terminal', 'chat'];
+    const i = order.indexOf(effView);
+    setView(order[(i + 1) % order.length]);
+  }
+  $effect(() => {
+    if (!isAgent) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey) return;
+      if (e.key !== 'c' && e.key !== 'C') return;
+      // Only the active pane reacts (tiled/split views mount several).
+      if (ws.activeSessionId !== sessionId) return;
+      e.preventDefault();
+      cycleView();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+  // Split: chat left / terminal right, the divider drag copied from the right
+  // panel's resizer (shell/RightPanel.svelte) but as a fraction of this pane.
+  let bodyEl = $state<HTMLDivElement | null>(null);
+  let chatFrac = $state(untrack(() => transcript.splitFrac(sessionId)));
+  let splitResizing = $state(false);
+  function startSplit(e: MouseEvent): void {
+    e.preventDefault();
+    const el = bodyEl;
+    if (!el) return;
+    splitResizing = true;
+    const rect = el.getBoundingClientRect();
+    const rtl = getComputedStyle(el).direction === 'rtl';
+    const onMove = (ev: MouseEvent) => {
+      const x = rtl ? rect.right - ev.clientX : ev.clientX - rect.left;
+      chatFrac = Math.min(0.8, Math.max(0.3, x / rect.width));
+    };
+    const onUp = () => {
+      splitResizing = false;
+      transcript.setSplitFrac(sessionId, chatFrac);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
   let dirsOpen = $state(false);
   let dirsBusy = $state(false);
   let extraDirs = $state<string[]>([]);
@@ -421,7 +501,16 @@
     {/if}
     {#if session?.cwd}<span class="pane-cwd mono" title={session.cwd}>{session.cwd}</span>{/if}
     <span class="grow"></span>
-    {#if !viewport.isPhone && ui.termToolbar}
+    {#if isAgent}
+      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()}>
+        <button role="tab" class:active={effView === 'terminal'} aria-selected={effView === 'terminal'} onclick={() => setView('terminal')} title="Terminal (⌘⇧C cycles)">Terminal</button>
+        <button role="tab" class:active={effView === 'chat'} aria-selected={effView === 'chat'} onclick={() => setView('chat')} title="Chat — the conversation rebuilt from the transcript">Chat</button>
+        {#if wide}
+          <button role="tab" class:active={effView === 'split'} aria-selected={effView === 'split'} onclick={() => setView('split')} title="Chat beside the terminal">Split</button>
+        {/if}
+      </div>
+    {/if}
+    {#if !viewport.isPhone && ui.termToolbar && effView !== 'chat'}
       <!-- Terminal font zoom + copy-on-select, surfaced in the header bar so the
            controls never float over (and hide) terminal content. The embedded
            <Terminal> gets showToolbar={false} to drop its overlay counterpart. -->
@@ -464,8 +553,21 @@
       <button class="icon-btn" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
     {/if}
   </header>
-  <div class="pane-term">
-    <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
+  <div class="pane-body" class:split={effView === 'split'} class:resizing={splitResizing} bind:this={bodyEl} data-view={effView}>
+    {#if effView !== 'terminal'}
+      <div class="pane-chat" style={effView === 'split' ? `flex: 0 0 ${(chatFrac * 100).toFixed(2)}%` : ''}>
+        <ConversationView {sessionId} workspaceId={session?.workspace_id ?? ws.currentId ?? ''} readonly={readOnly} />
+      </div>
+    {/if}
+    {#if effView === 'split'}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="pane-splitter" class:active={splitResizing} onmousedown={startSplit} title="Drag to resize"></div>
+    {/if}
+    {#if effView !== 'chat'}
+      <div class="pane-term">
+        <Terminal bind:this={termRef} {sessionId} {readOnly} {resumable} restartable={isAgent} onrestart={restart} {restartNonce} onstatus={onTermStatus} showToolbar={false} autoFocus={kbFocused} preferDom={isAgent} claimOnAttach={!readOnly} />
+      </div>
+    {/if}
   </div>
 </section>
 
@@ -681,9 +783,45 @@
     text-overflow: ellipsis;
     max-width: 220px;
   }
+  .pane-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: row;
+    min-width: 0;
+  }
   .pane-term {
     flex: 1;
     min-height: 0;
+    min-width: 0;
+  }
+  .pane-chat {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    background: var(--bg);
+  }
+  .pane-splitter {
+    flex: 0 0 5px;
+    cursor: col-resize;
+    background: var(--border);
+    transition: background 120ms ease-out;
+  }
+  .pane-splitter:hover,
+  .pane-splitter.active {
+    background: color-mix(in srgb, var(--accent) 60%, var(--border));
+  }
+  .pane-body.resizing {
+    user-select: none;
+  }
+  .view-seg {
+    padding: 1px;
+    flex-shrink: 0;
+  }
+  .view-seg > button {
+    height: 18px;
+    font-size: 10.5px;
+    padding: 0 8px;
   }
   .pane-title[role='button'] {
     cursor: text;
@@ -816,6 +954,10 @@
   @container (max-width: 300px) {
     .term-ctl {
       display: none;
+    }
+    .view-seg > button {
+      padding: 0 5px;
+      font-size: 10px;
     }
     .pane-title {
       max-width: 96px;

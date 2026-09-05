@@ -250,6 +250,41 @@ pub fn parse_json(body: &str, mappings: &[Mapping]) -> Parsed {
     p
 }
 
+/// Labels the dashboard actually reads. Everything else (`path`, `method`,
+/// `service`, `handler`…) is folded away at ingest: an API gateway exports a
+/// series per path × method × status, and storing those verbatim was ~1500
+/// rows per pod per cycle — 10M rows an hour — which is what made the
+/// workloads query take seconds. Sums of monotonic counters stay monotonic,
+/// so the `max − min` rate math is unchanged.
+pub const KEEP_LABELS: [&str; 4] = ["code", "status", "status_code", "le"];
+
+/// Collapse samples onto [`KEEP_LABELS`], summing values that land on the
+/// same (metric, labels) key. Order of first appearance is preserved.
+pub fn collapse_labels(samples: Vec<Sample>) -> Vec<Sample> {
+    let mut index: BTreeMap<(String, Vec<(String, String)>), usize> = BTreeMap::new();
+    let mut out: Vec<Sample> = Vec::new();
+    for s in samples {
+        let kept: BTreeMap<String, String> = s
+            .labels
+            .into_iter()
+            .filter(|(k, _)| KEEP_LABELS.contains(&k.as_str()))
+            .collect();
+        let key = (s.metric.clone(), kept.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        match index.get(&key) {
+            Some(&i) => out[i].value += s.value,
+            None => {
+                index.insert(key, out.len());
+                out.push(Sample {
+                    metric: s.metric,
+                    labels: kept,
+                    value: s.value,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Health probe: `up` (1 on 2xx) + the raw `http_status`.
 pub fn parse_health(status: u16) -> Parsed {
     let up = if (200..300).contains(&status) { 1.0 } else { 0.0 };
@@ -507,6 +542,31 @@ nan_metric NaN
         assert_eq!(parse_unit(&json!(true), &Unit::Number), Some(1.0));
         assert_eq!(parse_unit(&json!("x"), &Unit::Number), None);
         assert_eq!(parse_unit(&json!(null), &Unit::Number), None);
+    }
+
+    #[test]
+    fn collapse_sums_across_dropped_labels_and_keeps_code_and_le() {
+        let mk = |m: &str, l: &[(&str, &str)], v: f64| Sample {
+            metric: m.into(),
+            labels: l.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            value: v,
+        };
+        let out = collapse_labels(vec![
+            mk("http_requests_total", &[("path", "/a"), ("method", "GET"), ("code", "200")], 5.0),
+            mk("http_requests_total", &[("path", "/b"), ("method", "POST"), ("code", "200")], 7.0),
+            mk("http_requests_total", &[("path", "/b"), ("code", "500")], 1.0),
+            mk("http_request_duration_seconds_bucket", &[("path", "/a"), ("le", "0.1")], 3.0),
+            mk("http_request_duration_seconds_bucket", &[("path", "/b"), ("le", "0.1")], 4.0),
+            mk("up", &[], 1.0),
+        ]);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].labels.len(), 1);
+        assert_eq!(out[0].labels["code"], "200");
+        assert_eq!(out[0].value, 12.0);
+        assert_eq!(out[1].labels["code"], "500");
+        assert_eq!(out[2].labels["le"], "0.1");
+        assert_eq!(out[2].value, 7.0);
+        assert_eq!(out[3].metric, "up");
     }
 
     #[test]

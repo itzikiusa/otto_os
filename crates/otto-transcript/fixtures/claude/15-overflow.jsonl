@@ -1,0 +1,5 @@
+{"type":"user","uuid":"u1","timestamp":"2026-09-01T10:00:00Z","sessionId":"ovf","cwd":"/repo","message":{"role":"user","content":"count everything"}}
+{"type":"assistant","uuid":"a1","requestId":"req_1","timestamp":"2026-09-01T10:00:01Z","message":{"id":"msg_1","model":"m","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1e300,"output_tokens":18446744073709551615,"cache_read_input_tokens":-3,"cache_creation_input_tokens":1e300}}}
+{"type":"assistant","uuid":"a2","requestId":"req_2","timestamp":"2026-09-01T10:00:02Z","message":{"id":"msg_2","model":"m","content":[{"type":"text","text":"more"}],"usage":{"input_tokens":0,"output_tokens":18446744073709551615}}}
+{"type":"system","subtype":"turn_duration","durationMs":18446744073709551615,"timestamp":"2026-09-01T10:00:03Z","uuid":"s1"}
+{"type":"system","subtype":"turn_duration","durationMs":18446744073709551615,"timestamp":"2026-09-01T10:00:04Z","uuid":"s2"}

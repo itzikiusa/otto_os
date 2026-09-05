@@ -199,6 +199,18 @@ fn scope_of(event: &Event) -> Scope<'_> {
             session_id,
             workspace_id,
             ..
+        }
+        // Conversation view: transcript prose / tool output and produced
+        // artifacts are session-private, exactly like the trail.
+        | Event::TranscriptAppended {
+            session_id,
+            workspace_id,
+            ..
+        }
+        | Event::ArtifactAdded {
+            session_id,
+            workspace_id,
+            ..
         } => Scope::Session {
             workspace_id,
             session_id,
@@ -282,7 +294,9 @@ fn scope_of(event: &Event) -> Scope<'_> {
         | Event::PersonalAgentRunUpdated { workspace_id, .. }
         | Event::AgentRoomMessage { workspace_id, .. }
         // Run with Otto stage updates go to the run's workspace members.
-        | Event::OttoRunUpdated { workspace_id, .. } => Scope::Workspace(workspace_id),
+        | Event::OttoRunUpdated { workspace_id, .. }
+        // History index rescan progress goes to the requesting workspace.
+        | Event::HistoryIndexProgress { workspace_id, .. } => Scope::Workspace(workspace_id),
         // Usage tick, self-improvement updates, and insight-ready are global
         // (no workspace axis — insights are a cross-workspace cadence report).
         // Deliver them to every authenticated client, matching the `Notice` pattern.
@@ -605,6 +619,17 @@ mod tests {
                 session_id: "s1".into(),
                 workspace_id: "ws1".into(),
                 tasks: Vec::<AgentTask>::new(),
+            },
+            Event::TranscriptAppended {
+                session_id: "s1".into(),
+                workspace_id: "ws1".into(),
+                cursor: "0".into(),
+                turns: Vec::new(),
+            },
+            Event::ArtifactAdded {
+                session_id: "s1".into(),
+                workspace_id: "ws1".into(),
+                artifact: serde_json::Value::Null,
             },
         ];
         for ev in &lookups {

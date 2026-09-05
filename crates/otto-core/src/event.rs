@@ -437,6 +437,34 @@ pub enum Event {
     K8sClusterUpdated { cluster_id: Id, deleted: bool },
     /// Kubernetes console: the kubectl/k9s installer job changed state.
     K8sInstallUpdated { tool: String, state: String },
+    /// Conversation view: the session's transcript grew. `turns` are the turns
+    /// touched by the new records (each sent whole — clients replace by `id`);
+    /// `cursor` is the index of the LAST folded record. Payloads over 64 KB are
+    /// sent with `turns: []` so the client re-fetches instead. Session-family
+    /// scoped (owner / workspace admin / root), like `trail_appended`. `turns`
+    /// travels as JSON because otto-core cannot depend on otto-transcript.
+    TranscriptAppended {
+        workspace_id: Id,
+        session_id: Id,
+        cursor: String,
+        turns: Vec<serde_json::Value>,
+    },
+    /// Conversation view: the transcript fold found a new artifact (a written
+    /// file, PR link, image …). `artifact` is the serialized
+    /// `otto_transcript::Artifact`. Session-family scoped.
+    ArtifactAdded {
+        workspace_id: Id,
+        session_id: Id,
+        artifact: serde_json::Value,
+    },
+    /// History index rescan progress (`POST /workspaces/{wid}/history/rescan`).
+    /// Workspace-scoped. `done` is true on the final tick.
+    HistoryIndexProgress {
+        workspace_id: Id,
+        scanned: u64,
+        total: u64,
+        done: bool,
+    },
     /// Kubernetes monitoring: a collector cycle finished for `cluster_id`
     /// (dashboards refresh; `ok` = samples were written).
     K8sMonitorCycle {

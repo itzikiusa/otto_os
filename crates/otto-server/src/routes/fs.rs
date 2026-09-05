@@ -26,7 +26,7 @@ use crate::state::ServerCtx;
 use otto_core::domain::User;
 use otto_core::Error;
 
-mod sandbox {
+pub(crate) mod sandbox {
     //! Allow-list + deny-list sandbox for the host-file endpoints. Operates on a
     //! path that has ALREADY been canonicalized (symlinks + `..` resolved), so a
     //! symlink pointing outside the allowed roots (or into `~/.ssh`) is judged by
@@ -162,7 +162,7 @@ mod sandbox {
     /// True when `canonical` (an already-resolved path) is inside a denied
     /// directory or under a denied absolute prefix. Used for both browse and
     /// read so a denied directory can neither be listed nor descended.
-    pub(super) fn is_denied_dir(canonical: &Path) -> bool {
+    pub(crate) fn is_denied_dir(canonical: &Path) -> bool {
         // Home-relative secret dirs.
         if let Some(home) = home() {
             if let Ok(home_canon) = home.canonicalize() {
@@ -186,7 +186,7 @@ mod sandbox {
 
     /// True when `canonical` names a known secret file (by exact name or
     /// extension). Applied to `/fs/read` on top of [`is_denied_dir`].
-    pub(super) fn is_denied_file(canonical: &Path) -> bool {
+    pub(crate) fn is_denied_file(canonical: &Path) -> bool {
         let name = match canonical.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_ascii_lowercase(),
             None => return false,
