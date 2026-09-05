@@ -1,0 +1,1683 @@
+[
+  {
+    "id": "Workspace",
+    "file": "Workspace.mp4",
+    "title": "Your workspace",
+    "desc": "Start an agent, find your bearings, and follow the work.",
+    "accent": "#72a9ff",
+    "chapters": [
+      {
+        "id": "sessions",
+        "title": "Start a session",
+        "route": "agents",
+        "doc": "agent-sessions.md",
+        "view": "terminal",
+        "heading": "Fix the checkout timeout",
+        "detail": "Atlas / checkout-service",
+        "items": [
+          "Provider  Codex",
+          "Model  Choose a model",
+          "Repository  checkout-service",
+          "Session  Investigate timeout"
+        ],
+        "steps": [
+          "Open Agents and create a session. Choose your provider, model, and repository.",
+          "Give the agent a concrete task. Its terminal stays live while it works.",
+          "Split or tile sessions to compare work. Reopen a session when you need to continue."
+        ],
+        "source": "ui/src/modules/agents/NewSession.svelte",
+        "start": 6,
+        "duration": 21,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/6fffd2eee779969fa6b5.mp3",
+            "duration": 5.544
+          },
+          {
+            "file": "studio-v2/audio/voice/3b5c9239353081f4cae1.mp3",
+            "duration": 4.776
+          },
+          {
+            "file": "studio-v2/audio/voice/efcaf5d013da2aa455f5.mp3",
+            "duration": 5.448
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.544,
+          13.12
+        ],
+        "actions": [
+          "Choose provider and model",
+          "Watch the live terminal",
+          "Split and continue"
+        ]
+      },
+      {
+        "id": "mission",
+        "title": "Follow the work",
+        "route": "mission-control",
+        "doc": "mission-control.md",
+        "view": "work",
+        "heading": "Checkout reliability",
+        "detail": "Workspace activity",
+        "items": [
+          "Story / Retry checkout safely",
+          "Session / Investigate timeout",
+          "Review / Check the change",
+          "Approval / Waiting for you"
+        ],
+        "steps": [
+          "Open Mission Control to see related work in one place.",
+          "Select a work item to inspect its status, links, and evidence.",
+          "Follow the linked session or review when you need to act."
+        ],
+        "source": "ui/src/modules/mission-control/MissionControlPage.svelte",
+        "start": 27,
+        "duration": 18,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/105cb8d3382047059b6b.mp3",
+            "duration": 3.72
+          },
+          {
+            "file": "studio-v2/audio/voice/da22a9efc241dc801f49.mp3",
+            "duration": 4.632
+          },
+          {
+            "file": "studio-v2/audio/voice/d65f0a486308fedd0312.mp3",
+            "duration": 3.72
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.4,
+          11.832
+        ],
+        "actions": [
+          "Open Mission Control",
+          "Inspect a work item",
+          "Follow its linked work"
+        ]
+      },
+      {
+        "id": "navigation",
+        "title": "Make room to think",
+        "route": "settings",
+        "doc": "rtl-and-responsive.md",
+        "view": "settings",
+        "heading": "Your workspace, arranged for you",
+        "detail": "Settings / Appearance",
+        "items": [
+          "Theme / Dark",
+          "Sidebar / Reorder modules",
+          "Layout / Split sessions",
+          "Command palette / ⌘K"
+        ],
+        "steps": [
+          "Open Settings, then Appearance, to choose your theme and arrange the sidebar.",
+          "Keep the pages you use most within reach. Hide entries you rarely need.",
+          "Press Command K to find a command and move straight to the next task."
+        ],
+        "source": "ui/src/lib/sidebar.ts",
+        "start": 45,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/ce61a3772a5799c169e1.mp3",
+            "duration": 5.064
+          },
+          {
+            "file": "studio-v2/audio/voice/068ae6610051c46ca7e3.mp3",
+            "duration": 4.608
+          },
+          {
+            "file": "studio-v2/audio/voice/25fd777f1afd257c4dde.mp3",
+            "duration": 4.464
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.064,
+          12.472
+        ],
+        "actions": [
+          "Open Appearance",
+          "Arrange the sidebar",
+          "Find a command"
+        ]
+      }
+    ],
+    "number": 1,
+    "introSeconds": 6,
+    "outroSeconds": 5,
+    "duration": 69,
+    "tags": "start a session agents atlas / checkout-service provider  codex model  choose a model repository  checkout-service session  investigate timeout follow the work mission control workspace activity story / retry checkout safely session / investigate timeout review / check the change approval / waiting for you make room to think settings settings / appearance theme / dark sidebar / reorder modules layout / split sessions command palette / ⌘k",
+    "doc": "agent-sessions.md"
+  },
+  {
+    "id": "Delivery",
+    "file": "Delivery.mp4",
+    "title": "From change to proof",
+    "desc": "Inspect a change, review it, and follow the evidence to approval.",
+    "accent": "#72d4be",
+    "chapters": [
+      {
+        "id": "git",
+        "title": "Inspect the change",
+        "route": "git",
+        "doc": "git.md",
+        "view": "diff",
+        "heading": "Retry only transient failures",
+        "detail": "checkout-service / feature/retry-checkout",
+        "items": [
+          "src/checkout/retry.ts",
+          "tests/checkout/retry.test.ts",
+          "docs/checkout.md"
+        ],
+        "steps": [
+          "Open Git and choose your repository. Inspect the working changes before staging.",
+          "Select a file to read its diff. Stage only the changes you intend to commit.",
+          "Use the branch graph and pull requests to keep the change in context."
+        ],
+        "source": "ui/src/modules/git/GitPage.svelte",
+        "start": 6,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/4213c016789ab09bb622.mp3",
+            "duration": 5.424
+          },
+          {
+            "file": "studio-v2/audio/voice/d11c416b83f563dc6ee7.mp3",
+            "duration": 5.088
+          },
+          {
+            "file": "studio-v2/audio/voice/fc03e9f6631fdc881177.mp3",
+            "duration": 4.656
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.424,
+          13.312
+        ],
+        "actions": [
+          "Choose the repository",
+          "Read and stage the diff",
+          "Follow the branch"
+        ]
+      },
+      {
+        "id": "review",
+        "title": "Bring different lenses",
+        "route": "git",
+        "doc": "code-review.md",
+        "view": "review",
+        "heading": "Review the retry change",
+        "detail": "Git / Review",
+        "items": [
+          "Correctness / Retry only safe failures",
+          "Security / Check input boundaries",
+          "Performance / Bound retry duration",
+          "Tests / Cover the final attempt"
+        ],
+        "steps": [
+          "Open Review for a pull request or your working tree. Choose review lenses and providers.",
+          "Open a reviewer session to inspect its work. Triage the collected findings.",
+          "Hand a finding to an agent, then verify the fix before resolving it."
+        ],
+        "source": "ui/src/modules/git/ReviewPanel.svelte",
+        "start": 26,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/f3966a562ebb061fce45.mp3",
+            "duration": 5.784
+          },
+          {
+            "file": "studio-v2/audio/voice/b33a65d4d0195c71de2f.mp3",
+            "duration": 4.968
+          },
+          {
+            "file": "studio-v2/audio/voice/1e7d84ac2c1ae2b62610.mp3",
+            "duration": 4.512
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.784,
+          13.552
+        ],
+        "actions": [
+          "Choose review lenses",
+          "Triage the findings",
+          "Fix and verify"
+        ]
+      },
+      {
+        "id": "proof",
+        "title": "Read the evidence",
+        "route": "proof",
+        "doc": "proof-packs.md",
+        "view": "evidence",
+        "heading": "What supports completion?",
+        "detail": "Proof / Checkout reliability",
+        "items": [
+          "Test run / Passed",
+          "Diff snapshot / Attached",
+          "Review / Findings inspected",
+          "Approval / Human decision"
+        ],
+        "steps": [
+          "Open the linked Proof Pack. Inspect test output, snapshots, and attached artifacts.",
+          "Check the derived status. Missing evidence or a failed check still needs attention.",
+          "Use the evidence to decide whether the work is ready for approval."
+        ],
+        "source": "ui/src/modules/proof/ProofPage.svelte",
+        "start": 46,
+        "duration": 21,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/eacbe9a8c4aa62089994.mp3",
+            "duration": 6.072
+          },
+          {
+            "file": "studio-v2/audio/voice/1f91fe52c493cda09194.mp3",
+            "duration": 5.28
+          },
+          {
+            "file": "studio-v2/audio/voice/eaa306daa35aefa8b760.mp3",
+            "duration": 4.128
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          8.072,
+          14.152
+        ],
+        "actions": [
+          "Open the evidence",
+          "Check the derived status",
+          "Decide on approval"
+        ]
+      },
+      {
+        "id": "run",
+        "title": "Start from the task",
+        "route": "run-with-otto",
+        "doc": "run-with-otto.md",
+        "view": "pipeline",
+        "heading": "Turn a source item into a PR draft",
+        "detail": "Run with Otto",
+        "items": [
+          "Source",
+          "Worktree",
+          "Agent",
+          "Proof + review",
+          "Approval",
+          "PR draft"
+        ],
+        "steps": [
+          "Open Run with Otto. Choose a source item, repository, provider, and model.",
+          "Follow the run through implementation, evidence, and review. Inspect anything that needs attention.",
+          "At the approval gate, review the result before allowing the pull request draft."
+        ],
+        "source": "ui/src/modules/run-with-otto/RunLauncher.svelte",
+        "start": 67,
+        "duration": 22,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/c6ec2dc7db9eb47b787d.mp3",
+            "duration": 5.664
+          },
+          {
+            "file": "studio-v2/audio/voice/fdb5b6a4ab806953894a.mp3",
+            "duration": 6.552
+          },
+          {
+            "file": "studio-v2/audio/voice/e1da32daed0f038a45d1.mp3",
+            "duration": 5.112
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.664,
+          15.016
+        ],
+        "actions": [
+          "Choose the source",
+          "Follow the run",
+          "Review at the gate"
+        ]
+      }
+    ],
+    "number": 2,
+    "introSeconds": 6,
+    "outroSeconds": 5,
+    "duration": 94,
+    "tags": "inspect the change git checkout-service / feature/retry-checkout src/checkout/retry.ts tests/checkout/retry.test.ts docs/checkout.md bring different lenses git git / review correctness / retry only safe failures security / check input boundaries performance / bound retry duration tests / cover the final attempt read the evidence proof proof / checkout reliability test run / passed diff snapshot / attached review / findings inspected approval / human decision start from the task run with otto run with otto source worktree agent proof + review approval pr draft",
+    "doc": "git.md"
+  },
+  {
+    "id": "Context",
+    "file": "Context.mp4",
+    "title": "From idea to context",
+    "desc": "Refine a story, explore the web, and preserve what the team learns.",
+    "accent": "#b9a1ef",
+    "chapters": [
+      {
+        "id": "product",
+        "title": "Refine the story",
+        "route": "product",
+        "doc": "product.md",
+        "view": "document",
+        "heading": "Retry checkout safely",
+        "detail": "Product / Atlas checkout",
+        "items": [
+          "Analysis",
+          "Questions",
+          "Rewrite",
+          "Test Cases",
+          "Plan",
+          "Mockups"
+        ],
+        "steps": [
+          "Import a Jira issue or Confluence page into Product. Open its analysis.",
+          "Resolve the questions, inspect the rewrite, and refine the test cases and plan.",
+          "Create a mockup when a screen helps. Inject the refined context into an agent."
+        ],
+        "source": "ui/src/modules/product/ProductPage.svelte",
+        "start": 6,
+        "duration": 21,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/8146ef04fda78132bb16.mp3",
+            "duration": 5.448
+          },
+          {
+            "file": "studio-v2/audio/voice/7d3ca7e9df97a66d7b07.mp3",
+            "duration": 5.472
+          },
+          {
+            "file": "studio-v2/audio/voice/af27c2e048ce205a9ffc.mp3",
+            "duration": 5.448
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.448,
+          13.72
+        ],
+        "actions": [
+          "Import the story",
+          "Refine the requirements",
+          "Hand off the context"
+        ]
+      },
+      {
+        "id": "canvas",
+        "title": "Make the idea visible",
+        "route": "canvas",
+        "doc": "canvas.md",
+        "view": "canvas",
+        "heading": "A shared view of checkout",
+        "detail": "Canvas / Scene",
+        "items": [
+          "Request",
+          "Checkout",
+          "Payment",
+          "Receipt"
+        ],
+        "steps": [
+          "Open Canvas and create a scene. Choose Excalidraw, Mermaid, or D2.",
+          "Describe the flow to the agent. Watch the scene update as the source changes.",
+          "Refine the diagram in the conversation until it explains the idea clearly."
+        ],
+        "source": "ui/src/modules/canvas/CanvasPage.svelte",
+        "start": 27,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/0f1d2592a436c6ac99ec.mp3",
+            "duration": 5.424
+          },
+          {
+            "file": "studio-v2/audio/voice/615ec3e012a5eaa89507.mp3",
+            "duration": 5.136
+          },
+          {
+            "file": "studio-v2/audio/voice/e6a87eef535026c715d0.mp3",
+            "duration": 4.872
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.424,
+          13.36
+        ],
+        "actions": [
+          "Choose a scene format",
+          "Describe the flow",
+          "Refine the diagram"
+        ]
+      },
+      {
+        "id": "browser",
+        "title": "Research with context",
+        "route": "browser",
+        "doc": "browser.md",
+        "view": "browser",
+        "heading": "Understand the retry contract",
+        "detail": "Browser / Reader",
+        "items": [
+          "Retry only transient failures",
+          "Use a bounded backoff",
+          "Keep the idempotency key",
+          "Save the source with your notes"
+        ],
+        "steps": [
+          "Open Browser and navigate to a reference. Choose Reader, or Live in the desktop app.",
+          "Mark the passages or elements that matter. Add a note about what to investigate.",
+          "Send the marks into a session, or save the page and notes to Vault."
+        ],
+        "source": "ui/src/modules/browser/BrowserView.svelte",
+        "start": 47,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/71d94c4b4c9f4961a944.mp3",
+            "duration": 5.856
+          },
+          {
+            "file": "studio-v2/audio/voice/afd473f9268788ffef0b.mp3",
+            "duration": 5.16
+          },
+          {
+            "file": "studio-v2/audio/voice/a9596648f915a29b8ad1.mp3",
+            "duration": 4.44
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.856,
+          13.816
+        ],
+        "actions": [
+          "Open a reference",
+          "Mark the important detail",
+          "Send or save the context"
+        ]
+      },
+      {
+        "id": "vault",
+        "title": "Keep the knowledge",
+        "route": "vault",
+        "doc": "vault.md",
+        "view": "document",
+        "heading": "Checkout reliability notes",
+        "detail": "Vault / Atlas",
+        "items": [
+          "Retry policy",
+          "API contract",
+          "Operations runbook",
+          "Related decisions"
+        ],
+        "steps": [
+          "Open Vault and select a vault folder. Create or open a note.",
+          "Link related notes and use search to find the knowledge you need.",
+          "Keep decisions, references, and runbooks connected to the work they explain."
+        ],
+        "source": "ui/src/modules/vault/VaultPage.svelte",
+        "start": 67,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/820492a669bdfae716e2.mp3",
+            "duration": 4.272
+          },
+          {
+            "file": "studio-v2/audio/voice/ade60a461ef5f5f80af0.mp3",
+            "duration": 3.96
+          },
+          {
+            "file": "studio-v2/audio/voice/63eae89fd16f3f9b773b.mp3",
+            "duration": 5.16
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.4,
+          11.6
+        ],
+        "actions": [
+          "Open a vault",
+          "Write and link notes",
+          "Keep decisions connected"
+        ]
+      }
+    ],
+    "number": 3,
+    "introSeconds": 6,
+    "outroSeconds": 5,
+    "duration": 91,
+    "tags": "refine the story product product / atlas checkout analysis questions rewrite test cases plan mockups make the idea visible canvas canvas / scene request checkout payment receipt research with context browser browser / reader retry only transient failures use a bounded backoff keep the idempotency key save the source with your notes keep the knowledge vault vault / atlas retry policy api contract operations runbook related decisions",
+    "doc": "product.md"
+  },
+  {
+    "id": "Automation",
+    "file": "Automation.mp4",
+    "title": "Work that keeps moving",
+    "desc": "Choose the right kind of automation, with clear limits and visible progress.",
+    "accent": "#efbd76",
+    "chapters": [
+      {
+        "id": "swarm",
+        "title": "Build an agent team",
+        "route": "swarm",
+        "doc": "agent-swarm.md",
+        "view": "team",
+        "heading": "Checkout reliability team",
+        "detail": "Swarm / Atlas",
+        "items": [
+          "Coordinator / Assign the work",
+          "Implementer / Update retry logic",
+          "Reviewer / Inspect the change",
+          "Tester / Exercise failure cases"
+        ],
+        "steps": [
+          "Open Swarm and create a team. Give each role a clear responsibility.",
+          "Start the project and follow assignments on the board and run view.",
+          "Open an agent session when work needs direction. Review the team result."
+        ],
+        "source": "ui/src/modules/swarm/SwarmPage.svelte",
+        "start": 6,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/220a141e5ee10e64da2b.mp3",
+            "duration": 4.632
+          },
+          {
+            "file": "studio-v2/audio/voice/6d10daedeab57246e523.mp3",
+            "duration": 4.224
+          },
+          {
+            "file": "studio-v2/audio/voice/470d5a7549a874806cdf.mp3",
+            "duration": 4.752
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.632,
+          11.832
+        ],
+        "actions": [
+          "Define the roles",
+          "Follow assignments",
+          "Review the team result"
+        ]
+      },
+      {
+        "id": "loops",
+        "title": "Give iteration a boundary",
+        "route": "loops",
+        "doc": "goal-loops.md",
+        "view": "pipeline",
+        "heading": "Make the retry tests pass",
+        "detail": "Goal Loops",
+        "items": [
+          "Goal",
+          "Plan",
+          "Execute",
+          "Evaluate",
+          "Digest"
+        ],
+        "steps": [
+          "Create a Goal Loop with a concrete goal, acceptance criteria, and budget.",
+          "Follow each iteration as the agent plans, executes, and evaluates its result.",
+          "Inspect the evidence and stop or redirect the loop when the work needs judgment."
+        ],
+        "source": "ui/src/modules/loops/LoopsPage.svelte",
+        "start": 25,
+        "duration": 22,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/493575f67730aa1baa3d.mp3",
+            "duration": 5.28
+          },
+          {
+            "file": "studio-v2/audio/voice/93e9cf69be68fbd66cc3.mp3",
+            "duration": 6.12
+          },
+          {
+            "file": "studio-v2/audio/voice/29d0a1050df738a833ee.mp3",
+            "duration": 5.616
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.28,
+          14.2
+        ],
+        "actions": [
+          "Set goal and budget",
+          "Follow the iterations",
+          "Inspect and redirect"
+        ]
+      },
+      {
+        "id": "workflows",
+        "title": "Connect the steps",
+        "route": "workflows",
+        "doc": "workflows.md",
+        "view": "pipeline",
+        "heading": "A repeatable release check",
+        "detail": "Workflows",
+        "items": [
+          "Trigger",
+          "Agent",
+          "Condition",
+          "Approval",
+          "Report"
+        ],
+        "steps": [
+          "Open Workflows and build a graph from the steps your process needs.",
+          "Connect agent work, conditions, and approval nodes. Choose how the workflow starts.",
+          "Run it and inspect each node. Use the run view to investigate a failed step."
+        ],
+        "source": "ui/src/modules/workflows/WorkflowsPage.svelte",
+        "start": 47,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/a5181dd33e5fa2902f8a.mp3",
+            "duration": 4.152
+          },
+          {
+            "file": "studio-v2/audio/voice/36428b1512f55a7ef7f9.mp3",
+            "duration": 5.592
+          },
+          {
+            "file": "studio-v2/audio/voice/c5e090a55ba30cc292a6.mp3",
+            "duration": 5.376
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.4,
+          12.792
+        ],
+        "actions": [
+          "Build the graph",
+          "Connect the steps",
+          "Inspect a run"
+        ]
+      },
+      {
+        "id": "scheduled",
+        "title": "Put a report on a schedule",
+        "route": "scheduled-tasks",
+        "doc": "scheduled-tasks.md",
+        "view": "schedule",
+        "heading": "Morning checkout health report",
+        "detail": "Scheduled Tasks",
+        "items": [
+          "Schedule / Weekdays",
+          "Timezone / Choose your timezone",
+          "Prompt / Summarize recent failures",
+          "Delivery / Select a destination"
+        ],
+        "steps": [
+          "Create a Scheduled Task with a prompt, provider, and schedule.",
+          "Choose the timezone and report destination. Check when it will run next.",
+          "Inspect the generated report and execution history before relying on the routine."
+        ],
+        "source": "ui/src/modules/scheduled-tasks/ScheduledTasksPage.svelte",
+        "start": 67,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/3d00f5b2bcc1e1c146ed.mp3",
+            "duration": 4.368
+          },
+          {
+            "file": "studio-v2/audio/voice/4996d4c81c51ad62404d.mp3",
+            "duration": 4.656
+          },
+          {
+            "file": "studio-v2/audio/voice/c0cf7ec407f965b67153.mp3",
+            "duration": 5.664
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.4,
+          11.856
+        ],
+        "actions": [
+          "Create the schedule",
+          "Choose time and delivery",
+          "Inspect the report"
+        ]
+      },
+      {
+        "id": "personal",
+        "title": "Meet your personal agent",
+        "route": "personal-agents",
+        "doc": "personal-agents.md",
+        "view": "chat",
+        "heading": "Atlas release assistant",
+        "detail": "Personal Agents",
+        "items": [
+          "Persona / Release analyst",
+          "Provider + model / Pinned",
+          "Schedules / Morning briefing",
+          "Memory / Release context"
+        ],
+        "steps": [
+          "Open Personal Agents and create a named persona. Pin its provider and model.",
+          "Add schedules and useful memory. Chat with the agent whenever you need it.",
+          "Inspect its reports and shared rooms to follow the conversations between agents."
+        ],
+        "source": "ui/src/modules/personal-agents/PersonalAgentsPage.svelte",
+        "start": 87,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/5bb61795fd0329cb4313.mp3",
+            "duration": 5.184
+          },
+          {
+            "file": "studio-v2/audio/voice/641849d6dbf429382658.mp3",
+            "duration": 4.632
+          },
+          {
+            "file": "studio-v2/audio/voice/79a5edd223a3607970aa.mp3",
+            "duration": 5.04
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.184,
+          12.616
+        ],
+        "actions": [
+          "Define the persona",
+          "Add memory and schedules",
+          "Follow chats and rooms"
+        ]
+      }
+    ],
+    "number": 4,
+    "introSeconds": 6,
+    "outroSeconds": 5,
+    "duration": 112,
+    "tags": "build an agent team swarm swarm / atlas coordinator / assign the work implementer / update retry logic reviewer / inspect the change tester / exercise failure cases give iteration a boundary loops goal loops goal plan execute evaluate digest connect the steps workflows workflows trigger agent condition approval report put a report on a schedule scheduled tasks scheduled tasks schedule / weekdays timezone / choose your timezone prompt / summarize recent failures delivery / select a destination meet your personal agent personal agents personal agents persona / release analyst provider + model / pinned schedules / morning briefing memory / release context",
+    "doc": "agent-swarm.md"
+  },
+  {
+    "id": "Data",
+    "file": "Data.mp4",
+    "title": "Follow the data",
+    "desc": "Connect to a system, inspect a record, and test the contract around it.",
+    "accent": "#79c9dc",
+    "chapters": [
+      {
+        "id": "connections",
+        "title": "Start with a connection",
+        "route": "connections",
+        "doc": "connections-ssh-sftp.md",
+        "view": "connections",
+        "heading": "Your systems, one starting point",
+        "detail": "Connections",
+        "items": [
+          "SSH / Atlas staging",
+          "MySQL / Checkout data",
+          "Redis / Session cache",
+          "Kafka / Checkout events"
+        ],
+        "steps": [
+          "Open Connections to find saved terminals, databases, and Kafka clusters.",
+          "Choose a profile and connect. Use the configured SSH tunnel when the system requires one.",
+          "For SSH, open the terminal or SFTP browser to inspect files on the host."
+        ],
+        "source": "ui/src/modules/connections/ConnectionForm.svelte",
+        "start": 6,
+        "duration": 23,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/bcfafa5daf66f587bca0.mp3",
+            "duration": 5.304
+          },
+          {
+            "file": "studio-v2/audio/voice/d21169cb349f6439cb09.mp3",
+            "duration": 6.384
+          },
+          {
+            "file": "studio-v2/audio/voice/87b581d2282b3fbe8be4.mp3",
+            "duration": 5.928
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.304,
+          14.488
+        ],
+        "actions": [
+          "Choose a saved profile",
+          "Open the connection",
+          "Inspect terminal or files"
+        ]
+      },
+      {
+        "id": "database",
+        "title": "Ask a precise question",
+        "route": "database",
+        "doc": "database-explorer.md",
+        "view": "database",
+        "heading": "Find recent checkout failures",
+        "detail": "Connections / Database Explorer",
+        "items": [
+          "checkout_id / state / attempts",
+          "co_1042 / succeeded / 1",
+          "co_1043 / retrying / 2",
+          "co_1044 / failed / 3"
+        ],
+        "steps": [
+          "Open a database from Connections. Select its database and inspect the schema.",
+          "Write a query, or use the assistant to draft one. Read it before running.",
+          "Inspect the results. Use the grid, JSON viewer, and export for a closer look."
+        ],
+        "source": "ui/src/modules/database/DatabasePage.svelte",
+        "start": 29,
+        "duration": 21,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/b65a60c10ffd9bb9af55.mp3",
+            "duration": 5.016
+          },
+          {
+            "file": "studio-v2/audio/voice/b374e546a7e4fa479c40.mp3",
+            "duration": 4.776
+          },
+          {
+            "file": "studio-v2/audio/voice/aa0b9468149e7953ff11.mp3",
+            "duration": 5.88
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.016,
+          12.592
+        ],
+        "actions": [
+          "Inspect the schema",
+          "Review and run a query",
+          "Explore the results"
+        ]
+      },
+      {
+        "id": "brokers",
+        "title": "Follow the event",
+        "route": "brokers",
+        "doc": "message-brokers.md",
+        "view": "events",
+        "heading": "checkout.events",
+        "detail": "Connections / Message Brokers",
+        "items": [
+          "Partition 0 / checkout.created",
+          "Partition 1 / payment.requested",
+          "Partition 1 / payment.retried",
+          "Partition 2 / checkout.completed"
+        ],
+        "steps": [
+          "Open a Kafka cluster from Connections. Select a topic and inspect its partitions.",
+          "Choose where to start reading and fetch a bounded set of messages.",
+          "Inspect a message key, headers, and payload to follow the event through the system."
+        ],
+        "source": "ui/src/modules/brokers/BrokersPage.svelte",
+        "start": 50,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/c1e9db9d0049dcc425db.mp3",
+            "duration": 5.448
+          },
+          {
+            "file": "studio-v2/audio/voice/1c28ebeccc968b106d39.mp3",
+            "duration": 3.96
+          },
+          {
+            "file": "studio-v2/audio/voice/459e71c0c240c088aa40.mp3",
+            "duration": 5.52
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.448,
+          12.648
+        ],
+        "actions": [
+          "Choose a topic",
+          "Read a bounded sample",
+          "Inspect the payload"
+        ]
+      },
+      {
+        "id": "api",
+        "title": "Check the response",
+        "route": "api",
+        "doc": "api-client.md",
+        "view": "api",
+        "heading": "Inspect the checkout endpoint",
+        "detail": "API / Atlas staging",
+        "items": [
+          "GET /checkouts/co_1043",
+          "Headers / Accept: application/json",
+          "Status / 200 OK",
+          "Body / state: retrying"
+        ],
+        "steps": [
+          "Open API and choose or create a request. Set its method, URL, and environment.",
+          "Review headers, authentication, and body before sending the request.",
+          "Inspect the response, then save the request in a collection for next time."
+        ],
+        "source": "ui/src/modules/api/ApiPage.svelte",
+        "start": 70,
+        "duration": 21,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/a813ddf4f8fbe8f66e19.mp3",
+            "duration": 6.504
+          },
+          {
+            "file": "studio-v2/audio/voice/861529ab199c172067c1.mp3",
+            "duration": 4.728
+          },
+          {
+            "file": "studio-v2/audio/voice/336f2c96ff7d06834f8f.mp3",
+            "duration": 4.704
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          8.504,
+          14.032
+        ],
+        "actions": [
+          "Prepare the request",
+          "Review and send",
+          "Inspect and save"
+        ]
+      }
+    ],
+    "number": 5,
+    "introSeconds": 6,
+    "outroSeconds": 5,
+    "duration": 96,
+    "tags": "start with a connection connections connections ssh / atlas staging mysql / checkout data redis / session cache kafka / checkout events ask a precise question database connections / database explorer checkout_id / state / attempts co_1042 / succeeded / 1 co_1043 / retrying / 2 co_1044 / failed / 3 follow the event brokers connections / message brokers partition 0 / checkout.created partition 1 / payment.requested partition 1 / payment.retried partition 2 / checkout.completed check the response api api / atlas staging get /checkouts/co_1043 headers / accept: application/json status / 200 ok body / state: retrying",
+    "doc": "connections-ssh-sftp.md"
+  },
+  {
+    "id": "Cloud",
+    "file": "Cloud.mp4",
+    "title": "Operate the cloud",
+    "desc": "Move from an AWS account to a workload and the logs that explain it.",
+    "accent": "#f3be87",
+    "chapters": [
+      {
+        "id": "aws",
+        "title": "Choose the right account",
+        "route": "aws",
+        "doc": "aws-console.md",
+        "view": "cloud",
+        "heading": "Atlas staging",
+        "detail": "AWS / Accounts",
+        "items": [
+          "S3 / Object storage",
+          "SQS / Message queues",
+          "EC2 / Instances",
+          "Athena / Queries",
+          "EKS / Clusters",
+          "RDS / Databases"
+        ],
+        "steps": [
+          "Open AWS and select the account you intend to inspect. Complete sign in if required.",
+          "Choose the region and service. Browse buckets, queues, instances, or databases.",
+          "Keep the account and region visible as you move between resources."
+        ],
+        "source": "ui/src/modules/aws/AwsPage.svelte",
+        "start": 6,
+        "duration": 22,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/012780d641b3cf81ffb2.mp3",
+            "duration": 5.88
+          },
+          {
+            "file": "studio-v2/audio/voice/980240c447f199d825b6.mp3",
+            "duration": 6.48
+          },
+          {
+            "file": "studio-v2/audio/voice/99d49ed75c3543493b34.mp3",
+            "duration": 4.56
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.88,
+          15.16
+        ],
+        "actions": [
+          "Choose the account",
+          "Select region and service",
+          "Inspect the resource"
+        ]
+      },
+      {
+        "id": "metrics",
+        "title": "Read the resource signals",
+        "route": "aws",
+        "doc": "aws-console.md",
+        "view": "metrics",
+        "heading": "Checkout database health",
+        "detail": "AWS / RDS / Metrics",
+        "items": [
+          "CPU utilization / Percent",
+          "Connections / Count",
+          "Read latency / Seconds",
+          "Free storage / Bytes"
+        ],
+        "steps": [
+          "Open an AWS resource and inspect its available metrics. Choose the time range.",
+          "Read the chart alongside the resource details to narrow the investigation.",
+          "Use the related service view when you need to inspect the underlying resource."
+        ],
+        "source": "ui/src/modules/aws/MetricsPanel.svelte",
+        "start": 28,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/5d373126e00abf743f4b.mp3",
+            "duration": 5.664
+          },
+          {
+            "file": "studio-v2/audio/voice/a8d7154dfd3e049a97b2.mp3",
+            "duration": 4.92
+          },
+          {
+            "file": "studio-v2/audio/voice/4d0d3ee373f7b6466f05.mp3",
+            "duration": 4.848
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.664,
+          13.384
+        ],
+        "actions": [
+          "Choose a time range",
+          "Read the metric",
+          "Follow the resource"
+        ]
+      },
+      {
+        "id": "kubernetes",
+        "title": "Find the workload",
+        "route": "kubernetes",
+        "doc": "kubernetes-console.md",
+        "view": "kubernetes",
+        "heading": "checkout-api",
+        "detail": "Kubernetes / Atlas staging",
+        "items": [
+          "checkout-api / Deployment / 3 ready",
+          "checkout-worker / Deployment / 2 ready",
+          "checkout-cleanup / CronJob / Scheduled",
+          "checkout-api / Service / ClusterIP"
+        ],
+        "steps": [
+          "Open Kubernetes and select a saved cluster, or import an EKS cluster from AWS.",
+          "Choose a namespace you can access. Find the workload and open its details.",
+          "Use the Pods tab to inspect the pods belonging to that workload."
+        ],
+        "source": "ui/src/modules/kubernetes/ResourceDrawer.svelte",
+        "start": 48,
+        "duration": 21,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/d1c13c9459c322e8fde8.mp3",
+            "duration": 6.24
+          },
+          {
+            "file": "studio-v2/audio/voice/64495c22182658f00a31.mp3",
+            "duration": 4.944
+          },
+          {
+            "file": "studio-v2/audio/voice/35fb81db84b41cd4df30.mp3",
+            "duration": 4.056
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          8.24,
+          13.984
+        ],
+        "actions": [
+          "Choose the cluster",
+          "Find the workload",
+          "Inspect its pods"
+        ]
+      },
+      {
+        "id": "logs",
+        "title": "Read what happened",
+        "route": "kubernetes",
+        "doc": "kubernetes-console.md",
+        "view": "logs",
+        "heading": "Follow the checkout logs",
+        "detail": "Kubernetes / Workload / Logs",
+        "items": [
+          "checkout-api-7f8 / request received",
+          "checkout-api-7f8 / upstream timeout",
+          "checkout-api-9c2 / retry scheduled",
+          "checkout-api-9c2 / request completed"
+        ],
+        "steps": [
+          "Open the workload Logs tab to inspect output from its pods.",
+          "Follow new lines and narrow the output to the event you are investigating.",
+          "Use pod details, events, or an exec session when the next step needs deeper inspection."
+        ],
+        "source": "ui/src/modules/kubernetes/WorkloadPods.svelte",
+        "start": 69,
+        "duration": 20,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/7ec2f4e000673a90a107.mp3",
+            "duration": 4.056
+          },
+          {
+            "file": "studio-v2/audio/voice/1b03fca79c09d27c96ab.mp3",
+            "duration": 4.584
+          },
+          {
+            "file": "studio-v2/audio/voice/18163579a901f725dd05.mp3",
+            "duration": 6.0
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.4,
+          11.784
+        ],
+        "actions": [
+          "Open workload logs",
+          "Follow the event",
+          "Investigate the pod"
+        ]
+      }
+    ],
+    "number": 6,
+    "introSeconds": 6,
+    "outroSeconds": 5,
+    "duration": 94,
+    "tags": "choose the right account aws aws / accounts s3 / object storage sqs / message queues ec2 / instances athena / queries eks / clusters rds / databases read the resource signals aws aws / rds / metrics cpu utilization / percent connections / count read latency / seconds free storage / bytes find the workload kubernetes kubernetes / atlas staging checkout-api / deployment / 3 ready checkout-worker / deployment / 2 ready checkout-cleanup / cronjob / scheduled checkout-api / service / clusterip read what happened kubernetes kubernetes / workload / logs checkout-api-7f8 / request received checkout-api-7f8 / upstream timeout checkout-api-9c2 / retry scheduled checkout-api-9c2 / request completed",
+    "doc": "aws-console.md"
+  },
+  {
+    "id": "Intelligence",
+    "file": "Intelligence.mp4",
+    "title": "Improve the system",
+    "desc": "Tune agent tools and skills, then understand the work they produce.",
+    "accent": "#a6b6fa",
+    "chapters": [
+      {
+        "id": "mcp",
+        "title": "Choose the tools agents use",
+        "route": "mcp",
+        "doc": "mcp-control-plane.md",
+        "view": "tools",
+        "heading": "A deliberate tool surface",
+        "detail": "MCP Control Plane",
+        "items": [
+          "Servers / Connected tools",
+          "Catalog / Available capabilities",
+          "Policies / Tool access",
+          "Audit / Governed calls"
+        ],
+        "steps": [
+          "Open MCP Control Plane to inspect connected servers and their tools.",
+          "Review which capabilities an agent can access and how policies govern calls.",
+          "Use the audit view to investigate a governed tool invocation."
+        ],
+        "source": "ui/src/modules/mcp/McpPage.svelte",
+        "start": 6,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/68dfa7ff9cac16a7ba50.mp3",
+            "duration": 4.92
+          },
+          {
+            "file": "studio-v2/audio/voice/f9c9e86332f9b528ed14.mp3",
+            "duration": 4.896
+          },
+          {
+            "file": "studio-v2/audio/voice/31e2656fa1f9d53ea800.mp3",
+            "duration": 4.032
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.92,
+          12.616
+        ],
+        "actions": [
+          "Inspect the tool catalog",
+          "Review access policies",
+          "Trace a tool call"
+        ]
+      },
+      {
+        "id": "skills",
+        "title": "Make good practice reusable",
+        "route": "settings",
+        "doc": "skills-library.md",
+        "view": "document",
+        "heading": "A focused review skill",
+        "detail": "Settings / Skills",
+        "items": [
+          "When to use this skill",
+          "Inspect the changed behavior",
+          "Trace the failure path",
+          "Report evidence with each finding"
+        ],
+        "steps": [
+          "Open the skill library to inspect installed skills and their versions.",
+          "Read the instructions and usage scope before choosing a skill for a task.",
+          "Use focused skills to make your expectations explicit and reusable."
+        ],
+        "source": "ui/src/modules/settings/SkillsLibrary.svelte",
+        "start": 25,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/0d8a742c74f1b6694477.mp3",
+            "duration": 4.584
+          },
+          {
+            "file": "studio-v2/audio/voice/6bb6085d108f2291efc2.mp3",
+            "duration": 4.992
+          },
+          {
+            "file": "studio-v2/audio/voice/e72e7897725b1975e3b8.mp3",
+            "duration": 4.608
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.584,
+          12.376
+        ],
+        "actions": [
+          "Inspect the library",
+          "Read the instructions",
+          "Apply a focused skill"
+        ]
+      },
+      {
+        "id": "lab",
+        "title": "Evaluate before promoting",
+        "route": "skills-eval",
+        "doc": "skills-evaluator.md",
+        "view": "benchmark",
+        "heading": "Which skill works better?",
+        "detail": "Skills Lab",
+        "items": [
+          "Library / Browse and edit",
+          "Evaluator / Run a benchmark",
+          "Review / Inspect skill quality",
+          "Compare / Examine results"
+        ],
+        "steps": [
+          "Open Skills Lab to browse, edit, evaluate, or review a skill.",
+          "Run a benchmark with a concrete task and inspect the validation results.",
+          "Compare runs and evidence before promoting the version you want to keep."
+        ],
+        "source": "ui/src/modules/skills-lab/SkillsLabPage.svelte",
+        "start": 44,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/352584ead4c9007eec3c.mp3",
+            "duration": 5.088
+          },
+          {
+            "file": "studio-v2/audio/voice/e2ccdddd92776d3972b5.mp3",
+            "duration": 4.776
+          },
+          {
+            "file": "studio-v2/audio/voice/45f3b34c490ce5aab983.mp3",
+            "duration": 4.416
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.088,
+          12.664
+        ],
+        "actions": [
+          "Choose a skill",
+          "Run the benchmark",
+          "Compare the evidence"
+        ]
+      },
+      {
+        "id": "usage",
+        "title": "Understand cost and progress",
+        "route": "usage",
+        "doc": "usage-and-cost.md",
+        "view": "metrics",
+        "heading": "Read the shape of your work",
+        "detail": "Usage / Insights",
+        "items": [
+          "Usage / Provider and model",
+          "Tokens / Input and output",
+          "Cost / Selected period",
+          "Insights / Evidence and actions"
+        ],
+        "steps": [
+          "Open Usage and choose a period to inspect tokens and cost across providers.",
+          "Use the breakdowns to understand which models and sessions account for the usage.",
+          "Open Insights for a report, then inspect its evidence and suggested actions."
+        ],
+        "source": "ui/src/modules/usage/UsagePage.svelte",
+        "start": 63,
+        "duration": 21,
+        "alsoRoutes": [
+          "insights"
+        ],
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/a513eab179d8fd4e4d9a.mp3",
+            "duration": 5.256
+          },
+          {
+            "file": "studio-v2/audio/voice/d01f78f768f41d499ddf.mp3",
+            "duration": 5.064
+          },
+          {
+            "file": "studio-v2/audio/voice/49cbca25bfa8887cbd87.mp3",
+            "duration": 5.256
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          7.256,
+          13.12
+        ],
+        "actions": [
+          "Choose a period",
+          "Inspect the breakdown",
+          "Read an insight report"
+        ]
+      },
+      {
+        "id": "plugins",
+        "title": "Extend your workspace",
+        "route": "plugins",
+        "doc": "plugins.md",
+        "view": "tools",
+        "heading": "Add the tools your team needs",
+        "detail": "Settings / Plugins",
+        "items": [
+          "Installed / Your plugins",
+          "Capabilities / Pages and tools",
+          "Configuration / Plugin settings",
+          "Status / Running"
+        ],
+        "steps": [
+          "Open Plugins to inspect installed extensions and their configuration.",
+          "Choose a plugin to review its capabilities and current status.",
+          "Open its page from the sidebar when it provides a workspace tool."
+        ],
+        "source": "ui/src/modules/settings/PluginsSettings.svelte",
+        "start": 84,
+        "duration": 18,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/4b76f07cdbc1e41fee3d.mp3",
+            "duration": 4.536
+          },
+          {
+            "file": "studio-v2/audio/voice/0cd8d51cf918c16e3c8d.mp3",
+            "duration": 3.912
+          },
+          {
+            "file": "studio-v2/audio/voice/5950024f639ad85cb8da.mp3",
+            "duration": 3.96
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.536,
+          11.736
+        ],
+        "actions": [
+          "Inspect extensions",
+          "Review capabilities",
+          "Open the plugin"
+        ]
+      }
+    ],
+    "number": 7,
+    "introSeconds": 6,
+    "outroSeconds": 5,
+    "duration": 107,
+    "tags": "choose the tools agents use mcp mcp control plane servers / connected tools catalog / available capabilities policies / tool access audit / governed calls make good practice reusable settings settings / skills when to use this skill inspect the changed behavior trace the failure path report evidence with each finding evaluate before promoting skills eval skills lab library / browse and edit evaluator / run a benchmark review / inspect skill quality compare / examine results understand cost and progress usage usage / insights insights usage / provider and model tokens / input and output cost / selected period insights / evidence and actions extend your workspace plugins settings / plugins installed / your plugins capabilities / pages and tools configuration / plugin settings status / running",
+    "doc": "mcp-control-plane.md"
+  },
+  {
+    "id": "Everywhere",
+    "file": "Everywhere.mp4",
+    "title": "Take Otto with you",
+    "desc": "Keep the conversation and context close, across windows and devices.",
+    "accent": "#dda9c5",
+    "chapters": [
+      {
+        "id": "channels",
+        "title": "Continue the conversation",
+        "route": "settings",
+        "doc": "channels-slack-telegram.md",
+        "view": "chat",
+        "heading": "A conversation that stays connected",
+        "detail": "Settings / Channels",
+        "items": [
+          "Slack / Checkout investigation",
+          "You / Inspect the retry failure",
+          "Agent / Reading the failing path",
+          "Report / Evidence attached"
+        ],
+        "steps": [
+          "Connect Slack or Telegram in Channels settings and configure the bridge.",
+          "Start from a thread and send the agent a clear request.",
+          "Follow the responses in the same conversation, or open the session in Otto."
+        ],
+        "source": "ui/src/modules/settings/Channels.svelte",
+        "start": 6,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/4a615d93ab5d400aa106.mp3",
+            "duration": 4.632
+          },
+          {
+            "file": "studio-v2/audio/voice/2d99111a4a4c2595578b.mp3",
+            "duration": 3.672
+          },
+          {
+            "file": "studio-v2/audio/voice/24abd5163b3c6c8e9ae9.mp3",
+            "duration": 4.8
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.632,
+          11.832
+        ],
+        "actions": [
+          "Connect the channel",
+          "Start from a thread",
+          "Continue in Otto"
+        ]
+      },
+      {
+        "id": "mobile",
+        "title": "Bring a session with you",
+        "route": "share",
+        "doc": "remote-mobile-access.md",
+        "view": "mobile",
+        "heading": "Your Mac does the work",
+        "detail": "Remote access / Session sharing",
+        "items": [
+          "Owner / Remote access",
+          "Guest / One scoped session",
+          "Permission / Viewer or editor",
+          "Access / Expiring and revocable"
+        ],
+        "steps": [
+          "Enable remote access when you want to use Otto from a phone or tablet.",
+          "For a guest, create a scoped session link and choose viewer or editor access.",
+          "Set an expiry and revoke the link when it is no longer needed."
+        ],
+        "source": "ui/src/modules/share/SharePage.svelte",
+        "start": 25,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/02f237b8989973de9fac.mp3",
+            "duration": 4.392
+          },
+          {
+            "file": "studio-v2/audio/voice/564877fd555475391d93.mp3",
+            "duration": 5.544
+          },
+          {
+            "file": "studio-v2/audio/voice/653a5e0a7beb7ed1658a.mp3",
+            "duration": 4.008
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.4,
+          12.744
+        ],
+        "actions": [
+          "Enable remote access",
+          "Choose session permissions",
+          "Expire or revoke access"
+        ]
+      },
+      {
+        "id": "windows",
+        "title": "Give each task a window",
+        "route": "agents",
+        "doc": "multi-window.md",
+        "view": "windows",
+        "heading": "Two tasks, room for both",
+        "detail": "File / New Window",
+        "items": [
+          "Atlas / Agent session",
+          "Atlas / Git review",
+          "Workspace / Independent surface",
+          "Relaunch / Windows restored"
+        ],
+        "steps": [
+          "Choose File, New Window to open another Otto window.",
+          "Keep a session in one window and the related review or data in another.",
+          "Arrange the windows for the task. Otto restores your windows on relaunch."
+        ],
+        "source": "docs/features/multi-window.md",
+        "start": 44,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/db5bd67aacbd119c92db.mp3",
+            "duration": 3.816
+          },
+          {
+            "file": "studio-v2/audio/voice/1e3585ba98d1e771dd98.mp3",
+            "duration": 4.896
+          },
+          {
+            "file": "studio-v2/audio/voice/724df8df65b7e4c85e5d.mp3",
+            "duration": 4.704
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.4,
+          12.096
+        ],
+        "actions": [
+          "Open another window",
+          "Arrange the work",
+          "Continue on relaunch"
+        ]
+      },
+      {
+        "id": "snip",
+        "title": "Show exactly what you mean",
+        "route": "snip",
+        "doc": "snipping-tool.md",
+        "view": "snip",
+        "heading": "Give the agent the visual context",
+        "detail": "Snipping Tool",
+        "items": [
+          "Capture / Select a region",
+          "Annotate / Mark the detail",
+          "Clipboard / Ready to paste",
+          "Session / Continue with context"
+        ],
+        "steps": [
+          "Press Command Control Shift Two and drag to capture a region.",
+          "Annotate the detail you want the agent to notice. The image is on your clipboard.",
+          "Paste it into the session and explain what needs to change."
+        ],
+        "source": "docs/features/snipping-tool.md",
+        "start": 63,
+        "duration": 19,
+        "voice": [
+          {
+            "file": "studio-v2/audio/voice/fea2f6a8288c510b9b06.mp3",
+            "duration": 4.128
+          },
+          {
+            "file": "studio-v2/audio/voice/7f75093fbfe29d7484f4.mp3",
+            "duration": 4.872
+          },
+          {
+            "file": "studio-v2/audio/voice/c31f7b786a890041f87d.mp3",
+            "duration": 3.672
+          }
+        ],
+        "stepStarts": [
+          1.2,
+          6.4,
+          12.072
+        ],
+        "actions": [
+          "Capture a region",
+          "Annotate the detail",
+          "Paste into the session"
+        ]
+      }
+    ],
+    "number": 8,
+    "introSeconds": 6,
+    "outroSeconds": 5,
+    "duration": 87,
+    "tags": "continue the conversation settings settings / channels slack / checkout investigation you / inspect the retry failure agent / reading the failing path report / evidence attached bring a session with you share remote access / session sharing owner / remote access guest / one scoped session permission / viewer or editor access / expiring and revocable give each task a window agents file / new window atlas / agent session atlas / git review workspace / independent surface relaunch / windows restored show exactly what you mean snip snipping tool capture / select a region annotate / mark the detail clipboard / ready to paste session / continue with context",
+    "doc": "channels-slack-telegram.md"
+  }
+]
