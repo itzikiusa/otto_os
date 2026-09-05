@@ -699,6 +699,26 @@ async fn run(cfg: Config) -> Result<(), String> {
         });
     }
 
+    // Nested-agent capture: every ~30s, look inside every LIVE plain `shell`
+    // session for an agent CLI the user launched by hand (`claude`, `codex`,
+    // `agy`) and record that conversation's id on the session row. A terminal
+    // running an agent is no longer stateless — reopening it after a daemon
+    // restart respawns the shell and types the provider's resume command, so
+    // the conversation comes back instead of dead-ending.
+    {
+        let manager = Arc::clone(&manager);
+        let interval = std::time::Duration::from_secs(30);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let n = manager.capture_nested_agents().await;
+                if n > 0 {
+                    tracing::info!("captured {n} nested agent conversation(s) in shell session(s)");
+                }
+            }
+        });
+    }
+
     // Opt-in auto-archive: hourly, archive agent sessions idle beyond the
     // `session_auto_archive_days` setting (0/absent = off). Archive keeps the
     // row + history and stays reversible via unarchive.

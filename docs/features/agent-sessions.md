@@ -74,16 +74,32 @@ modal (`NewSession.svelte`) offers:
 - **Provider** — cards for `claude` ("Claude Code CLI"), `codex` ("Codex CLI"),
   `shell` ("Plain shell"), plus any custom providers from `GET /meta.providers`.
   The configured default provider is pre-selected and carries a **default**
-  badge.
+  badge. Clicking a card (or `←`/`→`) selects it exclusively, as always.
+- **How many — the `−` / `+` stepper on each card** (`+`/`-` on the keyboard for
+  the focused card). Counts add up ACROSS cards, so "2 codex, 3 claude and 1
+  shell" is one trip through the sheet: the footer button becomes **Start 6
+  Sessions**, a line under the grid spells the batch out, and the sessions are
+  started provider by provider in grid order, then opened **tiled** (exactly
+  where a `spawn 3 claude agents` command-palette plan lands them). Capped at 20
+  per provider. A typed **Title** becomes a base name numbered per session
+  (`"fix flaky tests 1" … "fix flaky tests 6"`); the **model** pin is only
+  offered for a batch that targets a single provider, since model ids are
+  provider-specific.
 - **Title (optional)** — placeholder shows the auto-generated name. If left
   blank the daemon names the session `"{provider} #{n}"`, where `n` is one more
   than the current count of that provider in the workspace.
-- **Working directory** — *"Defaults to the workspace root"* if blank. The
-  daemon `mkdir -p`s the directory if it does not exist (a missing cwd would
-  otherwise make the child fall back to `$HOME`).
+- **Working directory** — *"Defaults to the workspace root"* if blank. Any
+  folder on the daemon host works; it does **not** have to be inside a
+  workspace, so a one-off job somewhere else needs no new workspace. **Browse…**
+  opens the shared daemon-side folder picker (`GET /fs/browse`, sandboxed to
+  `$HOME` + the data dir — see [daemon-http-api](./daemon-http-api.md)), and the
+  field offers your recently used directories (this workspace's root first, then
+  the cwds of its existing sessions) as a datalist. The daemon `mkdir -p`s the
+  directory if it does not exist (a missing cwd would otherwise make the child
+  fall back to `$HOME`).
 - **Additional directories (optional)** — extra repos the agent may access,
   *"passed as `--add-dir`"*. Stored in `meta.extra_dirs` (an array). Honored by
-  `claude` / `codex` / `agy`; ignored for `shell`.
+  `claude` / `codex` / `agy`; ignored for `shell`. Same **Browse…** picker.
 - **Browser tools** — shown only for `claude` / `codex`: *"Give the agent a real
   browser via MCP (navigate, click, read pages)."* Stored as `meta.browser:
   true`; wires an MCP browser server into the workspace `.mcp.json`.
@@ -114,8 +130,10 @@ full provider list in `providers`.
 2. Generates a provider session id (a UUID — `claude --session-id` requires
    one), builds the launch `CommandSpec` from the provider registry, and appends
    `--add-dir` (from `meta.extra_dirs`) and `--model` (from `meta.model`) args.
-   `provider_session_id` is stored **only** when the provider supports resume
-   (claude); for codex/agy/shell it stays `None`.
+   `provider_session_id` is stored up front only for claude (the id Otto
+   assigned); codex/agy mint their own and it is captured from disk shortly
+   after spawn, and a `shell` gets one only if you launch an agent CLI inside it
+   (see [A terminal you ran an agent in](#a-terminal-you-ran-an-agent-in)).
 3. Writes the session row, then `mkdir -p`s the cwd.
 4. **Pre-trusts** the folder for the provider (`trust::ensure_trusted`, §6).
 5. **Reconciles** MCP servers into the workspace `.mcp.json` in one guarded
@@ -341,10 +359,41 @@ with its **resume args**. Claude keeps the full conversation in its on-disk
 JSONL transcript, so `--resume <provider_session_id>` restores it completely.
 
 A session is **resumable** iff it is an `agent` kind, has a
-`provider_session_id`, **and** its provider supports resume — which today means
-**only `claude`**. `codex`, `agy`, and `shell` never store a
-`provider_session_id` and are not resumed; reopening them after suspend/restart
-starts a fresh process (no lost-work risk is taken — see suspend below).
+`provider_session_id`, **and** its provider supports resume: `claude` (Otto
+assigns the id at launch with `--session-id`), `codex` and `agy` (they mint
+their own, which Otto captures from disk after spawn). A session whose id was
+never captured is not resumed; reopening it starts a fresh process (no
+lost-work risk is taken — see suspend below).
+
+#### A terminal you ran an agent in
+
+`shell` has no resume args of its own, so a plain terminal used to dead-end on
+reopen: `ensure_live` had nothing to do, and the session looked like it no
+longer existed even though nothing had been lost. Two things now happen instead
+(`otto-sessions/src/nested.rs`):
+
+- **A shell always respawns on open.** A login shell is cheap and stateless, so
+  reopening one lands on a working prompt rather than a dead screen.
+- **An agent you launched inside it is resumed.** Every ~30s
+  (`capture_nested_agents`) the daemon looks through each live shell session's
+  descendant processes for `claude` / `codex` / `agy`, asks the OS for that
+  process's real cwd (you may have `cd`-ed first), and matches the transcript it
+  created — for claude, the `<id>.jsonl` under `~/.claude/projects/<encoded
+  cwd>/` *born* during that launch. The id is stored in the row's
+  `provider_session_id` (so the session shows as **suspended / resumable**, like
+  any other) plus `meta.nested_provider` / `nested_cwd` / `nested_pid`.
+  Reopening then respawns the shell and types the provider's own resume command
+  into it — `claude --resume <id>`, `codex resume <id>`, `agy --conversation
+  <id>`, preceded by a `cd` when the agent was launched elsewhere.
+
+Deliberate limits: the scan reads the live process tree, so it only ever sees an
+agent that is **running right now** (exit the CLI and the last capture is what
+gets resumed; start another and it re-captures, keyed on the pid). Ids another
+session already owns are never re-claimed, and a launch window holding more than
+one unclaimed candidate is skipped rather than guessed at — the same "never
+guess" rule as the codex rollout capture, for the same reason (adopting someone
+else's conversation forks it). The resume command carries no Otto flags: you
+launched that CLI by hand, so you get your own permission mode back.
 
 > **Transcript pruning (background sessions only).** For non-live `claude`
 > sessions, the daemon checks whether the on-disk transcript
@@ -665,9 +714,15 @@ session in place (e.g. live handover-progress flags).
 - Stream a live activity trail + task tracker, and drive everything over HTTP/WS.
 
 **Limitations / by design:**
-- **Resume is claude-only.** codex/agy/shell are not resumed; after a daemon
-  restart or (for codex/agy/shell never) auto-suspend they start fresh. They are
-  also never *auto*-suspended (their work would be lost).
+- **Resume needs a captured conversation id.** claude gets one at launch;
+  codex/agy are captured from disk after spawn, and a session whose capture came
+  up empty (or ambiguous) starts fresh instead of adopting a conversation that
+  might belong to someone else. Such a session is also never *auto*-suspended,
+  since its work could not be brought back.
+- **A `shell` is respawned, not resumed.** Reopening one always gives a fresh
+  login shell — its scrollback, env and background jobs are gone. What survives
+  is an agent CLI you ran inside it: that conversation is captured while it runs
+  and resumed by typing the provider's resume command into the new shell.
 - Restart-resume relies on the on-disk claude JSONL transcript; if that
   transcript is gone, resume can't reconstruct the conversation.
 - The daemon listens on **loopback only** unless a network listener is
@@ -753,11 +808,18 @@ devices' sessions stay hidden here (they still run on the daemon)."* This is a
 - **Agent "woke up" / RAM spiked when I opened the tiled view.** Expected only
   up to 6 tiles go live at once; the rest are placeholders. If you pinned many
   tiles, each pinned tile stays live. Unpin or scroll them out of view.
-- **Reopening a codex/agy/shell session lost its context.** Those providers are
-  not resumable — only `claude` resumes. Use claude for long-lived resumable
-  work, or pin (`keep_alive`) a codex/shell session you must keep warm (note:
-  pinning prevents *auto*-suspend, but a daemon restart still starts it fresh
-  since it has no resume).
+- **Reopening a session lost its context.** Check the row for a
+  `provider_session_id` (`GET /sessions/{id}`): without one there was nothing to
+  resume — the spawn-time capture found no unambiguous match (`grep "won't
+  auto-resume" ~/Library/Logs/Otto/ottod.log*`). Pin (`keep_alive`) a session
+  you must keep warm; note that pinning only prevents *auto*-suspend, a daemon
+  restart still starts an uncaptured session fresh.
+- **A terminal came back as a bare shell after I had claude running in it.**
+  The nested capture only sees an agent that is running at scan time (every
+  ~30s), and claude files its transcript when the first prompt is sent — a
+  daemon restart in that gap leaves nothing to resume. `grep "captured a nested
+  agent" ~/Library/Logs/Otto/ottod.log*` shows what was captured and when. The
+  shell itself still respawns, so the terminal is usable either way.
 - **My session disappeared from the list.** Check whether **"Isolate sessions to
   this device"** is on (you may be on a different device than the one that
   created it), or whether it was archived (look in the Archived section) or
