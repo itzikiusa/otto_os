@@ -2,9 +2,9 @@
 //! the current kubeconfig context (intended for minikube). Runs only with
 //! `OTTO_K8S_E2E=1`; otherwise it is a no-op so `cargo test` stays hermetic.
 //!
-//! Env: `OTTO_K8S_E2E_NS` (namespace, default `default`), `OTTO_K8S_E2E_PORT`
-//! + `OTTO_K8S_E2E_PATH` (optional health probe on every pod, e.g. `8080` +
-//! `/`). Samples land in an in-memory sink; nothing is written anywhere.
+//! Env: `OTTO_K8S_E2E_NS` (namespace, default `default`); `OTTO_K8S_E2E_PORT`
+//! and `OTTO_K8S_E2E_PATH` add an optional health probe on every pod (e.g.
+//! `8080` and `/`). Samples land in an in-memory sink; nothing is written.
 
 use std::path::Path;
 use std::process::Command;
