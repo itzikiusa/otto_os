@@ -108,6 +108,27 @@ impl otto_k8s::K8sCtx for ServerCtx {
     fn spawner(&self) -> &Arc<dyn Spawner> {
         &self.spawner
     }
+    fn monitor_sink(&self) -> Option<Arc<dyn otto_k8s::MonitorSink>> {
+        Some(Arc::new(UsageSink(self.usage.clone())))
+    }
+}
+
+/// `otto_k8s::MonitorSink` over the embedded ClickHouse usage engine.
+struct UsageSink(Arc<otto_usage::UsageEngine>);
+
+impl otto_k8s::MonitorSink for UsageSink {
+    fn available(&self) -> bool {
+        self.0.available()
+    }
+    fn exec<'a>(&'a self, sql: &'a str) -> otto_k8s::BoxFut<'a, otto_core::Result<()>> {
+        Box::pin(async move { self.0.exec_sql(sql).await })
+    }
+    fn insert_ndjson<'a>(&'a self, table: &'a str, ndjson: &'a str) -> otto_k8s::BoxFut<'a, otto_core::Result<()>> {
+        Box::pin(async move { self.0.insert_ndjson(table, ndjson).await })
+    }
+    fn query_rows<'a>(&'a self, sql: &'a str) -> otto_k8s::BoxFut<'a, otto_core::Result<Vec<serde_json::Value>>> {
+        Box::pin(async move { self.0.query_rows(sql).await })
+    }
 }
 
 impl otto_connections::ConnectionsCtx for ServerCtx {

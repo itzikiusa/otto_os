@@ -262,6 +262,9 @@ impl K8sCtx for TestCtx {
     fn spawner(&self) -> &Arc<dyn Spawner> {
         &self.spawner
     }
+    fn monitor_sink(&self) -> Option<Arc<dyn otto_k8s::MonitorSink>> {
+        None
+    }
 }
 
 async fn call(
