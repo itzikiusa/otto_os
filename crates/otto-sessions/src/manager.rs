@@ -617,6 +617,26 @@ fn agy_conversation_fresh(
     })
 }
 
+/// The command that puts a reopened `shell` session back into the agent
+/// conversation the user had running in it, or `None` when the terminal never
+/// had one (a plain shell, which simply respawns empty).
+///
+/// Reads what [`SessionManager::capture_nested_agents`] recorded: the provider,
+/// its conversation id (stored in the row's `provider_session_id`, exactly like
+/// a first-class agent session's) and the directory the agent was launched
+/// from — the `cd` is emitted only when that differs from where the shell
+/// itself starts, since the transcript is resolved relative to it.
+fn nested_resume_command(session: &Session) -> Option<String> {
+    let provider = session.meta.get("nested_provider")?.as_str()?;
+    let sid = session.provider_session_id.as_deref()?;
+    let launched_in = session
+        .meta
+        .get("nested_cwd")
+        .and_then(|v| v.as_str())
+        .filter(|dir| *dir != session.cwd.as_str());
+    crate::nested::resume_command(provider, sid, launched_in)
+}
+
 /// Max length (chars) of an auto-derived provider title before it is clipped.
 const PROVIDER_TITLE_MAX: usize = 60;
 /// Ceiling on how many transcript lines the auto-namer parsers scan before
@@ -2408,8 +2428,161 @@ impl SessionManager {
                 }
             }
             self.restart_locked(id, None).await.map(|_| ())?;
+        } else if session.kind == SessionKind::Agent && session.provider == "shell" {
+            // A plain terminal has no provider-side conversation of its own, so
+            // the branch above can never bring it back — reopening one used to
+            // dead-end on a black screen ("this session doesn't exist any
+            // more") even though nothing about it was lost. A shell is cheap
+            // and stateless: respawn it. And when the user had an agent CLI
+            // running in it, THAT conversation is persistent and was captured
+            // by [`Self::capture_nested_agents`] — type its resume command back
+            // in so the terminal comes back in the state it was left.
+            let resume = nested_resume_command(&session);
+            self.restart_locked(id, None).await.map(|_| ())?;
+            if let Some(cmd) = resume {
+                self.type_after_prompt(id, cmd);
+            }
         }
         Ok(())
+    }
+
+    /// Type a command into a just-respawned shell, once the shell is ready.
+    ///
+    /// The PTY exists the moment `restart_locked` returns, but the login shell
+    /// behind it is still sourcing rc files; bytes written now sit in the line
+    /// discipline and are echoed in the middle of the prompt being drawn. Wait
+    /// for the shell's first output (its prompt) and a short settle, then type.
+    /// Both waits are bounded, so a shell that prints nothing at all still gets
+    /// the command. Fire-and-forget: a failure here leaves a working terminal.
+    fn type_after_prompt(&self, id: &Id, cmd: String) {
+        let Some(handle) = self.live_handle(id) else {
+            return;
+        };
+        let mut rx = handle.subscribe();
+        let sid = id.clone();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            match handle.write(format!("{cmd}\n").as_bytes()) {
+                Ok(()) => tracing::info!(
+                    session = %sid, %cmd,
+                    "typed the nested agent's resume command into the respawned shell"
+                ),
+                Err(e) => {
+                    tracing::warn!(session = %sid, "nested-agent resume input failed: {e}")
+                }
+            }
+        });
+    }
+
+    /// One pass of the nested-agent capture: for every LIVE `shell` session,
+    /// find the agent CLI the user launched inside it and record that
+    /// conversation's id on the session row, making the terminal resumable.
+    ///
+    /// The scan reads the live process tree, so it only ever sees an agent that
+    /// is running right now — hence a periodic sweep rather than a one-shot at
+    /// spawn (the user types `claude` whenever they feel like it, and may exit
+    /// it and start another). Ids already owned by another session are never
+    /// re-claimed, and an ambiguous window is skipped rather than guessed at
+    /// (same rule as the codex rollout capture). Returns the number captured.
+    ///
+    /// Resilient: a failure on one session is logged and skipped.
+    pub async fn capture_nested_agents(&self) -> usize {
+        // Snapshot live ids first (no DashMap refs held across awaits).
+        let live: Vec<(Id, Option<u32>)> = self
+            .live
+            .iter()
+            .map(|e| (e.key().clone(), e.value().pid()))
+            .collect();
+        if live.is_empty() {
+            return 0;
+        }
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let table = crate::nested::process_table();
+        let mut captured = 0;
+        for (id, pid) in live {
+            let Some(pid) = pid else { continue };
+            let session = match self.repo.get(&id).await {
+                Ok(s) => s,
+                Err(_) => continue, // removed between the snapshot and now
+            };
+            // Agent-kind shells only: a connection terminal (ssh, a DB
+            // client, `k8s exec`) is reopened through its connection, and its
+            // PTY's cwd is the daemon's, not the remote's.
+            if session.kind != SessionKind::Agent || session.provider != "shell" {
+                continue;
+            }
+            let Some((proc, provider)) = crate::nested::find_nested_agent(pid, &table) else {
+                continue;
+            };
+            // Already captured THIS launch? `nested_pid` pins the capture to one
+            // process, so exiting the agent and starting another in the same
+            // terminal re-captures instead of resuming the stale conversation.
+            let same_launch = session
+                .meta
+                .get("nested_pid")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|p| p == proc.pid as u64);
+            if same_launch && session.provider_session_id.is_some() {
+                continue;
+            }
+            // The agent files its transcript under the directory IT runs in,
+            // which is not the session cwd when the user `cd`-ed first.
+            let cwd = crate::nested::process_cwd(proc.pid).unwrap_or_else(|| session.cwd.clone());
+            let cwd = std::fs::canonicalize(&cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(cwd);
+            let floor = proc
+                .started
+                .checked_sub(Duration::from_secs(15))
+                .unwrap_or(std::time::UNIX_EPOCH);
+            // Serialize with the spawn-time capture so both see each other's
+            // claims (a nested agent and a first-class session can race for the
+            // same fresh rollout in the same cwd).
+            let _guard = self.codex_capture_lock.lock().await;
+            let claimed_rows = self.repo.provider_session_ids().await.unwrap_or_default();
+            let claimed: std::collections::HashSet<&str> =
+                claimed_rows.iter().map(String::as_str).collect();
+            let found = match provider {
+                "claude" => {
+                    crate::nested::claude_transcript_in_window(&home, &cwd, proc.started, &claimed)
+                }
+                "codex" => {
+                    match pick_codex_rollout(&codex_sessions_root(), &cwd, floor, &claimed, None) {
+                        RolloutPick::Claim(psid) => Some(psid),
+                        RolloutPick::Ambiguous | RolloutPick::Nothing => None,
+                    }
+                }
+                "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed),
+                _ => None,
+            };
+            let Some(psid) = found else { continue };
+            if let Err(e) = self.repo.set_provider_session(&id, &psid).await {
+                tracing::warn!(session = %id, "nested-agent capture: persist failed: {e}");
+                continue;
+            }
+            let _ = self
+                .repo
+                .merge_meta(
+                    &id,
+                    &serde_json::json!({
+                        "nested_provider": provider,
+                        "nested_cwd": cwd,
+                        "nested_pid": proc.pid,
+                    }),
+                )
+                .await;
+            captured += 1;
+            tracing::info!(
+                session = %id, provider, provider_session = %psid, cwd = %cwd,
+                "captured a nested agent conversation — this terminal is now resumable"
+            );
+            self.record_lifecycle(
+                &session,
+                format!("{provider} started in this terminal — conversation is now resumable"),
+            );
+        }
+        captured
     }
 
     /// The per-session resume mutex (created lazily). The map entry ref is
@@ -4335,6 +4508,51 @@ mod tests {
             None,
             "a claimed rollout id must never be re-claimed by another session"
         );
+    }
+
+    /// The reopen contract for a terminal the user ran an agent in: the
+    /// captured conversation comes back verbatim, and a `cd` is emitted ONLY
+    /// when the agent was launched somewhere other than the shell's own cwd
+    /// (claude/codex/agy all resolve a conversation relative to the directory
+    /// they run in, so resuming from the wrong one finds nothing).
+    #[test]
+    fn nested_resume_command_reflects_the_captured_launch() {
+        let mk = |psid: Option<&str>, meta: serde_json::Value| Session {
+            id: "s".into(),
+            workspace_id: "ws".into(),
+            kind: SessionKind::Agent,
+            provider: "shell".into(),
+            title: "t".into(),
+            status: SessionStatus::Reconnectable,
+            cwd: "/Users/dev/project".into(),
+            provider_session_id: psid.map(str::to_string),
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta,
+        };
+        let same_dir = serde_json::json!({
+            "nested_provider": "claude", "nested_cwd": "/Users/dev/project", "nested_pid": 42,
+        });
+        assert_eq!(
+            nested_resume_command(&mk(Some("abc-123"), same_dir.clone())).as_deref(),
+            Some("claude --resume 'abc-123'"),
+        );
+        // Launched after a `cd` → the resume has to go back there first.
+        let other_dir = serde_json::json!({
+            "nested_provider": "codex", "nested_cwd": "/Users/dev/other", "nested_pid": 42,
+        });
+        assert_eq!(
+            nested_resume_command(&mk(Some("abc"), other_dir)).as_deref(),
+            Some("cd '/Users/dev/other' && codex resume 'abc'"),
+        );
+        // A plain terminal — nothing was ever captured — just respawns empty.
+        assert_eq!(nested_resume_command(&mk(None, serde_json::json!({}))), None);
+        // Half a capture (id but no provider, or the reverse) is never guessed at.
+        assert_eq!(nested_resume_command(&mk(Some("abc"), serde_json::json!({}))), None);
+        assert_eq!(nested_resume_command(&mk(None, same_dir)), None);
     }
 
     /// The sweep's kill branch (fd-leak fix): a live agent session that can
