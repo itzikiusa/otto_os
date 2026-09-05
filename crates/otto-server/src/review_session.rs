@@ -26,10 +26,17 @@ use crate::agent_run::{run_with_recovery, watch_for_result, FailReason, RunOutco
 
 // Generous: several CLIs cold-start concurrently for one review, so claude can
 // take >30s to draw its TUI; injecting before it's ready loses the prompt.
-const TUI_STARTUP_WAIT: Duration = Duration::from_secs(40);
+const TUI_STARTUP_WAIT: Duration = Duration::from_secs(90);
 const TUI_POLL: Duration = Duration::from_millis(250);
 const TUI_SETTLE: Duration = Duration::from_millis(600);
 pub const PASTE_TO_ENTER: Duration = Duration::from_millis(250);
+/// After a paste, how long to wait for the pasted text to actually echo in the
+/// TUI before pressing Enter. A late redraw (claude's "N MCP servers need
+/// authentication" banner lands well after the prompt box is drawn) can wipe
+/// the input box, so an unverified Enter submits an empty line and the agent
+/// idles for the whole timeout.
+const PASTE_ECHO_WAIT: Duration = Duration::from_secs(8);
+const PASTE_ECHO_POLL: Duration = Duration::from_millis(250);
 // After submitting, confirm the agent actually started (output advanced); if
 // not, re-send Enter once — a freshly-spawned CLI under load can drop the first.
 const DISPATCH_WAIT: Duration = Duration::from_secs(6);
@@ -37,12 +44,12 @@ const DISPATCH_POLL: Duration = Duration::from_millis(250);
 pub const FINDINGS_POLL: Duration = Duration::from_millis(1000);
 /// After this much silence with no findings yet, assume the agent may be
 /// blocked on a prompt the guard couldn't auto-accept and flag it "waiting".
-pub const WAITING_IDLE: Duration = Duration::from_secs(45);
+pub const WAITING_IDLE: Duration = Duration::from_secs(120);
 /// After this much TOTAL silence with no findings, treat the agent as stuck and
 /// fail fast so the recovery wrapper can kill + retry it — instead of waiting out
 /// the full grace `timeout`. Well past `WAITING_IDLE`, so a watching human still
 /// has a window to Open + respond before auto-retry kicks in.
-const STUCK_IDLE: Duration = Duration::from_secs(180);
+const STUCK_IDLE: Duration = Duration::from_secs(900);
 /// Total attempts (initial + retries) for a review agent before giving up.
 const MAX_REVIEW_ATTEMPTS: u32 = 3;
 /// Backoff before each review-agent retry.
@@ -307,15 +314,7 @@ pub async fn run_agent_session(
 
     // Inject the prompt once the TUI has drawn + settled, then confirm it
     // dispatched (re-sending Enter once if the first submit was dropped).
-    if wait_for_tui(manager, &sid).await {
-        let _ = manager.input(&sid, &bracketed_paste(&prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = manager.input(&sid, b"\r").await;
-        if !dispatched(manager, &sid, before).await {
-            let _ = manager.input(&sid, b"\r").await;
-        }
-    }
+    submit_prompt(manager, &sid, &prompt).await;
 
     // Watch via the shared runner (out-file / claude transcript; exit / stuck /
     // timeout). It persists the waiting↔running transition; we never kill the
@@ -463,7 +462,7 @@ pub fn bracketed_paste(text: &str) -> Vec<u8> {
 
 /// How long an injected claude prompt gets to LAND in the transcript before the
 /// caller re-injects (first window) or fails the attempt (second window).
-pub const PROMPT_LAND_WAIT: Duration = Duration::from_secs(45);
+pub const PROMPT_LAND_WAIT: Duration = Duration::from_secs(120);
 
 /// Byte length of claude's transcript for (cwd, provider session id) — 0 when
 /// the file doesn't exist yet. Callers capture this BEFORE injecting so
@@ -551,9 +550,83 @@ pub async fn dispatched(
     }
 }
 
+/// A short, distinctive, whitespace-normalized probe from the prompt's first
+/// non-empty line — what the TUI must echo back for the paste to count.
+fn paste_probe(prompt: &str) -> String {
+    let line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let norm: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    // TUIs wrap/truncate long lines; 40 chars is short enough to survive that
+    // and long enough not to match boilerplate.
+    norm.chars().take(40).collect()
+}
+
+/// True once the last screenful contains `probe` (whitespace-normalized) —
+/// i.e. the pasted prompt is really sitting in the input box.
+fn paste_echoed(manager: &Arc<SessionManager>, sid: &otto_core::Id, probe: &str) -> bool {
+    if probe.is_empty() {
+        return true;
+    }
+    let Some(h) = manager.live_handle(sid) else { return false };
+    let raw = String::from_utf8_lossy(&h.scrollback(200)).into_owned();
+    let norm: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    norm.contains(probe)
+}
+
+/// Paste `prompt` into the session and press Enter — the one submit path
+/// every engine should use. Waits for the TUI to draw, pastes, then WAITS
+/// FOR THE PASTE TO ECHO (re-pasting once if a late redraw wiped it) before
+/// Enter, and re-sends Enter once if the submit visibly didn't dispatch.
+/// Returns false when the session died before the prompt could be sent.
+pub async fn submit_prompt(
+    manager: &Arc<SessionManager>,
+    sid: &otto_core::Id,
+    prompt: &str,
+) -> bool {
+    if !wait_for_tui(manager, sid).await {
+        return false;
+    }
+    let probe = paste_probe(prompt);
+    for attempt in 0..2 {
+        let _ = manager.input(sid, &bracketed_paste(prompt)).await;
+        tokio::time::sleep(PASTE_TO_ENTER).await;
+        let deadline = Instant::now() + PASTE_ECHO_WAIT;
+        loop {
+            if paste_echoed(manager, sid, &probe) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(PASTE_ECHO_POLL).await;
+        }
+        if paste_echoed(manager, sid, &probe) {
+            break;
+        }
+        if attempt == 0 {
+            tracing::warn!("prompt paste did not echo in session {sid}; re-pasting once");
+            // Let whatever redraw ate the paste finish before trying again.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+    let before = manager.live_handle(sid).map(|h| h.last_output_at());
+    let _ = manager.input(sid, b"\r").await;
+    if !dispatched(manager, sid, before).await {
+        let _ = manager.input(sid, b"\r").await;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_probe_is_short_normalized_and_skips_blank_lines() {
+        let p = paste_probe("\n\n  You are   reviewing\tthe skill package at /tmp/x — do it carefully and thoroughly\nmore");
+        assert_eq!(p.chars().count(), 40);
+        assert!(p.starts_with("You are reviewing the skill package"));
+        assert_eq!(paste_probe(""), "");
+    }
 
     #[test]
     fn findings_path_unique_per_agent() {

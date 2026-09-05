@@ -71,20 +71,14 @@ fn is_cancelled(flag: &Arc<AtomicBool>) -> bool {
 // PTY driving constants (match review_session.rs — claude's TUI is slow).
 // ---------------------------------------------------------------------------
 
-const TUI_STARTUP_WAIT: Duration = Duration::from_secs(40);
-const TUI_POLL: Duration = Duration::from_millis(250);
-const TUI_SETTLE: Duration = Duration::from_millis(600);
-const PASTE_TO_ENTER: Duration = Duration::from_millis(250);
-const DISPATCH_WAIT: Duration = Duration::from_secs(6);
-const DISPATCH_POLL: Duration = Duration::from_millis(250);
 const OUTPUT_POLL: Duration = Duration::from_millis(1000);
-const WAITING_IDLE: Duration = Duration::from_secs(60);
+const WAITING_IDLE: Duration = Duration::from_secs(120);
 
 /// Implementation agents get a longer grace period than validators (they edit
 /// code), validators a medium one, the improver a short one.
-const IMPL_TIMEOUT: Duration = Duration::from_secs(2400); // 40 min
-const VALIDATION_TIMEOUT: Duration = Duration::from_secs(900); // 15 min
-const IMPROVER_TIMEOUT: Duration = Duration::from_secs(600); // 10 min
+const IMPL_TIMEOUT: Duration = Duration::from_secs(7200); // 120 min
+const VALIDATION_TIMEOUT: Duration = Duration::from_secs(3600); // 60 min
+const IMPROVER_TIMEOUT: Duration = Duration::from_secs(3600); // 60 min
 
 /// Best-practice guidance handed to the improver so skill edits stay healthy.
 ///
@@ -849,15 +843,7 @@ async fn run_agent_capture(
     let sid = session.id.clone();
     slot.set("running", Some(&sid), "").await;
 
-    if wait_for_tui(manager, &sid).await {
-        let _ = manager.input(&sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = manager.input(&sid, b"\r").await;
-        if !dispatched(manager, &sid, before).await {
-            let _ = manager.input(&sid, b"\r").await;
-        }
-    }
+    crate::review_session::submit_prompt(manager, &sid, prompt).await;
 
     let deadline = Instant::now() + timeout;
     let mut flagged_waiting = false;
@@ -931,52 +917,8 @@ async fn run_agent_capture(
     }
 }
 
-fn bracketed_paste(text: &str) -> Vec<u8> {
-    let mut v = Vec::with_capacity(text.len() + 16);
-    v.extend_from_slice(b"\x1b[200~");
-    v.extend_from_slice(text.as_bytes());
-    v.extend_from_slice(b"\x1b[201~");
-    v
-}
 
-async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &Id) -> bool {
-    let deadline = Instant::now() + TUI_STARTUP_WAIT;
-    loop {
-        let Some(handle) = manager.live_handle(sid) else {
-            return false;
-        };
-        if handle.on_exit().borrow().is_some() {
-            return false;
-        }
-        if !handle.scrollback(1).is_empty() && handle.last_output_at().elapsed() >= TUI_SETTLE {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return true;
-        }
-        tokio::time::sleep(TUI_POLL).await;
-    }
-}
 
-async fn dispatched(
-    manager: &Arc<SessionManager>,
-    sid: &Id,
-    before: Option<std::time::Instant>,
-) -> bool {
-    let Some(before) = before else { return false };
-    let deadline = Instant::now() + DISPATCH_WAIT;
-    loop {
-        match manager.live_handle(sid) {
-            Some(h) if h.last_output_at() > before => return true,
-            None => return false,
-            _ => {}
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(DISPATCH_POLL).await;
-    }
-}
 
 /// Output-file path for one agent within an iteration.
 fn output_path(eval_id: &Id, iter: u32, slot: &str) -> PathBuf {

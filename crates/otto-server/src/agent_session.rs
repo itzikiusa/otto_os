@@ -21,7 +21,6 @@ use otto_sessions::SessionManager;
 use serde_json::Value;
 
 use crate::error::{ApiError, ApiResult};
-use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
 use crate::state::ServerCtx;
 
 /// Absolute cap on one turn (cold claude spawn + a long reply). Deliberately very
@@ -379,15 +378,7 @@ pub async fn run_session_turn_with(
 /// One paste + Enter into the session, with a single re-`\r` when the first didn't
 /// visibly dispatch. Bracketed paste keeps a multi-line prompt atomic.
 async fn submit_once(manager: &Arc<SessionManager>, sid: &Id, prompt: &str) {
-    if wait_for_tui(manager, sid).await {
-        let _ = manager.input(sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = manager.live_handle(sid).map(|h| h.last_output_at());
-        let _ = manager.input(sid, b"\r").await;
-        if !dispatched(manager, sid, before).await {
-            let _ = manager.input(sid, b"\r").await;
-        }
-    }
+    crate::review_session::submit_prompt(manager, sid, prompt).await;
 }
 
 /// Collapse every run of whitespace to a single space, so a paste reflow / newline

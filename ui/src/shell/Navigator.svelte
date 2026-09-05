@@ -427,7 +427,7 @@
             {#if ws.myRole !== 'viewer' && ws.archivedSessions.length > 1}
               <div class="arch-tools">
                 <label class="arch-all" title="Select all archived sessions">
-                  <input type="checkbox" checked={archSelCount > 0 && archSelCount === ws.archivedSessions.length} indeterminate={archSelCount > 0 && archSelCount < ws.archivedSessions.length} onchange={archSelectAll} />
+                  <input type="checkbox" aria-label="Select all archived sessions" checked={archSelCount > 0 && archSelCount === ws.archivedSessions.length} indeterminate={archSelCount > 0 && archSelCount < ws.archivedSessions.length} onchange={archSelectAll} />
                   <span>{archSelCount > 0 ? `${archSelCount} selected` : 'Select all'}</span>
                 </label>
                 <button class="row-action danger arch-del-sel" disabled={archSelCount === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="archived-delete-selected" onclick={() => void deleteSelectedArchived()}>
@@ -676,7 +676,7 @@
       {#if agentSelMode}
         <div class="arch-tools" data-testid="agents-select-tools">
           <label class="arch-all" title="Select all sessions">
-            <input type="checkbox" checked={agentSelIds.length > 0 && agentSelIds.length === fAgents.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < fAgents.length} onchange={agentSelectAll} />
+            <input type="checkbox" aria-label="Select all sessions" checked={agentSelIds.length > 0 && agentSelIds.length === fAgents.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < fAgents.length} onchange={agentSelectAll} />
             <span>{agentSelIds.length > 0 ? `${agentSelIds.length} selected` : 'Select all'}</span>
           </label>
           <button class="row-action arch-del-sel" disabled={agentSelIds.length === 0} title="Archive selected sessions" aria-label="Archive selected sessions" data-testid="agents-archive-selected" onclick={() => void archiveSelectedAgents()}>
@@ -1120,13 +1120,11 @@
     color: #febc2e;
     background: color-mix(in srgb, #febc2e 16%, transparent);
   }
-  .arch-tools { display: flex; align-items: center; gap: 6px; padding: 2px 6px 4px 8px; font-size: 11px; color: var(--text-dim); }
+  .arch-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; padding: 2px 6px 4px 8px; font-size: 11px; color: var(--text-dim); }
   .arch-all { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
   .arch-all input, .arch-check { margin: 0; accent-color: var(--accent); }
   .arch-check { flex-shrink: 0; }
-  .arch-del-sel { display: inline-flex; align-items: center; gap: 4px; opacity: 1; }
   .sel-toggle.on { color: var(--accent); }
-  .arch-del-sel:disabled { opacity: 0.4; cursor: default; }
   .nested-row.selected .nested-item { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .row-action {
     display: grid;
@@ -1151,6 +1149,16 @@
   .row-action.danger:hover {
     color: var(--status-exited);
   }
+  /* Text-bearing toolbar actions (bulk Archive / Delete): declared AFTER
+     .row-action so they beat its fixed 22px grid square — otherwise the label
+     wrapped under the icon and spilled past the sidebar edge. */
+  .arch-tools .row-action {
+    display: inline-flex; align-items: center; gap: 4px; width: auto; height: 22px;
+    padding: 0 7px; flex-shrink: 0; opacity: 1;
+    border: 1px solid var(--border); border-radius: var(--radius-s, 4px); white-space: nowrap;
+  }
+  .arch-tools .row-action:disabled { opacity: 0.4; cursor: default; }
+  .arch-tools .row-action.danger:not(:disabled) { color: var(--status-exited); border-color: color-mix(in srgb, var(--status-exited) 40%, transparent); }
   .nav-item.subtle {
     color: var(--text-dim);
   }

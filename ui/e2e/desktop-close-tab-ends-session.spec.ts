@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
+import { expectFullyInViewport } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Closing a session tab ENDS the session (desktop-browser only).
@@ -170,4 +171,37 @@ test('agents list: select mode archives / deletes the checked sessions in bulk',
   await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
   await expect.poll(() => exists(idByTitle.Maldini), { timeout: 15_000 }).toBe(false);
   expect(await exists(idByTitle.Gattuso)).toBe(true);
+});
+
+test('archived list: bulk toolbar stays inside the sidebar with many long titles', async ({ page }) => {
+  // Enough long-titled archived rows to overflow the sidebar width + height.
+  const ids: string[] = [];
+  for (let i = 0; i < 30; i++) {
+    const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/sessions`, {
+      data: { kind: 'agent', provider: 'shell', title: `Insights: daily report number ${i} with a long title`, cwd: '/tmp', meta: { origin: 'e2e' } },
+    });
+    ids.push((await r.json()).id as string);
+  }
+  for (const id of ids) await ctx.post(`${base}/api/v1/sessions/${id}/archive`);
+  await page.reload();
+  await expect(page.getByText('Kaka').first()).toBeVisible({ timeout: 20_000 });
+  await page.getByRole('button', { name: /^Archived/ }).click();
+  await page.getByLabel('Select all archived sessions').check();
+  const del = page.getByTestId('archived-delete-selected');
+  await expect(del).toContainText('Delete (30)');
+  await expectFullyInViewport(page, del, 'Delete selected button');
+  // No horizontal overflow inside the navigator.
+  const nav = page.getByRole('navigation', { name: 'Navigator' });
+  const overflow = await nav.evaluate((el) => {
+    const right = el.getBoundingClientRect().right;
+    const bad: string[] = [];
+    // The rail's own resize handle deliberately straddles the edge — skip it.
+    el.querySelectorAll('.nested *').forEach((n) => {
+      const r = n.getBoundingClientRect();
+      if (r.width > 0 && r.right > right + 1) bad.push(`${n.tagName.toLowerCase()}.${(n as HTMLElement).className.toString().split(' ').join('.')} right=${Math.round(r.right)} nav=${Math.round(right)}`);
+    });
+    return { scroll: el.scrollWidth, client: el.clientWidth, bad: bad.slice(0, 8) };
+  });
+  expect(overflow, JSON.stringify(overflow)).toMatchObject({ bad: [] });
+  await page.screenshot({ path: 'test-results/archived-bulk-toolbar.png', clip: { x: 0, y: 0, width: 320, height: 700 } });
 });

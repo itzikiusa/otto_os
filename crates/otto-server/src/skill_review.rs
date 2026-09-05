@@ -40,7 +40,7 @@ use tempfile::TempDir;
 
 use crate::auth::{require_ws_role, CurrentUser};
 use crate::error::{ApiError, ApiResult};
-use crate::review_session::{bracketed_paste, dispatched, wait_for_tui};
+use crate::review_session::submit_prompt;
 use crate::skill_eval::CancelRegistry;
 use crate::state::ServerCtx;
 
@@ -48,12 +48,11 @@ use crate::state::ServerCtx;
 // Timeouts
 // ---------------------------------------------------------------------------
 
-const AGENT_TIMEOUT: Duration = Duration::from_secs(600); // 10 min per reviewer agent
-const FIX_TIMEOUT: Duration = Duration::from_secs(900); // 15 min for the apply-fixes agent
-const SUMMARIZER_TIMEOUT: Duration = Duration::from_secs(120);
-const PASTE_TO_ENTER: Duration = Duration::from_millis(250);
+const AGENT_TIMEOUT: Duration = Duration::from_secs(3600); // 60 min per reviewer agent
+const FIX_TIMEOUT: Duration = Duration::from_secs(3600); // 60 min for the apply-fixes agent
+const SUMMARIZER_TIMEOUT: Duration = Duration::from_secs(600);
 const OUTPUT_POLL: Duration = Duration::from_millis(1000);
-const WAITING_IDLE: Duration = Duration::from_secs(60);
+const WAITING_IDLE: Duration = Duration::from_secs(120);
 
 // ---------------------------------------------------------------------------
 // Cancel registry helpers (re-declared; skill_eval's are private)
@@ -697,15 +696,7 @@ async fn run_skill_review_agent(
     row.note = String::new();
     let _ = repo.set_agent_at(review_id, index, &row).await;
 
-    if wait_for_tui(&ctx.manager, &sid).await {
-        let _ = ctx.manager.input(&sid, &bracketed_paste(&prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager.input(&sid, b"\r").await;
-        if !dispatched(&ctx.manager, &sid, before).await {
-            let _ = ctx.manager.input(&sid, b"\r").await;
-        }
-    }
+    submit_prompt(&ctx.manager, &sid, &prompt).await;
 
     let deadline = Instant::now() + AGENT_TIMEOUT;
     let mut flagged_waiting = false;
@@ -864,15 +855,7 @@ async fn run_fix_agent(
     let _ = repo.set_fix(review_id, &row).await;
     emit(ctx, &ws.id, review_id, "done");
 
-    if wait_for_tui(&ctx.manager, &sid).await {
-        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager.input(&sid, b"\r").await;
-        if !dispatched(&ctx.manager, &sid, before).await {
-            let _ = ctx.manager.input(&sid, b"\r").await;
-        }
-    }
+    submit_prompt(&ctx.manager, &sid, prompt).await;
 
     let deadline = Instant::now() + FIX_TIMEOUT;
     let mut flagged_waiting = false;
