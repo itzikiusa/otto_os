@@ -4350,6 +4350,8 @@ export interface WorkflowRun {
   id: Id;
   workflow_id: Id;
   workspace_id: Id;
+  /** User who started the run (its agent sessions are owned by them); null for trigger/schedule/chat runs. */
+  created_by?: Id | null;
   status: WorkflowRunStatus;
   input: unknown;
   nodes: NodeRunState[];

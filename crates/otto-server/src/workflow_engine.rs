@@ -1182,8 +1182,17 @@ pub async fn run_workflow(
             sessions: vec![],
         })
         .collect();
-    // Resolve the user this run acts as (for spawning visible agent sessions).
-    let user = resolve_run_user(&ctx, &workflow.created_by).await;
+    // Resolve the user this run acts as (for spawning visible agent sessions):
+    // the user who STARTED the run when known, else the workflow's creator
+    // (trigger / schedule / chat runs). Acting as the starter is what lets a
+    // non-root editor attach to the sessions their own run spawns — those are
+    // gated owner-or-admin, and the workflow's creator is usually someone else.
+    let run_starter = WorkflowsRepo::new(ctx.pool.clone())
+        .get_run(&run_id)
+        .await
+        .ok()
+        .and_then(|r| r.created_by);
+    let user = resolve_run_user(&ctx, &acting_user_id(run_starter, &workflow.created_by)).await;
     // Seed the run input from the entry manual_trigger node's configured fields
     // (its inspector — prompt/working_directory/repo_id/goals/…), letting the
     // actual /run body or chat-trigger input override per key. This is what makes
@@ -4770,6 +4779,18 @@ fn is_retryable(kind: &str) -> bool {
     !matches!(kind, "human_approval" | "manual_trigger")
 }
 
+/// Whose behalf a run executes on: the user who started it when recorded
+/// (`workflow_runs.created_by`), else the workflow's creator (trigger /
+/// schedule / chat / webhook runs). The agent sessions a run spawns are
+/// created as this user, and session access is owner-or-admin — so a run
+/// MUST act as its starter or a non-admin editor can never attach to the
+/// sessions of a workflow someone else authored.
+fn acting_user_id(run_started_by: Option<Id>, workflow_created_by: &Id) -> Id {
+    run_started_by
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| workflow_created_by.clone())
+}
+
 /// Resolve the user a run acts as. Falls back to a synthetic user for system /
 /// trigger-initiated runs whose `created_by` isn't a real account.
 async fn resolve_run_user(ctx: &ServerCtx, created_by: &Id) -> User {
@@ -5669,6 +5690,14 @@ fn canvas_node_ext(mode: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn run_acts_as_its_starter_else_workflow_creator() {
+        let wf_owner: Id = "root".into();
+        assert_eq!(super::acting_user_id(Some("editor-b".into()), &wf_owner), "editor-b");
+        assert_eq!(super::acting_user_id(None, &wf_owner), "root");
+        assert_eq!(super::acting_user_id(Some(String::new()), &wf_owner), "root");
+    }
+
     use super::*;
     use otto_core::workflows::WorkflowEdge;
 
@@ -5755,6 +5784,7 @@ mod tests {
             waiting_approval: false,
             approval_node_id: None,
             approved_by: None,
+            created_by: None,
             approval_note: None,
             approved_at: None,
             workflow_version: None,

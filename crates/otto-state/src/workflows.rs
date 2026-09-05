@@ -78,6 +78,7 @@ fn row_to_run(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRun> {
         waiting_approval: waiting != 0,
         approval_node_id: r.try_get("approval_node_id").ok().flatten(),
         approved_by: r.try_get("approved_by").ok().flatten(),
+        created_by: r.try_get("created_by").ok().flatten(),
         approval_note: r.try_get("approval_note").ok().flatten(),
         approved_at: approved_at.as_deref().map(ts).transpose()?,
         workflow_version: r.try_get("workflow_version").ok().flatten(),
@@ -271,24 +272,28 @@ impl WorkflowsRepo {
 
     // --- runs --------------------------------------------------------------
 
+    /// `created_by` = the user who started the run (the engine acts as them
+    /// when spawning agent sessions); `None` for trigger / schedule / chat runs.
     pub async fn create_run(
         &self,
         workflow_id: &Id,
         workspace_id: &Id,
         input: &serde_json::Value,
+        created_by: Option<&Id>,
     ) -> Result<WorkflowRun> {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO workflow_runs (id, workflow_id, workspace_id, status, input_json,
-                                        nodes_json, started_at)
-             VALUES (?, ?, ?, 'pending', ?, '[]', ?)",
+                                        nodes_json, started_at, created_by)
+             VALUES (?, ?, ?, 'pending', ?, '[]', ?, ?)",
         )
         .bind(&id)
         .bind(workflow_id)
         .bind(workspace_id)
         .bind(input.to_string())
         .bind(&now)
+        .bind(created_by)
         .execute(&self.pool)
         .await
         .map_err(dberr("create run"))?;
@@ -800,7 +805,7 @@ mod tests {
         let g = WorkflowGraph::default();
         let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
         let run = repo
-            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null)
+            .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
             .await
             .unwrap();
 
@@ -823,7 +828,7 @@ mod tests {
         let repo = WorkflowsRepo::new(pool);
         let g = WorkflowGraph::default();
         let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
-        let mk = || repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null);
+        let mk = || repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None);
 
         // r1: EXECUTING when the daemon died → must fail.
         let r1 = mk().await.unwrap();
@@ -856,14 +861,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_run_records_the_starter() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool);
+        let g = WorkflowGraph::default();
+        let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
+        let by = "user-b".to_string();
+        let r = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, Some(&by)).await.unwrap();
+        assert_eq!(r.created_by.as_deref(), Some("user-b"));
+        assert_eq!(repo.get_run(&r.id).await.unwrap().created_by.as_deref(), Some("user-b"));
+        let t = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None).await.unwrap();
+        assert!(t.created_by.is_none(), "trigger runs carry no starter");
+    }
+
+    #[tokio::test]
     async fn queued_run_ids_are_fifo_by_creation() {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let g = WorkflowGraph::default();
         let wf = repo.create(&"ws1".into(), "WF", "", "", &g, &"u1".into()).await.unwrap();
-        let a = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null).await.unwrap();
-        let b = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null).await.unwrap();
-        let c = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null).await.unwrap();
+        let a = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None).await.unwrap();
+        let b = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None).await.unwrap();
+        let c = repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None).await.unwrap();
         // A run that already started is not queued.
         repo.update_run(&b.id, RunStatus::Running, &[], None, false).await.unwrap();
         // Same-timestamp rows tiebreak on id; ULIDs are creation-ordered, so
@@ -915,7 +934,7 @@ mod tests {
             .unwrap();
 
         let run = repo
-            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}))
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}), None)
             .await
             .unwrap();
         assert_eq!(run.workflow_version, None);
@@ -938,7 +957,7 @@ mod tests {
             .await
             .unwrap();
         let run = repo
-            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}))
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}), None)
             .await
             .unwrap();
         assert_eq!(run.rev, 0, "fresh run starts at rev 0");
@@ -965,7 +984,7 @@ mod tests {
             .await
             .unwrap();
         let run = repo
-            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}))
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}), None)
             .await
             .unwrap();
 

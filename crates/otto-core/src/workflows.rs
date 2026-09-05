@@ -264,6 +264,11 @@ pub struct WorkflowRun {
     /// User id of the approver (None when rejected or still pending).
     #[serde(default)]
     pub approved_by: Option<String>,
+    /// User who started the run (the user its agent sessions are created as);
+    /// None for trigger / schedule / chat-initiated runs, which act as the
+    /// workflow's creator.
+    #[serde(default)]
+    pub created_by: Option<Id>,
     /// Note attached to the approval/rejection decision.
     #[serde(default)]
     pub approval_note: Option<String>,

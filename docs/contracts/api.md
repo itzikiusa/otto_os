@@ -1422,7 +1422,7 @@ revision bumped on **every** persisted progress write (node transitions, the
 human-approval pause, the approve/reject decision). Clients use it to discard
 stale/out-of-order snapshots and to order `workflow_run_updated` events; legacy
 rows report 0. The approval columns now ride the run too:
-`waiting_approval` (bool), `approval_node_id`, `approved_by`, `approval_note`,
+`waiting_approval` (bool), `approval_node_id`, `approved_by`, `approval_note`, `created_by` (the user who started the run — the engine acts as them when spawning agent sessions, so the starter is their owner; null for trigger/schedule/chat runs, which act as the workflow's creator),
 `approved_at` — previously only surfaced on `ActiveWorkflowRun`, which made the
 run-view approval banner unreachable. Each `NodeRunState` gains `started_at`
 (set on the pending→running transition; drives the live elapsed timer on a
