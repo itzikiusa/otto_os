@@ -840,3 +840,20 @@ registry and its installers are global, like connections. Emitted by
   is only in `/k8s/status`.
 - TypeScript types: `{ type: 'k8s_cluster_updated'; cluster_id: Id; deleted: boolean }`
   and `{ type: 'k8s_install_updated'; tool: 'kubectl' | 'k9s'; state: string }`.
+
+### `k8s_monitor_cycle`
+
+Global scope. Emitted by `crates/otto-k8s/src/monitor/collector.rs` after every
+monitoring cycle of an enabled cluster (see `api.md` "Kubernetes monitoring").
+
+```json
+{ "type": "k8s_monitor_cycle", "cluster_id": "<Id>", "ok": true,
+  "pods_scraped": 106, "pods_failed": 2, "cycle_ms": 28417 }
+```
+
+- `ok` — samples were written this cycle (`false` = the cluster was unreachable
+  or the ClickHouse write failed; `GET /k8s/clusters/{id}/monitor` carries the
+  error text in `status.last_error`).
+- Clients on the Monitor dashboard re-fetch `GET /k8s/monitor/overview` and the
+  open cluster's `…/monitor/workloads`; nothing else needs to react.
+- TypeScript: `{ type: 'k8s_monitor_cycle'; cluster_id: Id; ok: boolean; pods_scraped: number; pods_failed: number; cycle_ms: number }`.

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
   // Clusters overview: one card per saved cluster (env pill, color dot, server
   // version + capability chips), "Add cluster" wizard (Admin), card context menu
   // (open / test / refresh capabilities / edit / delete).
@@ -18,7 +20,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import { envBadge } from './k8s-util';
 
-  const isAdmin = $derived(auth.can('kubernetes', 'admin'));
+  const isAdmin = $derived(auth.isRoot);
   let wizardOpen = $state(false);
   let editing: K8sCluster | null = $state(null);
   let k9sSheet = $state(false);
@@ -56,12 +58,17 @@
     }
   }
 
+  let accessFor = $state<string | null>(null);
+  $effect(() => { for (const resource of k8s.clusters) void resourceAccess.load('k8s_cluster', resource.id); });
+
   function menu(e: MouseEvent | KeyboardEvent, c: K8sCluster): void {
     ctxMenu.show(e, [
+      ...(resourceAccess.can('k8s_cluster', c.id, 'manage_access', 'kubernetes', 'admin')
+        ? [{ label: 'Manage access…', icon: 'key', action: () => { accessFor = c.id; } }] : []),
       { label: 'Open', icon: 'helm', action: () => open(c) },
       { label: 'Test connection', icon: 'zap', action: () => void test(c) },
       { label: 'Refresh capabilities', icon: 'refresh', action: () => void k8s.loadCapabilities(c.id, true) },
-      ...(isAdmin
+      ...(resourceAccess.can('k8s_cluster', c.id, 'configure', 'kubernetes', 'admin')
         ? [
             { separator: true },
             { label: 'Edit…', icon: 'edit', action: () => { editing = c; wizardOpen = true; } },
@@ -94,6 +101,9 @@
       </div>
     </div>
     <div class="actions">
+      <button class="btn" onclick={() => router.go('kubernetes/monitor')} title="Monitoring dashboard: pod metrics, restarts, health" data-testid="k8s-monitor-btn">
+        <Icon name="gauge" size={14} /> Monitor
+      </button>
       <button class="btn ghost" onclick={() => void k8s.loadClusters()} title="Refresh" aria-label="Refresh clusters">
         <Icon name="refresh" size={14} />
       </button>
@@ -173,6 +183,12 @@
     {#snippet footer()}
       <button class="btn" onclick={() => (k9sSheet = false)}>Close</button>
     {/snippet}
+  </Modal>
+{/if}
+
+{#if accessFor}
+  <Modal title="Manage access" width={780} onclose={() => (accessFor = null)}>
+    <ResourceAccess kind="k8s_cluster" resourceId={accessFor} />
   </Modal>
 {/if}
 

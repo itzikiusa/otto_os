@@ -151,6 +151,7 @@ pub async fn require_session_owner_or_admin(
     user: &User,
     session: &Session,
 ) -> Result<(), ApiError> {
+    crate::resource_sessions::check(ctx,user,session).await?;
     check_session_owner_or_admin(ctx.roles.as_ref(), user, session).await
 }
 

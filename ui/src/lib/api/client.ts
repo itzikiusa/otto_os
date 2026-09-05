@@ -67,6 +67,7 @@ export function getToken(): string | null {
 export function setToken(token: string | null): void {
   if (token === null) localStorage.removeItem('otto_token');
   else localStorage.setItem('otto_token', token);
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('otto:auth-changed'));
 }
 
 async function request<T>(

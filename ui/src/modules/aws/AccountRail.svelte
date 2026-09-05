@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // Left rail inside the AWS module: accounts → services. A service is greyed
   // (still navigable, so the AccessDenied is visible) when the account's IAM
   // probe said `denied`, and hidden outright when the user lacks the feature's
@@ -21,14 +22,15 @@
   let { activeId, activeService, onedit, ondelete, onadd }: Props = $props();
 
   let collapsed: Record<string, boolean> = $state({});
-  const canAdmin = $derived(auth.can('aws', 'admin'));
+  const canAdmin = $derived(auth.isRoot);
 
   function featureOf(svc: AwsService): Feature {
     return `aws_${svc}` as Feature;
   }
 
+  $effect(() => { for (const a of aws.accounts) void resourceAccess.load('aws_account', a.id); });
   function services(a: AwsAccount) {
-    return AWS_SERVICES.filter((s) => auth.can(featureOf(s.id), 'view')).map((s) => ({
+    return AWS_SERVICES.filter((s) => resourceAccess.can('aws_account', a.id, s.id === 's3' ? 'discover' : `${s.id}_view`, featureOf(s.id), 'view')).map((s) => ({
       ...s,
       denied: !aws.serviceAllowed(a.id, s.id),
     }));
@@ -39,10 +41,11 @@
       { label: 'Overview', icon: 'grid', action: () => router.go('aws') },
       {
         label: 'Re-check permissions',
+        disabled: !resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'view'),
         icon: 'refresh',
         action: () => void aws.loadPermissions(a.id, true),
       },
-      ...(canAdmin
+      ...(resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'admin')
         ? [
             { label: 'Edit account…', icon: 'edit', action: () => onedit(a) },
             { separator: true },

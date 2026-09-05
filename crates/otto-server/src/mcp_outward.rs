@@ -114,6 +114,7 @@ const DEFAULT_ENABLED: &[&str] = &[
     "k8s_describe",
     "k8s_logs",
     "k8s_top",
+    "k8s_health",
     // (Vault v2 structural reads removed — Vault feature disabled.)
 ];
 const DANGEROUS: &[&str] = &[
@@ -628,6 +629,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Live per-pod CPU (millicores) / memory (bytes) from metrics-server, optionally for one `namespace`; `available:false` when the cluster has none. Read-only.",
             "inputSchema":{"type":"object","required":["cluster_id"],"properties":{
                 "cluster_id":{"type":"string"},"namespace":{"type":"string"}}}}),
+        json!({"name":"otto.k8s_health","mutating":false,"category":"Kubernetes",
+            "description":"Compact health digest for a MONITORED cluster (Kubernetes → Monitor must be enabled): classified restarts (oom / crash / probe / unknown) with pod + memory-limit detail, planned churn (rollouts, scales, drains, Otto actions), memory outliers vs limits, error-rate and p95 spikes vs the 24h baseline, version drift, and the collector + metrics-server status (a `forbidden: …` message is the exact RBAC grant to ask for). `window` = 1h|6h|24h|7d (default 1h). Use this instead of k8s_get_resources for periodic health checks; every list is capped at 20 entries. Read-only.",
+            "inputSchema":{"type":"object","required":["cluster_id"],"properties":{
+                "cluster_id":{"type":"string"},"window":{"type":"string","description":"1h|6h|24h|7d"}}}}),
         json!({"name":"otto.k8s_action","mutating":true,"category":"Kubernetes",
             "description":"Run ONE operational action on a resource via kubectl: restart, scale (params.replicas), delete_pod, rollout_status/undo/pause/resume, rollout_promote/abort/retry (Argo Rollouts), argocd_sync/refresh/terminate_op/app_restart, cronjob_trigger/suspend/resume. Destructive actions (delete_pod, scale to 0, rollout_undo, argocd_sync with prune) require `params.confirm_name == name`. DANGEROUS: mutates a live cluster — approval-gated.",
             "inputSchema":{"type":"object","required":["cluster_id","action","kind","namespace","name"],"properties":{
@@ -2106,6 +2111,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             seg(&arg_str(args, "cluster_id")?),
             opt_query(args, &[("ns", "namespace")])
         )),
+        "k8s_health" => SelfCall::get(format!(
+            "/api/v1/k8s/clusters/{}/monitor/health?{}",
+            seg(&arg_str(args, "cluster_id")?),
+            opt_query(args, &[("window", "window")])
+        )),
         "k8s_action" => SelfCall::post(
             format!("/api/v1/k8s/clusters/{}/actions", seg(&arg_str(args, "cluster_id")?)),
             json!({
@@ -2477,13 +2487,17 @@ pub struct GatewayToolsQuery {
 /// surfaces these to the agent and proxies each call through `/mcp/gateway/invoke`.
 pub async fn gateway_tools(
     State(ctx): State<ServerCtx>,
-    CurrentUser(_user): CurrentUser,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<GatewayToolsQuery>,
 ) -> ApiResult<Json<Value>> {
+    crate::auth::require_ws_role(&ctx,&user,&q.workspace_id,WorkspaceRole::Viewer).await?;
     let servers = ctx.mcp.registry().list_for_ws(&q.workspace_id).await.map_err(ApiError)?;
     let mut tools: Vec<Value> = Vec::new();
-    for s in servers.into_iter().filter(|s| s.enabled && s.managed) {
-        for t in ctx.mcp.tools().list_for_server(&s.id).await.map_err(ApiError)?.into_iter().filter(|t| t.enabled) {
+    for s in servers.into_iter().filter(|s| s.enabled) {
+        let policy=otto_state::ResourceAccessRepo::new(ctx.pool.clone()).get_live_policy(otto_core::access::ResourceKind::McpServer,&s.id).await?;
+        if !s.managed && policy.mode == otto_core::access::AccessMode::Legacy { continue; }
+        if !ctx.mcp.resource_allowed(&s,&user,"discover",None).await? { continue; }
+        for t in ctx.mcp.visible_tools(&s,&user).await.map_err(ApiError)?.into_iter().filter(|t| t.enabled) {
             tools.push(json!({
                 "name": format!("mcp__{}__{}", s.name, t.name),
                 "server_id": s.id,
@@ -2520,6 +2534,15 @@ pub async fn gateway_invoke(
     CurrentUser(user): CurrentUser,
     Json(req): Json<GatewayInvokeReq>,
 ) -> ApiResult<Json<Value>> {
+    let server = ctx.mcp.registry().get(&req.server_id).await?;
+    if server.workspace_id != req.workspace_id { return Err(Error::Forbidden("MCP workspace mismatch".into()).into()); }
+    let policy = otto_state::ResourceAccessRepo::new(ctx.pool.clone()).get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await?;
+    let role = if policy.mode == otto_core::access::AccessMode::Legacy { WorkspaceRole::Editor } else { WorkspaceRole::Viewer };
+    crate::auth::require_ws_role(&ctx,&user,&server.workspace_id,role).await?;
+    if policy.mode == otto_core::access::AccessMode::Legacy {
+        otto_state::GrantsRepo::new(ctx.pool.clone()).check_global(&user,otto_core::domain::Feature::Mcp,otto_core::domain::Capability::Edit,"legacy MCP invocation requires edit").await?;
+    }
+    if !ctx.mcp.resource_allowed(&server,&user,"invoke",Some(&req.tool)).await? { return Err(Error::Forbidden("MCP tool access denied".into()).into()); }
     let _ = &req.session_id;
     let ictx = InvokeCtx {
         workspace_id: Some(req.workspace_id.clone()),
@@ -2800,8 +2823,14 @@ mod tests {
         "aws_athena_get_query",
         "aws_eks_list_clusters",
     ];
-    const K8S_READS: &[&str] =
-        &["k8s_list_clusters", "k8s_get_resources", "k8s_describe", "k8s_logs", "k8s_top"];
+    const K8S_READS: &[&str] = &[
+        "k8s_list_clusters",
+        "k8s_get_resources",
+        "k8s_describe",
+        "k8s_logs",
+        "k8s_top",
+        "k8s_health",
+    ];
     const CONSOLE_WRITES: &[&str] = &["aws_athena_query", "aws_sqs_send", "k8s_action"];
 
     #[test]
@@ -2922,6 +2951,14 @@ mod tests {
         assert_eq!(
             route_for("k8s_top", &json!({"cluster_id":"c1","namespace":"prod"})).unwrap().path,
             "/api/v1/k8s/clusters/c1/metrics?ns=prod"
+        );
+        assert_eq!(
+            route_for("k8s_health", &json!({"cluster_id":"c1","window":"6h"})).unwrap().path,
+            "/api/v1/k8s/clusters/c1/monitor/health?window=6h"
+        );
+        assert_eq!(
+            route_for("k8s_health", &json!({"cluster_id":"c1"})).unwrap().path,
+            "/api/v1/k8s/clusters/c1/monitor/health?"
         );
         let c = route_for("k8s_action", &json!({"cluster_id":"c1","action":"scale","kind":"deployments","namespace":"prod","name":"web","params":{"replicas":3}})).unwrap();
         assert_eq!(c.method, Method::Post);

@@ -560,7 +560,7 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask) -> Result<ExecO
     let ws = ctx.workspaces.get(&task.workspace_id).await?;
     let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
     let run = repo
-        .create_run(&workflow.id, &workflow.workspace_id, &input)
+        .create_run(&workflow.id, &workflow.workspace_id, &input, None)
         .await?;
     let run_id = run.id.clone();
     crate::workflow_engine::spawn_run(

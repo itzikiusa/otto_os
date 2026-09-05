@@ -187,6 +187,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     let pool = otto_state::open(&cfg.db_path())
         .await
         .map_err(|e| format!("open database: {e}"))?;
+    otto_state::database_changes::DatabaseChangesRepo::new(pool.clone()).recover_interrupted().await
+        .map_err(|e| format!("recover interrupted database changes: {e}"))?;
     let secrets = otto_keychain::from_env(&cfg.data_dir);
     let (events, _) = broadcast::channel::<Event>(1024);
 
@@ -345,6 +347,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     // is the augmented `mcp_servers`; secrets resolve from the same Keychain.
     let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
     let spawner = Arc::new(PtySpawner {
+        pool: pool.clone(),
         manager: Arc::clone(&manager),
         workspaces: workspaces.clone(),
     });
@@ -986,6 +989,12 @@ async fn run(cfg: Config) -> Result<(), String> {
     let _workflow_schedule_trigger_handle =
         otto_server::workflow_trigger_scheduler::start(ctx.clone());
     tracing::info!("workflow schedule-trigger scheduler started");
+
+    // --- Kubernetes monitor supervisor ---
+    // One collector loop per cluster with monitoring enabled; reconciles every
+    // 15 s against `k8s_monitor_configs` and restarts a loop on config change.
+    let _k8s_monitor_handle = otto_server::k8s_monitor_scheduler::start(ctx.clone());
+    tracing::info!("k8s monitor scheduler started");
 
     // --- Mission Control / work-graph projector ---
     // Subscribes to the daemon event bus and materializes every agentic activity

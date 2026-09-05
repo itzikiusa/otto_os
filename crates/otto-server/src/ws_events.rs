@@ -308,7 +308,8 @@ fn scope_of(event: &Event) -> Scope<'_> {
         Event::AwsAccountUpdated { .. }
         | Event::AwsInstallUpdated { .. }
         | Event::K8sClusterUpdated { .. }
-        | Event::K8sInstallUpdated { .. } => Scope::Everyone,
+        | Event::K8sInstallUpdated { .. }
+        | Event::K8sMonitorCycle { .. } => Scope::Everyone,
     }
 }
 

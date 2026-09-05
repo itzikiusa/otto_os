@@ -501,7 +501,7 @@ reads the real trees); otherwise `~/.claude/projects` and `$CODEX_HOME/sessions`
 also accept `…/crates/otto-transcript/fixtures/**.jsonl`.
 
 `AgentTask` gained `source` (`"agent"` \| `"user"`), `description`, `nudge_pending`,
-`nudged_at` (migration 0116). The provider plan sync (`PUT …/tasks`, TodoWrite
+`nudged_at` (migration 0122). The provider plan sync (`PUT …/tasks`, TodoWrite
 ingest) now MERGES: it updates matching rows in place (by `ext_id`, else
 normalized title), inserts new `agent` rows, deletes only unmatched `agent` rows
 and keeps unmatched `user` rows after the plan — ids never regenerate. Claude
@@ -1471,7 +1471,7 @@ revision bumped on **every** persisted progress write (node transitions, the
 human-approval pause, the approve/reject decision). Clients use it to discard
 stale/out-of-order snapshots and to order `workflow_run_updated` events; legacy
 rows report 0. The approval columns now ride the run too:
-`waiting_approval` (bool), `approval_node_id`, `approved_by`, `approval_note`,
+`waiting_approval` (bool), `approval_node_id`, `approved_by`, `approval_note`, `created_by` (the user who started the run — the engine acts as them when spawning agent sessions, so the starter is their owner; null for trigger/schedule/chat runs, which act as the workflow's creator),
 `approved_at` — previously only surfaced on `ActiveWorkflowRun`, which made the
 run-view approval banner unreachable. Each `NodeRunState` gains `started_at`
 (set on the pending→running transition; drives the live elapsed timer on a
@@ -3288,10 +3288,10 @@ Admin = cluster registry + installs (see `crates/otto-server/src/policy.rs`).
 | POST /k8s/install | kubernetes:Admin | `{ tool: "kubectl"\|"k9s" }` | 202 `InstallJob` — background job (brew if present, else direct download into `<data_dir>/bin`); idempotent while `running`; progress via `/k8s/status` + WS `k8s_install_updated` |
 | GET /k8s/discover | kubernetes:View | — | `{ contexts: DiscoveredContext[] }` from `~/.kube/config` + every `$KUBECONFIG` entry via `kubectl config view -o json` (only `contexts[]` + `clusters[].cluster.server` are read — never key/cert/token material) |
 | GET /k8s/clusters | kubernetes:View | — | `K8sCluster[]` (name-sorted global library) |
-| POST /k8s/clusters | kubernetes:Admin | `UpsertK8sClusterReq { name, source?: "kubeconfig", kubeconfig_path?, context_name, default_namespace?, environment?, color? }` | 201 `K8sCluster` — `kubeconfig_path` (`~` ok) must exist; `source` other than `kubeconfig` ⇒ 400 |
+| POST /k8s/clusters | kubernetes:Admin | `UpsertK8sClusterReq { name, source?: "kubeconfig", kubeconfig_path?, context_name, default_namespace?, environment?, color?, known_namespaces?: string[] }` | 201 `K8sCluster` — `kubeconfig_path` (`~` ok) must exist; `source` other than `kubeconfig` ⇒ 400 |
 | POST /k8s/clusters/import | kubernetes:Admin | `{ name, kubeconfig_yaml, context_name?, default_namespace?, environment?, color? }` | 201 `K8sCluster` (`source: "imported"`) — writes `<data_dir>/kube/<id>.yaml` 0600, validates with `kubectl --kubeconfig <file> config view -o json`; `context_name` defaults to the file's `current-context`, `default_namespace` to that context's namespace; 1 MiB cap (413) |
 | GET /k8s/clusters/{id} | kubernetes:View | — | `K8sCluster` |
-| PATCH /k8s/clusters/{id} | kubernetes:Admin | partial `{ name?, kubeconfig_path?, context_name?, default_namespace?, environment?, color? }` (`""` clears nullable strings) | `K8sCluster` — `kubeconfig_path` is refused (400) for `imported`/`eks` rows (Otto-managed) |
+| PATCH /k8s/clusters/{id} | kubernetes:Admin | partial `{ name?, kubeconfig_path?, context_name?, default_namespace?, environment?, color?, known_namespaces?: string[] }` (`""` clears nullable strings; `known_namespaces` replaces the persisted list — namespaces offered in the picker even when the cluster forbids listing them; lowercased + deduped) | `K8sCluster` — `kubeconfig_path` is refused (400) for `imported`/`eks` rows (Otto-managed) |
 | DELETE /k8s/clusters/{id} | kubernetes:Admin | — | 204 — also removes the Otto-owned kubeconfig file for `imported`/`eks` sources (user files are never touched) |
 | POST /k8s/clusters/{id}/test | kubernetes:View | — | `{ ok, latency_ms, message, server_version? }` (`kubectl version -o json --request-timeout=8s`; success bumps `last_used_at`) |
 | GET /k8s/clusters/{id}/capabilities?refresh= | kubernetes:View | — | `K8sCapabilities { server_version?, metrics_server, argo_rollouts, argocd, checked_at }` — cached in the row (`capabilities`), `refresh=true` re-probes (`version`, `get --raw /apis/metrics.k8s.io/v1beta1`, `api-resources --api-group=argoproj.io -o name`) |
@@ -3367,3 +3367,218 @@ are fully qualified — `rollouts.argoproj.io`, `applications.argoproj.io`):
 | `argocd_app_restart` | applications | `resource_kind?`, `resource_name?` | for every Deployment / StatefulSet / DaemonSet / Rollout in `.status.resources[]` (filtered by the params) run the `restart` verb above in that resource's namespace, in this cluster's context |
 | `cronjob_trigger` | cronjobs | — | `create job --from=cronjob/<name> <name>-manual-<unix ts> -n <ns>` (job name trimmed to 63 chars) |
 | `cronjob_suspend` / `cronjob_resume` | cronjobs | — | `patch … --type merge -p {"spec":{"suspend":true\|false}}` |
+
+### Monitoring (`/k8s/monitor/*`, `/k8s/clusters/{id}/monitor*`)
+
+Opt-in, per-cluster metric collection from **user-defined HTTP probes on the
+pods themselves** (Otto's Go services expose `/actuator/info` +
+`/actuator/prometheus`, but nothing is hard-wired), plus whatever
+metrics-server allows, with restart classification and a ClickHouse-backed
+dashboard. Samples live in the embedded usage engine (`k8s_samples`,
+`k8s_events`, TTL = the largest configured `retention_days`); config + last
+cycle status live in SQLite (migration 0116). A collector loop runs per
+**enabled** cluster (`crates/otto-server/src/k8s_monitor_scheduler.rs`), every
+`interval_secs`: sweep pods → events → metrics-server (re-probed every cycle;
+a 403 is reported verbatim as `metrics_server: "forbidden: …"`) → pick
+transport (`auto` tries `pods/proxy` once, else `kubectl port-forward` with
+`concurrency` parallel forwards) → scrape → classify → write → status →
+WS `k8s_monitor_cycle`. Guide: `docs/features/kubernetes-monitoring.md`.
+
+Auth: `/k8s/monitor/overview` is `kubernetes:View`; `/k8s/clusters/{id}/monitor*`
+is View on GET, Edit on PUT/POST. Enabling requires the usage engine
+(ClickHouse) to be available ⇒ `409 conflict` otherwise.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /k8s/clusters/{id}/monitor | View | — | `{ config: MonitorConfig, status: MonitorStatus \| null, presets: [{ id, title, probes: Probe[] }] }` |
+| PUT /k8s/clusters/{id}/monitor | Edit | `MonitorConfig` (full replace) | same as GET; `400 invalid` names the offending field; `409` when `enabled` and ClickHouse is off; audited `k8s.monitor.update` |
+| POST /k8s/clusters/{id}/monitor/test | Edit | `{ ns?, pod? }` (defaults: first configured namespace, first Running non-excluded pod) | `{ namespace, pod, workload, transport, metrics_server, probes: [{ name, ok, status?, ms?, port?, samples: [{metric, labels, value}] (≤50), sample_count, labels, parse_errors, capped, body_preview, error? }] }` |
+| POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
+| GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
+| GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
+| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates |
+| GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
+| GET /k8s/clusters/{id}/monitor/health?window=1h | View | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
+
+`window` accepts `<n>m|h|d` (max `90d`). `metric`, `workload`, `pod`, `ns`
+and `class` must match `^[A-Za-z0-9_.:/-]{1,128}$` (400 otherwise).
+
+```ts
+MonitorConfig {
+  enabled: boolean; interval_secs: number /* 15..3600 */;
+  namespaces: string[] /* [] => cluster.default_namespace; required when that is null */;
+  probes: Probe[] /* ≤10 */; exclusions: Exclusion[];
+  transport: 'auto' | 'proxy' | 'port_forward'; concurrency: number /* 1..32 */;
+  retention_days: number /* 1..90 */;
+  series_cap: number /* 100..10000, default 1500 — prometheus series kept per pod per cycle, `_bucket` dropped first */;
+  metrics_server: boolean /* default true; false = never call metrics.k8s.io (status.metrics_server = 'disabled') */;
+}
+Probe { name; port?: number /* default: container's first port */; path /* starts with '/' */;
+        format: 'prometheus' | 'json' | 'health';
+        mappings?: { field: 'a.b.0.c'; metric?: string; label?: string;
+                     unit?: 'number'|'bytes'|'bytes_human'|'duration_human'|'percent' }[];
+        include?: string[]; exclude?: string[] /* series-name globs, prometheus only */;
+        timeout_ms?: number /* 100..30000, default 3000 */ }
+Exclusion = { kind:'namespace'|'pod'|'workload'; match: glob }   // workload glob matches "<kind>:<name>", e.g. "cronjob:*"
+          | { kind:'label'; selector: 'k=v,k2!=v2,k3' }
+MonitorStatus { cluster_id; last_cycle_at; last_ok_at; last_error; transport_used;
+                metrics_server: 'ok' | 'absent' | 'disabled' | 'unknown' | 'forbidden: <kubectl message>';
+                pods_seen; pods_scraped; pods_failed; cycle_ms }
+OverviewRow { cluster: { id, name, environment, color }; enabled; interval_secs; status: MonitorStatus|null;
+              health: 'healthy'|'degraded'|'incident'|'off'|'unknown'; window;
+              pods: { running, pending, failed, crashloop, total };
+              restarts: { oom, crash, probe, unknown } /* in-place, unplanned */; churn /* planned pod replacements */;
+              mem: { used, limit, pct }; rps; err_pct; drift: [{ workload, versions[] }]; workloads }
+WorkloadRow { namespace; workload; kind; pods; ready;
+              mem_bytes /* sum over pods (capacity) */; mem_limit; mem_pct /* WORST pod vs its own limit */;
+              mem_avg; mem_max; mem_max_pod; mem_sampled /* pods with a memory sample */;
+              pods_detail: [{ pod, node, phase, ready, version, mem_bytes, mem_limit, mem_pct,
+                              restarts_lifetime, restarts: { oom, crash, probe, unknown } /* in window */,
+                              crashloop, age_seconds }];
+              mem_trend_pct?;
+              restarts: { oom, crash, probe, unknown }; churn_planned; churn_unknown;
+              rps; err_pct; err_pct_baseline; rps_baseline; latency_kind: 'p95'|'avg'|''; latency_ms; latency_baseline_ms;
+              versions: string[]; crashloop; spark: { mem: number[]; rps: number[] } }
+MonitorEvent { ts; namespace; workload; pod; container; kind: 'restart'|'churn'|'version'|'k8s_event';
+               class; reason; exit_code; detail: object; actor }
+               // kind 'version' = the workload's dominant build version changed; reason "<from> → <to>",
+               // detail.next_restarts = pods already on the new version (class 'planned', planned_by 'rollout')
+Health { cluster; cluster_id; environment; window; collected_at;
+         collector: { enabled, ok, last_ok_at, error, transport, metrics_server, pods_seen, pods_scraped, pods_failed, cycle_ms };
+         pods; unplanned_restarts; restarts: { oom: [...], crash: [...], probe: [...], unknown: [...] };
+         churn: [{ workload, class, pods, by }]; deployments: [{ namespace, workload, from, to, at }];
+         memory_outliers; error_rate; latency; drift; thresholds }
+```
+
+Restart classes (spec `docs/superpowers/specs/2026-09-05-k8s-monitoring-dashboard-design.md`):
+`oom` (lastState `OOMKilled` / `OOMKilling` event), `probe` (`Unhealthy` liveness
++ `Killing` within 2 min), `crash` (`Error`, non-zero exit, `CrashLoopBackOff`),
+`planned` churn (`rollout` = new ReplicaSet, `scale`, `drain` = Evicted/Preempted,
+`otto:<user>` = an Otto `k8s.action.*` on the workload within 5 min),
+`completed` (Jobs), else `unknown` with the raw reason kept. Restart counters are
+per pod, so a rollout never inflates "restarts" — it shows up as churn.
+
+## Resource access (connections, MCP, AWS, Kubernetes)
+
+Feature grants decide page availability. Enforced resource policies separately decide which resources/children are visible and which operations are allowed. Workspace membership, token scope, native credentials and approval requirements remain independent ceilings. Root bypasses resource rules; disabled identities do not. Ordinary feature administrators do not bypass enforced rules.
+
+`ResourceKind`: `connection | mcp_server | aws_account | k8s_cluster`.
+`AccessPolicy`: `{kind, resource_id, mode: "legacy" | "enforced", revision: number, rules: AccessRule[]}`.
+`AccessRule`: `{id, subject_kind: "user" | "group", subject_id, effect: "allow" | "deny", operations: string[], children: string[] | null, grantable_operations: string[], credential_connection_id?: string}`.
+
+An absent rule is inherited/no grant. Matching group and user allows combine; any matching deny wins. `children:null` covers all current and future children. A nonempty list matches exact identities: database names, MCP tool names, `bucket:<name>` or `namespace:<name>`. Actions require discovery permission for the same scope. Scoped discovery can expose a parent for navigation only when at least one child remains accessible; it does not grant broad actions.
+
+| Method | Route | Result / authorization |
+| --- | --- | --- |
+| GET / POST | `/access/groups` | List / create group; root only |
+| PUT / DELETE | `/access/groups/{id}` | Update / delete group; root only |
+| GET | `/access/groups/{id}/members` | User IDs; root only |
+| PUT / DELETE | `/access/groups/{id}/members/{uid}` | Add / remove membership; root only |
+| GET / POST | `/access/roles` | List / create named operation preset; root only |
+| PUT / DELETE | `/access/roles/{id}` | Update / delete preset; root only |
+| GET / PUT | `/access/{kind}/{id}` | Read / replace policy; `manage_access` |
+| GET | `/access/{kind}/{id}/subjects` | Available users, groups, roles; `manage_access` |
+| GET | `/access/{kind}/{id}/capabilities?child=` | Current caller's effective decisions; visible resource |
+| GET | `/access/{kind}/{id}/effective?user_id=&child=` | Target user's effective decisions; `manage_access` |
+| POST | `/access/{kind}/{id}/preview` | Candidate access impact; `manage_access` |
+
+Group create/update body: `{name, description?: string}`. Role create/update body: `{name, description?: string, kind, operations: string[], grantable_operations: string[]}`. Role definitions are copied into policy rules by the editor; changing a preset never changes previously assigned access.
+
+Policy PUT and preview accept `{policy: AccessPolicy, preview_token?: string}`. PUT uses `policy.revision` as compare-and-swap, stores an immutable version and audit record, and returns the new policy. Root must provide a current preview token to switch enforcement mode. Preview returns `{token, revision, issues: string[], changes: [{user_id, display_name, before, after, children: [{child, before, after}]}]}`; each before/after is an operation-to-decision map. Native credential readiness is checked for root connection-policy activation/updates; it is checked again at execution and is not a permanent trust assertion.
+
+Effective access returns `{kind, resource_id, user_id, child, mode, operations: Record<string, {allowed, reason, matched_rule_ids, mode}>}`. Self-capabilities clear rule IDs. Nonroot managers can change other subjects only within their explicit grantable operation/scope ceiling; they cannot alter their own direct/group authority, remove existing denies, change mode, or assign execution credentials.
+
+New resources start enforced and private; creation initializes bounded creator access. Native connection, AWS account, Kubernetes context/import (including EKS), and MCP command/endpoint attachment is root-only. Delegated configure cannot repoint existing credentials or native identity; unchanged identity fields may accompany cosmetic edits. Existing resources remain legacy until explicitly activated. Policies reload membership on every backend decision. Unknown/deleted resources never become legacy-authorized. `403` indicates denied operation/management, `404` indicates absent or concealed resource, `409` indicates stale revision/preview, `400` indicates malformed or unsupported policy. These use the standard Problem body.
+
+Connection operations: `discover`, `configure`, `manage_access`, `shell`, `sftp_read`, `sftp_write`, `db_browse`, `db_query`, `db_export`, `db_data`, `db_schema`, `change_submit`, `change_approve`, `change_execute`. Native restricted script execution supports MySQL/PostgreSQL with verifiable native grants. A logical connection Allow rule may reference another saved same-endpoint credential profile; only root assigns that reference and secrets remain in the secret store. Unsupported native restrictions fail closed. Governed direct read execution uses native read-only transactions, including root; production writes require reviewed execution. Governed arbitrary local filesystem transfers are root-only; streaming browser export remains separately authorized. DB Assistant start/resume/summary also requires Agents Edit and db_query; existing assists are user-, connection-, workspace- and child-bound.
+
+MCP operations: `discover`, `invoke`, `configure`, `manage_access`, `approve`, optionally scoped to exact tool names. Server/tool lists, calls, approvals, audit and stats filter by resource visibility. Invocation rechecks current authority before downstream execution and retains argument-bound approval and token restrictions. Enforced MCP registrations are omitted from raw provider configurations and accessed through the governed gateway, including rows whose historical `managed` flag is false. Legacy activation refuses active workspace sessions or untracked direct entries; tracked entries are retired. External credential copies require source rotation.
+
+AWS operations and exact scopes are defined by `otto_core::access::operations_for(AwsAccount)`. S3 policies may select exact `bucket:<name>` children; broad service operations cannot be disguised as bucket-scoped grants. Kubernetes operations include independent `workloads_view`, `resources_view`, `secrets_view`, `logs`, `metrics`, `exec`, `k9s`, `apply`, `scale`, `restart`, `delete`, plus configuration/access administration. Namespace-scoped rules use exact `namespace:<name>` children; broad terminal/composite actions require unrestricted authority. AWS/Kubernetes discovery and every resource action enforce current user permissions; S3 download and Kubernetes log streams periodically recheck revocation.
+
+### Reviewed database changes
+
+All routes below require authenticated Database page access. Every target also
+requires current workspace membership, connection/database discovery, and the
+specific `change_submit`, `change_approve`, or `change_execute` permission.
+Legacy targets require Database Edit to submit and Admin to approve or execute,
+with the corresponding workspace role. Scoped session and MCP tokens cannot use
+these routes. Effective identity authorizes; real and effective identities are
+recorded in history. Root must also obtain an independent artifact approval.
+
+- `GET /database-changes?connection_id=<id>&before=<created_at>` lists up to 100
+  scanned recent changes, filtered to changes whose complete target set the
+  caller may access through at least one change permission. Hidden IDs return
+  `404` from detail/action routes.
+- `POST /database-changes` creates a draft from
+  `{title,description,script,targets:[{connection_id,node:"db:shop"}]}`. Targets
+  are canonicalized, deduplicated, sorted, and limited to 20 MySQL/PostgreSQL
+  databases. Script limit is 256 KiB. SQL remains review content until execution.
+- `GET /database-changes/{id}` returns `{change,attempts,history}`. Change fields
+  include the input, `id`, `author_id`, `real_author_id`, `revision`, `status`,
+  `content_hash`, `executor_id`, `validation`, `approved_by`, `approved_real_by`,
+  `approval_hash`, `cancellation_requested`, `created_at`, and `updated_at`.
+  History retains prior revisions but filters old target scopes independently.
+- `PUT /database-changes/{id}` accepts `{revision,...draftInput}`. Only the
+  author may revise an unexecuted change. Revision increments and clears all
+  validation and approval bindings. Executed changes require a new change.
+- `GET /database-changes/{id}/executors` lists `{id,display_name,username}` for users currently
+  authorized to execute all targets; caller must have submit authority on all
+  targets. Native credential readiness is checked separately during validation.
+- `POST /database-changes/{id}/validate` accepts `{revision,executor_id}`. The author needs
+  `change_submit`; the selected executor must currently have `change_execute`
+  for every target. Native credential and SQL preflight run without executing
+  the script. The hash binds revision, script, target configuration/environment,
+  resource-policy revision, selected executor credentials and independent-review
+  policy. Validation does not guarantee eventual execution success.
+- `POST /database-changes/{id}/submit` accepts `{revision,note?}` and moves a validated change to
+  `awaiting_review`, after checking current author eligibility and bindings.
+- `POST /database-changes/{id}/approve` or `/database-changes/{id}/reject` accepts `{revision,note?}`; rejection requires
+  a note. Approval requires `change_approve` on every target and an approver
+  independent of both the effective and real author, including impersonation.
+  Every reviewed change requires one independent approval, including development.
+- `POST /database-changes/{id}/execute` accepts `{revision}`. Only the bound executor with current
+  `change_execute` can claim an approved artifact. It also rechecks the author's
+  submit permission, approver's approval permission, native credential ceiling,
+  target configuration and policy revisions. Returns the claimed `running`
+  change; execution continues after the HTTP response. Duplicate and conflicting
+  target claims return `409`. A changed approval binding requires a new revision,
+  validation, and approval. Explicit database-operation denies still apply.
+- `POST /database-changes/{id}/cancel` accepts `{revision}`. Authors may cancel unexecuted changes;
+  callers with target execution authority may request cancellation of a running
+  change. Cancellation attempts native interruption and records an unknown
+  outcome when a statement might already have changed data.
+- `POST /database-changes/{id}/reconcile` accepts `{revision,attempt_id,outcome:"succeeded"|"failed"|"partially_applied",
+  note}` and requires execution authority, an unknown attempt, and at least ten
+  characters describing operator evidence. Reconciliation records inspected
+  results and releases that target's lock; it never replays SQL.
+
+Draft states are `draft`, `validated`, `awaiting_review`, `approved`, `rejected`,
+and `cancelled`. Execution states are `running`, `succeeded`, `failed`,
+`partially_applied`, and `outcome_unknown`. Attempts persist target, executor,
+ordinal, state, timestamps, confirmed statement counts when the adapter returns them, and a bounded outcome summary without query result
+sets or driver error contents. A target lock covers `queued`, `running`, and
+`outcome_unknown` attempts. Interrupted attempts become unknown at daemon startup;
+unsent queued targets are cancelled. No SQL is automatically retried. Rollouts
+stop after the first uncertain target. A reviewed compensating change is needed
+for recovery that requires SQL; automatic rollback is not promised.
+
+Errors use the standard Problem response: `400` invalid input/unsupported engine,
+`403` missing operation, native scope or independent approval, `404` hidden target
+or change, and `409` stale revision/binding, invalid transition, or target lock.
+
+Native connection setup is root-provisioned: creating/importing connections,
+scanning the daemon host's external database-tool profiles, replacing endpoint or
+credential parameters, changing a first command, or changing environment/read-only
+protections requires root. For an enforced connection, a delegated `configure`
+caller may save cosmetic name/section changes while preserving all native fields;
+stored secrets are preserved by omitting `secret`. A supplied replacement secret
+requires root. Full-form clients must retain unchanged native values.
+
+Governed MySQL/PostgreSQL direct reads execute in native READ ONLY transactions,
+including root reads and batches. Read exports and query plans also use native
+read-only transactions. This prevents writes hidden behind function overloads,
+operators, casts, and view/routine evaluation; a function name allowlist alone is
+not the execution boundary. Transaction cleanup uses rollback-on-drop. Reviewed
+approved changes retain their separate writable execution path. Client JSON or
+stored profile parameters cannot set the internal execution mode.

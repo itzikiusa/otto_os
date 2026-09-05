@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // Athena: three-pane like the DB Explorer — catalog tree (databases → tables
   // → columns) feeding `CodeEditor` sql completion, an editor with workgroup /
   // database selectors + Run (⌘↵, Edit-gated), results through the shared
@@ -9,7 +10,6 @@
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -34,7 +34,8 @@
   }
   let { account, onsignin }: Props = $props();
 
-  const canRun = $derived(auth.can('aws_athena', 'edit'));
+  $effect(() => { void resourceAccess.load('aws_account', account.id); });
+  const canRun = $derived(resourceAccess.can('aws_account', account.id, 'athena_query', 'aws_athena', 'edit'));
   const catalog = $derived(aws.athena[account.id] ?? null);
   let catLoading = $state(false);
   let catError = $state('');

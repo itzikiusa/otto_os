@@ -507,6 +507,59 @@ pub fn manual_job_name(cronjob: &str, now: DateTime<Utc>) -> String {
 
 /// Plan + run. Fetches the Application manifest first when the action needs it.
 pub async fn execute(k: &Kubectl, req: &K8sActionReq) -> Result<K8sActionResp> {
+    execute_inner(k, req, None).await
+}
+
+/// Authenticated entry point for HTTP and MCP callers. Rechecks each planned
+/// command so revocation stops a multi-step rollout before its next mutation.
+pub async fn execute_authorized(
+    k: &Kubectl,
+    req: &K8sActionReq,
+    pool: &otto_state::SqlitePool,
+    user: &otto_core::domain::User,
+    cluster_id: &otto_core::Id,
+) -> Result<K8sActionResp> {
+    execute_inner(k, req, Some((pool, user, cluster_id))).await
+}
+
+async fn authorize_action(
+    req: &K8sActionReq,
+    pool: &otto_state::SqlitePool,
+    user: &otto_core::domain::User,
+    cluster_id: &otto_core::Id,
+) -> Result<()> {
+    let operation = crate::access::action_operation(&req.action)?;
+    let kind =
+        Kind::parse(&req.kind).ok_or_else(|| Error::Invalid("unknown resource kind".into()))?;
+    // Application actions can fan out beyond the Application's namespace.
+    let broad = req.action.trim().starts_with("argocd_");
+    crate::access::check(
+        pool,
+        user,
+        cluster_id,
+        operation,
+        if broad || !kind.namespaced() {
+            None
+        } else {
+            Some(&req.ns)
+        },
+    )
+    .await
+}
+
+type Authorization<'a> = (
+    &'a otto_state::SqlitePool,
+    &'a otto_core::domain::User,
+    &'a otto_core::Id,
+);
+async fn execute_inner(
+    k: &Kubectl,
+    req: &K8sActionReq,
+    authorization: Option<Authorization<'_>>,
+) -> Result<K8sActionResp> {
+    if let Some((pool, user, cluster_id)) = authorization {
+        authorize_action(req, pool, user, cluster_id).await?;
+    }
     let now = Utc::now();
     let app = if needs_application(req.action.trim()) {
         Some(resources::get_one(k, Kind::Applications, Some(&req.ns), req.name.trim()).await?)
@@ -523,6 +576,9 @@ pub async fn execute(k: &Kubectl, req: &K8sActionReq) -> Result<K8sActionResp> {
     let mut outputs = Vec::new();
     let mut ok = true;
     for step in &plan.steps {
+        if let Some((pool, user, cluster_id)) = authorization {
+            authorize_action(req, pool, user, cluster_id).await?;
+        }
         if plan.tolerate_nonzero {
             let argv = k.argv(step.iter().cloned());
             let out =

@@ -7,6 +7,7 @@
   import PluginsSettings from './PluginsSettings.svelte';
   import Providers from './Providers.svelte';
   import Users from './Users.svelte';
+  import AccessGroups from './AccessGroups.svelte';
   import GitAccounts from '../git/GitAccounts.svelte';
   import IssueAccounts from './IssueAccounts.svelte';
   import Channels from './Channels.svelte';
@@ -70,6 +71,7 @@
       : []),
     // users management: users:admin gate.
     ...(auth.can('users', 'admin') ? [{ id: 'users', label: 'Users' }] : []),
+    ...(auth.isRoot ? [{ id: 'access-groups', label: 'Groups & Access' }] : []),
     // admin session overview: users:admin gate.
     ...(auth.can('users', 'admin') ? [{ id: 'sessions', label: 'Sessions' }] : []),
   ]);
@@ -132,6 +134,8 @@
       <Providers />
     {:else if page === 'users' && auth.can('users', 'admin')}
       <Users />
+    {:else if page === 'access-groups' && auth.isRoot}
+      <AccessGroups />
     {:else if page === 'sessions' && auth.can('users', 'admin')}
       <AdminSessions />
     {:else if page === 'sharing'}

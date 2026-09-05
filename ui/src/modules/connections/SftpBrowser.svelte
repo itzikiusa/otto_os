@@ -4,6 +4,7 @@
   // auth (the daemon drives the system `sftp` binary). Opened from the
   // Connections page; no terminal session required.
   import type { Connection, SftpEntry } from '../../lib/api/types';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { sftp } from '../../lib/stores/sftp.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -17,6 +18,8 @@
   }
   let { conn, onclose }: Props = $props();
 
+  const canWrite = $derived(resourceAccess.can('connection',conn.id,'sftp_write','connections','edit'));
+  $effect(()=>{void resourceAccess.load('connection',conn.id);});
   const view = $derived(sftp.state(conn.id));
 
   // Picker overlays: download-dir picker (per remote file) and upload-file picker.
@@ -195,10 +198,10 @@
       >
         <Icon name="refresh" size={13} />
       </button>
-      <button class="btn small" onclick={newFolder}>
+      <button class="btn small" disabled={!canWrite} onclick={newFolder}>
         <Icon name="plus" size={12} /> New folder
       </button>
-      <button class="btn small primary" onclick={() => (uploadOpen = true)}>
+      <button class="btn small primary" disabled={!canWrite} onclick={() => (uploadOpen = true)}>
         <Icon name="arrowUp" size={12} /> Upload
       </button>
       <span class="grow"></span>
@@ -280,7 +283,7 @@
                 class="icon-btn"
                 title="Rename"
                 aria-label="Rename"
-                onclick={() => renameEntry(e)}
+                disabled={!canWrite} onclick={() => renameEntry(e)}
               >
                 <Icon name="edit" size={13} />
               </button>
@@ -288,7 +291,7 @@
                 class="icon-btn"
                 title="Delete"
                 aria-label="Delete"
-                onclick={() => deleteEntry(e)}
+                disabled={!canWrite} onclick={() => deleteEntry(e)}
               >
                 <Icon name="trash" size={13} />
               </button>

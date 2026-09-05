@@ -1,5 +1,9 @@
 //! Core REST routes (contract endpoints #1-16, #57-58).
 
+pub mod database_changes;
+pub mod resource_access;
+pub mod access_groups;
+
 pub mod activity;
 pub mod admin_sessions;
 pub mod api_client;
@@ -125,6 +129,8 @@ pub fn public_routes() -> Router<ServerCtx> {
 /// of this router, together with any api_extras, by `build_router`).
 pub fn protected_routes() -> Router<ServerCtx> {
     Router::new()
+        .merge(resource_access::api_router::<ServerCtx>())
+        .merge(database_changes::api_router())
         .route("/auth/logout", post(auth_routes::logout))
         .route("/auth/me", get(auth_routes::me))
         // --- API tokens (personal access tokens) ------------------------

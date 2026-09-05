@@ -169,7 +169,7 @@ impl ConnectionsCtx for TestCtx {
 
 /// Create the one **global** connection every test acts on.
 async fn seed_global_conn(ctx: &TestCtx, creator: &Id) -> Connection {
-    ctx.connections()
+    let conn = ctx.connections()
         .create(
             None, // global — exactly what `POST /workspaces/{id}/connections` does
             creator,
@@ -185,7 +185,15 @@ async fn seed_global_conn(ctx: &TestCtx, creator: &Id) -> Connection {
             },
         )
         .await
-        .expect("create global connection")
+        .expect("create global connection");
+    // This suite covers the explicitly retained legacy feature-grant behavior.
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(ctx.pool.clone());
+    let mut policy = repo.get_policy(otto_core::access::ResourceKind::Connection, &conn.id).await.unwrap();
+    let revision = policy.revision;
+    policy.mode = otto_core::access::AccessMode::Legacy;
+    policy.rules.clear();
+    repo.put_policy(&policy, revision, &otto_core::access::AccessActor { real_user_id: creator.clone(), effective_user_id: None }).await.unwrap();
+    conn
 }
 
 /// Drive one request through the real router as `user`.
@@ -370,4 +378,57 @@ async fn root_still_bypasses_every_tier() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "root bypasses the grant table");
+}
+
+#[tokio::test]
+async fn governed_discovery_redacts_credentials_and_does_not_grant_configuration() {
+    use otto_core::access::*;
+    let pool = mem_pool().await;
+    let ctx = TestCtx::new(pool.clone());
+    let root = seed_user(&pool,"policy-root",true,"admin").await;
+    let viewer = seed_user(&pool,"policy-viewer",false,"view").await;
+    let stranger = seed_user(&pool,"policy-stranger",false,"admin").await;
+    let conn = seed_global_conn(&ctx,&root.id).await;
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(pool);
+    let current = repo.get_policy(ResourceKind::Connection,&conn.id).await.unwrap();
+    let policy = AccessPolicy {kind:ResourceKind::Connection,resource_id:conn.id.clone(),mode:AccessMode::Enforced,revision:current.revision,
+        rules:vec![AccessRule {id:"discover-only".into(),subject_kind:SubjectKind::User,subject_id:viewer.id.clone(),effect:RuleEffect::Allow,operations:vec!["discover".into()],children:None,grantable_operations:vec![],credential_connection_id:None}]};
+    repo.put_policy(&policy,current.revision,&AccessActor {real_user_id:root.id.clone(),effective_user_id:None}).await.unwrap();
+    let visible = ctx.connections().visible_connection(conn.clone(),&viewer.id).await.unwrap();
+    assert_eq!(visible.params,serde_json::json!({}));
+    assert!(visible.secret_ref.is_none());
+    assert!(visible.first_command.is_none());
+    assert_eq!(call(&ctx,&viewer,"PATCH",&format!("/connections/{}/pin",conn.id),serde_json::json!({"pinned":true})).await,StatusCode::OK);
+    assert!(ctx.connections().authorize(&conn.id,&viewer.id,"configure").await.is_err());
+    assert!(matches!(ctx.connections().visible_connection(conn,&stranger.id).await.unwrap_err(),Error::NotFound(_)));
+}
+
+#[tokio::test]
+async fn delegated_configure_cannot_rebind_native_identity_or_disable_protection() {
+    use otto_core::access::*;
+    let pool=mem_pool().await;let root=seed_user(&pool,"owner",true,"admin").await;let member=seed_user(&pool,"delegated",false,"view").await;
+    let ctx=TestCtx::new(pool.clone());
+    let request=UpsertConnectionReq{name:"Restricted DB".into(),kind:ConnectionKind::Mysql,params:serde_json::json!({"host":"example.invalid","port":3306,"user":"limited"}),secret:None,first_command:None,section_id:None,environment:Some(otto_core::domain::Environment::Prod),read_only:Some(true)};
+    let conn=ctx.svc.create(None,&root.id,request.clone()).await.unwrap();
+    let repo=otto_state::ResourceAccessRepo::new(pool.clone());let mut policy=repo.get_policy(ResourceKind::Connection,&conn.id).await.unwrap();
+    policy.rules.push(AccessRule{id:"configure".into(),subject_kind:SubjectKind::User,subject_id:member.id.clone(),effect:RuleEffect::Allow,operations:vec!["discover".into(),"configure".into()],children:None,grantable_operations:vec![],credential_connection_id:None});repo.put_policy(&policy,policy.revision,&AccessActor{real_user_id:root.id.clone(),effective_user_id:None}).await.unwrap();
+    let mut cosmetic=request.clone();cosmetic.name="Renamed".into();assert_eq!(ctx.svc.update(&conn.id,&member.id,cosmetic).await.unwrap().name,"Renamed");
+    for field in ["params","secret","environment","read_only","first_command"] {
+        let mut mutation=request.clone();match field {"params"=>mutation.params["user"]=serde_json::json!("hidden_admin"),"secret"=>mutation.secret=Some("replacement".into()),"environment"=>mutation.environment=Some(otto_core::domain::Environment::Dev),"read_only"=>mutation.read_only=Some(false),_=>mutation.first_command=Some("unrestricted command".into())};
+        assert!(matches!(ctx.svc.update(&conn.id,&member.id,mutation).await,Err(Error::Forbidden(_))),"sensitive mutation {field}");
+    }
+    let stored=ConnectionsRepo::new(pool).get(&conn.id).await.unwrap();assert_eq!(stored.params,request.params);assert!(stored.read_only);assert_eq!(stored.environment,otto_core::domain::Environment::Prod);
+    assert!(matches!(ctx.svc.create(None,&member.id,request).await,Err(Error::Forbidden(_))),"new aliases must be provisioned by root");
+}
+
+#[tokio::test]
+async fn nonroot_admin_cannot_scan_or_import_ambient_native_identities() {
+    let pool=mem_pool().await;let admin=seed_user(&pool,"setup-admin",false,"admin").await;let ctx=TestCtx::new(pool);
+    for (method,path,body) in [
+        ("GET","/workspaces/test/connections/import/sources",serde_json::json!({})),
+        ("POST","/workspaces/test/connections/import/scan",serde_json::json!({"source":"mysql_workbench"})),
+        ("POST","/workspaces/test/connections/import/create",serde_json::json!({"connections":[],"section_id":null})),
+    ] {
+        assert_eq!(call(&ctx,&admin,method,path,body).await,StatusCode::FORBIDDEN,"ambient setup endpoint {path}");
+    }
 }

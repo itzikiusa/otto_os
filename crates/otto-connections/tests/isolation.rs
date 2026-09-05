@@ -189,8 +189,7 @@ async fn setting_off_by_default_list_shows_all() {
     let user_b = seed_user(&pool, "bob", false).await;
 
     // A creates a connection.
-    ctx.connections()
-        .create(
+    seed_owned_connection(&ctx,
             Some(ws.clone()),
             &user_a.id,
             otto_core::api::UpsertConnectionReq {
@@ -207,6 +206,7 @@ async fn setting_off_by_default_list_shows_all() {
         .await
         .unwrap();
 
+    set_all_legacy(&pool).await;
     // Setting is OFF by default — B can list (sees A's connection).
     assert!(!owner_private_enabled(&ctx).await, "setting must be OFF by default");
     let visible = ctx.connections().list(&ws).await.unwrap();
@@ -241,8 +241,7 @@ async fn setting_on_list_for_excludes_others() {
     let user_a = seed_user(&pool, "alice2", false).await;
     let user_b = seed_user(&pool, "bob2", false).await;
 
-    ctx.connections()
-        .create(
+    seed_owned_connection(&ctx,
             Some(ws.clone()),
             &user_a.id,
             otto_core::api::UpsertConnectionReq {
@@ -259,6 +258,7 @@ async fn setting_on_list_for_excludes_others() {
         .await
         .unwrap();
 
+    set_all_legacy(&pool).await;
     // Enable the setting.
     SettingsRepo::new(pool.clone())
         .put("connections.owner_private", &serde_json::json!(true))
@@ -324,8 +324,7 @@ async fn setting_on_list_for_root_bypassed_via_list() {
     let user_a = seed_user(&pool, "alice3", false).await;
     let root = seed_user(&pool, "root3", true).await;
 
-    ctx.connections()
-        .create(
+    seed_owned_connection(&ctx,
             Some(ws.clone()),
             &user_a.id,
             otto_core::api::UpsertConnectionReq {
@@ -347,6 +346,7 @@ async fn setting_on_list_for_root_bypassed_via_list() {
         .await
         .unwrap();
 
+    set_all_legacy(&pool).await;
     // Root uses list() and sees everything.
     let root_visible = ctx.connections().list(&ws).await.unwrap();
     assert_eq!(root_visible.len(), 1, "root sees all connections via list()");
@@ -370,4 +370,23 @@ async fn setting_false_explicit_is_false() {
         .await
         .unwrap();
     assert!(!owner_private_enabled(&ctx).await);
+}
+
+// These owner-private compatibility tests intentionally create legacy profiles.
+async fn set_all_legacy(pool: &SqlitePool) {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT id, created_by FROM connections").fetch_all(pool).await.unwrap();
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(pool.clone());
+    for (id, creator) in rows {
+        let mut policy = repo.get_policy(otto_core::access::ResourceKind::Connection, &id).await.unwrap();
+        let revision = policy.revision;
+        policy.mode = otto_core::access::AccessMode::Legacy;
+        policy.rules.clear();
+        repo.put_policy(&policy, revision, &otto_core::access::AccessActor { real_user_id: creator, effective_user_id: None }).await.unwrap();
+    }
+}
+
+// Legacy ownership fixtures predate root-provisioned native setup; create their
+// persisted rows directly rather than bypassing the production creation gate.
+async fn seed_owned_connection(ctx:&TestCtx,workspace_id:Option<Id>,owner:&Id,req:otto_core::api::UpsertConnectionReq)->Result<Connection> {
+    ConnectionsRepo::new(ctx.pool.clone()).create(otto_state::NewConnection{workspace_id,name:req.name,kind:req.kind,params:req.params,secret_ref:None,first_command:req.first_command,section_id:req.section_id,environment:req.environment.unwrap_or_default(),read_only:req.read_only.unwrap_or(false),created_by:owner.clone()}).await
 }

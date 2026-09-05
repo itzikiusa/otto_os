@@ -77,6 +77,11 @@ fn row_to_connection(r: &sqlx::sqlite::SqliteRow) -> Result<Connection> {
 }
 
 impl ConnectionsRepo {
+    /// Shared state pool for resource authorization at the execution boundary.
+    pub fn pool(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }

@@ -5,6 +5,8 @@
   // through the same guarded write path a query uses — so a Prod/read-only
   // connection refuses it until the user types the connection name (the
   // identical typed-confirmation flow `runQuery` already uses). v1 is SQL-only.
+  import { databaseAccessChild } from '../../lib/access-options';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
@@ -44,6 +46,8 @@
   // In-flight stream controller — the footer Cancel aborts it while importing.
   let importAbort: AbortController | null = null;
 
+  const canImport = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_data','database','edit',databaseAccessChild(database.activeDb)));
+  $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,databaseAccessChild(database.activeDb));});
   const connName = $derived(database.selectedConn?.name ?? 'this connection');
 
   /** `dbImport` with a cancel signal: stream the NDJSON lines into `progress`
@@ -252,7 +256,7 @@
     <button
       class="btn primary"
       onclick={() => void runImport()}
-      disabled={importing || !filePath.trim() || !table.trim()}
+      disabled={!canImport || importing || !filePath.trim() || !table.trim()}
     >
       {importing ? 'Importing…' : 'Import'}
     </button>

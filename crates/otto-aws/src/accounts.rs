@@ -130,6 +130,16 @@ pub struct AwsAccount {
 }
 
 impl AwsAccount {
+    pub fn redact_configuration(&mut self) {
+        self.profile = None;
+        self.access_key_id = None;
+        self.role_arn = None;
+        self.endpoint_url = None;
+        self.identity = None;
+        self.permissions = None;
+        self.created_by = None;
+    }
+
     pub fn from_row(r: &AwsAccountRow) -> Self {
         let str_param = |k: &str| {
             r.params
@@ -392,6 +402,7 @@ pub fn parse_assumed(v: &serde_json::Value) -> Option<StaticCreds> {
 /// Cheap to construct per request (holds only handles).
 #[derive(Clone)]
 pub struct AwsService {
+    pool: otto_state::SqlitePool,
     pub repo: AwsAccountsRepo,
     secrets: Arc<dyn SecretStore>,
     events: broadcast::Sender<Event>,
@@ -402,6 +413,7 @@ pub struct AwsService {
 impl AwsService {
     pub fn from_ctx<S: AwsCtx>(ctx: &S) -> Self {
         Self {
+            pool: ctx.pool(),
             repo: AwsAccountsRepo::new(ctx.pool()),
             secrets: ctx.secrets().clone(),
             events: ctx.events().clone(),
@@ -443,6 +455,10 @@ impl AwsService {
     }
 
     pub async fn create(&self, creator: &Id, req: UpsertAwsAccountReq) -> Result<AwsAccount> {
+        let user = otto_state::UsersRepo::new(self.pool.clone())
+            .get(creator)
+            .await?;
+        crate::access::require_setup_authority(&user)?;
         let name = req
             .name
             .as_deref()
@@ -539,6 +555,10 @@ impl AwsService {
                 created_by: Some(creator.clone()),
             })
             .await?;
+        let user = otto_state::UsersRepo::new(self.pool.clone())
+            .get(creator)
+            .await?;
+        crate::access::initialize(&self.pool, &user, &row.id).await?;
         let row = if let Some(s) = secret {
             let sref = secret_ref_for(&row.id);
             self.secrets.put(&sref, &serde_json::to_string(&s)?)?;
@@ -561,8 +581,67 @@ impl AwsService {
         self.get(&row.id).await
     }
 
-    pub async fn update(&self, id: &Id, req: UpsertAwsAccountReq) -> Result<AwsAccount> {
+    pub async fn update(
+        &self,
+        id: &Id,
+        user: &otto_core::domain::User,
+        mut req: UpsertAwsAccountReq,
+    ) -> Result<AwsAccount> {
+        crate::access::check(&self.pool, user, id, "configure", None).await?;
         let cur = self.repo.get(id).await?;
+        if !user.is_root {
+            let current = AwsAccount::from_row(&cur);
+            let changed = |value: &Option<String>, existing: Option<&str>| {
+                value
+                    .as_deref()
+                    .is_some_and(|v| v.trim() != existing.unwrap_or(""))
+            };
+            if req.auth_mode.is_some_and(|mode| mode != current.auth_mode)
+                || changed(&req.profile, current.profile.as_deref())
+                || changed(&req.access_key_id, current.access_key_id.as_deref())
+                || changed(&req.role_arn, current.role_arn.as_deref())
+                || changed(&req.endpoint_url, current.endpoint_url.as_deref())
+                || changed(&req.region, Some(&current.region))
+                || req
+                    .environment
+                    .is_some_and(|environment| environment != current.environment)
+                || req
+                    .secret_access_key
+                    .as_deref()
+                    .is_some_and(|secret| !secret.trim().is_empty())
+                || req.session_token.is_some()
+            {
+                return Err(Error::Forbidden(
+                    "only root can change AWS identity or execution configuration".into(),
+                ));
+            }
+            // Do not rewrite credentials (or probe native configuration) when
+            // a full form submits its unchanged identity fields.
+            let mut params = cur.params.as_object().cloned().unwrap_or_default();
+            if let Some(color) = req.color {
+                if color.trim().is_empty() {
+                    params.remove("color");
+                } else {
+                    params.insert("color".into(), color.trim().into());
+                }
+            }
+            self.repo
+                .update(
+                    id,
+                    AwsAccountPatch {
+                        name: req
+                            .name
+                            .take()
+                            .map(|name| name.trim().to_string())
+                            .filter(|name| !name.is_empty()),
+                        params: Some(serde_json::Value::Object(params)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            self.emit(id, false);
+            return self.get(id).await;
+        }
         let mode = req
             .auth_mode
             .or_else(|| AuthMode::parse(&cur.auth_mode))
@@ -971,6 +1050,10 @@ impl AwsService {
 
     /// Spawn `aws sso login --profile <p>` as a PTY session (profile mode only).
     pub async fn login(&self, id: &Id, ws_id: &Id, user_id: &Id) -> Result<Session> {
+        let user = otto_state::UsersRepo::new(self.pool.clone())
+            .get(user_id)
+            .await?;
+        crate::access::check(&self.pool, &user, id, "configure", None).await?;
         let account = self.repo.get(id).await?;
         if AuthMode::parse(&account.auth_mode) != Some(AuthMode::Profile) {
             return Err(Error::Invalid(
@@ -1127,7 +1210,13 @@ mod tests {
         assert_eq!(e["AWS_EC2_METADATA_DISABLED"], "true");
         assert_eq!(e["AWS_ACCESS_KEY_ID"], "test");
         // Blank / whitespace endpoint ⇒ nothing injected.
-        let e = env_map(build_env(AuthMode::Profile, Some("p"), "us-east-1", None, Some("  ")));
+        let e = env_map(build_env(
+            AuthMode::Profile,
+            Some("p"),
+            "us-east-1",
+            None,
+            Some("  "),
+        ));
         assert!(!e.contains_key("AWS_ENDPOINT_URL"));
     }
 

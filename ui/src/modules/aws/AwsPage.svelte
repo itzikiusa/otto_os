@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // AWS console module. Routes: `#/aws` (accounts overview) ·
   // `#/aws/<accountId>/<service>` (service ∈ s3|sqs|ec2|athena|eks|rds) · deep link
   // `#/aws/<id>/s3/<bucket>?prefix=<encoded>` (the S3 browser reads/writes it).
@@ -8,7 +9,6 @@
   import { untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { router } from '../../lib/router.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -41,15 +41,20 @@
   const serviceFeature = $derived<Feature | null>(
     routeService ? (`aws_${routeService}` as Feature) : null,
   );
-  const serviceAllowedByRbac = $derived(serviceFeature ? auth.can(serviceFeature, 'view') : true);
+  $effect(() => { if (routeAccountId) void resourceAccess.load('aws_account', routeAccountId); });
+  const serviceAllowedByRbac = $derived(serviceFeature && routeAccountId ? resourceAccess.can('aws_account', routeAccountId, routeService === 's3' ? 'discover' : `${routeService}_view`, serviceFeature, 'view') : true);
 
   // Wizard (create / edit) — mounted fresh per open.
   let wizardOpen = $state(false);
   let wizardAccount = $state<AwsAccount | null>(null);
 
+  $effect(()=>resourceAccess.subscribe(change=>{
+    if(change.type==='reset' || (change.type==='decision' && change.kind==='aws_account' && change.before?.operations.configure?.allowed && !change.after?.operations.configure?.allowed)){wizardOpen=false;wizardAccount=null;}
+  }));
   // Initial load: status (install gate) + accounts. `untrack` so the effect
   // doesn't re-run on the stores it kicks (loaders write `$state`).
   $effect(() => {
+    void aws.accessRevision;
     untrack(() => {
       void aws.loadStatus();
       void aws.loadAccounts();
@@ -87,7 +92,7 @@
       toasts.error('No workspace', 'Select a workspace to attach the sign-in session to');
       return;
     }
-    if (!auth.can('aws', 'edit')) {
+    if (!resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'edit')) {
       toasts.warn('Not allowed', 'Signing in needs Edit on the AWS feature');
       return;
     }
@@ -167,7 +172,7 @@
             body={`You don't have View on ${routeService.toUpperCase()} for the AWS console. Ask an administrator for a grant.`}
           />
         {:else}
-          {#key `${account.id}/${routeService}`}
+          {#key `${account.id}/${routeService}/${aws.accessRevision}`}
             {#if routeService === 's3'}
               <S3Browser {account} onsignin={() => void signIn(account)} />
             {:else if routeService === 'sqs'}

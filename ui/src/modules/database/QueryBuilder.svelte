@@ -37,6 +37,9 @@
   // Add ANY table from ANY database via the palette. Joins are drawn by the
   // user (FK suggestions are an optional helper). SQL is generated live by
   // walking the edge graph from the first-added (base) table.
+  import { auth } from '../../lib/stores/auth.svelte';
+  import { databaseAccessChild } from '../../lib/access-options';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -197,7 +200,7 @@
   // that connection's canvas (instead of leaving the previous one to run
   // against the wrong server), and switching back restores it. Declared BEFORE
   // the palette-loading effect so a restore lands first on a connection flip.
-  const connKey = $derived(String(database.selectedConnId ?? ''));
+  const connKey = $derived(JSON.stringify([auth.me?.id,database.selectedConnId,database.accessRevision]));
   let restoredFor = $state<string | null>(null);
   $effect(() => {
     const key = connKey;
@@ -667,7 +670,10 @@
     return buildSql(tables, edges, wheres, exprs, orders, limit, baseUid, engine);
   });
 
+  const canRun = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_query','database','edit',databaseAccessChild(selectedDb || database.activeDb)));
+  $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,databaseAccessChild(selectedDb || database.activeDb));});
   function openInQuery(andRun: boolean): void {
+    if(andRun && !canRun)return;
     if (!generatedSql) return;
     database.newTab(generatedSql);
     if (andRun) void database.runQuery(generatedSql);
@@ -1070,7 +1076,7 @@
                 <button class="btn small" onclick={() => openInQuery(false)} disabled={!generatedSql}>
                   <Icon name="external" size={11} />Open in Query
                 </button>
-                <button class="btn small primary" onclick={() => openInQuery(true)} disabled={!generatedSql}>
+                <button class="btn small primary" onclick={() => openInQuery(true)} disabled={!generatedSql || !canRun}>
                   <Icon name="play" size={11} />Run
                 </button>
               </div>

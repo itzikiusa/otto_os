@@ -207,7 +207,7 @@ records the per-type counts in §8 (≥100 sessions, long and short).
 Claude → `claude_transcript_path`; Codex → `pub fn codex_rollout_path(psid)`
 (today `codex_sessions_root`/`codex_rollout_match` are private and match by cwd;
 the path is **persisted on the session row** as `sessions.transcript_path`
-(migration `0115_sessions_transcript_path.sql`) the moment the capture scan
+(migration `0121_sessions_transcript_path.sql`) the moment the capture scan
 finds it, so later lookups are O(1)); agy → `ProviderUnsupported`. A session
 without a resolvable transcript gets `200 { unavailable_reason }`, never 404.
 
@@ -245,7 +245,7 @@ first `GET …/transcript` for a live session, stops 60 s after exit or after
 memory). Cap 32 concurrent tails; beyond that no live push, reads still work.
 
 ### 4.5 Tasks: board → agent, and back
-- Migration `0116_agent_tasks_source.sql`: `agent_tasks.source TEXT NOT NULL DEFAULT 'agent'`
+- Migration `0122_agent_tasks_source.sql`: `agent_tasks.source TEXT NOT NULL DEFAULT 'agent'`
   (`'agent' | 'user'`), `description TEXT`.
 - `ActivityRepo::replace_tasks` (today `DELETE … WHERE session_id = ?`) is
   changed to **delete only `source='agent'` rows**, then merge: a `source='user'`
@@ -272,7 +272,7 @@ memory). Cap 32 concurrent tails; beyond that no live push, reads still work.
   (no max-defer override). Then `nudge_pending=0`, `nudged_at` set.
 
 ### 4.6 History index
-Migration `0117_transcript_index.sql`:
+Migration `0123_transcript_index.sql`:
 `transcript_index(path PK, provider, provider_session_id, cwd, title, first_prompt,
 started_at, last_active_at, mtime, size, turns, indexed_at)`. A background scan
 (started at daemon boot with low priority, and by `POST …/rescan`) walks both
@@ -372,7 +372,7 @@ conversation for `on_disk` entries.
 
 **Track A · Rust** — owns `crates/**`, `docs/contracts/**`, `scripts/redact-transcript.py`.
 §4 in full: crate extraction + fixtures + corpus test; `transcript_path` +
-`codex_rollout_path` + migration 0115; routes + RBAC arms + WS scope; tailer;
+`codex_rollout_path` + migration 0121; routes + RBAC arms + WS scope; tailer;
 tasks merge + nudge + 0116; history index + 0117; artifacts + confinement;
 inbox upload; contracts (`api.md`, `ws.md`). Gate 1 = tests + clippy +
 `ottod` build + the corpus numbers in §8.

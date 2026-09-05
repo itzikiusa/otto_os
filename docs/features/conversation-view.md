@@ -38,11 +38,11 @@ files, PRs and images a session produced are listed with previews in an
 | Layer | Path | Responsibility |
 |---|---|---|
 | Parser crate | `crates/otto-transcript/` | `parse_claude_line` / `parse_codex_line` (moved from `otto-usage`, re-exported there), `fold(records) → Transcript`, the two-era Codex adapter, subagent tree reader, image extraction, the offset `Tailer`; fixtures under `fixtures/{claude,codex-new,codex-old}` |
-| Transcript resolution | `crates/otto-sessions/src/lifecycle.rs` | `transcript_path(session)` — Claude by provider session id, Codex via the persisted `sessions.transcript_path` (migration 0115) |
+| Transcript resolution | `crates/otto-sessions/src/lifecycle.rs` | `transcript_path(session)` — Claude by provider session id, Codex via the persisted `sessions.transcript_path` (migration 0121) |
 | Routes | `crates/otto-server/src/routes/transcript.rs` | Transcript paging, images, artifacts, board tasks, inbox upload, History list/read/import/rescan (§5) |
 | Tail supervisor | `crates/otto-server/src/transcript_tail.rs` | Polls live sessions' transcripts (700 ms), folds, broadcasts `transcript_appended` / `artifact_added` |
-| Tasks merge + nudge | `crates/otto-state` (`ActivityRepo::replace_tasks`, migration 0116), `crates/otto-server/src/agent_tasks_nudge.rs` | Agent rows replaced on sync, user rows merged by title/ext_id; one sweep hands board tasks to the PTY |
-| History index | migration 0117 `transcript_index`, background walker | Head+tail scan of both provider roots; `history_index_progress` |
+| Tasks merge + nudge | `crates/otto-state` (`ActivityRepo::replace_tasks`, migration 0122), `crates/otto-server/src/agent_tasks_nudge.rs` | Agent rows replaced on sync, user rows merged by title/ext_id; one sweep hands board tasks to the PTY |
+| History index | migration 0123 `transcript_index`, background walker | Head+tail scan of both provider roots; `history_index_progress` |
 | Conversation UI | `ui/src/modules/agents/conversation/` + `SessionView.svelte`, `ui/src/lib/stores/transcript.svelte.ts` | `ConversationView` (`sessionId` or `transcriptPath` mode, `readonly`), the view toggle, composer |
 | History UI | `ui/src/modules/agents/history/` | `HistoryPage.svelte`, the `history` store, the ⌘K command |
 | Tasks / board UI | `ui/src/modules/panels/ActivityPanel.svelte`, `ui/src/modules/agents/MissionControl.svelte`, `ui/src/lib/stores/activity.svelte.ts` | Add task, badges, done/total strip, sub-tasks |
