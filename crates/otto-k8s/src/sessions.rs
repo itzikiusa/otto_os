@@ -107,6 +107,7 @@ pub async fn exec<S: K8sCtx>(
     cluster: &K8sCluster,
     req: &ExecReq,
 ) -> Result<Session> {
+    crate::access::check(&ctx.pool(), user, &cluster.id, "exec", Some(&req.ns)).await?;
     let k = crate::clusters::kubectl_for(ctx, cluster).await?;
     let spec = exec_spec(&k, req)?;
     let title = format!("{} · {}", req.pod.trim(), req.ns.trim());
@@ -132,6 +133,7 @@ pub async fn k9s<S: K8sCtx>(
     cluster: &K8sCluster,
     req: &K9sReq,
 ) -> Result<Session> {
+    crate::access::check_k9s(&ctx.pool(), user, &cluster.id).await?;
     let bin = install::locate(Tool::K9s, ctx.data_dir())
         .ok_or_else(|| Error::Invalid(cli::not_installed_message("k9s")))?;
     let env = crate::clusters::aws_env_for(ctx, cluster).await?;

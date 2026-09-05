@@ -187,6 +187,8 @@ async fn run(cfg: Config) -> Result<(), String> {
     let pool = otto_state::open(&cfg.db_path())
         .await
         .map_err(|e| format!("open database: {e}"))?;
+    otto_state::database_changes::DatabaseChangesRepo::new(pool.clone()).recover_interrupted().await
+        .map_err(|e| format!("recover interrupted database changes: {e}"))?;
     let secrets = otto_keychain::from_env(&cfg.data_dir);
     let (events, _) = broadcast::channel::<Event>(1024);
 
@@ -345,6 +347,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     // is the augmented `mcp_servers`; secrets resolve from the same Keychain.
     let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
     let spawner = Arc::new(PtySpawner {
+        pool: pool.clone(),
         manager: Arc::clone(&manager),
         workspaces: workspaces.clone(),
     });

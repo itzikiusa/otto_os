@@ -4,6 +4,7 @@
 //! and no async; every other crate depends on it and codes against these types.
 
 pub mod api;
+pub mod access;
 pub mod auth;
 pub mod domain;
 pub mod error;

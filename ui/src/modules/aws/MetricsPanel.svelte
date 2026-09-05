@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // CloudWatch metrics for ONE resource (an SQS queue, EC2 instance or RDS
   // instance): range picker (1h … 30d), refresh + auto-refresh every 60 s
   // while mounted, and a grid of MetricChart cards laid out per
@@ -46,6 +47,10 @@
   let current: AbortController | null = null;
 
   async function load(): Promise<void> {
+    await resourceAccess.load('aws_account', accountId);
+    if (!resourceAccess.can('aws_account', accountId, 'metrics', 'aws', 'view')) {
+      resp = null; denied = true; error = 'Metrics access is not granted for this account.'; return;
+    }
     current?.abort();
     const ac = new AbortController();
     current = ac;

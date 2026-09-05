@@ -277,7 +277,18 @@ async fn check_conn_role<S: DbViewerCtx>(
     user: &User,
     conn: &Connection,
     min: WorkspaceRole,
-) -> Result<(), Error> {
+ ) -> Result<(), Error> {
+    let enforced = if let Some(pool) = ctx.pool() {
+        crate::access::policy(&pool, &conn.id).await?.mode == otto_core::access::AccessMode::Enforced
+    } else { false };
+    let min = if enforced { WorkspaceRole::Viewer } else { min };
+    if enforced {
+        let pool = ctx.pool().ok_or_else(|| Error::Forbidden("resource authorization unavailable".into()))?;
+        let current = crate::access::current_user(&pool, conn, &user.id).await?;
+        if !otto_rbac::resource_access::ResourceAccess::new(pool).evaluate(&current, &crate::access::target(&conn.id, None), "discover").await?.allowed {
+            return Err(Error::NotFound("connection".into()));
+        }
+    }
     match &conn.workspace_id {
         Some(ws) => ctx.roles().check(user, ws, min).await,
         None => match ctx.pool() {
@@ -335,7 +346,7 @@ async fn test<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    Ok(Json(ctx.db().test(&id).await?).into_response())
+    Ok(Json(ctx.db().test(&id, &user.id).await?).into_response())
 }
 
 /// Probe an UNSAVED connection config (form "Test" button). Nothing is
@@ -369,7 +380,7 @@ async fn capabilities<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().capabilities(&id).await?).into_response())
+    Ok(Json(ctx.db().capabilities(&id, &user.id).await?).into_response())
 }
 
 async fn schema_root<S: DbViewerCtx>(
@@ -379,7 +390,7 @@ async fn schema_root<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().schema_root(&id).await?).into_response())
+    Ok(Json(ctx.db().schema_root(&id, &user.id).await?).into_response())
 }
 
 async fn schema_children<S: DbViewerCtx>(
@@ -392,7 +403,7 @@ async fn schema_children<S: DbViewerCtx>(
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
     Ok(Json(
         ctx.db()
-            .schema_children_with_counts(&id, &req.path, req.filter.as_deref(), req.counts)
+            .schema_children_with_counts(&id, &user.id, &req.path, req.filter.as_deref(), req.counts)
             .await?,
     )
     .into_response())
@@ -408,7 +419,7 @@ async fn search_objects<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().search_objects(&id, &req).await?).into_response())
+    Ok(Json(ctx.db().search_objects(&id, &user.id, &req).await?).into_response())
 }
 
 async fn object_detail<S: DbViewerCtx>(
@@ -419,7 +430,7 @@ async fn object_detail<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().object_detail(&id, &req.path, req.approx_row_count).await?).into_response())
+    Ok(Json(ctx.db().object_detail(&id, &user.id, &req.path, req.approx_row_count).await?).into_response())
 }
 
 /// Read-only relationship graph (ERD) for a schema: tables + columns + FK edges.
@@ -435,7 +446,7 @@ async fn schema_graph<S: DbViewerCtx>(
     // Default to 60 tables; clamp so a request can't fan out into thousands of
     // per-table introspection round-trips.
     let max_tables = req.max_tables.unwrap_or(60).clamp(1, 200);
-    Ok(Json(ctx.db().schema_graph(&id, &req.schema, max_tables).await?).into_response())
+    Ok(Json(ctx.db().schema_graph(&id, &user.id, &req.schema, max_tables).await?).into_response())
 }
 
 async fn run_query<S: DbViewerCtx>(
@@ -487,7 +498,7 @@ async fn query_plan<S: DbViewerCtx>(
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
     let node = req.node.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let plan = ctx.db().query_plan(&id, &req.statement, node).await?;
+    let plan = ctx.db().query_plan(&id, &user.id, &req.statement, node).await?;
     Ok(Json(plan).into_response())
 }
 
@@ -542,7 +553,7 @@ async fn cancel_query<S: DbViewerCtx>(
 ) -> ApiResult<StatusCode> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    ctx.db().cancel(&id, &req.query_id).await?;
+    ctx.db().cancel(&id, &user.id, &req.query_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -559,7 +570,7 @@ async fn close_connection<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    ctx.db().close_connection(&id).await?;
+    ctx.db().close_for_user(&id, &user.id).await?;
     Ok(Json(serde_json::json!({ "closed": true })).into_response())
 }
 
@@ -583,7 +594,7 @@ async fn query_status<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    Ok(Json(ctx.db().query_status(&id, &req.query_id)).into_response())
+    Ok(Json(ctx.db().query_status(&id, &user.id, &req.query_id).await?).into_response())
 }
 
 /// Request body for the server-side export endpoint.
@@ -634,7 +645,7 @@ async fn export_query<S: DbViewerCtx>(
     // Pre-flight the write-guard so a guarded write returns a clean error here,
     // before we commit to a 200 streaming body.
     ctx.db()
-        .guard_export(&id, &req.statement, node.as_deref())
+        .guard_export(&id, &user.id, &req.statement, node.as_deref())
         .await?;
 
     // Map the browser export format (csv/json — the wire contract is unchanged)
@@ -985,7 +996,7 @@ async fn nl_to_sql<S: DbViewerCtx>(
 
     let summary = ctx
         .db()
-        .schema_summary(&id, req.node.as_deref(), 40)
+        .schema_summary(&id, &user.id, req.node.as_deref(), 40)
         .await
         .unwrap_or_default();
 
@@ -1017,7 +1028,7 @@ async fn completion<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.db().completion(&id, &req).await?).into_response())
+    Ok(Json(ctx.db().completion(&id, &user.id, &req).await?).into_response())
 }
 
 /// Clear the cached completion snapshot for a connection so the next completion
@@ -1029,7 +1040,7 @@ async fn refresh_completion<S: DbViewerCtx>(
 ) -> ApiResult<Response> {
     let conn = ctx.db().get_connection(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Viewer).await?;
-    ctx.db().refresh_completion_cache(&id).await?;
+    ctx.db().refresh_completion_cache(&id, &user.id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1045,6 +1056,7 @@ async fn history<S: DbViewerCtx>(
     // Root sees all history on the connection; non-root callers see only
     // their own rows (#L11). Legacy rows (user_id = NULL, pre-0041) are
     // invisible to non-root callers — acceptable, as they predate multi-user.
+    ctx.db().authorize(&id, &user.id, None, "db_query").await?;
     let entries = if user.is_root {
         ctx.db().list_history(&id, limit).await?
     } else {
@@ -1146,6 +1158,7 @@ async fn update_saved<S: DbViewerCtx>(
     // (owner / ws-Admin / root) — saved queries are owner-private. Unknown id →
     // `get_saved` errors (404) before any mutation.
     let saved = ctx.db().get_saved(&qid).await?;
+    if let Some(conn) = &saved.connection_id { ctx.db().authorize(conn, &user.id, None, "db_query").await?; }
     ctx.roles()
         .check(&user, &saved.workspace_id, WorkspaceRole::Editor)
         .await?;
@@ -1165,6 +1178,7 @@ async fn delete_saved<S: DbViewerCtx>(
     // Deletion requires editor on the workspace the query was saved in, AND
     // ownership (owner / ws-Admin / root) — saved queries are owner-private.
     let saved = ctx.db().get_saved(&qid).await?;
+    if let Some(conn) = &saved.connection_id { ctx.db().authorize(conn, &user.id, None, "db_query").await?; }
     ctx.roles()
         .check(&user, &saved.workspace_id, WorkspaceRole::Editor)
         .await?;
@@ -1298,6 +1312,7 @@ async fn update_widget<S: DbViewerCtx>(
     Json(req): Json<UpdateWidgetReq>,
 ) -> ApiResult<Response> {
     let widget = ctx.db().get_widget(&id).await?;
+    ctx.db().authorize(&widget.connection_id, &user.id, None, "db_query").await?;
     ctx.roles()
         .check(&user, &widget.workspace_id, WorkspaceRole::Editor)
         .await?;
@@ -1323,6 +1338,7 @@ async fn delete_widget<S: DbViewerCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     let widget = ctx.db().get_widget(&id).await?;
+    ctx.db().authorize(&widget.connection_id, &user.id, None, "db_query").await?;
     ctx.roles()
         .check(&user, &widget.workspace_id, WorkspaceRole::Editor)
         .await?;
@@ -1337,6 +1353,7 @@ async fn run_widget<S: DbViewerCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<Response> {
     let widget = ctx.db().get_widget(&id).await?;
+    ctx.db().authorize(&widget.connection_id, &user.id, None, "db_query").await?;
     // Security (audit S7): `run_widget` executes the widget's stored statement
     // through the SAME `DbViewerService::run` path as `run_query` — which can
     // run arbitrary SQL/commands, including writes and DDL. It must therefore

@@ -13,11 +13,11 @@ use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
-use otto_core::domain::{Capability, Feature, User, WorkspaceRole};
+use otto_core::domain::{User, WorkspaceRole};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id};
 use otto_state::{
-    GrantsRepo, McpServerDetail, NewAllowlistEntry, NewPolicy, NewServerRow, SqlitePool,
+    McpServerDetail, NewAllowlistEntry, NewPolicy, NewServerRow, SqlitePool,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -64,11 +64,32 @@ async fn require_ws<S: McpCtx>(ctx: &S, user: &User, ws: &Id, min: WorkspaceRole
     ctx.roles().check(user, ws, min).await.map_err(ApiErr)
 }
 
-async fn mcp_capability<S: McpCtx>(ctx: &S, user: &User) -> Result<Capability, ApiErr> {
-    GrantsRepo::new(ctx.mcp_pool().clone())
-        .capability_of(user, Feature::Mcp)
-        .await
-        .map_err(ApiErr)
+/// Feature availability, workspace membership and resource authority intersect.
+async fn require_resource<S: McpCtx>(ctx: &S, user: &User, server: &McpServerDetail, operation: &str, child: Option<&str>, legacy: WorkspaceRole) -> Result<(), ApiErr> {
+    let policy = otto_state::ResourceAccessRepo::new(ctx.mcp_pool().clone()).get_policy(otto_core::access::ResourceKind::McpServer, &server.id).await?;
+    let min = if policy.mode == otto_core::access::AccessMode::Legacy { legacy } else { WorkspaceRole::Viewer };
+    require_ws(ctx,user,&server.workspace_id,min).await?;
+    if !ctx.mcp().resource_allowed(server,user,"discover",child).await? { return Err(ApiErr(Error::NotFound("MCP server".into()))); }
+    if !ctx.mcp().resource_allowed(server,user,operation,child).await? {
+        return Err(ApiErr(Error::Forbidden("MCP resource operation denied".into())));
+    }
+    Ok(())
+}
+
+async fn public_server<S: McpCtx>(ctx: &S, user: &User, mut server: McpServerDetail) -> Result<McpServerDetail,ApiErr> {
+    if !ctx.mcp().resource_allowed(&server,user,"configure",None).await? {
+        server.command.clear(); server.args.clear(); server.env.clear(); server.url=None; server.headers.clear();
+        server.secret_env_keys.clear(); server.secret_header_keys.clear(); server.has_secret=false;
+        server.health_error=None;
+        server.tools_count=ctx.mcp().visible_tools(&server,user).await?.len() as i64;
+    }
+    Ok(server)
+}
+
+async fn visible_record<S: McpCtx>(ctx: &S, user: &User, server_id: Option<&String>, tool: Option<&str>) -> Result<bool, ApiErr> {
+    let Some(id) = server_id else { return Ok(true); };
+    let server = match ctx.mcp().registry().get(id).await { Ok(s) => s, Err(Error::NotFound(_)) => return Ok(false), Err(e) => return Err(e.into()) };
+    Ok(ctx.mcp().resource_allowed(&server,user,"discover",tool).await?)
 }
 
 /// The workspaces a caller may see governance data for. `None` = all (root).
@@ -126,7 +147,11 @@ async fn list_servers<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<McpServerDetail>>> {
     require_ws(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    Ok(Json(ctx.mcp().registry().list_for_ws(&wid).await.map_err(ApiErr)?))
+    let mut visible = Vec::new();
+    for server in ctx.mcp().registry().list_for_ws(&wid).await? {
+        if ctx.mcp().resource_allowed(&server,&user,"discover",None).await? { visible.push(public_server(&ctx,&user,server).await?); }
+    }
+    Ok(Json(visible))
 }
 
 async fn create_server<S: McpCtx>(
@@ -140,12 +165,7 @@ async fn create_server<S: McpCtx>(
     if transport != "stdio" && transport != "http" {
         return Err(ApiErr(Error::Invalid("transport must be 'stdio' or 'http'".into())));
     }
-    // F10: registering a stdio server = arbitrary command run BY the daemon ⇒ Admin.
-    if transport == "stdio" && !user.is_root && mcp_capability(&ctx, &user).await? < Capability::Admin {
-        return Err(ApiErr(Error::Forbidden(
-            "registering a stdio (command-spawning) MCP server requires MCP Admin — it runs an arbitrary command as the Otto daemon".into(),
-        )));
-    }
+    if !user.is_root { return Err(ApiErr(Error::Forbidden("only the owner can attach MCP credentials or commands".into()))); }
     let name = req.name.trim();
     if name.is_empty() {
         return Err(ApiErr(Error::Invalid("server name must not be empty".into())));
@@ -191,6 +211,10 @@ async fn create_server<S: McpCtx>(
             .await
             .map_err(ApiErr)?;
     }
+    let operations: Vec<String> = otto_core::access::operations_for(otto_core::access::ResourceKind::McpServer).iter().map(|s| s.to_string()).collect();
+    otto_state::ResourceAccessRepo::new(ctx.mcp_pool().clone()).initialize_owner_policy(
+        otto_core::access::ResourceKind::McpServer, &server.id, &user.id, &operations, &[],
+        &otto_core::access::AccessActor { real_user_id:user.id.clone(),effective_user_id:None }).await?;
     ctx.mcp().registry().get(&server.id).await.map(Json).map_err(ApiErr)
 }
 
@@ -200,9 +224,9 @@ async fn get_server<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Value>> {
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Viewer).await?;
-    let tools = ctx.mcp().tools().list_for_server(&id).await.map_err(ApiErr)?;
-    Ok(Json(json!({ "server": server, "tools": tools })))
+    require_resource(&ctx, &user, &server, "discover", None, WorkspaceRole::Viewer).await?;
+    let tools = ctx.mcp().visible_tools(&server,&user).await.map_err(ApiErr)?;
+    Ok(Json(json!({ "server": public_server(&ctx,&user,server).await?, "tools": tools })))
 }
 
 async fn update_server<S: McpCtx>(
@@ -212,16 +236,14 @@ async fn update_server<S: McpCtx>(
     Json(req): Json<UpdateServerReq>,
 ) -> ApiResult<Json<McpServerDetail>> {
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Editor).await?;
-    // F10: a stdio server's command/args change is still command-control ⇒ Admin.
-    if server.transport == "stdio"
-        && (req.command.is_some() || req.args.is_some())
-        && !user.is_root
-        && mcp_capability(&ctx, &user).await? < Capability::Admin
-    {
-        return Err(ApiErr(Error::Forbidden(
-            "changing a stdio server's command requires MCP Admin".into(),
-        )));
+    require_resource(&ctx, &user, &server, "configure", None, WorkspaceRole::Editor).await?;
+    if !user.is_root && (req.command.as_ref().is_some_and(|v| v != &server.command)
+        || req.args.as_ref().is_some_and(|v| v != &server.args)
+        || req.env.as_ref().is_some_and(|v| v != &server.env)
+        || req.url.as_ref().is_some_and(|v| Some(v) != server.url.as_ref())
+        || req.headers.as_ref().is_some_and(|v| v != &server.headers)
+        || req.secret_env.is_some() || req.secret_headers.is_some()) {
+        return Err(ApiErr(Error::Forbidden("only the owner can change MCP credentials or commands".into())));
     }
     // Secret rotation: merge new secret values into the keychain blob.
     if req.secret_env.is_some() || req.secret_headers.is_some() {
@@ -260,7 +282,7 @@ async fn delete_server<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<StatusCode> {
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Editor).await?;
+    require_resource(&ctx, &user, &server, "configure", None, WorkspaceRole::Editor).await?;
     // Best-effort secret cleanup.
     if server.has_secret {
         let _ = ctx.mcp_secrets().delete(&McpService::secret_ref(&id));
@@ -275,7 +297,7 @@ async fn health_server<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<McpServerDetail>> {
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Editor).await?;
+    require_resource(&ctx, &user, &server, "configure", None, WorkspaceRole::Editor).await?;
     ctx.mcp().health_check(&id).await.map(Json).map_err(ApiErr)
 }
 
@@ -285,7 +307,7 @@ async fn discover_server<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<otto_state::McpTool>>> {
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Editor).await?;
+    require_resource(&ctx, &user, &server, "configure", None, WorkspaceRole::Editor).await?;
     ctx.mcp().discover(&id).await.map(Json).map_err(ApiErr)
 }
 
@@ -295,8 +317,8 @@ async fn list_tools<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<otto_state::McpTool>>> {
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Viewer).await?;
-    ctx.mcp().tools().list_for_server(&id).await.map(Json).map_err(ApiErr)
+    require_resource(&ctx, &user, &server, "discover", None, WorkspaceRole::Viewer).await?;
+    ctx.mcp().visible_tools(&server,&user).await.map(Json).map_err(ApiErr)
 }
 
 async fn patch_tool<S: McpCtx>(
@@ -307,7 +329,7 @@ async fn patch_tool<S: McpCtx>(
 ) -> ApiResult<Json<otto_state::McpTool>> {
     let tool = ctx.mcp().tools().get(&tool_id).await.map_err(ApiErr)?;
     let server = ctx.mcp().registry().get(&tool.server_id).await.map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Editor).await?;
+    require_resource(&ctx, &user, &server, "configure", Some(&tool.name), WorkspaceRole::Editor).await?;
     ctx.mcp()
         .tools()
         .patch(&tool_id, req.enabled, req.require_approval, req.risk_label.as_deref(), req.injection_risk.as_deref())
@@ -323,7 +345,7 @@ async fn invoke_tool<S: McpCtx>(
     Json(req): Json<InvokeReq>,
 ) -> ApiResult<Json<InvokeResp>> {
     let server = ctx.mcp().registry().get(&id).await.map_err(ApiErr)?;
-    require_ws(&ctx, &user, &server.workspace_id, WorkspaceRole::Editor).await?;
+    require_resource(&ctx, &user, &server, "invoke", Some(&name), WorkspaceRole::Editor).await?;
     let ictx = InvokeCtx {
         workspace_id: Some(server.workspace_id.clone()),
         dry_run: req.dry_run,
@@ -367,7 +389,11 @@ async fn get_allowlist<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<otto_state::McpAllowlistEntry>>> {
     require_ws(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
-    ctx.mcp().allowlist().list_for_ws(&wid).await.map(Json).map_err(ApiErr)
+    let mut visible = Vec::new();
+    for row in ctx.mcp().allowlist().list_for_ws(&wid).await? {
+        if visible_record(&ctx,&user,Some(&row.server_id),row.tool_name.as_deref()).await? { visible.push(row); }
+    }
+    Ok(Json(visible))
 }
 
 async fn set_allowlist<S: McpCtx>(
@@ -548,24 +574,31 @@ async fn list_approvals<S: McpCtx>(
     Query(q): Query<ApprovalQuery>,
 ) -> ApiResult<Json<Vec<otto_state::McpApproval>>> {
     let ws = accessible_ws(&ctx, &user).await?;
-    ctx.mcp()
-        .approvals()
-        .list(ws.as_deref(), q.status.as_deref(), 200)
-        .await
-        .map(Json)
-        .map_err(ApiErr)
+    let mut visible = Vec::new();
+    for row in ctx.mcp().approvals().list(ws.as_deref(),q.status.as_deref(),200).await? {
+        if visible_record(&ctx,&user,row.server_id.as_ref(),row.tool.as_deref()).await? { visible.push(row); }
+    }
+    Ok(Json(visible))
 }
 
 async fn decide_approval<S: McpCtx>(
     Path(id): Path<Id>,
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
     Json(req): Json<DecideReq>,
 ) -> ApiResult<Json<otto_state::McpApproval>> {
     let appr = ctx.mcp().approvals().get(&id).await.map_err(ApiErr)?;
+    if auth.as_ref().is_some_and(|a| appr.requested_by.as_ref() == Some(&a.0.real_user.id)) {
+        return Err(Error::Forbidden("requester cannot approve through impersonation".into()).into());
+    }
     // IDOR: the decider must have a role in the approval's workspace.
-    if let Some(ws) = &appr.workspace_id {
-        require_ws(&ctx, &user, ws, WorkspaceRole::Editor).await?;
+    if appr.server_id.is_none() {
+        if let Some(ws) = &appr.workspace_id { require_ws(&ctx,&user,ws,WorkspaceRole::Editor).await?; }
+    }
+    if let Some(server_id) = &appr.server_id {
+        let server = ctx.mcp().registry().get(server_id).await?;
+        require_resource(&ctx,&user,&server,"approve",appr.tool.as_deref(),WorkspaceRole::Editor).await?;
     }
     // Repo enforces approver != requester (separation of duties).
     ctx.mcp()
@@ -599,7 +632,11 @@ async fn list_audit<S: McpCtx>(
         limit: q.limit.unwrap_or(200),
         offset: q.offset.unwrap_or(0),
     };
-    ctx.mcp().call_log().list(&query).await.map(Json).map_err(ApiErr)
+    let mut visible = Vec::new();
+    for row in ctx.mcp().call_log().list(&query).await? {
+        if visible_record(&ctx,&user,row.server_id.as_ref(),Some(&row.tool)).await? { visible.push(row); }
+    }
+    Ok(Json(visible))
 }
 
 async fn stats<S: McpCtx>(
@@ -607,5 +644,9 @@ async fn stats<S: McpCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<otto_state::McpToolStats>>> {
     let ws = accessible_ws(&ctx, &user).await?;
-    ctx.mcp().call_log().stats(ws.as_deref()).await.map(Json).map_err(ApiErr)
+    let mut visible = Vec::new();
+    for row in ctx.mcp().call_log().stats(ws.as_deref()).await? {
+        if visible_record(&ctx,&user,row.server_id.as_ref(),Some(&row.tool)).await? { visible.push(row); }
+    }
+    Ok(Json(visible))
 }

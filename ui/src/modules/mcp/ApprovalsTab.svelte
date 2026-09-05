@@ -5,6 +5,8 @@
   // optional note. The requester cannot approve their own request (enforced
   // server-side). Polls every few seconds and on tab refocus so a new pending
   // request appears without a manual reload.
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
@@ -12,6 +14,8 @@
   import McpPill from './McpPill.svelte';
 
   let approvals = $state<McpApproval[]>([]);
+  const canDecide = (a:McpApproval) => a.requested_by!==auth.me?.id && (a.server_id ? resourceAccess.can('mcp_server',a.server_id,'approve','mcp','admin',a.tool ?? undefined) : auth.can('mcp','admin'));
+  $effect(()=>{for(const approval of approvals){if(approval.server_id)void resourceAccess.load('mcp_server',approval.server_id,approval.tool ?? undefined);}});
   let loading = $state(false);
   let busy = $state<Record<string, boolean>>({});
   let notes = $state<Record<string, string>>({});
@@ -46,6 +50,7 @@
   });
 
   async function decide(a: McpApproval, approved: boolean): Promise<void> {
+    if(!canDecide(a))return;
     busy = { ...busy, [a.id]: true };
     try {
       await mcpCpApi.cpDecide(a.id, { approved, note: notes[a.id]?.trim() || null });
@@ -119,10 +124,10 @@
                 value={notes[a.id] ?? ''}
                 oninput={(e) => (notes = { ...notes, [a.id]: (e.currentTarget as HTMLInputElement).value })}
               />
-              <button class="btn small ok" disabled={busy[a.id]} onclick={() => void decide(a, true)}>
+              <button class="btn small ok" disabled={busy[a.id] || !canDecide(a)} onclick={() => void decide(a, true)}>
                 {busy[a.id] ? '…' : 'Approve'}
               </button>
-              <button class="btn small danger" disabled={busy[a.id]} onclick={() => void decide(a, false)}>
+              <button class="btn small danger" disabled={busy[a.id] || !canDecide(a)} onclick={() => void decide(a, false)}>
                 {busy[a.id] ? '…' : 'Deny'}
               </button>
             </div>

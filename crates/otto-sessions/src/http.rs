@@ -31,6 +31,7 @@ async fn ensure_session_owner_or_admin<S: SessionsCtx>(
     user: &User,
     session: &Session,
 ) -> ApiResult<()> {
+    ctx.check_resource(user,session).await?;
     if session_owner_or_admin(ctx.roles().as_ref(), user, session).await {
         Ok(())
     } else {
@@ -42,6 +43,11 @@ async fn ensure_session_owner_or_admin<S: SessionsCtx>(
 
 /// Server-side context required by the sessions routes.
 pub trait SessionsCtx: Clone + Send + Sync + 'static {
+    /// Resource-bound sessions reauthorize on reads, control, and reconnect.
+    fn check_resource<'a>(&'a self, _user: &'a User, _session: &'a Session) -> otto_core::auth::BoxFuture<'a, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn manager(&self) -> &Arc<SessionManager>;
     fn roles(&self) -> &Arc<dyn RoleChecker>;
     fn workspaces(&self) -> &WorkspacesRepo;
@@ -187,7 +193,11 @@ async fn list_sessions<S: SessionsCtx>(
             .list_by_workspace_for_user(&ws_id, &user.id)
             .await?
     };
-    let sessions = sessions
+    let mut visible = Vec::new();
+    for session in sessions {
+        if ctx.check_resource(&user,&session).await.is_ok() { visible.push(session); }
+    }
+    let sessions = visible
         .into_iter()
         .filter(|s| q.archived.is_none_or(|a| s.archived == a))
         .filter(|s| q.kind.as_deref().is_none_or(|k| kind_str(s) == k))
@@ -268,10 +278,23 @@ async fn patch_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
-    Json(req): Json<UpdateSessionReq>,
+    Json(mut req): Json<UpdateSessionReq>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    if let Some(meta) = &req.meta {
+        // These fields bind a terminal to its originating protected resource.
+        // Ordinary metadata edits must not detach or replace that binding.
+        if ["k8s","aws","connection_id","source","resource_node"].iter().any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key)) {
+            return Err(ApiErr(Error::Forbidden("resource session bindings cannot be edited".into())));
+        }
+    }
+    // The manager replaces nested objects via two writes. Do not pass even
+    // unchanged binding objects through that path, which could detach them
+    // transiently while a concurrent input request authorizes the session.
+    if let Some(object)=req.meta.as_mut().and_then(serde_json::Value::as_object_mut) {
+        for key in ["k8s","aws","connection_id","source","resource_node"] {object.remove(key);}
+    }
     let session = match req.title {
         Some(title) => ctx.manager().update_title(&id, &title).await?,
         None => session,
@@ -387,6 +410,7 @@ async fn bulk_sessions<S: SessionsCtx>(
     for id in req.ids {
         let outcome = async {
             let session = ctx.manager().get(&id).await?;
+            ctx.check_resource(&user,&session).await?;
             if !session_owner_or_admin(ctx.roles().as_ref(), &user, &session).await {
                 return Err(Error::Forbidden("forbidden".into()));
             }

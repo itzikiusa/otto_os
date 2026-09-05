@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod passwords;
+pub mod resource_access;
 pub mod tokens;
 
 use otto_core::auth::{AuthContext, BoxFuture, RoleChecker, TokenAuthenticator};
@@ -15,6 +16,7 @@ use sqlx::SqlitePool;
 
 pub use cache::{AuthCache, NoopGrantsInvalidator};
 pub use passwords::{hash_password, validate_password, verify_password, MIN_PASSWORD_LEN};
+pub use resource_access::ResourceAccess;
 pub use tokens::{AuthRepo, IMPERSONATION_TOKEN_TTL_MINS};
 
 /// `TokenAuthenticator` backed by [`AuthRepo`].

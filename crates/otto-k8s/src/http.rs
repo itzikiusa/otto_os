@@ -1,10 +1,8 @@
 //! Kubernetes console REST router — every `/k8s/*` route of contract §3.
 //!
-//! Authorization is enforced upstream by the server's policy table
-//! (`crates/otto-server/src/policy.rs`, "Kubernetes console"): `/k8s/clusters/{id}/*`
-//! is View on GET and Edit otherwise (`test` View; `exec`/`k9s`/`actions` Edit),
-//! the registry + `/install` are Admin. Handlers therefore only do input
-//! validation, kubectl work and audit rows (`k8s.action.<action>`, `k8s.exec`).
+//! Feature/workspace/token ceilings are enforced by the server. Every cluster
+//! handler additionally checks the resource and operation before invoking
+//! kubectl, and child lists and streams honor namespace-specific decisions.
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
@@ -200,7 +198,11 @@ async fn install_tool<S: K8sCtx>(
     (StatusCode::ACCEPTED, Json(job))
 }
 
-async fn discover<S: K8sCtx>(State(ctx): State<S>) -> ApiResult<Json<Value>> {
+async fn discover<S: K8sCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+) -> ApiResult<Json<Value>> {
+    crate::access::require_setup_authority(&user)?;
     let contexts = clusters::discover(ctx.data_dir()).await?;
     Ok(Json(json!({ "contexts": contexts })))
 }
@@ -209,10 +211,30 @@ async fn discover<S: K8sCtx>(State(ctx): State<S>) -> ApiResult<Json<Value>> {
 // Registry
 // ---------------------------------------------------------------------------
 
+fn redact_configuration(cluster: &mut otto_state::K8sCluster) {
+    cluster.kubeconfig_path = None;
+    cluster.context_name.clear();
+    cluster.default_namespace = None;
+    cluster.aws_account_id = None;
+    cluster.params = json!({});
+    cluster.capabilities = None;
+    cluster.created_by = None;
+}
+
 async fn list_clusters<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
 ) -> ApiResult<Json<Vec<otto_state::K8sCluster>>> {
-    Ok(Json(Clusters::new(&ctx).list().await?))
+    let mut visible = Vec::new();
+    for mut cluster in Clusters::new(&ctx).list().await? {
+        if crate::access::allowed(&ctx.pool(), &user, &cluster.id, "discover", None).await? {
+            if !crate::access::can_configure(&ctx.pool(), &user, &cluster.id).await? {
+                redact_configuration(&mut cluster);
+            }
+            visible.push(cluster);
+        }
+    }
+    Ok(Json(visible))
 }
 
 async fn create_cluster<S: K8sCtx>(
@@ -235,41 +257,59 @@ async fn import_cluster<S: K8sCtx>(
 
 async fn get_cluster<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<otto_state::K8sCluster>> {
-    Ok(Json(Clusters::new(&ctx).get(&id).await?))
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
+    let mut cluster = Clusters::new(&ctx).get(&id).await?;
+    if !crate::access::can_configure(&ctx.pool(), &user, &id).await? {
+        redact_configuration(&mut cluster);
+    }
+    Ok(Json(cluster))
 }
 
 async fn update_cluster<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Json(req): Json<PatchK8sClusterReq>,
 ) -> ApiResult<Json<otto_state::K8sCluster>> {
-    Ok(Json(Clusters::new(&ctx).update(&id, req).await?))
+    crate::access::check(&ctx.pool(), &user, &id, "configure", None).await?;
+    Ok(Json(Clusters::new(&ctx).update(&id, &user, req).await?))
 }
 
 async fn delete_cluster<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
+    crate::access::check(&ctx.pool(), &user, &id, "configure", None).await?;
     Clusters::new(&ctx).delete(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn test_cluster<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<clusters::K8sTestResp>> {
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
-    Ok(Json(svc.test(&c).await?))
+    let mut result = svc.test(&c).await?;
+    if !crate::access::can_configure(&ctx.pool(), &user, &id).await? {
+        result.message = if result.ok { "Connection succeeded" } else { "Connection failed" }.into();
+    }
+    Ok(Json(result))
 }
 
 async fn capabilities<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<RefreshQuery>,
 ) -> ApiResult<Json<clusters::K8sCapabilities>> {
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     Ok(Json(
@@ -281,30 +321,74 @@ async fn capabilities<S: K8sCtx>(
 // Reads
 // ---------------------------------------------------------------------------
 
-async fn namespaces<S: K8sCtx>(State(ctx): State<S>, Path(id): Path<Id>) -> ApiResult<Json<Value>> {
+async fn namespaces<S: K8sCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Value>> {
+    crate::access::check(&ctx.pool(), &user, &id, "discover", None).await?;
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
-    let ns = resources::namespaces(&k).await?;
+    let mut ns = Vec::new();
+    for candidate in resources::namespaces(&k).await? {
+        for op in [
+            "workloads_view",
+            "resources_view",
+            "secrets_view",
+            "logs",
+            "metrics",
+            "exec",
+            "apply",
+            "scale",
+            "restart",
+            "delete",
+        ] {
+            if crate::access::allowed(&ctx.pool(), &user, &id, op, Some(&candidate.name)).await? {
+                ns.push(candidate);
+                break;
+            }
+        }
+    }
     Ok(Json(json!({ "namespaces": ns })))
 }
 
-async fn nodes<S: K8sCtx>(State(ctx): State<S>, Path(id): Path<Id>) -> ApiResult<Json<Value>> {
+async fn nodes<S: K8sCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Value>> {
+    crate::access::check(&ctx.pool(), &user, &id, "resources_view", None).await?;
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     let caps = svc.cached_capabilities(&c).await;
     let k = clusters::kubectl_for(&ctx, &c).await?;
-    let rows = resources::nodes(&k, caps.metrics_server).await?;
+    let with_metrics = caps.metrics_server
+        && crate::access::allowed(&ctx.pool(), &user, &id, "metrics", None).await?;
+    let rows = resources::nodes(&k, with_metrics).await?;
     Ok(Json(json!({ "nodes": rows })))
 }
 
 async fn list_resources<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<ResourcesQuery>,
 ) -> ApiResult<Json<Value>> {
     let kind =
         Kind::parse(&q.kind).ok_or_else(|| Error::Invalid(format!("unknown kind '{}'", q.kind)))?;
+    crate::access::check(
+        &ctx.pool(),
+        &user,
+        &id,
+        crate::access::read_operation(kind),
+        if kind.namespaced() {
+            q.ns.as_deref()
+        } else {
+            None
+        },
+    )
+    .await?;
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     let caps = svc.cached_capabilities(&c).await;
@@ -315,7 +399,8 @@ async fn list_resources<S: K8sCtx>(
         q.ns.as_deref(),
         q.label.as_deref(),
         q.q.as_deref(),
-        caps.metrics_server,
+        caps.metrics_server
+            && crate::access::allowed(&ctx.pool(), &user, &id, "metrics", q.ns.as_deref()).await?,
     )
     .await?;
     let _ = svc.repo().touch(&c.id).await;
@@ -326,11 +411,24 @@ async fn list_resources<S: K8sCtx>(
 
 async fn resource_detail<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<ResourceQuery>,
 ) -> ApiResult<Json<Value>> {
     let kind =
         Kind::parse(&q.kind).ok_or_else(|| Error::Invalid(format!("unknown kind '{}'", q.kind)))?;
+    crate::access::check(
+        &ctx.pool(),
+        &user,
+        &id,
+        crate::access::read_operation(kind),
+        if kind.namespaced() {
+            q.ns.as_deref()
+        } else {
+            None
+        },
+    )
+    .await?;
     if q.name.trim().is_empty() {
         return Err(Error::Invalid("name is required".into()).into());
     }
@@ -346,8 +444,16 @@ async fn resource_detail<S: K8sCtx>(
 
 async fn pod_containers<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, ns, name)): Path<(Id, String, String)>,
 ) -> ApiResult<Json<Value>> {
+    let mut allowed = false;
+    for operation in ["logs", "exec", "workloads_view"] {
+        allowed |= crate::access::allowed(&ctx.pool(), &user, &id, operation, Some(&ns)).await?;
+    }
+    if !allowed {
+        return Err(Error::Forbidden("pod container access is not granted".into()).into());
+    }
     let c = Clusters::new(&ctx).get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
     let containers = resources::containers(&k, &ns, &name).await?;
@@ -356,9 +462,11 @@ async fn pod_containers<S: K8sCtx>(
 
 async fn pod_logs<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path((id, ns, name)): Path<(Id, String, String)>,
     Query(q): Query<LogsQuery>,
 ) -> ApiResult<Response> {
+    crate::access::check(&ctx.pool(), &user, &id, "logs", Some(&ns)).await?;
     let c = Clusters::new(&ctx).get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
     let headers = [
@@ -368,6 +476,7 @@ async fn pod_logs<S: K8sCtx>(
     ];
     if q.follow == Some(true) {
         let body = logs::follow(&k, &ns, &name, &q)?;
+        let body = crate::access::guard_body(body, ctx.pool(), user, id, ns.to_string());
         return Ok((headers, body).into_response());
     }
     let text = logs::fetch(&k, &ns, &name, &q).await?;
@@ -379,9 +488,11 @@ async fn pod_logs<S: K8sCtx>(
 /// the per-pod route.
 async fn selector_logs<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<SelectorLogsQuery>,
 ) -> ApiResult<Response> {
+    crate::access::check(&ctx.pool(), &user, &id, "logs", Some(&q.ns)).await?;
     let ns = q.ns.trim();
     let sel = q.selector.trim();
     if ns.is_empty() || sel.is_empty() {
@@ -397,6 +508,7 @@ async fn selector_logs<S: K8sCtx>(
     let lq = q.logs();
     if lq.follow == Some(true) {
         let body = logs::follow_target(&k, ns, LogTarget::Selector(sel), &lq)?;
+        let body = crate::access::guard_body(body, ctx.pool(), user, id, ns.to_string());
         return Ok((headers, body).into_response());
     }
     let text = logs::fetch_target(&k, ns, LogTarget::Selector(sel), &lq).await?;
@@ -405,9 +517,11 @@ async fn selector_logs<S: K8sCtx>(
 
 async fn metrics<S: K8sCtx>(
     State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
     Path(id): Path<Id>,
     Query(q): Query<NsQuery>,
 ) -> ApiResult<Json<Value>> {
+    crate::access::check(&ctx.pool(), &user, &id, "metrics", q.ns.as_deref()).await?;
     let c = Clusters::new(&ctx).get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
     let (pods, available) = resources::metrics(&k, q.ns.as_deref()).await?;
@@ -476,7 +590,7 @@ async fn run_action<S: K8sCtx>(
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
-    let result = actions::execute(&k, &req).await;
+    let result = actions::execute_authorized(&k, &req, &ctx.pool(), &user, &id).await;
     let _ = svc.repo().touch(&c.id).await;
     // Audit both outcomes: a denied/failed mutation attempt is as interesting
     // as a successful one. Params are logged verbatim (they carry no secrets:

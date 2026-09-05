@@ -6,6 +6,7 @@
 //! is located / installed on demand (`install.rs`); each AWS service has its
 //! own module with pure normalizers over the CLI's JSON. Server-side wiring
 //! (ctx trait impl + router merge) lives in `crates/otto-server/src/modules.rs`.
+pub mod access;
 pub mod accounts;
 pub mod athena;
 pub mod cli;

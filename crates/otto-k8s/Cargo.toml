@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 otto-core = { workspace = true }
+otto-rbac = { workspace = true }
 otto-state = { workspace = true }
 otto-pty = { workspace = true }
 otto-connections = { workspace = true }

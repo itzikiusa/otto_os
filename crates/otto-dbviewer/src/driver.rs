@@ -31,6 +31,12 @@ pub trait Driver: Send + Sync {
     /// server version.
     async fn test(&self, cfg: &ResolvedConfig) -> Result<TestResult>;
 
+    /// Inspect the actual native credential ceiling. Unsupported engines fail
+    /// closed for governed arbitrary scripts; no caller-supplied assertion is used.
+    async fn native_grants(&self, _cfg: &ResolvedConfig) -> Result<Vec<crate::native_access::NativeGrant>> {
+        Err(crate::native_access::setup_error("native privilege verification is unsupported for this engine"))
+    }
+
     /// Top level of the object tree (databases / keyspaces / etc.).
     async fn schema_root(&self, cfg: &ResolvedConfig) -> Result<Vec<SchemaNode>>;
 

@@ -104,6 +104,7 @@ pub trait DbTester: Send + Sync {
     fn test_db_connection<'a>(
         &'a self,
         id: &'a Id,
+        user_id: &'a Id,
     ) -> otto_core::auth::BoxFuture<'a, Result<TestConnectionResp>>;
 }
 
@@ -243,15 +244,45 @@ impl ConnectionsService {
         self.repo.get(id).await
     }
 
+    pub async fn authorize(&self, id: &Id, user_id: &Id, operation: &str) -> Result<()> {
+        let conn = self.repo.get(id).await?;
+        crate::access::check(&self.repo.pool(), &conn, user_id, operation).await
+    }
+
+    pub async fn is_enforced(&self, id: &Id) -> Result<bool> {
+        crate::access::enforced(&self.repo.pool(), id).await
+    }
+
+    pub async fn visible_connection(&self, conn: Connection, user_id: &Id) -> Result<Connection> {
+        crate::access::check(&self.repo.pool(), &conn, user_id, "discover").await?;
+        if crate::access::check(&self.repo.pool(), &conn, user_id, "configure").await.is_err() {
+            return Ok(crate::access::redact(conn));
+        }
+        Ok(conn)
+    }
+
     /// Connections visible to a workspace (its own + global).
     pub async fn list(&self, ws: &Id) -> Result<Vec<Connection>> {
-        self.repo.list_visible(ws).await
+        // An identity-free legacy adapter must never reveal governed profiles.
+        let mut visible = Vec::new();
+        for conn in self.repo.list_visible(ws).await? {
+            if !self.is_enforced(&conn.id).await? { visible.push(conn); }
+        }
+        Ok(visible)
     }
 
     /// Like `list` but filtered to connections created by `user_id`.
     /// Used when `connections.owner_private = true`.
     pub async fn list_for(&self, ws: &Id, user_id: &Id) -> Result<Vec<Connection>> {
-        self.repo.list_visible_for(ws, user_id).await
+        let private = otto_state::SettingsRepo::new(self.repo.pool()).get("connections.owner_private").await?
+            .and_then(|v| v.as_bool()).unwrap_or(false);
+        let user = otto_state::UsersRepo::new(self.repo.pool()).get(user_id).await?;
+        let mut visible = Vec::new();
+        for conn in self.repo.list_visible(ws).await? {
+            if !self.is_enforced(&conn.id).await? && private && !user.is_root && conn.created_by != *user_id { continue; }
+            if let Ok(conn) = self.visible_connection(conn, user_id).await { visible.push(conn); }
+        }
+        Ok(visible)
     }
 
     /// Create a profile; `workspace_id = None` makes it global (root-managed).
@@ -261,6 +292,8 @@ impl ConnectionsService {
         user_id: &Id,
         req: UpsertConnectionReq,
     ) -> Result<Connection> {
+        let actor=otto_state::UsersRepo::new(self.repo.pool()).get(user_id).await?;
+        if actor.disabled || !actor.is_root {return Err(Error::Forbidden("root must provision native connection identities and credentials before they can be delegated".into()));}
         validate_params(req.kind, &req.params, req.secret.is_some())?;
         let conn = self
             .repo
@@ -277,6 +310,28 @@ impl ConnectionsService {
                 created_by: user_id.clone(),
             })
             .await?;
+        let user = otto_state::UsersRepo::new(self.repo.pool()).get(user_id).await?;
+        let feature_grants = otto_state::GrantsRepo::new(self.repo.pool());
+        let connections_cap = feature_grants.capability_of(&user, otto_core::domain::Feature::Connections).await?;
+        let database_cap = feature_grants.capability_of(&user, otto_core::domain::Feature::Database).await?;
+        use otto_core::domain::Capability;
+        let mut operations: Vec<String> = ["discover", "configure", "manage_access"].into_iter().map(str::to_owned).collect();
+        if connections_cap >= Capability::Edit {
+            operations.extend(["shell", "sftp_read", "sftp_write"].into_iter().map(str::to_owned));
+        }
+        if database_cap >= Capability::View {
+            operations.extend(["db_browse", "db_query", "db_export"].into_iter().map(str::to_owned));
+        }
+        if database_cap >= Capability::Edit {
+            operations.extend(["db_data", "db_schema", "change_submit"].into_iter().map(str::to_owned));
+        }
+        if database_cap >= Capability::Admin {
+            operations.extend(["change_approve", "change_execute"].into_iter().map(str::to_owned));
+        }
+        otto_state::resource_access::ResourceAccessRepo::new(self.repo.pool()).initialize_owner_policy(
+            otto_core::access::ResourceKind::Connection, &conn.id, user_id, &operations, &operations,
+            &otto_core::access::AccessActor { real_user_id: user_id.clone(), effective_user_id: None }
+        ).await?;
         if let Some(secret) = req.secret {
             let secret_ref = secret_ref_for(&conn.id);
             self.secrets.put(&secret_ref, &secret)?;
@@ -302,12 +357,23 @@ impl ConnectionsService {
     /// are true PATCH semantics: absent (None) keeps the stored value, so a
     /// PATCH that omits them can't silently downgrade a `Prod`/read-only
     /// connection and disable the write-guard.
-    pub async fn update(&self, id: &Id, req: UpsertConnectionReq) -> Result<Connection> {
+    pub async fn update(&self, id: &Id, user_id: &Id, req: UpsertConnectionReq) -> Result<Connection> {
+        self.authorize(id, user_id, "configure").await?;
         let existing = self.repo.get(id).await?;
         if req.kind != existing.kind {
             return Err(Error::Invalid(
                 "connection kind cannot be changed — create a new connection".into(),
             ));
+        }
+        let actor=otto_state::UsersRepo::new(self.repo.pool()).get(user_id).await?;
+        if self.is_enforced(id).await? && !actor.is_root {
+            // Full-form clients preserve a stored secret by omitting it.
+            // Never turn a limited configuration update into a secret oracle.
+            let replacing_secret=req.secret.is_some();
+            if req.params!=existing.params || replacing_secret || req.first_command!=existing.first_command
+                || req.environment.is_some_and(|e|e!=existing.environment) || req.read_only.is_some_and(|v|v!=existing.read_only) {
+                return Err(Error::Forbidden("root must change connection identity, credentials, commands or environment protections".into()));
+            }
         }
         let will_have_secret = req.secret.is_some() || existing.secret_ref.is_some();
         validate_params(req.kind, &req.params, will_have_secret)?;
@@ -337,7 +403,8 @@ impl ConnectionsService {
     }
 
     /// Delete the profile and its Keychain secret.
-    pub async fn delete(&self, id: &Id) -> Result<()> {
+    pub async fn delete(&self, id: &Id, user_id: &Id) -> Result<()> {
+        self.authorize(id, user_id, "configure").await?;
         let conn = self.repo.get(id).await?;
         if let Some(secret_ref) = &conn.secret_ref {
             if let Err(e) = self.secrets.delete(secret_ref) {
@@ -357,6 +424,10 @@ impl ConnectionsService {
         title: Option<String>,
         spawner: &dyn Spawner,
     ) -> Result<Session> {
+        self.authorize(&conn.id, user_id, "shell").await?;
+        if self.is_enforced(&conn.id).await? && conn.kind != ConnectionKind::Ssh {
+            return Err(Error::Forbidden("governed database/custom profiles cannot open unrestricted terminal sessions".into()));
+        }
         let secret = self.fetch_secret(conn)?;
         let (spec, _warn_argv) = build_command(conn, secret.as_deref())?;
         let session = spawner
@@ -375,13 +446,15 @@ impl ConnectionsService {
     }
 
     /// Toggle the pinned status for a connection.
-    pub async fn set_pinned(&self, id: &Id, pinned: bool) -> Result<Connection> {
-        self.repo.set_pinned(id, pinned).await
+    pub async fn set_pinned(&self, id: &Id, user_id: &Id, pinned: bool) -> Result<Connection> {
+        self.authorize(id, user_id, "discover").await?;
+        self.visible_connection(self.repo.set_pinned(id, pinned).await?, user_id).await
     }
 
     /// Headless test-connect: run the command with a kind-specific probe,
     /// 10s timeout, report ok/latency/first stderr line.
-    pub async fn test(&self, conn: &Connection) -> Result<TestConnectionResp> {
+    pub async fn test(&self, conn: &Connection, user_id: &Id) -> Result<TestConnectionResp> {
+        self.authorize(&conn.id, user_id, "configure").await?;
         let secret = self.fetch_secret(conn)?;
         // NOTE: `warn_key_perms` is filled by the `test_connection` HTTP handler
         // (the single spot that covers both this CLI path and the cached-tunnel

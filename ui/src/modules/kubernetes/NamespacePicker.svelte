@@ -15,9 +15,10 @@
     /** Non-empty when the namespace list failed to load — typing still works. */
     error?: string;
     disabled?: boolean;
+    allowAll?: boolean;
     onchange: (ns: string) => void;
   }
-  let { value, namespaces, error = '', disabled = false, onchange }: Props = $props();
+  let { value, namespaces, error = '', disabled = false, allowAll = true, onchange }: Props = $props();
 
   const ALL = '';
   let open = $state(false);
@@ -31,7 +32,7 @@
     const q = query.trim().toLowerCase();
     const names = namespaces.map((n) => n.name).filter((n) => !q || n.toLowerCase().includes(q));
     const list: { value: string; label: string }[] = [];
-    if (!q || 'all namespaces'.includes(q)) list.push({ value: ALL, label: 'All namespaces' });
+    if (allowAll && (!q || 'all namespaces'.includes(q))) list.push({ value: ALL, label: 'All namespaces' });
     for (const n of names) list.push({ value: n, label: n });
     // Let the user type a namespace the list doesn't know (RBAC-limited
     // `get namespaces`, or the list failed) and still select it.
@@ -157,7 +158,7 @@
     onchange={(e) => onchange((e.currentTarget as HTMLSelectElement).value)}
     data-testid="k8s-ns-picker"
   >
-    <option value="">All namespaces</option>
+    {#if allowAll}<option value="">All namespaces</option>{/if}
     {#each namespaces as n (n.name)}<option value={n.name}>{n.name}</option>{/each}
     {#if value && !namespaces.some((n) => n.name === value)}<option value={value}>{value}</option>{/if}
   </select>

@@ -3,6 +3,8 @@
 //! otto-connections / otto-git are mounted via `build_router`'s extras at
 //! integration time.
 
+pub mod database_changes;
+pub mod resource_sessions;
 pub mod agent_run;
 pub mod agent_session;
 pub mod api_helpers;

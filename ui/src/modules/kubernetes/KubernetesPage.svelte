@@ -27,6 +27,7 @@
   let skipInstall = $state(false);
 
   $effect(() => {
+    void k8s.accessRevision;
     void k8s.loadStatus();
     void k8s.loadClusters();
     return () => k8s.suspend();
@@ -35,6 +36,7 @@
   // Route → store. Only the route is a dependency; every store write is
   // untracked so a store change can never re-trigger this effect.
   $effect(() => {
+    void k8s.accessRevision;
     const id = routeClusterId;
     const kind = routeKind;
     const ns = routeNs;
@@ -73,7 +75,7 @@
     <InstallPanel tool="kubectl" oncontinue={() => (skipInstall = true)} />
   {:else if routeClusterId}
     {#if cluster}
-      <ClusterWorkspace {cluster} />
+      {#key `${cluster.id}/${k8s.accessRevision}`}<ClusterWorkspace {cluster} />{/key}
     {:else if k8s.clustersLoaded}
       <EmptyState
         icon="helm"
@@ -86,7 +88,7 @@
       <div class="k8s-boot"><Skeleton rows={6} height={40} /></div>
     {/if}
   {:else}
-    <ClustersOverview />
+    {#key k8s.accessRevision}<ClustersOverview />{/key}
   {/if}
 </div>
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
   // Accounts overview: one card per AWS account — identity (account id + role
   // from the caller ARN), region, per-service permission chips (green allowed /
   // grey denied / hollow unknown), "Sign in" when the probe says credentials
@@ -7,6 +9,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -22,8 +25,7 @@
   }
   let { onadd, onedit, ondelete, onsignin }: Props = $props();
 
-  const canAdmin = $derived(auth.can('aws', 'admin'));
-  const canLogin = $derived(auth.can('aws', 'edit'));
+  const canAdmin = $derived(auth.isRoot);
   let filter = $state('');
   const visible = $derived.by(() => {
     const q = filter.trim().toLowerCase();
@@ -37,13 +39,18 @@
     );
   });
 
+  let accessFor = $state<string | null>(null);
+  $effect(() => { for (const resource of aws.accounts) void resourceAccess.load('aws_account', resource.id); });
+
   function menu(e: MouseEvent | KeyboardEvent, a: AwsAccount): void {
     ctxMenu.show(e, [
-      { label: 'Re-check permissions', icon: 'refresh', action: () => void aws.loadPermissions(a.id, true) },
-      ...(canLogin && a.auth_mode === 'profile'
+      ...(resourceAccess.can('aws_account', a.id, 'manage_access', 'aws', 'admin')
+        ? [{ label: 'Manage access…', icon: 'key', action: () => { accessFor = a.id; } }] : []),
+      { label: 'Re-check permissions', disabled: !resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'view'), icon: 'refresh', action: () => void aws.loadPermissions(a.id, true) },
+      ...(resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'edit') && a.auth_mode === 'profile'
         ? [{ label: 'Sign in (aws sso login)', icon: 'key', action: () => onsignin(a) }]
         : []),
-      ...(canAdmin
+      ...(resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'admin')
         ? [
             { label: 'Edit…', icon: 'edit', action: () => onedit(a) },
             { separator: true },
@@ -64,6 +71,7 @@
   const probed = new Set<string>();
   $effect(() => {
     for (const a of aws.accounts) {
+      if (!resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'view')) continue;
       if (probed.has(a.id) || aws.perms(a.id) || aws.permLoading[a.id]) continue;
       probed.add(a.id);
       void aws.loadPermissions(a.id);
@@ -150,7 +158,7 @@
           <div class="chips" aria-label="Service permissions">
             {#each AWS_SERVICES as s (s.id)}
               {@const st = chipState(a, s.id)}
-              {@const rbac = auth.can(`aws_${s.id}` as Feature, 'view')}
+              {@const rbac = resourceAccess.can('aws_account', a.id, s.id === 's3' ? 'discover' : `${s.id}_view`, `aws_${s.id}` as Feature, 'view')}
               <a
                 class="chip {st}"
                 class:norbac={!rbac}
@@ -168,7 +176,7 @@
               onclick={() => void aws.loadPermissions(a.id, true)}
               title="Re-check permissions"
               aria-label="Re-check permissions"
-              disabled={loadingP}
+              disabled={loadingP || !resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'view')}
             >
               <Icon name="refresh" size={12} />
             </button>
@@ -176,7 +184,7 @@
           {#if p?.login_required}
             <div class="login-row">
               <span class="warn">Credentials expired or missing.</span>
-              {#if a.auth_mode === 'profile' && canLogin}
+              {#if a.auth_mode === 'profile' && resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'edit')}
                 <button class="primary sm" onclick={() => onsignin(a)}>
                   <Icon name="key" size={12} /> Sign in
                 </button>
@@ -187,7 +195,7 @@
           {/if}
           <div class="card-foot">
             <button class="link" onclick={() => router.go(`aws/${a.id}/s3`)}>Open</button>
-            {#if canAdmin}
+            {#if resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'admin')}
               <button class="link" onclick={() => onedit(a)}><Icon name="gear" size={12} /> Edit</button>
             {/if}
           </div>
@@ -196,6 +204,12 @@
     </div>
   {/if}
 </div>
+
+{#if accessFor}
+  <Modal title="Manage access" width={780} onclose={() => (accessFor = null)}>
+    <ResourceAccess kind="aws_account" resourceId={accessFor} />
+  </Modal>
+{/if}
 
 <style>
   .ov {

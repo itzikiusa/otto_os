@@ -260,6 +260,10 @@ pub async fn import_kubeconfig(
     region: Option<&str>,
     creator: &Id,
 ) -> Result<K8sCluster> {
+    let user = otto_state::UsersRepo::new(pool.clone())
+        .get(creator)
+        .await?;
+    crate::access::require_setup_authority(&user)?;
     validate_cluster_name(name)?;
     let region_str = crate::accounts::resolve_region(a, region)?.to_string();
     let alias = req
@@ -344,6 +348,31 @@ pub async fn import_kubeconfig(
         Error::Internal(format!("insert k8s cluster: {e}"))
     })?;
 
+    let user = otto_state::UsersRepo::new(pool.clone())
+        .get(creator)
+        .await?;
+    let capability = otto_state::GrantsRepo::new(pool.clone())
+        .capability_of(&user, otto_core::domain::Feature::Kubernetes)
+        .await?;
+    let operations: Vec<String> =
+        otto_core::access::operations_for(otto_core::access::ResourceKind::K8sCluster)
+            .iter()
+            .filter(|_| capability >= otto_core::domain::Capability::Admin)
+            .map(|op| (*op).to_string())
+            .collect();
+    otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
+        .initialize_owner_policy(
+            otto_core::access::ResourceKind::K8sCluster,
+            &id,
+            creator,
+            &operations,
+            &operations,
+            &otto_core::access::AccessActor {
+                real_user_id: creator.clone(),
+                effective_user_id: None,
+            },
+        )
+        .await?;
     Ok(K8sCluster {
         id,
         name: alias.clone(),

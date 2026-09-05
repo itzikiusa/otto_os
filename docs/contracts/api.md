@@ -3318,3 +3318,128 @@ are fully qualified — `rollouts.argoproj.io`, `applications.argoproj.io`):
 | `argocd_app_restart` | applications | `resource_kind?`, `resource_name?` | for every Deployment / StatefulSet / DaemonSet / Rollout in `.status.resources[]` (filtered by the params) run the `restart` verb above in that resource's namespace, in this cluster's context |
 | `cronjob_trigger` | cronjobs | — | `create job --from=cronjob/<name> <name>-manual-<unix ts> -n <ns>` (job name trimmed to 63 chars) |
 | `cronjob_suspend` / `cronjob_resume` | cronjobs | — | `patch … --type merge -p {"spec":{"suspend":true\|false}}` |
+
+## Resource access (connections, MCP, AWS, Kubernetes)
+
+Feature grants decide page availability. Enforced resource policies separately decide which resources/children are visible and which operations are allowed. Workspace membership, token scope, native credentials and approval requirements remain independent ceilings. Root bypasses resource rules; disabled identities do not. Ordinary feature administrators do not bypass enforced rules.
+
+`ResourceKind`: `connection | mcp_server | aws_account | k8s_cluster`.
+`AccessPolicy`: `{kind, resource_id, mode: "legacy" | "enforced", revision: number, rules: AccessRule[]}`.
+`AccessRule`: `{id, subject_kind: "user" | "group", subject_id, effect: "allow" | "deny", operations: string[], children: string[] | null, grantable_operations: string[], credential_connection_id?: string}`.
+
+An absent rule is inherited/no grant. Matching group and user allows combine; any matching deny wins. `children:null` covers all current and future children. A nonempty list matches exact identities: database names, MCP tool names, `bucket:<name>` or `namespace:<name>`. Actions require discovery permission for the same scope. Scoped discovery can expose a parent for navigation only when at least one child remains accessible; it does not grant broad actions.
+
+| Method | Route | Result / authorization |
+| --- | --- | --- |
+| GET / POST | `/access/groups` | List / create group; root only |
+| PUT / DELETE | `/access/groups/{id}` | Update / delete group; root only |
+| GET | `/access/groups/{id}/members` | User IDs; root only |
+| PUT / DELETE | `/access/groups/{id}/members/{uid}` | Add / remove membership; root only |
+| GET / POST | `/access/roles` | List / create named operation preset; root only |
+| PUT / DELETE | `/access/roles/{id}` | Update / delete preset; root only |
+| GET / PUT | `/access/{kind}/{id}` | Read / replace policy; `manage_access` |
+| GET | `/access/{kind}/{id}/subjects` | Available users, groups, roles; `manage_access` |
+| GET | `/access/{kind}/{id}/capabilities?child=` | Current caller's effective decisions; visible resource |
+| GET | `/access/{kind}/{id}/effective?user_id=&child=` | Target user's effective decisions; `manage_access` |
+| POST | `/access/{kind}/{id}/preview` | Candidate access impact; `manage_access` |
+
+Group create/update body: `{name, description?: string}`. Role create/update body: `{name, description?: string, kind, operations: string[], grantable_operations: string[]}`. Role definitions are copied into policy rules by the editor; changing a preset never changes previously assigned access.
+
+Policy PUT and preview accept `{policy: AccessPolicy, preview_token?: string}`. PUT uses `policy.revision` as compare-and-swap, stores an immutable version and audit record, and returns the new policy. Root must provide a current preview token to switch enforcement mode. Preview returns `{token, revision, issues: string[], changes: [{user_id, display_name, before, after, children: [{child, before, after}]}]}`; each before/after is an operation-to-decision map. Native credential readiness is checked for root connection-policy activation/updates; it is checked again at execution and is not a permanent trust assertion.
+
+Effective access returns `{kind, resource_id, user_id, child, mode, operations: Record<string, {allowed, reason, matched_rule_ids, mode}>}`. Self-capabilities clear rule IDs. Nonroot managers can change other subjects only within their explicit grantable operation/scope ceiling; they cannot alter their own direct/group authority, remove existing denies, change mode, or assign execution credentials.
+
+New resources start enforced and private; creation initializes bounded creator access. Native connection, AWS account, Kubernetes context/import (including EKS), and MCP command/endpoint attachment is root-only. Delegated configure cannot repoint existing credentials or native identity; unchanged identity fields may accompany cosmetic edits. Existing resources remain legacy until explicitly activated. Policies reload membership on every backend decision. Unknown/deleted resources never become legacy-authorized. `403` indicates denied operation/management, `404` indicates absent or concealed resource, `409` indicates stale revision/preview, `400` indicates malformed or unsupported policy. These use the standard Problem body.
+
+Connection operations: `discover`, `configure`, `manage_access`, `shell`, `sftp_read`, `sftp_write`, `db_browse`, `db_query`, `db_export`, `db_data`, `db_schema`, `change_submit`, `change_approve`, `change_execute`. Native restricted script execution supports MySQL/PostgreSQL with verifiable native grants. A logical connection Allow rule may reference another saved same-endpoint credential profile; only root assigns that reference and secrets remain in the secret store. Unsupported native restrictions fail closed. Governed direct read execution uses native read-only transactions, including root; production writes require reviewed execution. Governed arbitrary local filesystem transfers are root-only; streaming browser export remains separately authorized. DB Assistant start/resume/summary also requires Agents Edit and db_query; existing assists are user-, connection-, workspace- and child-bound.
+
+MCP operations: `discover`, `invoke`, `configure`, `manage_access`, `approve`, optionally scoped to exact tool names. Server/tool lists, calls, approvals, audit and stats filter by resource visibility. Invocation rechecks current authority before downstream execution and retains argument-bound approval and token restrictions. Enforced MCP registrations are omitted from raw provider configurations and accessed through the governed gateway, including rows whose historical `managed` flag is false. Legacy activation refuses active workspace sessions or untracked direct entries; tracked entries are retired. External credential copies require source rotation.
+
+AWS operations and exact scopes are defined by `otto_core::access::operations_for(AwsAccount)`. S3 policies may select exact `bucket:<name>` children; broad service operations cannot be disguised as bucket-scoped grants. Kubernetes operations include independent `workloads_view`, `resources_view`, `secrets_view`, `logs`, `metrics`, `exec`, `k9s`, `apply`, `scale`, `restart`, `delete`, plus configuration/access administration. Namespace-scoped rules use exact `namespace:<name>` children; broad terminal/composite actions require unrestricted authority. AWS/Kubernetes discovery and every resource action enforce current user permissions; S3 download and Kubernetes log streams periodically recheck revocation.
+
+### Reviewed database changes
+
+All routes below require authenticated Database page access. Every target also
+requires current workspace membership, connection/database discovery, and the
+specific `change_submit`, `change_approve`, or `change_execute` permission.
+Legacy targets require Database Edit to submit and Admin to approve or execute,
+with the corresponding workspace role. Scoped session and MCP tokens cannot use
+these routes. Effective identity authorizes; real and effective identities are
+recorded in history. Root must also obtain an independent artifact approval.
+
+- `GET /database-changes?connection_id=<id>&before=<created_at>` lists up to 100
+  scanned recent changes, filtered to changes whose complete target set the
+  caller may access through at least one change permission. Hidden IDs return
+  `404` from detail/action routes.
+- `POST /database-changes` creates a draft from
+  `{title,description,script,targets:[{connection_id,node:"db:shop"}]}`. Targets
+  are canonicalized, deduplicated, sorted, and limited to 20 MySQL/PostgreSQL
+  databases. Script limit is 256 KiB. SQL remains review content until execution.
+- `GET /database-changes/{id}` returns `{change,attempts,history}`. Change fields
+  include the input, `id`, `author_id`, `real_author_id`, `revision`, `status`,
+  `content_hash`, `executor_id`, `validation`, `approved_by`, `approved_real_by`,
+  `approval_hash`, `cancellation_requested`, `created_at`, and `updated_at`.
+  History retains prior revisions but filters old target scopes independently.
+- `PUT /database-changes/{id}` accepts `{revision,...draftInput}`. Only the
+  author may revise an unexecuted change. Revision increments and clears all
+  validation and approval bindings. Executed changes require a new change.
+- `GET /database-changes/{id}/executors` lists `{id,display_name,username}` for users currently
+  authorized to execute all targets; caller must have submit authority on all
+  targets. Native credential readiness is checked separately during validation.
+- `POST /database-changes/{id}/validate` accepts `{revision,executor_id}`. The author needs
+  `change_submit`; the selected executor must currently have `change_execute`
+  for every target. Native credential and SQL preflight run without executing
+  the script. The hash binds revision, script, target configuration/environment,
+  resource-policy revision, selected executor credentials and independent-review
+  policy. Validation does not guarantee eventual execution success.
+- `POST /database-changes/{id}/submit` accepts `{revision,note?}` and moves a validated change to
+  `awaiting_review`, after checking current author eligibility and bindings.
+- `POST /database-changes/{id}/approve` or `/database-changes/{id}/reject` accepts `{revision,note?}`; rejection requires
+  a note. Approval requires `change_approve` on every target and an approver
+  independent of both the effective and real author, including impersonation.
+  Every reviewed change requires one independent approval, including development.
+- `POST /database-changes/{id}/execute` accepts `{revision}`. Only the bound executor with current
+  `change_execute` can claim an approved artifact. It also rechecks the author's
+  submit permission, approver's approval permission, native credential ceiling,
+  target configuration and policy revisions. Returns the claimed `running`
+  change; execution continues after the HTTP response. Duplicate and conflicting
+  target claims return `409`. A changed approval binding requires a new revision,
+  validation, and approval. Explicit database-operation denies still apply.
+- `POST /database-changes/{id}/cancel` accepts `{revision}`. Authors may cancel unexecuted changes;
+  callers with target execution authority may request cancellation of a running
+  change. Cancellation attempts native interruption and records an unknown
+  outcome when a statement might already have changed data.
+- `POST /database-changes/{id}/reconcile` accepts `{revision,attempt_id,outcome:"succeeded"|"failed"|"partially_applied",
+  note}` and requires execution authority, an unknown attempt, and at least ten
+  characters describing operator evidence. Reconciliation records inspected
+  results and releases that target's lock; it never replays SQL.
+
+Draft states are `draft`, `validated`, `awaiting_review`, `approved`, `rejected`,
+and `cancelled`. Execution states are `running`, `succeeded`, `failed`,
+`partially_applied`, and `outcome_unknown`. Attempts persist target, executor,
+ordinal, state, timestamps, confirmed statement counts when the adapter returns them, and a bounded outcome summary without query result
+sets or driver error contents. A target lock covers `queued`, `running`, and
+`outcome_unknown` attempts. Interrupted attempts become unknown at daemon startup;
+unsent queued targets are cancelled. No SQL is automatically retried. Rollouts
+stop after the first uncertain target. A reviewed compensating change is needed
+for recovery that requires SQL; automatic rollback is not promised.
+
+Errors use the standard Problem response: `400` invalid input/unsupported engine,
+`403` missing operation, native scope or independent approval, `404` hidden target
+or change, and `409` stale revision/binding, invalid transition, or target lock.
+
+Native connection setup is root-provisioned: creating/importing connections,
+scanning the daemon host's external database-tool profiles, replacing endpoint or
+credential parameters, changing a first command, or changing environment/read-only
+protections requires root. For an enforced connection, a delegated `configure`
+caller may save cosmetic name/section changes while preserving all native fields;
+stored secrets are preserved by omitting `secret`. A supplied replacement secret
+requires root. Full-form clients must retain unchanged native values.
+
+Governed MySQL/PostgreSQL direct reads execute in native READ ONLY transactions,
+including root reads and batches. Read exports and query plans also use native
+read-only transactions. This prevents writes hidden behind function overloads,
+operators, casts, and view/routine evaluation; a function name allowlist alone is
+not the execution boundary. Transaction cleanup uses rollback-on-drop. Reviewed
+approved changes retain their separate writable execution path. Client JSON or
+stored profile parameters cannot set the internal execution mode.

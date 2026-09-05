@@ -3,6 +3,7 @@
   // require-approval, risk-label override) plus a governed tool tester: run a
   // tool with JSON arguments through the full invoke pipeline (optionally
   // dry-run) and see the decision + preview / content / pending-approval id.
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
@@ -22,6 +23,8 @@
   }
   let { wsId, servers, selectedServerId, onSelect }: Props = $props();
 
+  const can = (operation:string, child?:string) => !!selectedServerId && resourceAccess.can('mcp_server',selectedServerId,operation,'mcp',operation==='invoke'?'edit':'admin',child);
+  $effect(()=>{if(selectedServerId){void resourceAccess.load('mcp_server',selectedServerId);for(const tool of tools)void resourceAccess.load('mcp_server',selectedServerId,tool.name);}});
   let tools = $state<McpToolView[]>([]);
   let loading = $state(false);
   let busyTool = $state<Record<string, boolean>>({});
@@ -109,7 +112,7 @@
 
   async function run(): Promise<void> {
     const id = selectedServerId;
-    if (!id || !testToolName) return;
+    if (!id || !testToolName || !can('invoke',testToolName)) return;
     let args: unknown = {};
     argError = null;
     if (argsText.trim()) {
@@ -155,7 +158,7 @@
     {#if server}
       <McpPill kind="injection" value={server.injection_risk} />
       <span class="grow"></span>
-      <button class="btn small" onclick={() => void discover()} disabled={loading}>
+      <button class="btn small" onclick={() => void discover()} disabled={loading || !can('configure')}>
         {loading ? 'Discovering…' : 'Discover'}
       </button>
     {/if}
@@ -169,7 +172,7 @@
     <div class="empty">
       <Icon name="zap" size={24} />
       <p>No tools discovered yet for <strong>{server.name}</strong>.</p>
-      <button class="btn primary" onclick={() => void discover()}>Discover tools</button>
+      <button class="btn primary" disabled={!can('configure')} onclick={() => void discover()}>Discover tools</button>
     </div>
   {:else}
     <div class="grid">
@@ -199,7 +202,7 @@
               class:on={t.enabled}
               role="switch"
               aria-checked={t.enabled}
-              disabled={busyTool[t.id]}
+              disabled={busyTool[t.id] || !can('configure',t.name)}
               onclick={() => void patchTool(t, { enabled: !t.enabled })}
               title={t.enabled ? 'Enabled' : 'Disabled'}
             ><span class="knob"></span></button>
@@ -210,7 +213,7 @@
               class:on={t.require_approval}
               role="switch"
               aria-checked={t.require_approval}
-              disabled={busyTool[t.id]}
+              disabled={busyTool[t.id] || !can('configure',t.name)}
               onclick={() => void patchTool(t, { require_approval: !t.require_approval })}
               title={t.require_approval ? 'Requires approval' : 'No approval required'}
             ><span class="knob"></span></button>
@@ -218,7 +221,7 @@
           <span class="cell">
             <select
               value={t.risk_label}
-              disabled={busyTool[t.id]}
+              disabled={busyTool[t.id] || !can('configure',t.name)}
               onchange={(e) =>
                 void patchTool(t, {
                   risk_label: (e.currentTarget as HTMLSelectElement).value as McpRiskLabel,
@@ -256,7 +259,7 @@
             <span>Dry run (preview only)</span>
           </label>
           <span class="grow"></span>
-          <button class="btn primary small" onclick={() => void run()} disabled={running || !testToolName}>
+          <button class="btn primary small" onclick={() => void run()} disabled={running || !testToolName || !can('invoke',testToolName)}>
             {running ? 'Running…' : 'Run'}
           </button>
         </div>

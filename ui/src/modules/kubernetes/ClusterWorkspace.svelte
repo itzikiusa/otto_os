@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { actionOperation, readOperation } from './permissions';
   // k9s-like cluster workspace. Top bar: cluster switcher · namespace combobox
   // · text filter · refresh / auto-refresh · k9s · key hints. Left: kinds rail
   // (Argo Rollouts / ArgoCD Apps only when the capability probe says so; a
@@ -38,7 +40,28 @@
   }
   let { cluster }: Props = $props();
 
-  const canEdit = $derived(auth.can('kubernetes', 'edit'));
+  function can(operation: string, ns = k8s.selected?.ns || k8s.namespace): boolean {
+    return resourceAccess.can('k8s_cluster', cluster.id, operation, 'kubernetes',
+      ['exec', 'apply', 'scale', 'restart', 'delete', 'k9s'].includes(operation) ? 'edit' : 'view', ns ? `namespace:${ns}` : undefined);
+  }
+  function canAction(action: ActionDef, row: K8sRow): boolean {
+    const ns = action.id.startsWith('argocd_') ? '' : row.namespace;
+    return can(actionOperation(action.id), ns);
+  }
+  const canEdit = $derived(['exec', 'apply', 'scale', 'restart', 'delete'].some(op => can(op)));
+  const canK9s = $derived(resourceAccess.can('k8s_cluster', cluster.id, 'k9s', 'kubernetes', 'edit'));
+  $effect(() => {
+    void resourceAccess.load('k8s_cluster', cluster.id);
+    const namespaces = new Set([k8s.namespace, k8s.selected?.ns, ...k8s.rows.map(row => row.namespace)]);
+    for (const ns of namespaces) if (ns) void resourceAccess.load('k8s_cluster', cluster.id, `namespace:${ns}`);
+  });
+  $effect(() => {
+    const access = resourceAccess.get('k8s_cluster', cluster.id);
+    if (access?.mode === 'enforced' && !k8s.namespace && k8s.namespaces.length && !can(readOperation(k8s.kind), '')) {
+      const first = k8s.namespaces[0].name;
+      untrack(() => k8s.setNamespace(first));
+    }
+  });
   const isAdmin = $derived(auth.can('kubernetes', 'admin'));
   const kinds = $derived(visibleKinds(k8s.caps));
   const kind = $derived(k8s.kind);
@@ -149,7 +172,7 @@
 
   // --- actions --------------------------------------------------------------------
   async function doAction(a: ActionDef, r: K8sRow): Promise<void> {
-    if (!canEdit) return;
+    if (!canAction(a, r)) return;
     if (a.needs === 'scale') {
       scaleFor = { row: r, def: a };
       return;
@@ -170,13 +193,13 @@
       { label: 'Describe', icon: 'note', action: () => openRow(r, 'describe') },
     ];
     if (kind === 'pods') {
-      items.push({ label: 'Logs', icon: 'file', action: () => openRow(r, 'logs') });
-      if (canEdit) items.push({ label: 'Shell (exec)', icon: 'terminal', action: () => { autoExec = true; openRow(r, 'terminal'); } });
+      if (can('logs', r.namespace)) items.push({ label: 'Logs', icon: 'file', action: () => openRow(r, 'logs') });
+      if (can('exec', r.namespace)) items.push({ label: 'Shell (exec)', icon: 'terminal', action: () => { autoExec = true; openRow(r, 'terminal'); } });
     } else if (r.extra?.selector) {
       items.push({ label: 'Pods', icon: 'box', action: () => openRow(r, 'pods') });
-      items.push({ label: 'Logs (all pods)', icon: 'file', action: () => openRow(r, 'logs') });
+      if (can('logs', r.namespace)) items.push({ label: 'Logs (all pods)', icon: 'file', action: () => openRow(r, 'logs') });
     }
-    const acts = canEdit ? actionsFor(kind, r) : [];
+    const acts = actionsFor(kind, r).filter(a => canAction(a, r));
     if (acts.length) {
       items.push({ separator: true });
       for (const a of acts) items.push({ label: a.label, icon: a.icon, danger: a.danger, action: () => void doAction(a, r) });
@@ -186,7 +209,7 @@
 
   // --- k9s -------------------------------------------------------------------------
   async function openK9s(): Promise<void> {
-    if (!canEdit || k9sOpening) return;
+    if (!canK9s || k9sOpening) return;
     if (!k8s.status?.k9s.installed) {
       if (isAdmin) k9sInstallOpen = true;
       else toasts.warn('k9s is not installed', 'Ask an Otto admin to install it from the Kubernetes overview.');
@@ -270,7 +293,7 @@
           }
           break;
         case 's':
-          if (kind === 'pods' && row && canEdit) {
+          if (kind === 'pods' && row && can('exec', row.namespace)) {
             e.preventDefault();
             autoExec = true;
             openRow(row, 'terminal');
@@ -328,7 +351,7 @@
     <span class="env-badge mono" class:prod={cluster.environment === 'prod'}>{envBadge(cluster.environment)}</span>
     {#if k8s.caps?.server_version}<span class="ver mono" title="Server version">{k8s.caps.server_version}</span>{/if}
 
-    <NamespacePicker bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} />
+    <NamespacePicker allowAll={can(readOperation(kind), '')} bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} />
 
     <div class="filter">
       <Icon name="search" size={12} />
@@ -345,7 +368,7 @@
     <button class="pill-toggle" class:on={k8s.autoRefresh} onclick={() => k8s.setAutoRefresh(!k8s.autoRefresh)} aria-pressed={k8s.autoRefresh} title="Auto-refresh every 10 s">
       <Icon name="clock" size={11} /> Auto
     </button>
-    {#if canEdit}
+    {#if canK9s}
       <button class="btn small" onclick={() => void openK9s()} disabled={k9sOpening} title="Open k9s in a terminal" data-testid="k8s-k9s-btn">
         <Icon name="terminal" size={12} /> k9s
       </button>

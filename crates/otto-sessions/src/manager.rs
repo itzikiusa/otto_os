@@ -1796,6 +1796,7 @@ impl SessionManager {
         req: CreateSessionReq,
         spec_override: Option<CommandSpec>,
     ) -> Result<Session> {
+        let _mcp_activation = crate::mcp::activation_gate().read().await;
         let mut req = req;
         // Fold the explicit `model` param into `meta.model` (winning over any
         // model already in `meta`) so ONE meta key drives both the spawn args
@@ -3224,6 +3225,7 @@ impl SessionManager {
 
     /// [`Self::restart`] body; caller MUST hold this session's resume lock.
     async fn restart_locked(&self, id: &Id, spec_override: Option<CommandSpec>) -> Result<Session> {
+        let _mcp_activation = crate::mcp::activation_gate().read().await;
         let session = self.repo.get(id).await?;
         if session.archived {
             return Err(Error::Conflict(

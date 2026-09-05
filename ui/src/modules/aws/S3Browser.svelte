@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // S3 (read-only): bucket list → object browser with breadcrumb prefixes
   // (folder rows first), a preview drawer (text / pretty JSON / CSV table) and
   // a streamed Download. The current bucket + prefix live in the route
@@ -30,6 +31,8 @@
   const routeSeg = $derived(router.parts[3]);
   const bucket = $derived(splitBucketSegment(routeSeg)[0]);
   const prefix = $derived(splitBucketSegment(routeSeg)[1]);
+  $effect(() => { if (bucket) void resourceAccess.load('aws_account', account.id, `bucket:${bucket}`); });
+  const canRead = $derived(resourceAccess.can('aws_account', account.id, 's3_read', 'aws_s3', 'view', `bucket:${bucket}`));
 
   function goTo(b: string, p: string): void {
     const seg = p ? `${encodeURIComponent(b)}?prefix=${encodeURIComponent(p)}` : encodeURIComponent(b);
@@ -148,6 +151,7 @@
   });
 
   async function openPreview(o: S3Object): Promise<void> {
+    if (!canRead) return;
     preview = { obj: o, data: null, loading: true, error: '' };
     try {
       const d = await awsApi.s3Preview(account.id, bucket, o.key);
@@ -161,6 +165,7 @@
   // ── download ──
   let dl = $state<{ key: string; received: number; total: number | null; ctrl: AbortController } | null>(null);
   async function download(o: S3Object): Promise<void> {
+    if (!canRead) return;
     if (dl) {
       toasts.warn('A download is already running', leaf(dl.key));
       return;
@@ -203,8 +208,8 @@
       return;
     }
     ctxMenu.show(e, [
-      { label: 'Preview', icon: 'eye', action: () => void openPreview(r.obj) },
-      { label: 'Download', icon: 'arrowDown', action: () => void download(r.obj) },
+      { label: 'Preview', disabled: !canRead, icon: 'eye', action: () => void openPreview(r.obj) },
+      { label: 'Download', disabled: !canRead, icon: 'arrowDown', action: () => void download(r.obj) },
       { separator: true },
       { label: 'Copy key', icon: 'copy', action: () => void copy(r.key, 'key') },
       { label: 'Copy S3 URI', icon: 'copy', action: () => void copy(`s3://${bucket}/${r.key}`, 'S3 URI') },
@@ -307,7 +312,7 @@
                 <td class="dim mono hide-sm">{r.kind === 'file' ? (r.obj.storage_class ?? '') : ''}</td>
                 <td class="act">
                   {#if r.kind === 'file'}
-                    <button class="icon-btn" onclick={(e) => { e.stopPropagation(); void download(r.obj); }} title="Download" aria-label={`Download ${r.name}`}><Icon name="arrowDown" size={13} /></button>
+                    <button class="icon-btn" onclick={(e) => { e.stopPropagation(); void download(r.obj); }} disabled={!canRead} title="Download" aria-label={`Download ${r.name}`}><Icon name="arrowDown" size={13} /></button>
                   {/if}
                 </td>
               </tr>

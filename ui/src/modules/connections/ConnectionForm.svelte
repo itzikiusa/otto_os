@@ -2,6 +2,7 @@
   // New/Edit connection sheet — unified form with optional SSH tunnel toggle.
   // Field layout: name / kind / host / port / user / database / password /
   //   [SSH section: jump host + identity file] / first command.
+  import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { api } from '../../lib/api/client';
@@ -307,7 +308,7 @@
   let testResult = $state<{ ok: boolean; detail: string } | null>(null);
 
   async function testUnsaved(): Promise<void> {
-    if (testing) return;
+    if (testing || !auth.isRoot) return;
     testing = true;
     testResult = null;
     try {
@@ -319,7 +320,7 @@
       // For an existing profile with an unchanged (blank) password the probe
       // has no secret to use — the saved secret is intentionally never read
       // back into the form. The user re-enters it to test credentials.
-      if (secret !== '') body.secret = secret;
+      if (auth.isRoot && secret !== '') body.secret = secret;
       const res = await api.post<{ ok: boolean; latency_ms?: number; message: string; server_version?: string }>(
         '/connections/unsaved/db/test',
         body,
@@ -336,18 +337,18 @@
   }
 
   async function save(): Promise<void> {
-    if (busy) return;
+    if (busy || (!existing && !auth.isRoot)) return;
     busy = true;
     const body: UpsertConnectionReq = {
       name: name.trim(),
-      kind,
-      params: buildParams(),
-      first_command: firstCommand.trim() === '' ? null : firstCommand.trim(),
+      kind: !auth.isRoot && existing ? existing.kind : kind,
+      params: !auth.isRoot && existing ? existing.params : buildParams(),
+      first_command: !auth.isRoot && existing ? existing.first_command : firstCommand.trim() === '' ? null : firstCommand.trim(),
       section_id: sectionId === '' ? null : sectionId,
-      environment,
-      read_only: readOnly,
+      environment: !auth.isRoot && existing ? existing.environment : environment,
+      read_only: !auth.isRoot && existing ? existing.read_only : readOnly,
     };
-    if (secret !== '') body.secret = secret;
+    if (auth.isRoot && secret !== '') body.secret = secret;
     try {
       const saved = existing
         ? await api.patch<Connection>(`/connections/${existing.id}`, body)
@@ -438,6 +439,8 @@
     </div>
   {/if}
 
+  {#if !auth.isRoot}<p class="hint">Owner manages credentials, native connection settings and environment.</p>{/if}
+  <fieldset class="native-fields" disabled={!auth.isRoot}>
   <!-- Kind -->
   <div class="field">
     <label for="cf-kind">Kind</label>
@@ -745,6 +748,8 @@
     <span class="hint">Sent to the terminal once the client connects.</span>
   </div>
 
+  </fieldset>
+
   {#snippet footer()}
     {#if testResult}
       <span class="test-result {testResult.ok ? 'ok' : 'err'}" title={testResult.detail}>
@@ -753,11 +758,11 @@
     {/if}
     <button class="btn" onclick={onclose}>Cancel</button>
     {#if testableKinds.has(kind)}
-      <button class="btn" disabled={testing || busy} onclick={testUnsaved}>
+      <button class="btn" disabled={!auth.isRoot || testing || busy} onclick={testUnsaved}>
         {testing ? 'Testing…' : 'Test'}
       </button>
     {/if}
-    <button class="btn primary" disabled={busy || name.trim() === ''} onclick={save}>
+    <button class="btn primary" disabled={(!existing && !auth.isRoot) || busy || name.trim() === ''} onclick={save}>
       {busy ? 'Saving…' : existing ? 'Save Changes' : 'Create Connection'}
     </button>
   {/snippet}
@@ -786,6 +791,7 @@
 {/if}
 
 <style>
+  .native-fields { border:0; padding:0; margin:0; min-width:0; }
   .kind-row {
     display: flex;
     flex-wrap: wrap;

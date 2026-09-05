@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // EC2: instances table (state pill, name, id, type, AZ, IPs, launch) with a
   // state filter + region switcher; row actions start/stop/reboot [Edit] — stop
   // and reboot need the instance id typed; a right-side drawer (AwsDrawer,
@@ -7,7 +8,6 @@
   import { untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
-  import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -28,7 +28,11 @@
   }
   let { account, onsignin }: Props = $props();
 
-  const canEdit = $derived(auth.can('aws_ec2', 'edit'));
+  $effect(() => { void resourceAccess.load('aws_account', account.id); });
+  const canStart = $derived(resourceAccess.can('aws_account', account.id, 'ec2_start', 'aws_ec2', 'edit'));
+  const canStop = $derived(resourceAccess.can('aws_account', account.id, 'ec2_stop', 'aws_ec2', 'edit'));
+  const canReboot = $derived(resourceAccess.can('aws_account', account.id, 'ec2_reboot', 'aws_ec2', 'edit'));
+  const canEdit = $derived(canStart || canStop || canReboot);
   const STATES = ['pending', 'running', 'stopping', 'stopped', 'shutting-down', 'terminated'];
 
   // The view is remounted per account (AwsPage {#key}s on account+service), so
@@ -80,6 +84,7 @@
   let busy = $state<Record<string, boolean>>({});
 
   async function act(i: Ec2Instance, action: Ec2Action): Promise<void> {
+    if (!resourceAccess.can('aws_account', account.id, `ec2_${action}`, 'aws_ec2', 'edit')) return;
     const label = i.name ? `${i.name} (${i.instance_id})` : i.instance_id;
     if (action === 'start') {
       const ok = await confirmer.ask(`Start ${label}?`, { title: 'Start instance', confirmLabel: 'Start', danger: false });
@@ -160,9 +165,9 @@
       ...(canEdit
         ? [
             { separator: true },
-            { label: 'Start', icon: 'play', disabled: !stopped, action: () => void act(i, 'start') },
-            { label: 'Reboot', icon: 'refresh', disabled: !running, action: () => void act(i, 'reboot') },
-            { label: 'Stop', icon: 'x', danger: true, disabled: !running, action: () => void act(i, 'stop') },
+            { label: 'Start', icon: 'play', disabled: !canStart || !stopped, action: () => void act(i, 'start') },
+            { label: 'Reboot', icon: 'refresh', disabled: !canReboot || !running, action: () => void act(i, 'reboot') },
+            { label: 'Stop', icon: 'x', danger: true, disabled: !canStop || !running, action: () => void act(i, 'stop') },
           ]
         : []),
     ]);
@@ -269,9 +274,9 @@
           <span class="mono dim">{inst.az ?? ''}</span>
           {#if canEdit}
             <span class="spacer"></span>
-            <button class="ghost sm" onclick={() => void act(inst, 'start')} disabled={inst.state !== 'stopped' || busy[inst.instance_id]}><Icon name="play" size={12} /> Start</button>
-            <button class="ghost sm" onclick={() => void act(inst, 'reboot')} disabled={inst.state !== 'running' || busy[inst.instance_id]}><Icon name="refresh" size={12} /> Reboot</button>
-            <button class="ghost sm danger" onclick={() => void act(inst, 'stop')} disabled={inst.state !== 'running' || busy[inst.instance_id]}><Icon name="x" size={12} /> Stop</button>
+            <button class="ghost sm" onclick={() => void act(inst, 'start')} disabled={!canStart || inst.state !== 'stopped' || busy[inst.instance_id]}><Icon name="play" size={12} /> Start</button>
+            <button class="ghost sm" onclick={() => void act(inst, 'reboot')} disabled={!canReboot || inst.state !== 'running' || busy[inst.instance_id]}><Icon name="refresh" size={12} /> Reboot</button>
+            <button class="ghost sm danger" onclick={() => void act(inst, 'stop')} disabled={!canStop || inst.state !== 'running' || busy[inst.instance_id]}><Icon name="x" size={12} /> Stop</button>
           {/if}
         </div>
         <dl class="kv">

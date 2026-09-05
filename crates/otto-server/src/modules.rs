@@ -34,11 +34,132 @@ use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
+/// Reload identity and workspace authority at the actual input boundary. A
+/// session owner still needs Editor membership to type into that workspace.
+async fn input_user(
+    pool: &otto_state::SqlitePool,
+    user_id: &Id,
+    session: &Session,
+) -> Result<User> {
+    let user = otto_state::UsersRepo::new(pool.clone())
+        .get(user_id)
+        .await?;
+    if user.disabled {
+        return Err(Error::Forbidden("account disabled".into()));
+    }
+    let role = WorkspacesRepo::new(pool.clone())
+        .role_of(&user, &session.workspace_id)
+        .await?;
+    if !matches!(role, Some(WorkspaceRole::Editor | WorkspaceRole::Admin)) {
+        return Err(Error::Forbidden(
+            "workspace Editor access is required for session input".into(),
+        ));
+    }
+    if !user.is_root && user.id != session.created_by && role != Some(WorkspaceRole::Admin) {
+        return Err(Error::Forbidden(
+            "not the session owner or a workspace admin".into(),
+        ));
+    }
+    crate::resource_sessions::check_with_pool(pool, &user, session).await?;
+    Ok(user)
+}
+
+async fn input_session(ctx: &ServerCtx, user_id: &Id, id: &Id) -> Result<Session> {
+    let session = ctx.manager.get(id).await?;
+    input_user(&ctx.pool, user_id, &session).await?;
+    Ok(session)
+}
+
+/// Send both the paste and its delayed submit through current authorization.
+async fn submit_session_text(ctx: &ServerCtx, user_id: &Id, id: &Id, text: &str) -> Result<()> {
+    input_session(ctx, user_id, id).await?;
+    ctx.manager
+        .input(id, format!("\x1b[200~{text}\x1b[201~").as_bytes())
+        .await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    input_session(ctx, user_id, id).await?;
+    ctx.manager.input(id, b"\r").await?;
+    ctx.manager.record_user_message(id, text).await;
+    Ok(())
+}
+
+async fn input_agents(ctx: &ServerCtx, user_id: &Id, ws_id: &Id) -> Result<Vec<Session>> {
+    let mut allowed = Vec::new();
+    for session in ctx.manager.list_by_workspace(ws_id).await? {
+        if session.kind == SessionKind::Agent
+            && matches!(
+                session.status,
+                otto_core::domain::SessionStatus::Running
+                    | otto_core::domain::SessionStatus::Working
+                    | otto_core::domain::SessionStatus::Idle
+            )
+            && input_session(ctx, user_id, &session.id).await.is_ok()
+        {
+            allowed.push(session);
+        }
+    }
+    Ok(allowed)
+}
+
+async fn broadcast_sessions(
+    ctx: &ServerCtx,
+    user_id: &Id,
+    ws_id: &Id,
+    text: &str,
+    targets: Option<&[Id]>,
+) -> Result<Vec<Id>> {
+    let mut sent = Vec::new();
+    for session in input_agents(ctx, user_id, ws_id).await? {
+        if targets.is_none_or(|ids| ids.contains(&session.id))
+            && submit_session_text(ctx, user_id, &session.id, text)
+                .await
+                .is_ok()
+        {
+            sent.push(session.id);
+        }
+    }
+    Ok(sent)
+}
+
+fn delay_session_input(
+    ctx: &ServerCtx,
+    user: &User,
+    session_id: &Id,
+    text: String,
+    delay: Duration,
+    token: String,
+) {
+    let ctx = ctx.clone();
+    let user_id = user.id.clone();
+    let session_id = session_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let result: Result<()> = async {
+            let auth = ctx.authenticator.authenticate(&token).await?;
+            if auth.effective_user.id != user_id || auth.mcp_only || auth.scope.is_some() {
+                return Err(Error::Unauthorized);
+            }
+            input_session(&ctx, &user_id, &session_id).await?;
+            ctx.manager
+                .input(&session_id, format!("{text}\n").as_bytes())
+                .await
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!(session = %session_id, "delayed session input denied or failed: {e}");
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Router ctx trait impls
 // ---------------------------------------------------------------------------
 
 impl otto_sessions::SessionsCtx for ServerCtx {
+    fn check_resource<'a>(&'a self, user: &'a otto_core::domain::User, session: &'a otto_core::domain::Session) -> BoxFuture<'a, Result<()>> {
+        Box::pin(crate::resource_sessions::check(self,user,session))
+    }
+
     fn manager(&self) -> &Arc<SessionManager> {
         &self.manager
     }
@@ -142,9 +263,10 @@ impl otto_connections::DbTester for DbViewerTester {
     fn test_db_connection<'a>(
         &'a self,
         id: &'a Id,
+        user_id: &'a Id,
     ) -> BoxFuture<'a, Result<otto_core::api::TestConnectionResp>> {
         Box::pin(async move {
-            let r = self.db.test(id).await?;
+            let r = self.db.test(id,user_id).await?;
             Ok(otto_core::api::TestConnectionResp {
                 ok: r.ok,
                 latency_ms: r.latency_ms,
@@ -470,6 +592,7 @@ impl otto_swarm::SwarmCtx for ServerCtx {
 pub struct PtySpawner {
     pub manager: Arc<SessionManager>,
     pub workspaces: WorkspacesRepo,
+    pub pool: otto_state::SqlitePool,
 }
 
 impl Spawner for PtySpawner {
@@ -498,14 +621,16 @@ impl Spawner for PtySpawner {
             if let Some(cmd) = first_command {
                 let manager = Arc::clone(&self.manager);
                 let session_id = session.id.clone();
+                let user_id = user_id.clone();
+                let pool = self.pool.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(1500)).await;
-                    if let Err(e) = manager
-                        .input(&session_id, format!("{cmd}\n").as_bytes())
-                        .await
-                    {
-                        tracing::warn!(session = %session_id, "first_command failed: {e}");
-                    }
+                    let result: Result<()> = async {
+                        let current = manager.get(&session_id).await?;
+                        input_user(&pool, &user_id, &current).await?;
+                        manager.input(&session_id, format!("{cmd}\n").as_bytes()).await
+                    }.await;
+                    if let Err(e) = result { tracing::warn!(session = %session_id, "first_command denied or failed: {e}"); }
                 });
             }
             Ok(session)
@@ -706,12 +831,8 @@ async fn orchestrate(
     // The planner spawns a real claude session in the workspace root —
     // pre-trust the folder so the PTY never stalls on the trust dialog.
     otto_sessions::trust::ensure_trusted("claude", &ws.root_path);
-    let sessions = ctx
-        .manager
-        .list_by_workspace(&ws_id)
-        .await
-        .map_err(ApiError)?;
-    let connections = ctx.connections.list(&ws_id).await.map_err(ApiError)?;
+    let sessions = input_agents(&ctx, &user.id, &ws_id).await.map_err(ApiError)?;
+    let connections = ctx.connections.list_for(&ws_id, &user.id).await.map_err(ApiError)?;
     // Effective default agent for this workspace: per-workspace setting, else
     // the global default, else "claude". Steers spawn_sessions in the planner.
     let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
@@ -774,11 +895,7 @@ async fn workspace_broadcast(
     }
     // Treat an empty target list the same as "no targets" → broadcast to all.
     let targets = req.session_ids.filter(|ids| !ids.is_empty());
-    let session_ids = ctx
-        .manager
-        .broadcast_message(&ws_id, text, targets.as_deref())
-        .await
-        .map_err(ApiError)?;
+    let session_ids = broadcast_sessions(&ctx, &user.id, &ws_id, text, targets.as_deref()).await.map_err(ApiError)?;
     Ok(Json(otto_core::api::BroadcastResp { session_ids }))
 }
 
@@ -798,12 +915,23 @@ async fn workspace_relay(
     if text.is_empty() {
         return Err(ApiError(Error::Invalid("relay text is empty".into())));
     }
-    let out = ctx.manager.relay(&ws_id, text).await.map_err(ApiError)?;
+    let candidates = input_agents(&ctx, &user.id, &ws_id).await.map_err(ApiError)?;
+    let addressable: Vec<_> = candidates.iter().map(|s| otto_sessions::names::Addressable {
+        id: s.id.clone(),
+        handle: s.meta.get("name_handle").and_then(Value::as_str).unwrap_or(&s.title).to_string(),
+        full: s.meta.get("name_full").and_then(Value::as_str).unwrap_or(&s.title).to_string(),
+        title: s.title.clone(),
+    }).collect();
+    let resolved = otto_sessions::names::resolve_address(text, &addressable);
+    let mut session_ids = Vec::new();
+    for id in &resolved.targets {
+        if submit_session_text(&ctx, &user.id, id, resolved.text.trim()).await.is_ok() { session_ids.push(id.clone()); }
+    }
     Ok(Json(otto_core::api::RelayResp {
-        session_ids: out.session_ids,
-        broadcast: out.broadcast,
-        unaddressed: out.unaddressed,
-        text: out.text,
+        session_ids,
+        broadcast: resolved.broadcast,
+        unaddressed: resolved.targets.is_empty(),
+        text: if resolved.targets.is_empty() {text.to_string()} else {resolved.text},
     }))
 }
 
@@ -1440,10 +1568,7 @@ impl PlanIo for ExecHelper {
         // Funnel through the one shared implementation so the AI/palette path and
         // the dedicated /broadcast endpoint can't drift. `None` = all live agents.
         Box::pin(async move {
-            self.ctx
-                .manager
-                .broadcast_message(&self.ws_id, text, None)
-                .await
+            broadcast_sessions(&self.ctx, &self.user.id, &self.ws_id, text, None).await
         })
     }
 
@@ -1457,8 +1582,7 @@ impl PlanIo for ExecHelper {
             }
             // Submit as a real keypress (paste + Enter), not "{text}\n" in one
             // burst — otherwise bracketed-paste TUIs paste the text but never send.
-            self.ctx.manager.submit_text(session_id, text).await?;
-            self.ctx.manager.record_user_message(session_id, text).await;
+            submit_session_text(&self.ctx, &self.user.id, session_id, text).await?;
             Ok(())
         })
     }
@@ -5090,6 +5214,7 @@ async fn handoff_review(
     Path(review_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    axum::Extension(crate::auth::BearerToken(token)): axum::Extension<crate::auth::BearerToken>,
     Json(body): Json<HandoffReq>,
 ) -> crate::error::ApiResult<Json<Session>> {
     // Load review and its repo.
@@ -5166,17 +5291,7 @@ async fn handoff_review(
         .map_err(crate::error::ApiError)?;
 
     // Write the prompt into the session after a short delay (mirrors PtySpawner).
-    let manager = Arc::clone(&ctx.manager);
-    let session_id = session.id.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        if let Err(e) = manager
-            .input(&session_id, format!("{prompt}\n").as_bytes())
-            .await
-        {
-            tracing::warn!(session = %session_id, "handoff prompt write failed: {e}");
-        }
-    });
+    delay_session_input(&ctx, &user, &session.id, prompt, Duration::from_millis(1500), token);
 
     Ok(Json(session))
 }
@@ -5435,6 +5550,7 @@ async fn update_providers(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    axum::Extension(crate::auth::BearerToken(token)): axum::Extension<crate::auth::BearerToken>,
     Json(req): Json<UpdateProvidersReq>,
 ) -> ApiResult<Json<Session>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -5488,17 +5604,7 @@ async fn update_providers(
 
     // Write the compound command into the PTY shortly after spawn, mirroring
     // the PtySpawner pattern used for connection first_command.
-    let manager = Arc::clone(&ctx.manager);
-    let session_id = session.id.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        if let Err(e) = manager
-            .input(&session_id, format!("{compound}\n").as_bytes())
-            .await
-        {
-            tracing::warn!(session = %session_id, "update_providers first_command failed: {e}");
-        }
-    });
+    delay_session_input(&ctx, &user, &session.id, compound, Duration::from_millis(800), token);
 
     Ok(Json(session))
 }
@@ -5799,8 +5905,13 @@ async fn db_explain_with_agent(
     Path(conn_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    axum::Extension(crate::auth::BearerToken(token)): axum::Extension<crate::auth::BearerToken>,
     Json(body): Json<DbExplainReq>,
 ) -> ApiResult<Json<Session>> {
+    otto_state::GrantsRepo::new(ctx.pool.clone()).check_global(
+        &user, otto_core::domain::Feature::Agents, otto_core::domain::Capability::Edit,
+        "Database explanations require permission to run host agents",
+    ).await?;
     let conn = ctx
         .db_explorer
         .get_connection(&conn_id)
@@ -5853,25 +5964,17 @@ async fn db_explain_with_agent(
         cwd: Some(ws.root_path.clone()),
         connection_id: None,
         model: None,
-        meta: None,
+        meta: Some(serde_json::json!({"source":"db_assist", "connection_id":conn_id})),
     };
+    let resource = otto_core::access::ResourceRef { kind: otto_core::access::ResourceKind::Connection, id: conn_id.clone(), child: None };
+    otto_rbac::ResourceAccess::new(ctx.pool.clone()).check(&user, &resource, "db_query").await.map_err(ApiError)?;
     let session = ctx
         .manager
         .create(&ws, &user.id, req, None)
         .await
         .map_err(ApiError)?;
 
-    let manager = Arc::clone(&ctx.manager);
-    let session_id = session.id.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        if let Err(e) = manager
-            .input(&session_id, format!("{prompt}\n").as_bytes())
-            .await
-        {
-            tracing::warn!(session = %session_id, "db explain prompt write failed: {e}");
-        }
-    });
+    delay_session_input(&ctx, &user, &session.id, prompt, Duration::from_millis(1500), token);
 
     Ok(Json(session))
 }
@@ -5888,6 +5991,7 @@ async fn inject_session(
     Path((ws_id, sid)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    axum::Extension(crate::auth::BearerToken(token)): axum::Extension<crate::auth::BearerToken>,
     Json(req): Json<otto_product::types::InjectSessionReq>,
 ) -> ApiResult<Json<Session>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -5950,18 +6054,8 @@ async fn inject_session(
         .map_err(ApiError)?;
 
     // Write the bundle into the session after a short settle delay.
-    let manager = Arc::clone(&ctx.manager);
-    let session_id = session.id.clone();
     let payload = bundle.markdown.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(6)).await;
-        if let Err(e) = manager
-            .input(&session_id, format!("{payload}\n").as_bytes())
-            .await
-        {
-            tracing::warn!(session = %session_id, "inject bundle write failed: {e}");
-        }
-    });
+    delay_session_input(&ctx, &user, &session.id, payload, Duration::from_secs(6), token);
 
     // Record an inject event.
     ctx.product_repo
@@ -6005,11 +6099,14 @@ async fn attach_product_story(
     Path(session_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    axum::Extension(crate::auth::BearerToken(token)): axum::Extension<crate::auth::BearerToken>,
     Json(req): Json<AttachProductReq>,
 ) -> ApiResult<Json<Session>> {
     // Resolve the session and its workspace.
     let session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &session.workspace_id, WorkspaceRole::Editor).await?;
+
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
 
     // Load story and verify it belongs to the same workspace.
     let story = ctx
@@ -6031,15 +6128,8 @@ async fn attach_product_story(
         .map_err(ApiError)?;
 
     // Push the bundle into the live PTY after a short settle delay.
-    let manager = Arc::clone(&ctx.manager);
-    let sid = session_id.clone();
     let payload = bundle.markdown.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        if let Err(e) = manager.input(&sid, format!("{payload}\n").as_bytes()).await {
-            tracing::warn!(session = %sid, "attach-product bundle write failed: {e}");
-        }
-    });
+    delay_session_input(&ctx, &user, &session.id, payload, Duration::from_secs(2), token);
 
     // Tag the session meta with the attached story.
     let updated = ctx
@@ -6128,4 +6218,149 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::plugins::asset_router(ctx.clone()),
     ];
     (api, root)
+}
+
+#[cfg(test)]
+mod terminal_input_access_tests {
+    use super::*;
+    use otto_core::access::{AccessActor, ResourceKind};
+
+    #[tokio::test]
+    async fn alternate_input_checks_current_resource_page_owner_and_workspace() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let owner = users.create("owner", "hash", "Owner", false).await.unwrap();
+        let outsider = users
+            .create("outsider", "hash", "Outsider", false)
+            .await
+            .unwrap();
+        let ws = WorkspacesRepo::new(pool.clone())
+            .create("Workspace", "/tmp", &owner.id)
+            .await
+            .unwrap();
+        WorkspacesRepo::new(pool.clone())
+            .set_member(&ws.id, &outsider.id, WorkspaceRole::Editor)
+            .await
+            .unwrap();
+        let conn_id = otto_core::new_id();
+        sqlx::query("INSERT INTO connections (id,name,kind,params_json,created_by,created_at) VALUES (?,'SSH','ssh','{}',?,'2026-09-05T00:00:00Z')").bind(&conn_id).bind(&owner.id).execute(&pool).await.unwrap();
+        for user in [&owner, &outsider] {
+            sqlx::query("INSERT INTO user_feature_grants (user_id,feature,capability) VALUES (?,'connections','view')").bind(&user.id).execute(&pool).await.unwrap();
+        }
+        let repo = otto_state::ResourceAccessRepo::new(pool.clone());
+        repo.initialize_owner_policy(
+            ResourceKind::Connection,
+            &conn_id,
+            &owner.id,
+            &["discover".into(), "shell".into()],
+            &[],
+            &AccessActor {
+                real_user_id: owner.id.clone(),
+                effective_user_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut shared = repo
+            .get_policy(ResourceKind::Connection, &conn_id)
+            .await
+            .unwrap();
+        let mut outsider_rule = shared.rules[0].clone();
+        outsider_rule.id = otto_core::new_id();
+        outsider_rule.subject_id = outsider.id.clone();
+        shared.rules.push(outsider_rule);
+        repo.put_policy(
+            &shared,
+            shared.revision,
+            &AccessActor {
+                real_user_id: owner.id.clone(),
+                effective_user_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let session = otto_state::SessionsRepo::new(pool.clone())
+            .create(otto_state::NewSession {
+                workspace_id: ws.id.clone(),
+                kind: SessionKind::Connection,
+                provider: "ssh".into(),
+                title: "SSH".into(),
+                cwd: "/tmp".into(),
+                provider_session_id: None,
+                connection_id: Some(conn_id.clone()),
+                created_by: owner.id.clone(),
+                meta: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        assert!(input_user(&pool, &owner.id, &session).await.is_ok());
+        assert!(
+            input_user(&pool, &outsider.id, &session).await.is_err(),
+            "workspace Editor cannot inject into another user's terminal"
+        );
+        sqlx::query("DELETE FROM user_feature_grants WHERE user_id=?")
+            .bind(&owner.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            input_user(&pool, &owner.id, &session).await.is_err(),
+            "page revocation applies at delayed input"
+        );
+        sqlx::query("INSERT INTO user_feature_grants (user_id,feature,capability) VALUES (?,'connections','view')").bind(&owner.id).execute(&pool).await.unwrap();
+        WorkspacesRepo::new(pool.clone())
+            .set_member(&ws.id, &owner.id, WorkspaceRole::Viewer)
+            .await
+            .unwrap();
+        assert!(
+            input_user(&pool, &owner.id, &session).await.is_err(),
+            "ownership cannot override revoked Editor role"
+        );
+        WorkspacesRepo::new(pool.clone())
+            .set_member(&ws.id, &owner.id, WorkspaceRole::Admin)
+            .await
+            .unwrap();
+        assert!(input_user(&pool, &owner.id, &session).await.is_ok());
+        sqlx::query("UPDATE users SET disabled=1 WHERE id=?")
+            .bind(&owner.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            input_user(&pool, &owner.id, &session).await.is_err(),
+            "disabled user cannot supply delayed input"
+        );
+        sqlx::query("UPDATE users SET disabled=0 WHERE id=?")
+            .bind(&owner.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut policy = repo
+            .get_policy(ResourceKind::Connection, &conn_id)
+            .await
+            .unwrap();
+        policy.rules.clear();
+        repo.put_policy(
+            &policy,
+            policy.revision,
+            &AccessActor {
+                real_user_id: owner.id.clone(),
+                effective_user_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            input_user(&pool, &owner.id, &session).await.is_err(),
+            "resource revoke applies even with workspace Admin"
+        );
+    }
 }

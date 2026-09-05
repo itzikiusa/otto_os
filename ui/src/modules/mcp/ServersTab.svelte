@@ -2,6 +2,10 @@
   // The governed MCP server registry: each row shows transport, a health pill,
   // tool count, injection-risk badge, and an enabled toggle, with Discover /
   // Health check / Delete actions. "Add server" opens the create form.
+  import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
@@ -21,6 +25,9 @@
   }
   let { wsId, servers, loading, onReload, onPatch, onSelect }: Props = $props();
 
+  let accessId = $state<string | null>(null);
+  const can = (id: string, op: string) => resourceAccess.can('mcp_server',id,op,'mcp','admin');
+  $effect(() => {for(const server of servers) void resourceAccess.load('mcp_server',server.id);});
   let formOpen = $state(false);
   /** Per-server in-flight action so the right buttons spin without blocking others. */
   let busy = $state<Record<string, string>>({});
@@ -103,7 +110,7 @@
     <button class="btn small" onclick={() => void onReload()} title="Refresh">
       <Icon name="refresh" size={13} />
     </button>
-    <button class="btn primary small" onclick={() => (formOpen = true)}>
+    <button class="btn primary small" disabled={!auth.isRoot} onclick={() => (formOpen = true)}>
       <Icon name="plus" size={13} /> Add server
     </button>
   </div>
@@ -114,7 +121,7 @@
     <div class="empty">
       <Icon name="plug" size={26} />
       <p>No MCP servers registered in this workspace yet.</p>
-      <button class="btn primary" onclick={() => (formOpen = true)}>Add a server</button>
+      <button class="btn primary" disabled={!auth.isRoot} onclick={() => (formOpen = true)}>Add a server</button>
     </div>
   {:else}
     <div class="grid">
@@ -148,7 +155,7 @@
               class:on={s.enabled}
               role="switch"
               aria-checked={s.enabled}
-              disabled={busy[s.id] === 'toggle'}
+              disabled={busy[s.id] === 'toggle' || !can(s.id,'configure')}
               onclick={() => void toggleEnabled(s)}
               title={s.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
             >
@@ -156,13 +163,14 @@
             </button>
           </span>
           <span class="cell actions">
-            <button class="btn xs" disabled={!!busy[s.id]} onclick={() => void discover(s)}>
+            {#if auth.isRoot || can(s.id,'manage_access')}<button class="btn xs" onclick={() => accessId=s.id}>Access</button>{/if}
+            <button class="btn xs" disabled={!!busy[s.id] || !can(s.id,'configure')} onclick={() => void discover(s)}>
               {busy[s.id] === 'discover' ? '…' : 'Discover'}
             </button>
-            <button class="btn xs" disabled={!!busy[s.id]} onclick={() => void health(s)}>
+            <button class="btn xs" disabled={!!busy[s.id] || !can(s.id,'configure')} onclick={() => void health(s)}>
               {busy[s.id] === 'health' ? '…' : 'Health'}
             </button>
-            <button class="btn xs danger" disabled={!!busy[s.id]} onclick={() => void remove(s)}>
+            <button class="btn xs danger" disabled={!!busy[s.id] || !can(s.id,'configure')} onclick={() => void remove(s)}>
               {busy[s.id] === 'delete' ? '…' : 'Delete'}
             </button>
           </span>
@@ -171,6 +179,8 @@
     </div>
   {/if}
 </div>
+
+{#if accessId}<Modal title="MCP server access" width={820} onclose={() => accessId=null}><ResourceAccess kind="mcp_server" resourceId={accessId} /></Modal>{/if}
 
 {#if formOpen}
   <ServerForm {wsId} onclose={() => (formOpen = false)} onsaved={() => void onReload()} />

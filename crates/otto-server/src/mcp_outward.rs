@@ -2477,13 +2477,17 @@ pub struct GatewayToolsQuery {
 /// surfaces these to the agent and proxies each call through `/mcp/gateway/invoke`.
 pub async fn gateway_tools(
     State(ctx): State<ServerCtx>,
-    CurrentUser(_user): CurrentUser,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<GatewayToolsQuery>,
 ) -> ApiResult<Json<Value>> {
+    crate::auth::require_ws_role(&ctx,&user,&q.workspace_id,WorkspaceRole::Viewer).await?;
     let servers = ctx.mcp.registry().list_for_ws(&q.workspace_id).await.map_err(ApiError)?;
     let mut tools: Vec<Value> = Vec::new();
-    for s in servers.into_iter().filter(|s| s.enabled && s.managed) {
-        for t in ctx.mcp.tools().list_for_server(&s.id).await.map_err(ApiError)?.into_iter().filter(|t| t.enabled) {
+    for s in servers.into_iter().filter(|s| s.enabled) {
+        let policy=otto_state::ResourceAccessRepo::new(ctx.pool.clone()).get_live_policy(otto_core::access::ResourceKind::McpServer,&s.id).await?;
+        if !s.managed && policy.mode == otto_core::access::AccessMode::Legacy { continue; }
+        if !ctx.mcp.resource_allowed(&s,&user,"discover",None).await? { continue; }
+        for t in ctx.mcp.visible_tools(&s,&user).await.map_err(ApiError)?.into_iter().filter(|t| t.enabled) {
             tools.push(json!({
                 "name": format!("mcp__{}__{}", s.name, t.name),
                 "server_id": s.id,
@@ -2520,6 +2524,15 @@ pub async fn gateway_invoke(
     CurrentUser(user): CurrentUser,
     Json(req): Json<GatewayInvokeReq>,
 ) -> ApiResult<Json<Value>> {
+    let server = ctx.mcp.registry().get(&req.server_id).await?;
+    if server.workspace_id != req.workspace_id { return Err(Error::Forbidden("MCP workspace mismatch".into()).into()); }
+    let policy = otto_state::ResourceAccessRepo::new(ctx.pool.clone()).get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await?;
+    let role = if policy.mode == otto_core::access::AccessMode::Legacy { WorkspaceRole::Editor } else { WorkspaceRole::Viewer };
+    crate::auth::require_ws_role(&ctx,&user,&server.workspace_id,role).await?;
+    if policy.mode == otto_core::access::AccessMode::Legacy {
+        otto_state::GrantsRepo::new(ctx.pool.clone()).check_global(&user,otto_core::domain::Feature::Mcp,otto_core::domain::Capability::Edit,"legacy MCP invocation requires edit").await?;
+    }
+    if !ctx.mcp.resource_allowed(&server,&user,"invoke",Some(&req.tool)).await? { return Err(Error::Forbidden("MCP tool access denied".into()).into()); }
     let _ = &req.session_id;
     let ictx = InvokeCtx {
         workspace_id: Some(req.workspace_id.clone()),

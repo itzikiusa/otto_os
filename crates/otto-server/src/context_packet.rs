@@ -178,6 +178,8 @@ async fn send(
         // Short settle so the agent's prompt is ready before the packet arrives
         // (mirrors the 2-second delay used by `attach_product_story`).
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let Ok(current)=manager.get(&sid).await else {return;};
+        if crate::auth::require_session_owner_or_admin(&ctx,&user,&current).await.is_err() {return;}
         if let Err(e) = manager.input(&sid, &payload_bytes).await {
             tracing::warn!(session = %sid, "context-packet write failed: {e}");
         }

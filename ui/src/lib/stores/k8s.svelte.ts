@@ -8,6 +8,8 @@
 // getter/`$derived` (the table reads `filteredRows`, a pure derived); every
 // mutation happens in a method the page calls from an effect or a handler.
 
+import { auth } from './auth.svelte';
+import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import { ApiError } from '../api/client';
 import { formatBytes, formatMillicores } from '../../modules/kubernetes/k8s-util';
 import { k8sApi } from '../api/k8s';
@@ -42,12 +44,12 @@ export interface K8sSelection {
   name: string;
 }
 
-const NS_KEY = (clusterId: string): string => `otto_k8s_ns:${clusterId}`;
+const NS_KEY = (clusterId: string): string => `otto_k8s_ns:${auth.me?.id ?? 'anonymous'}:${clusterId}`;
 /** Namespaces this cluster is KNOWN to have — the default namespace plus every
  *  one the user selected and could read. Rancher project-scoped users can't
  *  `get namespaces` (cluster-scope list is forbidden), so without this the
  *  picker would offer nothing but "All namespaces" — which is forbidden too. */
-const KNOWN_NS_KEY = (clusterId: string): string => `otto_k8s_known_ns:${clusterId}`;
+const KNOWN_NS_KEY = (clusterId: string): string => `otto_k8s_known_ns:${auth.me?.id ?? 'anonymous'}:${clusterId}`;
 const CLUSTER_SCOPE_HINT =
   'This kubeconfig user can\'t list across all namespaces (cluster scope). Pick a namespace (press n) — e.g. the cluster\'s default one.';
 const AUTO_KEY = 'otto_k8s_autorefresh';
@@ -119,6 +121,52 @@ export function rowMatches(r: K8sRow, q: string): boolean {
 }
 
 class K8sStore {
+  accessRevision = $state(0);
+  onAccessChange(change: ResourceAccessChange): void {
+    if (
+      change.type === 'decision' &&
+      (change.kind !== 'k8s_cluster' ||
+        !change.before ||
+        !Object.keys(change.before.operations).some(
+          (op) => change.before?.operations[op]?.allowed && !change.after?.operations[op]?.allowed,
+        ))
+    )
+      return;
+    this.accessRevision++;
+    this.rowsAbort?.abort();
+    this.rows = [];
+    this.rowsKey = '';
+    this.rowsError = '';
+    this.rowsLoading = false;
+    this.rowsLoadedAt = null;
+    this.hasMetrics = false;
+    this.namespaces = [];
+    this.namespacesError = '';
+    this.selected = null;
+    this.k9sSessionId = null;
+    this.namespace = '';
+    this.filter = '';
+    if (change.type === 'decision') {
+      this.clusters = this.clusters.filter((c) => c.id !== change.id);
+      const caps = { ...this.capabilities };
+      delete caps[change.id];
+      this.capabilities = caps;
+      try {
+        localStorage.removeItem(NS_KEY(change.id));
+        localStorage.removeItem(KNOWN_NS_KEY(change.id));
+      } catch {
+        /* optional preference */
+      }
+    } else {
+      this.clusters = [];
+      this.capabilities = {};
+      if (change.identity) this.clusterId = null;
+    }
+    this.clusterId = null;
+    this.clustersLoaded = false;
+    this.clustersLoading = false;
+  }
+
   // --- tool status -------------------------------------------------------------
   status: K8sStatus | null = $state(null);
   statusLoading = $state(false);
@@ -211,9 +259,11 @@ class K8sStore {
   // --- clusters ---------------------------------------------------------------------
 
   async loadClusters(): Promise<void> {
+    const revision=this.accessRevision;
     this.clustersLoading = true;
     try {
       const list = await k8sApi.listClusters();
+      if(revision!==this.accessRevision)return;
       this.clusters = list;
       this.clustersError = '';
       // Seed capability chips from the cached probe on each row.
@@ -229,8 +279,10 @@ class K8sStore {
   }
 
   async loadCapabilities(id: string, refresh = false): Promise<K8sCapabilities | null> {
+    const revision=this.accessRevision;
     try {
       const caps = await k8sApi.capabilities(id, refresh);
+      if(revision!==this.accessRevision)return null;
       this.capabilities = { ...this.capabilities, [id]: caps };
       return caps;
     } catch {
@@ -325,15 +377,16 @@ class K8sStore {
   }
 
   async loadNamespaces(): Promise<void> {
+    const revision=this.accessRevision;
     const id = this.clusterId;
     if (!id) return;
     try {
       const r = await k8sApi.namespaces(id);
-      if (this.clusterId !== id) return;
+      if (this.clusterId !== id || revision!==this.accessRevision) return;
       this.namespaces = this.mergeKnown(id, r.namespaces);
       this.namespacesError = '';
     } catch (e) {
-      if (this.clusterId !== id) return;
+      if (this.clusterId !== id || revision!==this.accessRevision) return;
       // RBAC-limited user: fall back to the namespaces we know work here so
       // the picker still has real entries to switch between.
       this.namespaces = this.mergeKnown(id, []);
@@ -344,6 +397,7 @@ class K8sStore {
   /** Listed namespaces ∪ known-good ones (known ones the API didn't return
    *  are appended, e.g. when the list is RBAC-partial). */
   private mergeKnown(clusterId: string, listed: K8sNamespace[]): K8sNamespace[] {
+    if(!auth.isRoot && resourceAccess.get('k8s_cluster',clusterId)?.mode!=='legacy')return listed;
     const have = new Set(listed.map((n) => n.name));
     const extra = knownNamespaces(clusterId)
       .filter((n) => !have.has(n))
@@ -454,3 +508,4 @@ class K8sStore {
 }
 
 export const k8s = new K8sStore();
+resourceAccess.subscribe(change=>k8s.onAccessChange(change));
