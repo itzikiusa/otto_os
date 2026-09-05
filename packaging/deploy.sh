@@ -15,13 +15,14 @@
 #         packaging/deploy.sh --status   show the log of the last install/verify phase
 # Env:    SKIP_UI=1    reuse the existing ui/dist (skip `npm run build`)
 #         EMBED_UI=0   build ottod WITHOUT the SPA baked in (see step 2)
-#         DETACH=0     run steps 5–6 inline instead of under launchd (see below)
+#         DETACH=0     run steps 6–7 inline instead of under launchd (see below)
+#         PRUNE=0      keep every stale build artifact (skip step 5)
 #
 # RESILIENCE (the 90%-interrupted problem): this script is usually run from an
 # agent/shell session that ottod itself owns (a PTY child of the daemon). Step 5
 # relaunches the app, the app's supervisor replaces the daemon, and ottod's
 # shutdown hangs up every session PTY — which SIGKILLs the shell running THIS
-# script, mid-verify, exit 137. So steps 5–6 (install → relaunch → verify) are
+# script, mid-verify, exit 137. So steps 6–7 (install → relaunch → verify) are
 # handed to a one-shot launchd agent (`com.otto.deploy-finish`) that is NOT in
 # ottod's process tree and therefore survives the restart. It logs to
 # ~/Library/Logs/Otto/deploy-finish-<ts>.log; the foreground just tails that
@@ -53,13 +54,13 @@ if [[ "${1:-}" == "--status" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Steps 5–6: install → relaunch → verify. Runs either inline (DETACH=0) or as
+# Steps 6–7: install → relaunch → verify. Runs either inline (DETACH=0) or as
 # the body of the detached launchd job (OTTO_DEPLOY_PHASE=finish). Everything
 # in here must be safe to run with no controlling terminal and no inherited
 # environment beyond what the plist sets.
 # ---------------------------------------------------------------------------
 finish_phase() {
-echo "==> 5/6  Install & relaunch"
+echo "==> 6/7  Install & relaunch"
 # The app redeploys the daemon ONLY at start, so it must be quit first (the
 # launchd agent has KeepAlive, so quitting the app doesn't stop the daemon).
 # Under launchd, osascript may lack Automation rights for Otto (TCC) and quit
@@ -76,7 +77,7 @@ rm -rf /Applications/Otto.app
 ditto "$APP" /Applications/Otto.app
 open /Applications/Otto.app
 
-echo "==> 6/6  Verify (+ self-heal codesigning crash-loop)"
+echo "==> 7/7  Verify (+ self-heal codesigning crash-loop)"
 
 dep="$HOME/Library/Application Support/Otto/bin/ottod"
 side="$APP/Contents/MacOS/ottod"
@@ -226,7 +227,7 @@ if [[ "${OTTO_DEPLOY_PHASE:-}" == "finish" ]]; then
     exit 0
 fi
 
-echo "==> 1/6  Frontend → ui/dist"
+echo "==> 1/7  Frontend → ui/dist"
 if [[ "${SKIP_UI:-}" == "1" && -f ui/dist/index.html ]]; then
     echo "    (SKIP_UI=1 — reusing existing ui/dist)"
 else
@@ -241,7 +242,7 @@ fi
 # Default ON — a redeploy must never take remote access away. Opt out with
 # EMBED_UI=0 (smaller binary, local desktop use only).
 # Build order matters: step 1 must have written ui/dist before this compiles.
-echo "==> 2/6  Daemon (release ottod) + sidecar"
+echo "==> 2/7  Daemon (release ottod) + sidecar"
 TRIPLE="$(rustc -vV | sed -n 's/host: //p')"
 if [[ "${EMBED_UI:-1}" == "0" ]]; then
     echo "    (EMBED_UI=0 — daemon will NOT serve the SPA; remote/mobile access disabled)"
@@ -252,18 +253,31 @@ fi
 mkdir -p "$APP_SRC/binaries"
 cp "$ROOT/target/release/ottod" "$APP_SRC/binaries/ottod-$TRIPLE"
 
-echo "==> 3/6  Desktop app (Tauri bundle)"
+echo "==> 3/7  Desktop app (Tauri bundle)"
 ( cd "$APP_SRC" && npx --yes @tauri-apps/cli@^2 build --bundles app )
 
-echo "==> 4/6  Sign (+ ensure 'Otto Dev Signing' is trusted for code signing)"
+echo "==> 4/7  Sign (+ ensure 'Otto Dev Signing' is trusted for code signing)"
 bash "$HERE/sign.sh" "$APP" "$ROOT/target/release/ottod"
+
+# Cargo never garbage-collects the artifacts of previous builds: each changed
+# feature set / dependency graph writes a NEW <crate>-<hash> file next to the old
+# one. With ~285 MB test binaries in this workspace that silently reached 43 GB
+# of unreachable duplicates (vs 6.5 GB of live ones) before it was noticed as a
+# full disk. Prune here — right after the last cargo invocation of this deploy,
+# so the generation just built is the one the pruner keeps.
+echo "==> 5/7  Prune superseded build artifacts (keep the newest generation)"
+if [[ "${PRUNE:-1}" == "0" ]]; then
+    echo "    (PRUNE=0 — leaving stale artifacts in place)"
+else
+    bash "$HERE/prune-target.sh" || echo "    WARN: prune failed — not fatal, the deploy continues."
+fi
 
 if [[ "${DETACH:-1}" == "0" ]]; then
     finish_phase
     exit $?
 fi
 
-echo "==> 5/6+6/6 handed to launchd job $FINISH_LABEL (survives the daemon restart)"
+echo "==> 6/7+7/7 handed to launchd job $FINISH_LABEL (survives the daemon restart)"
 mkdir -p "$LOG_DIR" "$(dirname "$FINISH_PLIST")"
 FINISH_LOG="$LOG_DIR/deploy-finish-$(date +%Y%m%d-%H%M%S).log"
 : > "$FINISH_LOG"
