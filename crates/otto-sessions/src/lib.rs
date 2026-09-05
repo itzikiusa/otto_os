@@ -7,6 +7,7 @@ pub mod lifecycle;
 pub mod manager;
 pub mod mcp;
 pub mod names;
+pub mod nested;
 pub mod prompt_guard;
 pub mod providers;
 pub mod share_throttle;
