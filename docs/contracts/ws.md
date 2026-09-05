@@ -382,12 +382,16 @@ AI-run task (analysis, rewrite, test-case generation, plan generation).
   "type": "product_changed",
   "workspace_id": "<Id>",
   "story_id": "<Id>",
-  "section": "analysis|rewrite|testcases|plan",
-  "status": "done|error"
+  "section": "analysis|rewrite|testcases|plan|source|tree",
+  "status": "done|error|draft|changed"
 }
 ```
 
-- `section` — which product tab completed: `analysis`, `rewrite`, `testcases`, or `plan`.
+- `section` — which product tab completed: `analysis`, `rewrite`, `testcases`, or `plan`;
+  `source` when a swarm agent publishes a top-level draft (`status: "draft"`); **`tree`**
+  (`status: "changed"`) when the epic tree changed — a swarm agent minted a project epic,
+  filed a child under it or updated an existing child (`routes/swarm_ingest.rs`). The list
+  pane refreshes on `tree`.
 - `status` — final state of the run.
 - UI routing: `events.svelte.ts` dispatches to `product.applyEvent()` in the product store,
   which fires per-section subscriber callbacks registered by each product tab (`AnalysisTab`,
@@ -713,21 +717,31 @@ instead of waiting for it to finish.
 
 ### `mockup_updated` / `mockup_session_started`
 
-Workspace-scoped. Emitted by `crates/otto-server/src/mockup_assist.rs` — same
-shape and timing as the canvas pair above, but for a product story's mockup
-attachment (an HTML page or Mermaid diagram the mockup agent edits in place).
+Workspace-scoped. Emitted by `crates/otto-server/src/mockup_assist.rs` (live
+per-poll while the design agent edits the file, and once with the committed
+result), by `product_media.rs` on every `PUT /product/attachments/{aid}/content`
+save from the UI, by `routes/swarm_ingest.rs` when a swarm agent publishes an
+artifact, and by `design_blender.rs` for each output a Blender render job
+attaches — same shape and timing as the canvas pair above, but for a product
+story's design artifact.
 
 ```json
-{ "type": "mockup_updated", "workspace_id": "<Id>", "story_id": "<Id>", "attachment_id": "<Id>", "format": "html|mermaid", "content": "..." }
+{ "type": "mockup_updated", "workspace_id": "<Id>", "story_id": "<Id>", "attachment_id": "<Id>", "format": "html|mermaid|excalidraw|scene3d|<mime>", "content": "..." | null }
 { "type": "mockup_session_started", "workspace_id": "<Id>", "story_id": "<Id>", "attachment_id": "<Id>", "session_id": "<Id>" }
 ```
 
+- `format` — a `DesignFormat` name for the four text formats; for uploaded /
+  rendered binaries (`image/png`, `model/gltf-binary`) it is the attachment's mime.
+- `content` — `Option<String>`: the new source for text formats; **an explicit
+  `null`** (never omitted — no `skip_serializing_if`) for binaries and payloads over
+  4 MB, in which case clients re-fetch `GET /product/attachments/{aid}`.
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
-- UI routing: `events.svelte.ts` → `mockupAssist.ingestLive()` (`mockup_updated`)
-  / `mockupAssist.setSession()` (`mockup_session_started`); the Product →
-  Mockups Assistant panel re-renders the live preview for the matching
-  `attachment_id`.
-- TypeScript types: `{ type: 'mockup_updated'; workspace_id: Id; story_id: Id; attachment_id: Id; format: string; content: string }`
+- UI routing: `events.svelte.ts` → `mockupAssist.ingestLive()` (`mockup_updated`;
+  the `null`-content branch re-fetches) / `mockupAssist.setSession()`
+  (`mockup_session_started`); the Product → Design arena re-renders the viewer
+  for the matching `attachment_id`. If the user has unsaved local edits the
+  panel asks before replacing (no silent clobber).
+- TypeScript types: `{ type: 'mockup_updated'; workspace_id: Id; story_id: Id; attachment_id: Id; format: string; content: string | null }`
   and `{ type: 'mockup_session_started'; workspace_id: Id; story_id: Id; attachment_id: Id; session_id: Id }`.
 
 ### `canvas_refs_changed`

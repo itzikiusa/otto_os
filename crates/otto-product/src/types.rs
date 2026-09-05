@@ -36,6 +36,36 @@ pub struct UpdateStoryReq {
     pub watch_cadence_min: Option<i64>,
     #[serde(default)]
     pub tags: Option<String>,
+    /// Epic tree: `"parent_id": null` DETACHES (Some(None)); absent = unchanged.
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub parent_id: Option<Option<String>>,
+    /// `story` | `epic` | `doc` — anything else is a 400.
+    #[serde(default)]
+    pub tree_kind: Option<String>,
+    #[serde(default)]
+    pub folder: Option<String>,
+}
+
+/// Distinguish "key absent" from "key present and null" for `parent_id`.
+fn de_double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(de)?))
+}
+
+/// `POST /product/stories/{sid}/children` body — a child filed under the epic
+/// `sid`. `tree_kind` defaults to `doc` (a lightweight design note / spec
+/// section); `story` gives the child the full tab strip. `epic` is rejected.
+#[derive(Debug, Default, Deserialize)]
+pub struct CreateChildReq {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub tree_kind: Option<String>,
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

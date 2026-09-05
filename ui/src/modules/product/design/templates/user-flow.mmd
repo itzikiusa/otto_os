@@ -1,0 +1,10 @@
+flowchart TD
+  A([Player taps Withdraw]) --> B{Eligible for instant?}
+  B -- "≤ $500 / within daily cap / supported rail" --> C[Write pending ledger row]
+  B -- "over limit · unsupported rail · flagged" --> F[Queue for nightly batch]
+  C --> D[Call rail: push-to-card]
+  D -- ok --> E[Settle ledger row\nemit payout.settled]
+  D -- error --> R[Reconcile job]
+  R --> F
+  E --> G([Cashier: queued → sent → settled])
+  F --> H([Cashier: processing])

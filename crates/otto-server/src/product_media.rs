@@ -13,6 +13,13 @@
 //! reading, sets `Content-Type` from the stored mime, and sends
 //! `X-Content-Type-Options: nosniff`.
 //!
+//! Design-arena artifacts ride the same table: `kind:'design'` rows whose mime is
+//! one of the four `DesignFormat`s or an uploaded `model/gltf-binary` /
+//! `model/gltf+json`. `PUT /product/attachments/{aid}/content` saves an edited
+//! artifact from the UI (3D inspector, Excalidraw board, code view) through the
+//! upload path's guards without ever changing the row's `mime`/`filename`, and
+//! broadcasts `MockupUpdated` (text formats carry the source, binaries `null`).
+//!
 //! All routes follow the workspace-role pattern: mutations require Editor, reads
 //! require Viewer. The workspace is resolved from the owning story (annotation
 //! routes resolve the attachment → story → workspace).
@@ -27,6 +34,7 @@ use axum::Json;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use otto_core::domain::WorkspaceRole;
+use otto_core::event::Event;
 use otto_core::{Error, Id};
 use otto_state::{
     AnnotationPatch, AttachmentPatch, MockupAnnotation, NewAnnotation, NewAttachment,
@@ -39,9 +47,9 @@ use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
 /// Maximum raw (decoded) attachment size: 25 MB.
-const MAX_RAW_BYTES: usize = 25 * 1024 * 1024;
+pub(crate) const MAX_RAW_BYTES: usize = 25 * 1024 * 1024;
 /// Storage sub-path under `data_dir` for story attachments.
-const ATTACH_ROOT: &str = "product/attachments";
+pub(crate) const ATTACH_ROOT: &str = "product/attachments";
 
 // ---------------------------------------------------------------------------
 // Request / response bodies
@@ -55,6 +63,18 @@ pub struct UploadReq {
     #[serde(default)]
     pub kind: Option<String>,
     pub data_b64: String,
+}
+
+/// `PUT /product/attachments/{aid}/content` body — the new bytes, base64.
+#[derive(Debug, Deserialize)]
+pub struct ContentPutReq {
+    pub data_b64: String,
+    /// Optimistic concurrency: the `updated_at` the editor loaded (RFC 3339).
+    /// When present and it no longer matches the row's `updated_at` (someone —
+    /// the agent, another tab — saved in between) the save is a **409** and the
+    /// client re-fetches instead of clobbering. Absent = unconditional save.
+    #[serde(default)]
+    pub base_updated_at: Option<String>,
 }
 
 /// `PATCH /product/attachments/{aid}` body.
@@ -88,8 +108,10 @@ pub struct AnnotationPatchReq {
 // ---------------------------------------------------------------------------
 
 /// MIME allow-list for uploads. Executables/scripts are rejected by being
-/// absent here (combined with the magic-byte sniff for the binary types).
-fn allowed_mime(mime: &str) -> bool {
+/// absent here (combined with the magic-byte sniff for the binary types). No
+/// `text/x-python`: a Blender script is a server-side EXPORT of a validated
+/// `scene3d` document, never an uploaded or agent-written file.
+pub(crate) fn allowed_mime(mime: &str) -> bool {
     matches!(
         mime,
         "image/png"
@@ -102,13 +124,21 @@ fn allowed_mime(mime: &str) -> bool {
             | "text/plain"
             | "text/markdown"
             | "text/vnd.mermaid"
+            // Design arena.
+            | "application/vnd.excalidraw+json"
+            | "application/vnd.otto.scene3d+json"
+            | "model/gltf-binary"
+            | "model/gltf+json"
     )
 }
 
 /// Magic-byte sniff of the decoded bytes against the declared MIME. Binary types
-/// (png/jpeg/gif/webp/pdf) are checked by signature; text-ish types
-/// (svg/html/plain/markdown) are only required to be valid UTF-8.
-fn sniff_ok(declared: &str, bytes: &[u8]) -> bool {
+/// (png/jpeg/gif/webp/pdf/glb) are checked by signature; text-ish types
+/// (svg/html/plain/markdown/mermaid) are only required to be valid UTF-8; JSON
+/// types (excalidraw/scene3d/gltf) must be UTF-8 opening with `{` after optional
+/// whitespace (a full parse happens where the schema is known — `scene3d` is
+/// validated by `design_scene3d::validate` on save).
+pub(crate) fn sniff_ok(declared: &str, bytes: &[u8]) -> bool {
     match declared {
         "image/png" => bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
         "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
@@ -116,16 +146,24 @@ fn sniff_ok(declared: &str, bytes: &[u8]) -> bool {
         // RIFF....WEBP — 4-byte "RIFF", 4-byte size, then "WEBP".
         "image/webp" => bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
         "application/pdf" => bytes.starts_with(b"%PDF-"),
+        // GLB: magic "glTF", u32 version, u32 length.
+        "model/gltf-binary" => bytes.len() >= 12 && &bytes[0..4] == b"glTF",
         // Text-ish formats: accept any valid UTF-8 payload.
         "image/svg+xml" | "text/html" | "text/plain" | "text/markdown" | "text/vnd.mermaid" => {
             std::str::from_utf8(bytes).is_ok()
+        }
+        // JSON documents: UTF-8 and an object at the top.
+        "application/vnd.excalidraw+json" | "application/vnd.otto.scene3d+json" | "model/gltf+json" => {
+            std::str::from_utf8(bytes)
+                .map(|s| s.trim_start().starts_with('{'))
+                .unwrap_or(false)
         }
         _ => false,
     }
 }
 
 /// Storage extension for a MIME (matches `allowed_mime`).
-fn ext_for_mime(mime: &str) -> &'static str {
+pub(crate) fn ext_for_mime(mime: &str) -> &'static str {
     match mime {
         "image/png" => ".png",
         "image/jpeg" => ".jpg",
@@ -136,9 +174,32 @@ fn ext_for_mime(mime: &str) -> &'static str {
         "text/html" => ".html",
         "text/markdown" => ".md",
         "text/vnd.mermaid" => ".mmd",
+        "application/vnd.excalidraw+json" => ".excalidraw",
+        "application/vnd.otto.scene3d+json" => ".json",
+        "model/gltf-binary" => ".glb",
+        "model/gltf+json" => ".gltf",
         _ => ".bin",
     }
 }
+
+/// Is this a text artifact whose source rides on `MockupUpdated.content`
+/// (vs. a binary the client re-fetches)? Payloads above `MAX_EVENT_CONTENT`
+/// are sent as `null` too so a giant board doesn't flood every WS client.
+pub(crate) fn event_content(mime: &str, bytes: &[u8]) -> Option<String> {
+    if bytes.len() > MAX_EVENT_CONTENT {
+        return None;
+    }
+    let text = crate::design_format::DesignFormat::from_mime(mime).is_some()
+        || matches!(mime, "text/plain" | "text/markdown" | "image/svg+xml" | "model/gltf+json");
+    if text {
+        String::from_utf8(bytes.to_vec()).ok()
+    } else {
+        None
+    }
+}
+
+/// Above this the WS event carries `content: null` and clients re-fetch.
+const MAX_EVENT_CONTENT: usize = 4 * 1024 * 1024;
 
 /// Canonicalized-containment check: is `candidate` inside `root`?
 ///
@@ -362,6 +423,115 @@ pub async fn patch_attachment(
     Ok(Json(updated))
 }
 
+/// `PUT /product/attachments/{aid}/content` — Editor. Replace an artifact's bytes
+/// from the UI editor (3D inspector / Excalidraw board / code view). Reuses the
+/// upload guards (allow-list, sniff, raw cap, confined path); the row's `mime`
+/// and `filename` never change here, so extension and served content-type stay
+/// consistent. A `scene3d` payload is additionally schema-validated (400 on a
+/// bad document). Persists via `set_assist_result` (size + `updated_at`, meta
+/// untouched) and broadcasts `MockupUpdated` — `content` is the source for text
+/// formats and `null` for binaries / oversized payloads.
+pub async fn put_attachment_content(
+    AxPath(aid): AxPath<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<ContentPutReq>,
+) -> ApiResult<Json<ProductAttachment>> {
+    let att = load_attachment(&ctx, &aid).await?;
+    crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Editor).await?;
+    check_base_updated_at(req.base_updated_at.as_deref(), &att.updated_at).map_err(ApiError)?;
+    let bytes = decode_content(&att.mime, &req.data_b64).map_err(ApiError)?;
+
+    let root = ctx.data_dir.join(ATTACH_ROOT);
+    let full = otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path)
+        .ok_or_else(|| ApiError(Error::Forbidden("attachment path escapes the data dir".into())))?;
+    if !path_within(&root, &full) {
+        return Err(ApiError(Error::Forbidden(
+            "attachment path escapes the attachments root".into(),
+        )));
+    }
+    if let Some(parent) = full.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| ApiError(Error::Internal(format!("create attachment dir: {e}"))))?;
+    }
+    tokio::fs::write(&full, &bytes)
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("write attachment: {e}"))))?;
+
+    let updated = ctx
+        .attachment_repo
+        .set_assist_result(&aid, bytes.len() as i64, None, att.meta_json.clone())
+        .await
+        .map_err(ApiError)?;
+
+    let _ = ctx.events.send(Event::MockupUpdated {
+        workspace_id: att.workspace_id.clone(),
+        story_id: att.story_id.clone(),
+        attachment_id: aid,
+        format: crate::design_format::DesignFormat::from_mime(&att.mime)
+            .map(|f| f.as_str().to_string())
+            .unwrap_or_else(|| att.mime.clone()),
+        content: event_content(&att.mime, &bytes),
+    });
+    Ok(Json(updated))
+}
+
+/// Optimistic-concurrency check for the content PUT: an unparseable
+/// `base_updated_at` is a 400; a parseable one that differs from the row's
+/// `updated_at` (compared as instants, so formatting differences don't matter)
+/// is a 409.
+pub(crate) fn check_base_updated_at(
+    base: Option<&str>,
+    current: &chrono::DateTime<chrono::Utc>,
+) -> Result<(), Error> {
+    let Some(base) = base.map(str::trim).filter(|b| !b.is_empty()) else {
+        return Ok(());
+    };
+    let base = chrono::DateTime::parse_from_rfc3339(base)
+        .map_err(|e| Error::Invalid(format!("base_updated_at is not RFC 3339: {e}")))?
+        .with_timezone(&chrono::Utc);
+    if base != *current {
+        return Err(Error::Conflict(format!(
+            "attachment changed since {} (now {}); reload before saving",
+            base.to_rfc3339(),
+            current.to_rfc3339()
+        )));
+    }
+    Ok(())
+}
+
+/// The content PUT's guards, pure so they unit-test without a daemon: the row's
+/// mime must be allowed, the base64 must decode to a non-empty payload under the
+/// raw cap that sniffs as the declared type, and a `scene3d` document must
+/// validate against its schema.
+pub(crate) fn decode_content(mime: &str, data_b64: &str) -> Result<Vec<u8>, Error> {
+    if !allowed_mime(mime) {
+        return Err(Error::Invalid(format!("attachment type {mime} is not editable")));
+    }
+    let bytes = B64
+        .decode(data_b64.trim())
+        .map_err(|e| Error::Invalid(format!("invalid base64: {e}")))?;
+    if bytes.is_empty() {
+        return Err(Error::Invalid("empty content".into()));
+    }
+    if bytes.len() > MAX_RAW_BYTES {
+        return Err(Error::Invalid(format!(
+            "content exceeds {} MB cap",
+            MAX_RAW_BYTES / (1024 * 1024)
+        )));
+    }
+    if !sniff_ok(mime, &bytes) {
+        return Err(Error::Invalid(
+            "content does not match the attachment's type".into(),
+        ));
+    }
+    if mime == crate::design_format::DesignFormat::Scene3d.mime() {
+        crate::design_scene3d::validate_bytes(&bytes)?;
+    }
+    Ok(bytes)
+}
+
 /// `DELETE /product/attachments/{aid}` — Editor. Removes the DB row + the file
 /// (best effort).
 pub async fn delete_attachment(
@@ -481,10 +651,20 @@ async fn load_attachment(ctx: &ServerCtx, aid: &Id) -> ApiResult<ProductAttachme
 }
 
 /// Default `kind` for a freshly-uploaded attachment from its MIME: images get
-/// `image`, everything else gets `file`. ("mockup" is set explicitly via PATCH.)
-fn default_kind_for_mime(mime: &str) -> String {
+/// `image`, the Design-arena formats (Excalidraw / scene3d / glTF) get `design`
+/// so the arena lists them, everything else gets `file`. ("mockup" is set
+/// explicitly via PATCH.)
+pub(crate) fn default_kind_for_mime(mime: &str) -> String {
     if mime.starts_with("image/") {
         "image".into()
+    } else if matches!(
+        mime,
+        "application/vnd.excalidraw+json"
+            | "application/vnd.otto.scene3d+json"
+            | "model/gltf-binary"
+            | "model/gltf+json"
+    ) {
+        "design".into()
     } else {
         "file".into()
     }
@@ -492,7 +672,7 @@ fn default_kind_for_mime(mime: &str) -> String {
 
 /// Strip any directory components from a user-supplied filename, keeping only the
 /// final path segment for display (the on-disk name is the attachment id).
-fn sanitize_filename(name: &str) -> String {
+pub(crate) fn sanitize_filename(name: &str) -> String {
     let trimmed = name.trim();
     let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).trim();
     if base.is_empty() || base == "." || base == ".." {
@@ -548,6 +728,92 @@ mod tests {
         assert_eq!(ext_for_mime("application/pdf"), ".pdf");
         assert_eq!(ext_for_mime("text/html"), ".html");
         assert_eq!(ext_for_mime("text/markdown"), ".md");
+        assert_eq!(ext_for_mime("application/vnd.excalidraw+json"), ".excalidraw");
+        assert_eq!(ext_for_mime("application/vnd.otto.scene3d+json"), ".json");
+        assert_eq!(ext_for_mime("model/gltf-binary"), ".glb");
+        assert_eq!(ext_for_mime("model/gltf+json"), ".gltf");
+        assert_eq!(ext_for_mime("application/x-unknown"), ".bin");
+    }
+
+    #[test]
+    fn design_mimes_are_allowed_sniffed_and_kind_design() {
+        for m in [
+            "application/vnd.excalidraw+json",
+            "application/vnd.otto.scene3d+json",
+            "model/gltf-binary",
+            "model/gltf+json",
+        ] {
+            assert!(allowed_mime(m), "{m}");
+            assert_eq!(default_kind_for_mime(m), "design", "{m}");
+        }
+        // Never Python: the Blender script is a server-side export.
+        assert!(!allowed_mime("text/x-python"));
+        assert_eq!(default_kind_for_mime("image/png"), "image");
+        assert_eq!(default_kind_for_mime("application/pdf"), "file");
+
+        // glTF magic header.
+        let mut glb = b"glTF".to_vec();
+        glb.extend_from_slice(&[2, 0, 0, 0, 12, 0, 0, 0]);
+        assert!(sniff_ok("model/gltf-binary", &glb));
+        assert!(!sniff_ok("model/gltf-binary", b"{\"not\": \"glb\"}"));
+        // JSON case: `{` after whitespace.
+        assert!(sniff_ok("application/vnd.excalidraw+json", b"  \n{\"type\":\"excalidraw\"}"));
+        assert!(sniff_ok("model/gltf+json", b"{\"asset\":{}}"));
+        assert!(!sniff_ok("application/vnd.otto.scene3d+json", b"[1,2]"));
+        assert!(!sniff_ok("application/vnd.otto.scene3d+json", b"<html>"));
+    }
+
+    #[test]
+    fn content_put_guards() {
+        let b64 = |b: &[u8]| B64.encode(b);
+        // Happy path: html source.
+        assert_eq!(decode_content("text/html", &b64(b"<p>x</p>")).unwrap(), b"<p>x</p>");
+        // Disallowed row type (an executable somehow) → Invalid.
+        assert!(decode_content("application/x-sh", &b64(b"echo")).is_err());
+        // Bad base64 / empty payload.
+        assert!(decode_content("text/html", "!!not-b64!!").is_err());
+        assert!(decode_content("text/html", "").is_err());
+        // Sniff mismatch: a PNG row fed HTML.
+        assert!(decode_content("image/png", &b64(b"<html>")).is_err());
+        // scene3d must validate: wrong type key → 400; a good doc passes.
+        let bad = b64(br#"{"type":"nope","version":1}"#);
+        assert!(decode_content("application/vnd.otto.scene3d+json", &bad).is_err());
+        let good = crate::design_scene3d::empty_scene_json("T");
+        assert!(decode_content("application/vnd.otto.scene3d+json", &b64(good.as_bytes())).is_ok());
+        // Over the raw cap.
+        let huge = vec![b'a'; MAX_RAW_BYTES + 1];
+        assert!(decode_content("text/plain", &b64(&huge)).is_err());
+    }
+
+    #[test]
+    fn base_updated_at_guard() {
+        use chrono::{TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
+        // Absent / blank → unconditional.
+        assert!(check_base_updated_at(None, &now).is_ok());
+        assert!(check_base_updated_at(Some("  "), &now).is_ok());
+        // Same instant, any RFC 3339 spelling → ok.
+        assert!(check_base_updated_at(Some("2026-09-05T12:00:00Z"), &now).is_ok());
+        assert!(check_base_updated_at(Some("2026-09-05T14:00:00+02:00"), &now).is_ok());
+        // Stale → Conflict; garbage → Invalid.
+        assert!(matches!(
+            check_base_updated_at(Some("2026-09-05T11:59:59Z"), &now),
+            Err(Error::Conflict(_))
+        ));
+        assert!(matches!(
+            check_base_updated_at(Some("yesterday"), &now),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn event_content_is_source_for_text_and_null_for_binaries() {
+        assert_eq!(event_content("text/html", b"<p>").as_deref(), Some("<p>"));
+        assert_eq!(event_content("application/vnd.otto.scene3d+json", b"{}").as_deref(), Some("{}"));
+        assert_eq!(event_content("model/gltf-binary", b"glTF...."), None);
+        assert_eq!(event_content("image/png", b"\x89PNG"), None);
+        let big = vec![b'x'; MAX_EVENT_CONTENT + 1];
+        assert_eq!(event_content("text/html", &big), None);
     }
 
     #[test]

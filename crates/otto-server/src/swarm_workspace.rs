@@ -354,61 +354,101 @@ pub fn render_identity(
 }
 
 /// `otto-product` — a PO/feature-design agent publishes a feature DRAFT to the
-/// Product page (a new draft story the user/PO reviews). Mirrors `otto-post`'s
-/// per-session auth.
+/// Product page, filed under the swarm project's epic (`--folder` groups it,
+/// `--kind doc|story` picks the tree role; the same title updates in place).
+/// Mirrors `otto-post`'s per-session auth. Flags live INSIDE the `case` block —
+/// the `*)` catch-all appends to the body, so an unknown flag never silently
+/// becomes markdown. Failures are loud: the HTTP status on stderr and a
+/// non-zero exit — an agent sees why nothing landed.
 const OTTO_PRODUCT: &str = r#"#!/bin/sh
 # otto-product — publish a feature DRAFT to the Product page for the user/PO to
-# review. Usage: otto-product --title "Feature title" "draft markdown body"
+# review. It lands under this project's epic on the Product page.
+# Usage: otto-product --title "Feature title" [--folder Design] [--kind doc|story] "draft markdown body"
 BASE="${OTTO_INGEST_BASE:-http://127.0.0.1:7700}"
-TITLE=""; BODY=""
+TITLE=""; FOLDER=""; KIND=""; BODY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --title) TITLE="$2"; shift 2 ;;
+    --folder) FOLDER="$2"; shift 2 ;;
+    --kind) KIND="$2"; shift 2 ;;
     --) shift; BODY="$*"; break ;;
+    --*) # An unknown flag ONLY while no body has started and the arg is a single
+         # token; a body that begins with `---` front-matter or an hrule (it has
+         # whitespace/newlines) is body, never a flag.
+         if [ -z "$BODY" ] && [ "$1" = "${1%%[[:space:]]*}" ]; then
+           echo "otto-product: unknown flag $1 (known: --title --folder --kind)" >&2; exit 2
+         fi
+         if [ -z "$BODY" ]; then BODY="$1"; else BODY="$BODY $1"; fi; shift ;;
     *) if [ -z "$BODY" ]; then BODY="$1"; else BODY="$BODY $1"; fi; shift ;;
   esac
 done
-if [ -z "$BODY" ]; then echo "usage: otto-product --title \"Title\" \"markdown body\"" >&2; exit 1; fi
-PAYLOAD=$(TITLE="$TITLE" BODY="$BODY" python3 - <<'PY'
+if [ -z "$BODY" ]; then echo "usage: otto-product --title \"Title\" [--folder F] [--kind doc|story] \"markdown body\"" >&2; exit 1; fi
+PAYLOAD=$(TITLE="$TITLE" FOLDER="$FOLDER" KIND="$KIND" BODY="$BODY" python3 - <<'PY'
 import json, os
-print(json.dumps({"title": os.environ.get("TITLE",""), "body_md": os.environ.get("BODY","")}))
+d = {"title": os.environ.get("TITLE",""), "body_md": os.environ.get("BODY","")}
+if os.environ.get("FOLDER"): d["folder"] = os.environ["FOLDER"]
+if os.environ.get("KIND"): d["tree_kind"] = os.environ["KIND"]
+print(json.dumps(d))
 PY
 )
-curl -s -X POST "$BASE/api/v1/ingest/swarm/product" \
+STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/ingest/swarm/product" \
   -H "Content-Type: application/json" \
   -H "X-Otto-Session: $OTTO_SESSION_ID" \
   -H "X-Otto-Token: $OTTO_INGEST_TOKEN" \
-  -d "$PAYLOAD" >/dev/null 2>&1
+  -d "$PAYLOAD") || { echo "otto-product: could not reach $BASE" >&2; exit 1; }
+case "$STATUS" in
+  2*) echo "otto-product: published \"$TITLE\"${FOLDER:+ in folder $FOLDER}" ;;
+  *) echo "otto-product: failed with HTTP $STATUS (bad --kind? not a swarm session?)" >&2; exit 1 ;;
+esac
 "#;
 
-/// `otto-mockup` — a discovery/design agent publishes a generated mockup (an
-/// HTML page or a Mermaid diagram) to the story under discovery. Mirrors
-/// `otto-post`'s per-session auth; the target story is derived server-side from
-/// the session's project. Usage: otto-mockup --title "..." --format html|mermaid "content".
+/// `otto-mockup` — a discovery/design agent publishes a design artifact (an HTML
+/// screen, a Mermaid diagram, an Excalidraw board or a `scene3d` document) to
+/// the story under discovery — or, outside a Discovery run, to the project's
+/// linked story / epic. Mirrors `otto-post`'s per-session auth; the target story
+/// is derived server-side. Unknown `--format` values are rejected locally AND by
+/// the server (400), never silently stored as HTML.
 const OTTO_MOCKUP: &str = r#"#!/bin/sh
-# otto-mockup — publish a generated mockup for the story under discovery.
-# Usage: otto-mockup --title "Title" --format html|mermaid "<content>"
+# otto-mockup — publish a design artifact for this project's story on the Product page.
+# Usage: otto-mockup --title "Title" [--format html|mermaid|excalidraw|scene3d] [--folder F] "<content>"
 BASE="${OTTO_INGEST_BASE:-http://127.0.0.1:7700}"
-TITLE=""; FORMAT="html"; CONTENT=""
+TITLE=""; FORMAT="html"; FOLDER=""; CONTENT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --title) TITLE="$2"; shift 2 ;;
     --format) FORMAT="$2"; shift 2 ;;
+    --folder) FOLDER="$2"; shift 2 ;;
     --) shift; CONTENT="$*"; break ;;
+    --*) # Unknown flag only while no content has started and the arg is one
+         # token; content starting with `--`/`---` (front-matter, hrule) is content.
+         if [ -z "$CONTENT" ] && [ "$1" = "${1%%[[:space:]]*}" ]; then
+           echo "otto-mockup: unknown flag $1 (known: --title --format --folder)" >&2; exit 2
+         fi
+         if [ -z "$CONTENT" ]; then CONTENT="$1"; else CONTENT="$CONTENT $1"; fi; shift ;;
     *) if [ -z "$CONTENT" ]; then CONTENT="$1"; else CONTENT="$CONTENT $1"; fi; shift ;;
   esac
 done
-if [ -z "$CONTENT" ]; then echo "usage: otto-mockup --title \"Title\" --format html|mermaid \"content\"" >&2; exit 1; fi
-PAYLOAD=$(TITLE="$TITLE" FORMAT="$FORMAT" CONTENT="$CONTENT" python3 - <<'PY'
+if [ -z "$CONTENT" ]; then echo "usage: otto-mockup --title \"Title\" [--format html|mermaid|excalidraw|scene3d] \"content\"" >&2; exit 1; fi
+case "$FORMAT" in
+  html|mermaid|excalidraw|scene3d) ;;
+  *) echo "otto-mockup: unknown --format $FORMAT (html|mermaid|excalidraw|scene3d)" >&2; exit 2 ;;
+esac
+PAYLOAD=$(TITLE="$TITLE" FORMAT="$FORMAT" FOLDER="$FOLDER" CONTENT="$CONTENT" python3 - <<'PY'
 import json, os
-print(json.dumps({"title": os.environ.get("TITLE",""), "format": os.environ.get("FORMAT","html"), "content": os.environ.get("CONTENT","")}))
+d = {"title": os.environ.get("TITLE",""), "format": os.environ.get("FORMAT","html"), "content": os.environ.get("CONTENT","")}
+if os.environ.get("FOLDER"): d["folder"] = os.environ["FOLDER"]
+print(json.dumps(d))
 PY
 )
-curl -s -X POST "$BASE/api/v1/ingest/swarm/mockup" \
+STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/ingest/swarm/mockup" \
   -H "Content-Type: application/json" \
   -H "X-Otto-Session: $OTTO_SESSION_ID" \
   -H "X-Otto-Token: $OTTO_INGEST_TOKEN" \
-  -d "$PAYLOAD" >/dev/null 2>&1
+  -d "$PAYLOAD") || { echo "otto-mockup: could not reach $BASE" >&2; exit 1; }
+case "$STATUS" in
+  2*) echo "otto-mockup: published \"$TITLE\" ($FORMAT)" ;;
+  *) echo "otto-mockup: failed with HTTP $STATUS (bad --format? no story for this project?)" >&2; exit 1 ;;
+esac
 "#;
 
 /// `otto-discovery-report` — a discovery agent publishes the consolidated
@@ -555,6 +595,34 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// The helper scripts parse their flags INSIDE the `case` block (an unknown
+    /// `--flag` errors instead of being appended to the body) and fail loudly.
+    #[test]
+    fn helper_scripts_parse_flags_and_fail_loud() {
+        for (name, body, flags) in [
+            ("otto-product", OTTO_PRODUCT, &["--title", "--folder", "--kind"][..]),
+            ("otto-mockup", OTTO_MOCKUP, &["--title", "--format", "--folder"][..]),
+        ] {
+            for f in flags {
+                assert!(body.contains(&format!("    {f}) ")), "{name}: {f} handled in case");
+            }
+            // Unknown flags are rejected ONLY while the body is empty and the arg is a
+            // single token — `---` front-matter / an hrule body (has whitespace) is body.
+            assert!(body.contains("--*) #"), "{name}: unknown-flag arm present");
+            assert!(
+                body.contains("[ -z \"$BODY\" ] && [ \"$1\" = \"${1%%[[:space:]]*}\" ]")
+                    || body.contains("[ -z \"$CONTENT\" ] && [ \"$1\" = \"${1%%[[:space:]]*}\" ]"),
+                "{name}: unknown-flag arm guarded by empty-body + single-token"
+            );
+            assert!(body.contains("exit 2"), "{name}: unknown flags exit 2");
+            assert!(body.contains("-w '%{http_code}'"), "{name}: reports HTTP status");
+            assert!(!body.contains(">/dev/null 2>&1"), "{name}: no swallowed curl");
+            assert!(body.contains("exit 1 ;;"), "{name}: non-zero on failure");
+        }
+        assert!(OTTO_PRODUCT.contains("\"tree_kind\""), "--kind maps to tree_kind");
+        assert!(OTTO_MOCKUP.contains("html|mermaid|excalidraw|scene3d"));
     }
 
     #[test]

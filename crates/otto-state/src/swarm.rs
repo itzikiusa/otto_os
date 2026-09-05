@@ -1063,8 +1063,39 @@ impl SwarmRepo {
         .bind(id)
         .execute(&self.pool)
         .await
-        .map_err(dberr("update project"))?;
+        // Same unique `story_id` index as `create_project`: two swarm agents
+        // racing to mint the project's epic both call `update_project(story_id)`
+        // — the loser must see a Conflict so it can re-read the project and file
+        // under the winner's epic instead of surfacing a 500.
+        .map_err(dberr_unique(
+            "update project",
+            "a swarm project is already linked to this story",
+        ))?;
         self.get_project(id).await
+    }
+
+    /// Link `story_id` to project `id` ONLY if the project has no story yet.
+    /// `Ok(true)` = linked by this call; `Ok(false)` = someone else linked first
+    /// (re-read the project and use theirs). This is the epic-tree ingest race
+    /// guard: two agents of the same project racing to mint its epic must not
+    /// last-writer-win each other, and a story already rooting ANOTHER project
+    /// surfaces as `Conflict` via the unique index.
+    pub async fn link_story_if_unlinked(&self, id: &Id, story_id: &Id) -> Result<bool> {
+        let now = fmt(Utc::now());
+        let res = sqlx::query(
+            "UPDATE swarm_projects SET story_id = ?, updated_at = ?
+             WHERE id = ? AND story_id IS NULL",
+        )
+        .bind(story_id)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr_unique(
+            "link project story",
+            "a swarm project is already linked to this story",
+        ))?;
+        Ok(res.rows_affected() == 1)
     }
 
     pub async fn delete_project(&self, id: &Id) -> Result<()> {
@@ -2166,5 +2197,65 @@ mod tests {
             .unwrap();
         let spent = repo.total_cost(&swarm.id).await.unwrap();
         assert!((spent - 3.75).abs() < 1e-9, "summed cost = 3.75, got {spent}");
+    }
+    fn new_project(swarm: &Id, story_id: Option<Id>) -> NewProject {
+        NewProject {
+            swarm_id: swarm.clone(),
+            workspace_id: new_id(),
+            name: "proj".into(),
+            description: String::new(),
+            repo_path: None,
+            goal_md: None,
+            story_id,
+            order_idx: 0,
+            created_by: new_id(),
+        }
+    }
+
+    /// Epic-tree ingest race: linking a second project to a story that already
+    /// roots one surfaces as `Conflict` (not a generic DB error) from
+    /// `update_project`, exactly like `create_project` already does.
+    #[tokio::test]
+    async fn update_project_maps_story_unique_violation_to_conflict() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+        let story = new_id();
+        let _winner = repo
+            .create_project(new_project(&swarm, Some(story.clone())))
+            .await
+            .unwrap();
+        let loser = repo.create_project(new_project(&swarm, None)).await.unwrap();
+        let err = repo
+            .update_project(
+                &loser.id,
+                ProjectPatch {
+                    story_id: Some(Some(story.clone())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, otto_core::Error::Conflict(_)), "got {err:?}");
+        // The loser is untouched and can re-read the winner via the story.
+        let linked = repo.project_for_story(&story).await.unwrap().unwrap();
+        assert_ne!(linked.id, loser.id);
+    }
+
+    #[tokio::test]
+    async fn link_story_if_unlinked_is_first_writer_wins() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let swarm = new_id();
+        let project = repo.create_project(new_project(&swarm, None)).await.unwrap();
+        let a = new_id();
+        let b = new_id();
+        assert!(repo.link_story_if_unlinked(&project.id, &a).await.unwrap());
+        assert!(!repo.link_story_if_unlinked(&project.id, &b).await.unwrap());
+        assert_eq!(repo.get_project(&project.id).await.unwrap().story_id, Some(a.clone()));
+        // A story rooting another project → Conflict.
+        let other = repo.create_project(new_project(&swarm, None)).await.unwrap();
+        let err = repo.link_story_if_unlinked(&other.id, &a).await.unwrap_err();
+        assert!(matches!(err, otto_core::Error::Conflict(_)), "got {err:?}");
     }
 }

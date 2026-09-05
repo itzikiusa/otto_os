@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard</title>
+<style>
+  :root { --bg:#0b1220; --panel:#111a2e; --line:#1f2a44; --ink:#e5e9f4; --dim:#8b96b3; --accent:#22c55e; --warn:#f59e0b; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; font:13.5px/1.45 -apple-system,Inter,system-ui,sans-serif; color:var(--ink); background:var(--bg); }
+  .app { display:grid; grid-template-columns:220px 1fr; min-height:100vh; }
+  aside { background:var(--panel); border-right:1px solid var(--line); padding:18px 14px; }
+  aside .logo { font-weight:700; letter-spacing:.02em; margin-bottom:22px; }
+  aside a { display:block; padding:8px 10px; border-radius:8px; color:var(--dim); text-decoration:none; }
+  aside a.on { background:#1c2742; color:var(--ink); }
+  main { padding:22px 26px; }
+  .top { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+  .top h1 { margin:0; font-size:20px; }
+  .top .range { display:flex; gap:6px; }
+  .top .range button { border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:8px; padding:5px 10px; }
+  .top .range button.on { color:var(--ink); border-color:#33427a; background:#1c2742; }
+  .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .kpi small { color:var(--dim); text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; }
+  .kpi .v { font-size:24px; font-weight:700; margin:4px 0 2px; }
+  .kpi .d { font-size:12px; color:var(--accent); }
+  .kpi .d.bad { color:var(--warn); }
+  .grid { display:grid; grid-template-columns:2fr 1fr; gap:12px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .panel h2 { margin:0 0 12px; font-size:13px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  .chart { height:180px; display:flex; align-items:flex-end; gap:6px; }
+  .chart i { flex:1; background:linear-gradient(180deg,#4ade80,#166534); border-radius:4px 4px 0 0; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:600; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; background:#14532d; color:#86efac; }
+  .pill.warn { background:#78350f; color:#fde68a; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="logo">◈ Payouts</div>
+    <a class="on">Overview</a><a>Settlements</a><a>Rails</a><a>Limits</a><a>Alerts</a>
+  </aside>
+  <main>
+    <div class="top">
+      <h1>Instant withdrawals</h1>
+      <div class="range"><button>24h</button><button class="on">7d</button><button>30d</button></div>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><small>Settled &lt; 30s</small><div class="v">96.4%</div><div class="d">▲ 1.2 pts</div></div>
+      <div class="kpi"><small>Fallback to batch</small><div class="v">3.1%</div><div class="d bad">▲ 0.4 pts</div></div>
+      <div class="kpi"><small>p95 settle latency</small><div class="v">18.2s</div><div class="d">▼ 2.1s</div></div>
+      <div class="kpi"><small>Failed payouts</small><div class="v">12</div><div class="d">▼ 5</div></div>
+    </div>
+    <div class="grid">
+      <div class="panel">
+        <h2>Payouts per hour</h2>
+        <div class="chart"><i style="height:40%"></i><i style="height:55%"></i><i style="height:48%"></i><i style="height:70%"></i><i style="height:82%"></i><i style="height:64%"></i><i style="height:90%"></i><i style="height:76%"></i><i style="height:58%"></i><i style="height:66%"></i><i style="height:88%"></i><i style="height:95%"></i></div>
+      </div>
+      <div class="panel">
+        <h2>Recent settlements</h2>
+        <table>
+          <tr><th>Player</th><th>Rail</th><th>Status</th></tr>
+          <tr><td>a.kovac</td><td>Visa Direct</td><td><span class="pill">settled</span></td></tr>
+          <tr><td>m.ortega</td><td>MC Send</td><td><span class="pill">settled</span></td></tr>
+          <tr><td>j.lin</td><td>Visa Direct</td><td><span class="pill warn">batch</span></td></tr>
+          <tr><td>s.okafor</td><td>MC Send</td><td><span class="pill">settled</span></td></tr>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

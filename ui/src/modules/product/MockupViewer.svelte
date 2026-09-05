@@ -21,8 +21,16 @@
 
   interface Props {
     attachment: ProductAttachment;
+    /** When given, render THIS source (html / mermaid) instead of fetching the
+     *  attachment's bytes — the Design Arena owns the in-memory, autosaved source
+     *  and re-renders the viewer as it changes. Ignored for images. */
+    source?: string | null;
+    /** The arena has its own toolbar; hide the viewer's file-name strip. */
+    hideToolbar?: boolean;
+    /** Arena "Enable interactivity" lives in its inspector — mirror it here. */
+    allowScripts?: boolean;
   }
-  const { attachment }: Props = $props();
+  let { attachment, source = null, hideToolbar = false, allowScripts = $bindable(false) }: Props = $props();
 
   // Mermaid is initialized once, with auto-rendering off — we drive render()
   // ourselves and never let it touch the parent document.
@@ -52,9 +60,6 @@
   let rendering = $state(false);
   let renderError = $state<string | null>(null);
 
-  // Per-mockup "Enable interactivity" — adds allow-scripts to the HTML sandbox.
-  let allowScripts = $state(false);
-
   // The render-box element passed to the annotation overlay so pins anchor to it.
   let renderBox = $state<HTMLDivElement | null>(null);
 
@@ -70,7 +75,7 @@
   async function fetchText(id: string): Promise<string> {
     const token = getToken();
     const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-    const resp = await fetch(`${baseUrl()}/api/v1/product/attachments/${id}`, { headers });
+    const resp = await fetch(`${baseUrl()}/api/v1/product/attachments/${encodeURIComponent(id)}`, { headers });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.text();
   }
@@ -83,16 +88,22 @@
       `<body>${svg}</body></html>`;
   }
 
+  // Generation counter: a blob URL that resolves AFTER revokeCreated() ran (the
+  // attachment changed / the viewer unmounted mid-fetch) is revoked on the spot
+  // instead of being pushed into a list nobody will revoke again.
+  let gen = 0;
   function revokeCreated(): void {
+    gen++;
     const stale = createdUrls.splice(0);
     for (const u of stale) URL.revokeObjectURL(u);
   }
 
-  // ── Render pipeline — re-runs whenever the attachment changes ────────────────
+  // ── Render pipeline — re-runs whenever the attachment OR the source changes ──
   $effect(() => {
-    // Read the attachment id so this effect re-runs on change.
+    // Read the attachment id + source so this effect re-runs on change.
     const a = attachment;
-    void renderFor(a);
+    const src = source;
+    void renderFor(a, src);
   });
 
   $effect(() => {
@@ -100,32 +111,43 @@
     return () => revokeCreated();
   });
 
-  async function renderFor(a: ProductAttachment): Promise<void> {
+  async function renderFor(a: ProductAttachment, src: string | null): Promise<void> {
     rendering = true;
     renderError = null;
     imgUrl = null;
     htmlContent = null;
     mermaidSvg = null;
     revokeCreated();
+    const myGen = gen;
     try {
       const k = classify(a);
       if (k === 'image') {
-        const url = await authedBlobUrl(`/product/attachments/${a.id}`);
+        const url = await authedBlobUrl(`/product/attachments/${encodeURIComponent(a.id)}`);
+        if (myGen !== gen) {
+          URL.revokeObjectURL(url); // superseded while in flight
+          return;
+        }
         createdUrls.push(url);
         imgUrl = url;
       } else if (k === 'html') {
-        htmlContent = await fetchText(a.id);
+        htmlContent = src ?? (await fetchText(a.id));
       } else if (k === 'mermaid') {
-        const src = await fetchText(a.id);
-        const id = `otto-mermaid-${Date.now()}-${mermaidSeq++}`;
-        const { svg } = await mermaid.render(id, src);
-        mermaidSvg = svg;
+        const text = src ?? (await fetchText(a.id));
+        if (!text.trim()) {
+          mermaidSvg = '';
+        } else {
+          const id = `otto-mermaid-${Date.now()}-${mermaidSeq++}`;
+          const { svg } = await mermaid.render(id, text);
+          mermaidSvg = svg;
+        }
       } else {
         renderError = `Unsupported mockup type: ${a.mime || 'unknown'}`;
       }
     } catch (e) {
       renderError = e instanceof Error ? e.message : String(e);
-      toasts.error('Could not render mockup', renderError);
+      // A source override means the user is TYPING (code view) — a transient
+      // Mermaid parse error is expected mid-edit; show it inline, don't toast.
+      if (src === null) toasts.error('Could not render mockup', renderError);
     } finally {
       rendering = false;
     }
@@ -142,9 +164,9 @@
   });
 </script>
 
-<div class="viewer">
+<div class="viewer" class:bare={hideToolbar}>
   <!-- Toolbar -->
-  <div class="viewer-toolbar">
+  <div class="viewer-toolbar" hidden={hideToolbar}>
     <span class="vt-name" title={attachment.filename}>{attachment.filename}</span>
     <span class="vt-mime">{attachment.mime}</span>
     {#if kind === 'html'}
@@ -210,6 +232,11 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     overflow: hidden;
+  }
+  /* Inside the arena the viewport already has chrome — no double border. */
+  .viewer.bare {
+    border: none;
+    border-radius: 0;
   }
   .viewer-toolbar {
     display: flex;

@@ -187,7 +187,13 @@ fn build_prompt(
             "Do the work now. Use `./otto-post` to share progress, ideas, reviews and concerns \
              with the team as you go. If your role is product/feature design (a PO, analyst, \
              etc.) and you produce a feature draft/spec, publish it to the Product page for the \
-             user to review with: `./otto-product --title \"Feature title\" \"<markdown body>\"`.\n\n\
+             user to review with: `./otto-product --title \"Feature title\" \"<markdown body>\"`. \
+             The Product page already has an EPIC for this project; `otto-product` files your \
+             draft under it — pass `--folder` to group your work (e.g. `--folder Design`) and \
+             `--kind story` for a full user story (default `doc`). Publishing the same title \
+             again UPDATES that page instead of creating another. Design artifacts (HTML \
+             screens, Mermaid diagrams, Excalidraw boards, 3D scenes) go through \
+             `./otto-mockup --title \"…\" --format html|mermaid|excalidraw|scene3d \"<content>\"`.\n\n\
              Stay on THIS task — the plan is owned by your manager. Do not invent new tasks: \
              `subtasks` and `handoffs` go to your manager for triage, so use them only when \
              you truly cannot proceed (at most ONE handoff, never a chain). If something is \

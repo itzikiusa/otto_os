@@ -1660,6 +1660,7 @@ mod tests {
             discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
             canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
             product_agent_cancels: crate::product_run::new_cancel_registry(),
+            design_jobs: crate::design_blender::new_job_registry(),
             memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
             vault: Arc::new(otto_vault::VaultEngine::new(pool.clone())),
             vault_docs_runs: crate::vault_docs_agent::new_run_registry(),

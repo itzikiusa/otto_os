@@ -19,6 +19,7 @@
   import type { ProductTranscript } from './types';
   import AttachmentsPanel from './AttachmentsPanel.svelte';
   import LinkedCanvases from './LinkedCanvases.svelte';
+  import ChildrenBoard from './ChildrenBoard.svelte';
 
   // Version picker state — null means "show current (source) version".
   let viewingVersion = $state<ProductStoryVersion | null>(null);
@@ -1990,6 +1991,11 @@
 
       <!-- Attachments panel for Confluence / other layouts -->
       <AttachmentsPanel bind:this={panelRef} />
+    {/if}
+
+    <!-- ── Epic: the Children board (folder → cards) + roll-up (design §3.2) ── -->
+    {#if story.tree_kind === 'epic' || product.childrenOf(story.id).length > 0}
+      <ChildrenBoard epicId={story.id} />
     {/if}
 
     <!-- ── Swarm link (cross-link back to the project this story spawned) ── -->

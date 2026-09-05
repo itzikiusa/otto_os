@@ -26,7 +26,7 @@ use serde::Deserialize;
 
 use crate::service::ProductService;
 use crate::types::{
-    BulkApproveTestcasesReq, NewDraftReq, NewLearningReq, NewNoteReq, NewQuestionReq,
+    BulkApproveTestcasesReq, CreateChildReq, NewDraftReq, NewLearningReq, NewNoteReq, NewQuestionReq,
     NewTranscriptReq, PostQuestionsReq, PublishAsRfcReq, PublishAsStoryReq, PublishTestsReq,
     ReorderTestcasesReq, StorySwarmLink, UpdateDraftReq, UpdateLearningReq, UpdateNoteReq,
     UpdateQuestionReq, UpdateStoryReq, UpdateTestcaseReq,
@@ -45,6 +45,24 @@ pub trait ProductCtx: Clone + Send + Sync + 'static {
     /// swarm projects/tasks/runs linked to a story.  Implementors that have no
     /// swarm layer return `None`; the endpoint returns an empty `StorySwarmLink`.
     fn swarm_repo(&self) -> Option<&otto_state::SwarmRepo> {
+        None
+    }
+    /// Root directory of story attachment files
+    /// (`data_dir/product/attachments`). `DELETE /product/stories/{sid}` removes
+    /// `<root>/<sid>/` best-effort after the rows are gone; implementors without
+    /// a filesystem (tests) return `None` and only the rows are deleted.
+    fn attachments_root(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// Root of the design-assist scratch dirs (`data_dir/product/mockup_assist`,
+    /// one `<attachment_id>/` per artifact — see `otto-server::mockup_assist`).
+    /// Removed best-effort with the story's attachments on delete.
+    fn mockup_scratch_root(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// Attachment repo, used only to enumerate a story's attachment ids before
+    /// the rows go (for the scratch-dir cleanup above). `None` = skip.
+    fn attachment_repo(&self) -> Option<&otto_state::ProductAttachmentRepo> {
         None
     }
 }
@@ -185,6 +203,8 @@ pub fn router<S: ProductCtx>() -> Router<S> {
                 .delete(delete_story::<S>),
         )
         .route("/product/stories/{sid}/refresh", post(refresh_story::<S>))
+        // Epic tree: file a `story` / `doc` child under an epic.
+        .route("/product/stories/{sid}/children", post(create_child::<S>))
         // Versions (under-story collection + flat version item)
         .route("/product/stories/{sid}/versions", get(list_versions::<S>))
         .route("/product/versions/{vid}", get(get_version::<S>))
@@ -363,6 +383,15 @@ async fn patch_story<S: ProductCtx>(
     Json(req): Json<UpdateStoryReq>,
 ) -> ApiResult<Response> {
     let ws = ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    // Epic tree: one level only. A new parent must be a top-level story and this
+    // story must not have children of its own; `tree_kind` is a closed enum.
+    let tree_kind = match req.tree_kind.as_deref() {
+        Some(k) => Some(crate::service::validate_tree_kind(k)?.to_string()),
+        None => None,
+    };
+    if let Some(Some(pid)) = req.parent_id.as_ref() {
+        ctx.product().validate_parent(pid, Some(&sid)).await?;
+    }
     let updated = ctx
         .product_repo()
         .update_story(
@@ -378,6 +407,9 @@ async fn patch_story<S: ProductCtx>(
                 confluence_tests_page_id: None,
                 confluence_tests_url: None,
                 tags: req.tags,
+                parent_id: req.parent_id,
+                tree_kind,
+                folder: req.folder.map(|f| f.trim().to_string()),
                 ..Default::default()
             },
         )
@@ -402,8 +434,53 @@ async fn delete_story<S: ProductCtx>(
     Path(StoryId { sid }): Path<StoryId>,
 ) -> ApiResult<StatusCode> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    // Attachment ids BEFORE the rows go: each may own an assist scratch dir.
+    let attachment_ids: Vec<Id> = match ctx.attachment_repo() {
+        Some(repo) => repo
+            .list_for_story(&sid)
+            .await
+            .map(|atts| atts.into_iter().map(|a| a.id).collect())
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
     ctx.product_repo().delete_story(&sid).await?;
+    // Best-effort file cleanup: the story's attachment dir + each artifact's
+    // assist scratch dir. The rows are already gone (source of truth); ids are
+    // route params / daemon-minted, so confine every join before touching the fs.
+    if let Some(root) = ctx.attachments_root() {
+        if let Some(dir) = otto_core::paths::confine_join(&root, &sid) {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+        }
+    }
+    if let Some(root) = ctx.mockup_scratch_root() {
+        for aid in &attachment_ids {
+            if let Some(dir) = otto_core::paths::confine_join(&root, aid) {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+            }
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /product/stories/{sid}/children` — Editor on the epic's workspace.
+async fn create_child<S: ProductCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(StoryId { sid }): Path<StoryId>,
+    Json(req): Json<CreateChildReq>,
+) -> ApiResult<Response> {
+    ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    let detail = ctx
+        .product()
+        .create_child(
+            &sid,
+            &user.id,
+            req.title.as_deref().map(str::trim).filter(|t| !t.is_empty()),
+            req.tree_kind.as_deref().unwrap_or("doc"),
+            req.folder.as_deref().unwrap_or(""),
+        )
+        .await?;
+    Ok(Json(detail).into_response())
 }
 
 async fn refresh_story<S: ProductCtx>(
@@ -1555,6 +1632,9 @@ mod tests {
                 issue_type: None,
                 stage: "draft".into(),
                 cwd: None,
+                parent_id: None,
+                tree_kind: "story".into(),
+                folder: String::new(),
                 created_by: user_id.clone(),
             })
             .await
@@ -1612,6 +1692,9 @@ mod tests {
                 issue_type: None,
                 stage: "draft".into(),
                 cwd: None,
+                parent_id: None,
+                tree_kind: "story".into(),
+                folder: String::new(),
                 created_by: attacker.clone(),
             })
             .await
@@ -1654,5 +1737,193 @@ mod tests {
             StatusCode::FORBIDDEN,
             "owner must clear the ownership guard"
         );
+    }
+    // -----------------------------------------------------------------------
+    // Epic tree routes
+    // -----------------------------------------------------------------------
+
+    async fn seed_draft(ctx: &TestCtx, ws: &Id, user_id: &Id, title: &str) -> Id {
+        ctx.repo
+            .create_story(NewStory {
+                workspace_id: ws.clone(),
+                source_kind: "draft".into(),
+                account_id: String::new(),
+                source_key: String::new(),
+                title: title.into(),
+                url: String::new(),
+                issue_type: None,
+                stage: "draft".into(),
+                cwd: None,
+                parent_id: None,
+                tree_kind: "story".into(),
+                folder: String::new(),
+                created_by: user_id.clone(),
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    fn json_req(method: Method, uri: String, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn children_route_files_a_doc_under_the_epic() {
+        let pool = mem_pool().await;
+        let user_id = seed_user(&pool).await;
+        let ws = seed_workspace(&pool).await;
+        let ctx = TestCtx::new(pool);
+        let epic = seed_draft(&ctx, &ws, &user_id, "Loyalty").await;
+        let a = app(ctx.clone(), &user_id);
+
+        let resp = a
+            .clone()
+            .oneshot(json_req(
+                Method::POST,
+                format!("/product/stories/{epic}/children"),
+                serde_json::json!({ "title": "Tier ladder", "folder": "Design" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["story"]["parent_id"], epic.as_str());
+        assert_eq!(body["story"]["tree_kind"], "doc");
+        assert_eq!(body["story"]["folder"], "Design");
+        assert_eq!(body["story"]["workspace_id"], ws.as_str());
+        let child: Id = body["story"]["id"].as_str().unwrap().to_string();
+
+        // A child of a child is rejected (one level), as is an `epic` child.
+        let resp = a
+            .clone()
+            .oneshot(json_req(
+                Method::POST,
+                format!("/product/stories/{child}/children"),
+                serde_json::json!({ "title": "too deep" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = a
+            .oneshot(json_req(
+                Method::POST,
+                format!("/product/stories/{epic}/children"),
+                serde_json::json!({ "title": "x", "tree_kind": "epic" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_moves_marks_and_detaches_with_one_level_guard() {
+        let pool = mem_pool().await;
+        let user_id = seed_user(&pool).await;
+        let ws = seed_workspace(&pool).await;
+        let ctx = TestCtx::new(pool);
+        let epic = seed_draft(&ctx, &ws, &user_id, "Epic").await;
+        let s1 = seed_draft(&ctx, &ws, &user_id, "S1").await;
+        let s2 = seed_draft(&ctx, &ws, &user_id, "S2").await;
+        let a = app(ctx.clone(), &user_id);
+
+        // Mark as epic.
+        let resp = a
+            .clone()
+            .oneshot(json_req(
+                Method::PATCH,
+                format!("/product/stories/{epic}"),
+                serde_json::json!({ "tree_kind": "epic" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["tree_kind"], "epic");
+        // Unknown tree_kind → 400.
+        let resp = a
+            .clone()
+            .oneshot(json_req(
+                Method::PATCH,
+                format!("/product/stories/{epic}"),
+                serde_json::json!({ "tree_kind": "saga" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Move s1 under the epic in folder PO.
+        let resp = a
+            .clone()
+            .oneshot(json_req(
+                Method::PATCH,
+                format!("/product/stories/{s1}"),
+                serde_json::json!({ "parent_id": epic, "folder": "PO" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let b = body_json(resp).await;
+        assert_eq!(b["parent_id"], epic.as_str());
+        assert_eq!(b["folder"], "PO");
+
+        // s2 under s1 (a child) → 400; epic (has children) under s2 → 400.
+        let resp = a
+            .clone()
+            .oneshot(json_req(
+                Method::PATCH,
+                format!("/product/stories/{s2}"),
+                serde_json::json!({ "parent_id": s1 }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = a
+            .clone()
+            .oneshot(json_req(
+                Method::PATCH,
+                format!("/product/stories/{epic}"),
+                serde_json::json!({ "parent_id": s2 }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // Self-parent → 400.
+        let resp = a
+            .clone()
+            .oneshot(json_req(
+                Method::PATCH,
+                format!("/product/stories/{s2}"),
+                serde_json::json!({ "parent_id": s2 }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Absent key leaves the parent alone; explicit null detaches.
+        let resp = a
+            .clone()
+            .oneshot(json_req(
+                Method::PATCH,
+                format!("/product/stories/{s1}"),
+                serde_json::json!({ "folder": "Design" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(body_json(resp).await["parent_id"], epic.as_str());
+        let resp = a
+            .oneshot(json_req(
+                Method::PATCH,
+                format!("/product/stories/{s1}"),
+                serde_json::json!({ "parent_id": null }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_json(resp).await["parent_id"].is_null());
     }
 }

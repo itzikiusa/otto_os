@@ -441,12 +441,15 @@ class EventsClient {
           // panel refetches when its session id matches.
           canvasRefsBus.apply(parsed.session_id);
         } else if (parsed.type === 'mockup_updated') {
-          // Live mockup edits: the Mockups Assistant panel re-renders the preview.
+          // Live design edits: the arena's Assistant preview + the open artifact
+          // reload. `content` is an explicit null for binary / oversized payloads
+          // (a glb, a Blender render) — the store then re-fetches the bytes rather
+          // than treating "null" as an empty document.
           mockupAssist.ingestLive(
             parsed.attachment_id,
             parsed.story_id,
             parsed.format,
-            parsed.content,
+            parsed.content ?? null,
           );
         } else if (parsed.type === 'mockup_session_started') {
           // The mockup agent session is live (turn start) → attach its shell.

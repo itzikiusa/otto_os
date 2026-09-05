@@ -1,0 +1,31 @@
+{
+  "type": "otto-scene3d",
+  "version": 1,
+  "background": "#0f172a",
+  "grid": true,
+  "camera": { "position": [14, 10, 16], "target": [0, 1, 0], "fov": 50 },
+  "lights": [
+    { "id": "sun", "name": "Sun", "type": "directional", "position": [8, 14, 6], "intensity": 1.3, "color": "#fff7ed", "shadow": true },
+    { "id": "amb", "name": "Ambient", "type": "ambient", "intensity": 0.35 },
+    { "id": "fill", "name": "Fill", "type": "hemisphere", "intensity": 0.4, "color": "#bfdbfe", "ground_color": "#1e293b" }
+  ],
+  "objects": [
+    { "id": "floor", "name": "Ground", "type": "plane", "position": [0, 0, 0], "rotation": [-90, 0, 0], "scale": [40, 40, 1], "material": { "color": "#334155", "roughness": 0.95 } },
+    { "id": "spawn", "name": "Spawn pad", "type": "cylinder", "position": [-10, 0.1, 8], "rotation": [0, 0, 0], "scale": [2, 0.2, 2], "material": { "color": "#22c55e", "emissive": "#14532d", "roughness": 0.6 }, "notes": "Player start. Faces +Z." },
+    { "id": "wall-n", "name": "Wall N", "type": "box", "position": [0, 1.5, -12], "rotation": [0, 0, 0], "scale": [24, 3, 1], "material": { "color": "#64748b", "roughness": 0.8 } },
+    { "id": "wall-e", "name": "Wall E", "type": "box", "position": [12, 1.5, 0], "rotation": [0, 0, 0], "scale": [1, 3, 24], "material": { "color": "#64748b", "roughness": 0.8 } },
+    { "id": "platform-1", "name": "Platform 1", "type": "box", "position": [-4, 1, 2], "rotation": [0, 0, 0], "scale": [4, 0.5, 4], "material": { "color": "#94a3b8", "roughness": 0.7 } },
+    { "id": "platform-2", "name": "Platform 2", "type": "box", "position": [2, 2.5, -2], "rotation": [0, 15, 0], "scale": [4, 0.5, 4], "material": { "color": "#94a3b8", "roughness": 0.7 } },
+    { "id": "platform-3", "name": "Platform 3", "type": "box", "position": [7, 4, -6], "rotation": [0, 0, 0], "scale": [4, 0.5, 4], "material": { "color": "#94a3b8", "roughness": 0.7 } },
+    { "id": "cover-1", "name": "Cover crate", "type": "box", "position": [-1, 0.5, 6], "rotation": [0, 20, 0], "scale": [1, 1, 1], "material": { "color": "#f59e0b", "roughness": 0.6 } },
+    { "id": "cover-2", "name": "Cover crate 2", "type": "box", "position": [0.4, 0.5, 6.8], "rotation": [0, -10, 0], "scale": [1, 1, 1], "material": { "color": "#f59e0b", "roughness": 0.6 } },
+    { "id": "pillar", "name": "Pillar", "type": "cylinder", "position": [4, 3, 6], "rotation": [0, 0, 0], "scale": [0.8, 6, 0.8], "material": { "color": "#475569", "roughness": 0.9 } },
+    { "id": "goal", "name": "Goal marker", "type": "torus", "position": [9, 5.5, -6], "rotation": [90, 0, 0], "scale": [1, 1, 1], "material": { "color": "#38bdf8", "emissive": "#0369a1", "metalness": 0.2, "roughness": 0.3 }, "notes": "Level exit trigger volume." },
+    { "id": "label", "name": "Label", "type": "text", "text": "LEVEL 01 · BLOCKOUT", "position": [-10, 4, -11], "rotation": [0, 0, 0], "scale": [1, 1, 1], "material": { "color": "#e2e8f0" } }
+  ],
+  "groups": [
+    { "id": "grp-walls", "name": "Walls", "children": ["wall-n", "wall-e"] },
+    { "id": "grp-platforms", "name": "Platforms", "children": ["platform-1", "platform-2", "platform-3"] },
+    { "id": "grp-props", "name": "Props", "children": ["cover-1", "cover-2", "pillar"] }
+  ]
+}

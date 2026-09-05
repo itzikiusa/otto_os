@@ -3,7 +3,7 @@
 // Reads `ws.currentId` only (never mutates it), following the same
 // singleton-class + Svelte-5-runes pattern as database.svelte.ts.
 
-import { api } from '../api/client';
+import { api, authedBlobUrl, authedText, ApiError } from '../api/client';
 import { ws } from './workspace.svelte';
 import type { Session, ProductLens } from '../api/types';
 import type {
@@ -59,7 +59,77 @@ import type {
   DiscoveryChatTurn,
   DiscoveryAction,
   ApplyResult,
+  TreeKind,
+  CreateChildReq,
+  SaveAttachmentContentReq,
+  BlenderStatus,
+  BlenderJob,
 } from '../../modules/product/types';
+
+/** One epic's subtree in the derived {@link ProductStore.tree}: folders in
+ *  first-seen order (the unfiled `''` folder first when present). */
+export interface TreeNode {
+  story: ProductStory;
+  /** True when `tree_kind === 'epic'` OR the row has children (design §2.1). */
+  isEpic: boolean;
+  folders: { name: string; children: ProductStory[] }[];
+  childCount: number;
+}
+
+/** Autosave state of one design artifact (design §4.1 status line). */
+export type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict';
+
+/** Autosave debounce for `PUT /product/attachments/{aid}/content` (§4.1). */
+export const CONTENT_SAVE_DEBOUNCE_MS = 600;
+
+/** Encode UTF-8 text / raw bytes as base64 for the content PUT. Chunked so a
+ *  multi-MB payload doesn't blow the `String.fromCharCode` argument limit. */
+export function toBase64(data: string | Uint8Array): string {
+  const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+/** Group a FLAT story list into the epic tree (design §3.2): children by
+ *  `parent_id` → `folder`. Top-level rows keep list order; a child whose parent
+ *  is missing from `stories` (tag-filtered out / not loaded) is shown at top
+ *  level rather than vanishing. Pure, so the page can run it over a filtered list. */
+export function buildTree(stories: ProductStory[]): TreeNode[] {
+  const byParent = new Map<string, ProductStory[]>();
+  const ids = new Set(stories.map((s) => s.id));
+  for (const s of stories) {
+    if (s.parent_id && ids.has(s.parent_id)) {
+      const list = byParent.get(s.parent_id) ?? [];
+      list.push(s);
+      byParent.set(s.parent_id, list);
+    }
+  }
+  const nodes: TreeNode[] = [];
+  for (const s of stories) {
+    if (s.parent_id && ids.has(s.parent_id)) continue;
+    const kids = byParent.get(s.id) ?? [];
+    const folders: TreeNode['folders'] = [];
+    for (const k of kids) {
+      const name = k.folder ?? '';
+      let f = folders.find((x) => x.name === name);
+      if (!f) {
+        f = { name, children: [] };
+        folders.push(f);
+      }
+      f.children.push(k);
+    }
+    // Unfiled first, then folders alphabetically (case-insensitive).
+    folders.sort((a, b) =>
+      a.name === '' ? -1 : b.name === '' ? 1 : a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+    );
+    nodes.push({ story: s, isEpic: s.tree_kind === 'epic' || kids.length > 0, folders, childCount: kids.length });
+  }
+  return nodes;
+}
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -69,6 +139,23 @@ class ProductStore {
   // ── Story list ─────────────────────────────────────────────────────────────
   stories: ProductStory[] = $state([]);
   selectedId: string | null = $state(null);
+
+  /** The epic tree (design §3.2): `stories` stays FLAT; this groups children by
+   *  `parent_id` → `folder`. Top-level rows keep list order; a child whose parent
+   *  is missing from the list (filtered out / not loaded) is shown at top level
+   *  rather than vanishing. */
+  tree: TreeNode[] = $derived.by(() => buildTree(this.stories));
+
+  /** Children of a story (from the flat list), or `[]`. */
+  childrenOf(id: string): ProductStory[] {
+    return this.stories.filter((s) => s.parent_id === id);
+  }
+
+  /** The parent epic row of a story, when it's loaded. */
+  parentOf(s: ProductStory | null | undefined): ProductStory | null {
+    if (!s?.parent_id) return null;
+    return this.stories.find((x) => x.id === s.parent_id) ?? null;
+  }
 
   // ── Story detail + sub-collections ────────────────────────────────────────
   detail: ProductStoryDetail | null = $state(null);
@@ -137,6 +224,7 @@ class ProductStore {
   }
 
   async select(id: string): Promise<void> {
+    if (this.selectedId !== id) this.revokeBlobCache();
     this.selectedId = id;
     await this.loadDetail();
   }
@@ -157,6 +245,45 @@ class ProductStore {
     this.stories = this.stories.map((s) => (s.id === id ? updated : s));
     if (this.detail) this.detail = { ...this.detail, story: updated };
     return updated;
+  }
+
+  /** PATCH any story by id (not only the selected one) and sync local state. */
+  async patchStory(id: string, patch: UpdateStoryReq): Promise<ProductStory> {
+    const updated = await api.patch<ProductStory>(`/product/stories/${id}`, patch);
+    this.stories = this.stories.map((s) => (s.id === id ? updated : s));
+    if (this.detail && this.detail.story.id === id) this.detail = { ...this.detail, story: updated };
+    return updated;
+  }
+
+  // ── Epic tree (design §3.2) ────────────────────────────────────────────────
+
+  /** Move a story under an epic (`parentId`) into `folder`; `parentId === null`
+   *  detaches it to top level. One level only — the server rejects a parent
+   *  that itself has a parent. */
+  async moveStory(id: string, parentId: string | null, folder = ''): Promise<ProductStory> {
+    return this.patchStory(id, { parent_id: parentId, folder });
+  }
+
+  /** Mark a row as an epic / story / doc (its tree role, not its Jira type). */
+  async setTreeKind(id: string, kind: TreeKind): Promise<ProductStory> {
+    return this.patchStory(id, { tree_kind: kind });
+  }
+
+  /** Create a child draft under an epic and select it. */
+  async createChild(parentId: string, req: CreateChildReq): Promise<ProductStory> {
+    const detail = await api.post<ProductStoryDetail>(
+      `/product/stories/${parentId}/children`,
+      req,
+    );
+    this.stories = [detail.story, ...this.stories];
+    await this.select(detail.story.id);
+    return detail.story;
+  }
+
+  /** Create a top-level epic draft (a draft with `tree_kind:'epic'`). */
+  async createEpic(title?: string | null): Promise<ProductStory> {
+    const story = await this.createDraft(title);
+    return this.setTreeKind(story.id, 'epic');
   }
 
   // Optimistically reflect a Jira title/description edit in local state without a
@@ -461,9 +588,194 @@ class ProductStore {
     return api.get<ProductAttachment[]>(`/product/stories/${id}/attachments`);
   }
 
+  /** Attachments of ANY story (the epic's Design tab lists every child's). */
+  async listAttachmentsOf(sid: string): Promise<ProductAttachment[]> {
+    return api.get<ProductAttachment[]>(`/product/stories/${encodeURIComponent(sid)}/attachments`);
+  }
+
   async uploadAttachment(req: UploadAttachmentReq): Promise<ProductAttachment> {
     const id = this.storyId();
     return api.post<ProductAttachment>(`/product/stories/${id}/attachments`, req);
+  }
+
+  // ── Design artifacts — content autosave (design §2.2 / §4.1) ───────────────
+  // The store OWNS the 600 ms debounce + per-artifact save state; editors
+  // (board, inspector, code view) call `saveAttachmentContent` on every change,
+  // undebounced. `flushAttachmentContent` forces a pending write (blur, switch,
+  // unmount). `conflict` is set by the arena when a live update arrived over
+  // unsaved edits and the user chose to keep theirs — the next save clears it.
+  saveState: Record<string, SaveState> = $state({});
+  /** Last successful save time per attachment (drives "saved 2s ago"). */
+  savedAt: Record<string, number> = $state({});
+  private pendingContent = new Map<string, { data: string | Uint8Array; timer: ReturnType<typeof setTimeout> }>();
+  private inflight = new Map<string, Promise<ProductAttachment | null>>();
+  /** Optimistic-concurrency base per artifact: the `updated_at` we last loaded or
+   *  saved, sent as `base_updated_at` so a stale editor gets a 409, not a clobber. */
+  private contentBase = new Map<string, string>();
+
+  /** Record the server row an editor is working from (on load / accepted live update). */
+  setContentBase(aid: string, updatedAt: string | null | undefined): void {
+    if (updatedAt) this.contentBase.set(aid, updatedAt);
+    else this.contentBase.delete(aid);
+  }
+  contentBaseOf(aid: string): string | null {
+    return this.contentBase.get(aid) ?? null;
+  }
+
+  /** Schedule a debounced `PUT …/content`. Resolves with the row once THIS
+   *  payload (or a later one that superseded it) is persisted; `null` when a
+   *  later edit superseded it before it was sent. */
+  saveAttachmentContent(aid: string, data: string | Uint8Array): Promise<ProductAttachment | null> {
+    const prev = this.pendingContent.get(aid);
+    if (prev) clearTimeout(prev.timer);
+    this.saveState = { ...this.saveState, [aid]: 'dirty' };
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        void this.flushAttachmentContent(aid).then(resolve);
+      }, CONTENT_SAVE_DEBOUNCE_MS);
+      this.pendingContent.set(aid, { data, timer });
+    });
+  }
+
+  /** Send the pending payload for `aid` now (no-op when nothing is pending). */
+  async flushAttachmentContent(aid: string): Promise<ProductAttachment | null> {
+    const pending = this.pendingContent.get(aid);
+    if (!pending) return this.inflight.get(aid) ?? null;
+    clearTimeout(pending.timer);
+    this.pendingContent.delete(aid);
+    // Serialize writes per artifact so two flushes can't race on the wire.
+    const prior = this.inflight.get(aid) ?? Promise.resolve(null);
+    const run = prior.then(async () => {
+      this.saveState = { ...this.saveState, [aid]: 'saving' };
+      try {
+        const body: SaveAttachmentContentReq = {
+          data_b64: toBase64(pending.data),
+          base_updated_at: this.contentBase.get(aid) ?? null,
+        };
+        const att = await api.put<ProductAttachment>(
+          `/product/attachments/${encodeURIComponent(aid)}/content`,
+          body,
+        );
+        this.contentBase.set(aid, att.updated_at);
+        // A newer edit landed while we were saving → stay dirty (its own flush
+        // will flip us to saved); otherwise we're clean.
+        const stillDirty = this.pendingContent.has(aid);
+        this.saveState = { ...this.saveState, [aid]: stillDirty ? 'dirty' : 'saved' };
+        this.savedAt = { ...this.savedAt, [aid]: Date.now() };
+        return att;
+      } catch (e) {
+        // 409 = the row moved on since our base (another editor / the agent):
+        // surface the conflict UI instead of a generic error. Keep the payload
+        // so "keep mine" can re-send it against the fresh base.
+        const conflict = e instanceof ApiError && e.status === 409;
+        if (conflict) this.pendingContent.set(aid, { data: pending.data, timer: setTimeout(() => {}, 0) });
+        this.saveState = { ...this.saveState, [aid]: conflict ? 'conflict' : 'error' };
+        throw e;
+      }
+    });
+    this.inflight.set(aid, run.catch(() => null));
+    try {
+      return await run;
+    } finally {
+      if (this.inflight.get(aid) === run) this.inflight.delete(aid);
+    }
+  }
+
+  /** True while an artifact has unsent, in-flight, FAILED or CONFLICTED edits —
+   *  a save that didn't land is still the user's work and must never be
+   *  clobbered silently by the next live update. */
+  hasUnsavedContent(aid: string): boolean {
+    const st = this.saveState[aid];
+    return this.pendingContent.has(aid) || st === 'dirty' || st === 'saving' || st === 'error' || st === 'conflict';
+  }
+
+  /** "Keep mine" after a 409: adopt the server's current `updated_at` as the base
+   *  and re-send the local payload (the user explicitly chose to overwrite). */
+  async overwriteAttachmentContent(aid: string, data: string | Uint8Array, serverUpdatedAt: string): Promise<ProductAttachment | null> {
+    this.contentBase.set(aid, serverUpdatedAt);
+    const prev = this.pendingContent.get(aid);
+    if (prev) clearTimeout(prev.timer);
+    this.pendingContent.set(aid, { data, timer: setTimeout(() => {}, 0) });
+    return this.flushAttachmentContent(aid);
+  }
+
+  /** Drop a pending (unsent) edit — used when the user accepts a live replace. */
+  discardPendingContent(aid: string): void {
+    const pending = this.pendingContent.get(aid);
+    if (pending) clearTimeout(pending.timer);
+    this.pendingContent.delete(aid);
+    this.saveState = { ...this.saveState, [aid]: 'saved' };
+  }
+
+  markConflict(aid: string): void {
+    this.saveState = { ...this.saveState, [aid]: 'conflict' };
+  }
+
+  /** Fetch an attachment's bytes as text (the arena's initial load). */
+  async attachmentText(aid: string): Promise<string> {
+    return authedText(`/product/attachments/${encodeURIComponent(aid)}`);
+  }
+
+  // ── Design artifacts — authed blob URLs (B → C hand-off: `resolveAttachment`) ─
+  // A `gltf` scene object references an `attachment_id`, never a URL; the 3D
+  // viewport resolves it through here. Cached per attachment so a scene with N
+  // references to one model fetches it once; revoked on story change.
+  private blobCache = new Map<string, Promise<string>>();
+
+  attachmentBlobUrl(aid: string): Promise<string> {
+    let p = this.blobCache.get(aid);
+    if (!p) {
+      p = authedBlobUrl(`/product/attachments/${encodeURIComponent(aid)}`).catch((e) => {
+        this.blobCache.delete(aid);
+        throw e;
+      });
+      this.blobCache.set(aid, p);
+    }
+    return p;
+  }
+
+  /** Forget one cached URL (after a content PUT / live update replaced the bytes). */
+  invalidateBlobUrl(aid: string): void {
+    const p = this.blobCache.get(aid);
+    this.blobCache.delete(aid);
+    void p?.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+  }
+
+  private revokeBlobCache(): void {
+    for (const p of this.blobCache.values()) void p.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+    this.blobCache.clear();
+  }
+
+  /** Leaving the Design module / switching workspace: revoke every cached blob
+   *  URL and drop editor bases (pending timers are flushed by the arena first). */
+  teardown(): void {
+    this.revokeBlobCache();
+    this.contentBase.clear();
+  }
+
+  // ── Blender bridge (design §4.4; optional, detected) ───────────────────────
+
+  async blenderStatus(): Promise<BlenderStatus> {
+    return api.get<BlenderStatus>(`/product/design/blender`);
+  }
+
+  /** Start a headless render/export of a scene3d attachment → job id (202).
+   *  `sid` is the attachment's OWN story (an epic's arena edits children's rows). */
+  async blenderRender(sid: string, aid: string): Promise<{ id: string }> {
+    return api.post<{ id: string }>(
+      `/product/stories/${encodeURIComponent(sid)}/design/${encodeURIComponent(aid)}/blender-render`,
+    );
+  }
+
+  async blenderJob(jobId: string): Promise<BlenderJob> {
+    return api.get<BlenderJob>(`/product/design/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  /** The server-generated Blender script for a scene3d attachment (a download). */
+  async blenderScript(sid: string, aid: string): Promise<string> {
+    return authedText(
+      `/product/stories/${encodeURIComponent(sid)}/design/${encodeURIComponent(aid)}/blender-script`,
+    );
   }
 
   async deleteAttachment(aid: string): Promise<void> {

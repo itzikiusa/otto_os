@@ -14,6 +14,7 @@
     McpToolAccess,
     McpTransport,
   } from '../../lib/api/types';
+  import { MCP_SERVER_TEMPLATES, type McpServerTemplate } from './templates';
 
   interface Props {
     wsId: string;
@@ -40,6 +41,25 @@
   let enabled = $state(false);
 
   let saving = $state(false);
+
+  // ── Templates (static starters, e.g. Blender) ──────────────────────────────
+  let templateId = $state('');
+  const template = $derived(MCP_SERVER_TEMPLATES.find((t) => t.id === templateId) ?? null);
+
+  /** Pre-fill the form from a template; the user still reviews + saves. */
+  function applyTemplate(t: McpServerTemplate | null): void {
+    if (!t) return;
+    name = t.name;
+    transport = t.transport;
+    description = t.description;
+    command = t.command ?? '';
+    argsText = (t.args ?? []).join('\n');
+    envText = Object.entries(t.env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n');
+    url = t.url ?? '';
+    injectionRisk = t.injection_risk;
+    defaultToolAccess = t.default_tool_access;
+    enabled = false; // templates never start enabled
+  }
 
   /** One value per non-empty line. */
   function parseLines(text: string): string[] {
@@ -109,6 +129,29 @@
 
 <Modal title="Add MCP server" width={560} {onclose}>
   <div class="form">
+    <label class="field">
+      <span>Start from a template <em>(optional)</em></span>
+      <select
+        class="template-pick"
+        bind:value={templateId}
+        onchange={() => applyTemplate(template)}
+        aria-label="Server template"
+      >
+        <option value="">— blank —</option>
+        {#each MCP_SERVER_TEMPLATES as t (t.id)}
+          <option value={t.id}>{t.name} · {t.transport}</option>
+        {/each}
+      </select>
+    </label>
+    {#if template?.notes}
+      <p class="tpl-notes">
+        {template.notes}
+        {#if template.link}
+          <a href={template.link} target="_blank" rel="noopener noreferrer">Addon &amp; docs ↗</a>
+        {/if}
+      </p>
+    {/if}
+
     <label class="field">
       <span>Name</span>
       <input bind:value={name} placeholder="e.g. linear, github, web-fetch" />
@@ -246,6 +289,20 @@
   }
   .check input {
     width: auto;
+  }
+  .tpl-notes {
+    margin: -4px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-radius: var(--radius-s, 6px);
+    padding: 8px 10px;
+  }
+  .tpl-notes a {
+    color: var(--accent);
+    margin-inline-start: 4px;
   }
   .warn {
     margin: 0;
