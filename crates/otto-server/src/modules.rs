@@ -4150,16 +4150,39 @@ async fn draft_commit_message(
     let skill_text = resolve_skill_inline(&ctx.context_library, "commit-message");
     let prompt = compose_draft_prompt(&skill_text, &base_prompt);
 
-    let reply = ctx
-        .orchestrator
-        .run_agent(
-            &prompt,
-            &repo.path,
-            None,
-            std::time::Duration::from_secs(150),
-        )
+    // Same path as `draft_pr_core`: a REAL, visible session (watchable from
+    // the WIP panel while it runs) on the configured drafting model with
+    // `lean_turn` — not the headless orchestrator PTY on the user's default
+    // model, which was both invisible and slow.
+    let ws = ctx
+        .workspaces
+        .get(&repo.workspace_id)
         .await
         .map_err(crate::error::ApiError)?;
+    let model = pr_draft_model(&ctx).await;
+    let meta = serde_json::json!({
+        "source": "commit-draft",
+        "model": model,
+        "lean_turn": true,
+    });
+    let title = format!(
+        "Commit draft · {}",
+        if branch.trim().is_empty() { "HEAD" } else { branch.as_str() }
+    );
+    let (reply, session_id) = crate::agent_session::run_session_turn(
+        &ctx,
+        &ws,
+        &user,
+        None,
+        &title,
+        &repo.path,
+        "claude",
+        meta,
+        &prompt,
+        DRAFT_STUCK_AFTER,
+        |_id| {},
+    )
+    .await?;
     let message = parse_commit_draft(&reply);
     // Always carry the Jira key in the subject line (the agent is asked to, but
     // forgets under the Conventional-Commits format) — same guarantee as the PR.
@@ -4171,6 +4194,7 @@ async fn draft_commit_message(
     Ok(Json(otto_core::api::DraftCommitMessageResp {
         message,
         from_staged,
+        session_id: Some(session_id),
     }))
 }
 

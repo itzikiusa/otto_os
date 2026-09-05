@@ -2475,6 +2475,8 @@ export interface DraftCommitMessageResp {
   message: string;
   /** True when drafted from the staged diff; false when it fell back to the working diff. */
   from_staged: boolean;
+  /** The `commit-draft` session that drafted this (same path as `DraftPrResp.session_id`). */
+  session_id?: Id | null;
 }
 
 export interface UpdatePrReq {

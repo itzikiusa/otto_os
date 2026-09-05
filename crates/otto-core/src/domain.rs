@@ -169,7 +169,7 @@ pub struct Session {
 /// kept byte-identical, and every engine that stamps a `meta.source` on the
 /// sessions it owns must list that source here — otherwise its sessions render
 /// as foreground agents AND become durable (exempt from volume cleanup).
-pub const BACKGROUND_SESSION_SOURCES: [&str; 22] = [
+pub const BACKGROUND_SESSION_SOURCES: [&str; 23] = [
     "channel",
     "review",
     "review_summarizer",
@@ -186,6 +186,7 @@ pub const BACKGROUND_SESSION_SOURCES: [&str; 22] = [
     "vault-docs",
     "vault-docs-review",
     "pr-draft",
+    "commit-draft",
     "insights",
     "run_with_otto",
     "goal_loop",
@@ -2623,6 +2624,7 @@ mod tests {
             "vault-docs",
             "vault-docs-review",
             "pr-draft",
+            "commit-draft",
             "insights",
             "run_with_otto",
             "goal_loop",
@@ -2635,6 +2637,6 @@ mod tests {
                 "{src} missing from BACKGROUND_SESSION_SOURCES"
             );
         }
-        assert_eq!(BACKGROUND_SESSION_SOURCES.len(), 22);
+        assert_eq!(BACKGROUND_SESSION_SOURCES.len(), 23);
     }
 }

@@ -12,9 +12,11 @@
     RepoStatusResp,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import DiffViewer from './DiffViewer.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Terminal from '../../lib/components/Terminal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
 
@@ -64,6 +66,23 @@
   let amend = $state(false);
   let committing = $state(false);
   let drafting = $state(false);
+  /** Same watch-the-agent affordance as the PR dialog: drafting runs as a REAL
+   *  `commit-draft` session (a background source — not listed under Agents),
+   *  so it can be embedded here and watched while the spinner runs. The id
+   *  arrives with the POST at the END of the turn; until then the freshest
+   *  commit-draft session created since the draft began is the live one. */
+  let draftSessionId = $state<string | null>(null);
+  let draftStartedAt = $state<string | null>(null);
+  let draftElapsed = $state(0);
+  let showDraftTerm = $state(false);
+  const liveDraftId: string | null = $derived.by(() => {
+    if (draftSessionId) return draftSessionId;
+    if (!drafting || !draftStartedAt) return null;
+    const c = ws.sessions.filter(
+      (s) => (s.meta as { source?: string } | null)?.source === 'commit-draft' && !s.archived && s.created_at >= draftStartedAt!,
+    );
+    return c.length > 0 ? c[c.length - 1].id : null;
+  });
 
   // The draft endpoint reads the staged diff (falling back to the full working
   // diff) — neither includes untracked files, so require something draftable.
@@ -258,6 +277,11 @@
   async function draftMessage(): Promise<void> {
     if (drafting || committing) return;
     drafting = true;
+    draftSessionId = null;
+    draftElapsed = 0;
+    // Slight backdate so a session created in the same second still matches.
+    draftStartedAt = new Date(Date.now() - 2000).toISOString();
+    const tick = setInterval(() => (draftElapsed += 1), 1000);
     try {
       const d = await api.post<DraftCommitMessageResp>(
         `/repos/${repoId}/draft-commit-message`,
@@ -272,6 +296,7 @@
         subject = text.slice(0, nl).trim();
         body = text.slice(nl + 1).replace(/^\s*\n/, '').trimEnd();
       }
+      draftSessionId = d.session_id ?? null;
       toasts.info(
         'Draft ready',
         d.from_staged
@@ -281,6 +306,7 @@
     } catch (e) {
       toasts.error('Draft failed', e instanceof Error ? e.message : String(e));
     } finally {
+      clearInterval(tick);
       drafting = false;
     }
   }
@@ -605,12 +631,27 @@
           : 'Stage a file first — drafting can’t see untracked files'}
       >
         {#if drafting}
-          <span class="spinner-xs"></span>Drafting…
+          <span class="spinner-xs"></span>Drafting…{draftElapsed > 0 ? ` ${draftElapsed}s` : ''}
         {:else}
           <Icon name="zap" size={11} /> Draft
         {/if}
       </button>
+      {#if liveDraftId}
+        <button
+          class="btn small ghost draft-btn"
+          onclick={() => (showDraftTerm = !showDraftTerm)}
+          title={showDraftTerm ? 'Hide the drafting agent' : 'Watch the drafting agent live'}
+        >
+          <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={11} />
+          {showDraftTerm ? 'Hide agent' : 'Watch agent'}
+        </button>
+      {/if}
     </div>
+    {#if liveDraftId && showDraftTerm}
+      <div class="draft-term">
+        <Terminal sessionId={liveDraftId} preferDom showToolbar={false} />
+      </div>
+    {/if}
     <textarea
       class="input body-input"
       rows="2"
@@ -636,6 +677,14 @@
 </div>
 
 <style>
+  .draft-term {
+    height: 220px;
+    margin: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    overflow: hidden;
+    background: var(--term-bg);
+  }
   .wip-panel {
     display: flex;
     flex-direction: column;
