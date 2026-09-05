@@ -215,3 +215,60 @@ test('Terminal · Chat · Split persists across reload; Split shows chat beside 
   await page.keyboard.press('Meta+Shift+C');
   await expect(page.locator('.pane-body[data-view="terminal"]')).toBeVisible();
 });
+
+test('composer is a multi-line box that never scrolls sideways', async ({ page }) => {
+  const view = conv(page);
+  await expect(view).toBeVisible({ timeout: 20_000 });
+  const ta = view.locator('.composer textarea');
+  await expect(ta).toBeVisible();
+  const box = await ta.boundingBox();
+  expect(box && box.height >= 56, `textarea height ${box?.height}`).toBeTruthy();
+  // The placeholder is long: it must wrap, not hide behind a horizontal bar.
+  const overflow = await ta.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+  await ta.fill('one\ntwo\nthree\nfour\nfive\nsix');
+  const grown = await ta.boundingBox();
+  expect(grown && box && grown.height > box.height).toBeTruthy();
+});
+
+test('search finds turns, walks matches and copy buttons exist per turn', async ({ page }) => {
+  const view = conv(page);
+  await expect(view).toBeVisible({ timeout: 20_000 });
+  await view.locator('.conv-head button[title^="Search"]').click();
+  const input = view.locator('.search-in');
+  await expect(input).toBeFocused();
+  await input.fill('PR');
+  const n = view.locator('.search-n');
+  await expect(n).toHaveAttribute('data-search-hits', /^[1-9]\d*$/);
+  await expect(view.locator('.turn.hit').first()).toBeVisible();
+  await input.press('Enter');
+  await expect(view.locator('.turn.current')).toHaveCount(1);
+  await input.press('Escape');
+  await expect(view.locator('.search-in')).toHaveCount(0);
+  await expect(view.locator('.turn.hit')).toHaveCount(0);
+  // Copy affordance on every turn with text (revealed on hover).
+  const turns = view.locator('.turn[data-role]');
+  expect(await view.locator('.turn .copy-btn').count()).toBeGreaterThan(0);
+  await turns.first().hover();
+  await expect(turns.first().locator('.copy-btn')).toBeVisible();
+});
+
+test('an edit step shows +/− stats and a colored diff; touch keeps the tail armed', async ({ page }) => {
+  const view = conv(page);
+  await expect(view).toBeVisible({ timeout: 20_000 });
+  const groups = view.locator('.steps:not(.single) .steps-head');
+  const n = await groups.count();
+  for (let i = 0; i < n; i++) {
+    const g = groups.nth(i);
+    if ((await g.getAttribute('aria-expanded')) !== 'true') await g.click();
+  }
+  const edit = view.locator('.step[data-tool="edit"]').first();
+  await expect(edit, 'fixture must contain an Edit call').toBeVisible();
+  await expect(edit.locator('.step-stats .add')).toContainText(/\+\d+/);
+  await expect(edit.locator('.step-stats .del')).toContainText(/\d+/);
+  await edit.locator('.step-row').click();
+  await expect(edit.locator('.diff-wrap')).toBeVisible();
+  // Keep-alive: the seeded session is live (shell PTY), so touch re-arms → 204.
+  const r = await ctx.post(`${base}/api/v1/sessions/${sessionId}/transcript/touch`);
+  expect(r.status(), await r.text()).toBe(204);
+});

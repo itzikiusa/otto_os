@@ -423,6 +423,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // composer's image inbox, and the History surface.
         .route("/sessions/{id}/transcript", get(transcript::get_transcript))
         .route(
+            "/sessions/{id}/transcript/touch",
+            post(transcript::touch_transcript),
+        )
+        .route(
             "/sessions/{id}/transcript/images/{img_id}",
             get(transcript::transcript_image),
         )

@@ -29,10 +29,14 @@
     status === 'working' ? 'Working…' : status === 'idle' ? 'Idle' : status === 'running' ? 'Running' : status,
   );
 
+  // Three lines by default (rows=3 + line-height), growing with the text up
+  // to ~40% of the window; the textarea itself never scrolls sideways (wrap +
+  // overflow-x hidden), so nothing overlays the placeholder.
   function autosize(): void {
     if (!ta) return;
     ta.style.height = 'auto';
-    ta.style.height = `${Math.min(220, ta.scrollHeight)}px`;
+    const cap = Math.max(160, Math.floor(window.innerHeight * 0.4));
+    ta.style.height = `${Math.min(cap, Math.max(ta.scrollHeight, 0))}px`;
   }
 
   async function send(): Promise<void> {
@@ -119,7 +123,7 @@
       <textarea
         bind:this={ta}
         bind:value={text}
-        rows="1"
+        rows="3"
         placeholder="Message the agent — ⏎ to send, ⇧⏎ for a newline, paste an image to attach"
         spellcheck="true"
         dir="auto"
@@ -157,7 +161,9 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--bg);
-    padding: 6px 6px 6px 10px;
+    padding: 8px 6px 8px 12px;
+    overflow: hidden;
+    min-width: 0;
   }
   .box:focus-within {
     border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
@@ -171,10 +177,16 @@
     background: none;
     color: var(--text);
     font: inherit;
-    font-size: 13px;
-    line-height: 1.45;
-    max-height: 220px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    min-height: 62px;
+    max-height: 40vh;
     padding: 2px 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    scrollbar-gutter: stable;
   }
   textarea::placeholder {
     color: var(--text-dim);

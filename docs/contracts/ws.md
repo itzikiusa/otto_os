@@ -132,11 +132,11 @@ Every variant of `otto_core::event::Event` (`crates/otto-core/src/event.rs`). Th
 the `type` field (snake_case of the variant name); the remaining keys are the payload.
 Delivery scope: **session-family events** (`session_status`, `session_created`,
 `session_meta_updated`, `session_renamed`, `session_removed`, `trail_appended`,
-`tasks_updated`, `transcript_appended`, `artifact_added`) reach only the session's owner (`created_by`), a workspace
+`tasks_updated`, `transcript_appended`, `transcript_live`, `artifact_added`) reach only the session's owner (`created_by`), a workspace
 `admin`, or root — and only after the `viewer`+ membership gate on the event's
 `workspace_id`; other **workspace-scoped events** (improvement, swarm) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**broadcast events** (`Notice`) reach every authenticated client. There are 47
+**broadcast events** (`Notice`) reach every authenticated client. There are 48
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -762,7 +762,7 @@ Canvas scene is attached to or detached from an agent session.
   the event's `session_id` matches the open session.
 - TypeScript type: `{ type: 'canvas_refs_changed'; workspace_id: Id; session_id: Id }`.
 
-### `transcript_appended` / `artifact_added` / `history_index_progress`
+### `transcript_appended` / `transcript_live` / `artifact_added` / `history_index_progress`
 
 Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
 `crates/otto-server/src/transcript_tail.rs` (the per-session live tail, armed by
@@ -771,6 +771,7 @@ Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
 
 ```json
 {"type":"transcript_appended","workspace_id":"…","session_id":"…","cursor":"<record_index>","turns":[{…Turn…}]}
+{"type":"transcript_live","workspace_id":"…","session_id":"…","text":"⏺ Still exploring…"}
 {"type":"artifact_added","workspace_id":"…","session_id":"…","artifact":{…Artifact…}}
 {"type":"history_index_progress","workspace_id":"…","scanned":120,"total":2705,"done":false}
 ```
@@ -782,6 +783,14 @@ Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
   `turns: []`: re-fetch `GET …/transcript`. Session-family scoped
   (owner / workspace admin / root, viewer-gated) — transcript prose and tool
   output never reach other users.
+- `transcript_live` — the agent's in-progress response as currently drawn on
+  the session's terminal screen (plain text rows between the last prompt echo
+  and the input box, spinner rows dropped, ≤ 16 KB tail). The provider writes
+  a transcript record only when a block COMPLETES, so this is the sub-turn
+  streaming signal; pushed at most once per tail poll (700 ms) and only when
+  the text changed. `text: ""` = nothing streaming. Clients show it as a draft
+  under the last turn while the session is `working` and drop it once the
+  folded turn covers it. Session-family scoped.
 - `artifact_added` — the fold found a new artifact (written file, PR link, image).
   Carries the full `Artifact`. Session-family scoped.
 - `history_index_progress` — a `POST /workspaces/{wid}/history/rescan` walk

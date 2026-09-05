@@ -21,6 +21,11 @@ export function fetchImageUrl(sessionId: string, imageId: string): Promise<strin
  *  the text lands as a submitted turn (Track A's `submit_text`, never a raw
  *  paste burst). Isolated here so the endpoint swap is a one-liner once the
  *  dedicated prompt route lands (see §8 of the design doc). */
+/** Keep the live tail armed for an open chat (`POST …/transcript/touch`). */
+export function touchTranscript(sessionId: string): Promise<void> {
+  return api.post<void>(`/sessions/${encodeURIComponent(sessionId)}/transcript/touch`, {});
+}
+
 export function submitPrompt(sessionId: string, text: string): Promise<void> {
   return api.post<void>(`/sessions/${encodeURIComponent(sessionId)}/input`, { text, submit: true });
 }

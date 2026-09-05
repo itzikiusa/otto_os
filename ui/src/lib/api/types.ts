@@ -1233,6 +1233,18 @@ export type OttoEvent =
       turns: Turn[];
     }
   | {
+      /** The agent's in-progress response as drawn on the session's terminal
+       *  screen (plain text, ≤ 16 KB) — pushed by the live tail whenever it changes
+       *  (≤ 1 frame per 700 ms). The provider writes a transcript record only when
+       *  a block completes, so this is the sub-turn streaming signal; the chat shows
+       *  it as a draft under the last turn and drops it once the real turn lands.
+       *  Empty `text` = nothing streaming. Scope::Session. */
+      type: 'transcript_live';
+      workspace_id: Id;
+      session_id: Id;
+      text: string;
+    }
+  | {
       /** The transcript folder registered a new artifact (file / PR / image / …)
        *  for a live session — the Outputs panel and the chat's artifact chips update. */
       type: 'artifact_added';

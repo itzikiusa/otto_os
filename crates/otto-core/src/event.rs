@@ -449,6 +449,18 @@ pub enum Event {
         cursor: String,
         turns: Vec<serde_json::Value>,
     },
+    /// Conversation view: the agent's in-progress response as currently drawn
+    /// on the session's terminal screen (plain text, ≤ 16 KB), pushed by the
+    /// live tail at most once per poll while the text changes. The provider
+    /// writes a transcript record only when a block COMPLETES, so this is the
+    /// only sub-turn signal; clients show it as a draft below the last folded
+    /// turn and drop it once the real turn lands. `text` is empty when nothing
+    /// is streaming. Session-family scoped.
+    TranscriptLive {
+        workspace_id: Id,
+        session_id: Id,
+        text: String,
+    },
     /// Conversation view: the transcript fold found a new artifact (a written
     /// file, PR link, image …). `artifact` is the serialized
     /// `otto_transcript::Artifact`. Session-family scoped.

@@ -81,6 +81,12 @@ export class Conversation {
   tailTick = $state(0);
   /** Artifacts pushed by `artifact_added` since the load (chips at the tail). */
   liveArtifacts: Artifact[] = $state([]);
+  /** The in-progress response read off the terminal screen (`transcript_live`);
+   *  "" when nothing is streaming. Rendered as a draft under the last turn. */
+  liveDraft = $state('');
+  /** Bumped on every `transcript_appended` — the draft is hidden until the
+   *  screen text moves past what the folded turn already shows. */
+  lastAppendAt = $state(0);
   /** Lazy subagent bodies keyed by agent id (`?sub=`). */
   subagents: Record<string, { turns: Turn[]; loading: boolean; error: string | null; has_earlier: boolean; cursor: string }> =
     $state({});
@@ -181,6 +187,25 @@ export class Conversation {
       };
     }
     this.tailTick += 1;
+    this.lastAppendAt = Date.now();
+  }
+
+  /** Apply a `transcript_live` frame (the screen draft). */
+  applyLive(text: string): void {
+    if (text === this.liveDraft) return;
+    this.liveDraft = text;
+  }
+
+  /** Keep the server-side tail armed while this conversation is on screen
+   *  (it stops on its own a few minutes after the last touch). Cheap: no fold. */
+  async touch(): Promise<void> {
+    const sid = this.sessionId;
+    if (!sid) return;
+    try {
+      await api.post<void>(`/sessions/${encodeURIComponent(sid)}/transcript/touch`, {});
+    } catch {
+      /* 409 = no transcript yet (the view is retrying the GET); anything else is transient */
+    }
   }
 
   /** Re-read the newest page and merge it over what we hold (keeps earlier pages). */
@@ -346,6 +371,10 @@ class TranscriptStore {
     switch (ev.type) {
       case 'transcript_appended': {
         this.convs.get(`s:${ev.session_id}`)?.applyDelta(ev.cursor, ev.turns);
+        return true;
+      }
+      case 'transcript_live': {
+        this.convs.get(`s:${ev.session_id}`)?.applyLive(ev.text);
         return true;
       }
       case 'artifact_added': {

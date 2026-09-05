@@ -11,6 +11,7 @@
   import { openFile } from '../../../lib/stores/openfile.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { TOOL_CHROME, fmtBytes, patchToDiff, toolSubtitle } from './format';
+  import { autoLang, ensureHljs, highlightBlock, highlightLine, langFromPath } from '../../../lib/hl';
   import type { Block } from '../../../lib/api/types';
   import { CONV_CTX, type ConvContext } from './context';
 
@@ -27,7 +28,56 @@
   const status = $derived<'ok' | 'err' | 'pending'>(
     block.result == null ? 'pending' : block.result.ok ? 'ok' : 'err',
   );
-  const diff = $derived(block.result?.patch ? patchToDiff(block.result.patch, block.result.file_path) : null);
+  // Edit calls carry `structuredPatch` on the result; older records (and a
+  // failed edit) do not — synthesize a −old/+new hunk from the input so the
+  // change is still shown as a diff, never as two blobs of text.
+  function editInputPatch(): string | null {
+    const input = block.input;
+    if (block.tool !== 'edit' || input == null || typeof input !== 'object') return null;
+    const o = input as { old_string?: unknown; new_string?: unknown; file_path?: unknown };
+    if (typeof o.old_string !== 'string' || typeof o.new_string !== 'string') return null;
+    const oldL = o.old_string.split('\n');
+    const newL = o.new_string.split('\n');
+    const path = typeof o.file_path === 'string' ? o.file_path : 'file';
+    return [
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      `@@ -1,${oldL.length} +1,${newL.length} @@`,
+      ...oldL.map((l) => `-${l}`),
+      ...newL.map((l) => `+${l}`),
+    ].join('\n');
+  }
+  const diff = $derived.by(() => {
+    if (block.result?.patch) return patchToDiff(block.result.patch, block.result.file_path);
+    const synth = editInputPatch();
+    return synth ? patchToDiff(synth, block.result?.file_path ?? null) : null;
+  });
+  const diffStats = $derived.by(() => {
+    if (!diff) return null;
+    let add = 0;
+    let del = 0;
+    for (const f of diff.files) {
+      add += f.added ?? 0;
+      del += f.deleted ?? 0;
+    }
+    return add || del ? { add, del } : null;
+  });
+
+  // Syntax colors: hljs loads lazily (stays out of the main bundle); until it
+  // arrives, and for plain command output, text renders escaped. Language =
+  // the file's extension for read/edit/write, else a bounded auto-detect.
+  let hlReady = $state(false);
+  $effect(() => {
+    if (!open) return;
+    void ensureHljs().then(() => (hlReady = true));
+  });
+  const lang = $derived.by(() => {
+    if (!hlReady) return null;
+    const byPath = filePath ? langFromPath(filePath) : null;
+    if (byPath) return byPath;
+    return autoLang(text);
+  });
+
   const filePath = $derived(block.result?.file_path ?? (block.tool === 'read' || block.tool === 'edit' || block.tool === 'write' ? subtitle || null : null));
   const text = $derived(block.result?.text ?? '');
   const lines = $derived(text ? text.split('\n') : []);
@@ -43,6 +93,8 @@
     }
   });
   let showInput = $state(false);
+  const outHtml = $derived(open && !windowed && text ? highlightBlock(text, lang) : '');
+  const inputHtml = $derived(open && showInput && inputJson ? highlightBlock(inputJson, hlReady ? 'json' : null) : '');
 
   function openInFiles(): void {
     if (!filePath) return;
@@ -62,6 +114,9 @@
       <span class="step-name">{title}</span>
       {#if subtitle && subtitle !== title}<span class="step-sub mono">{subtitle}</span>{/if}
     </span>
+    {#if diffStats}
+      <span class="step-stats mono" title="Lines added / removed"><span class="add">+{diffStats.add}</span> <span class="del">−{diffStats.del}</span></span>
+    {/if}
     {#if block.result?.truncated}
       <span class="chip step-trunc" title="Output capped at 64 KB">{fmtBytes(block.result.bytes)}</span>
     {/if}
@@ -78,7 +133,7 @@
       {#if inputJson}
         <button class="link-btn" onclick={() => (showInput = !showInput)}>{showInput ? 'Hide input' : 'Show input'}</button>
         {#if showInput}
-          <pre class="out mono" dir="ltr">{inputJson}</pre>
+          <pre class="out mono hljs" dir="ltr">{@html inputHtml}</pre>
         {/if}
       {/if}
       {#if diff && diff.files.some((f) => f.hunks.length)}
@@ -91,10 +146,10 @@
         <Markdown md={text} small />
       {:else if windowed}
         <VirtualList items={lines} estimateHeight={18} class="out-vlist">
-          {#snippet row(line)}<div class="out-line mono" dir="ltr">{line || ' '}</div>{/snippet}
+          {#snippet row(line)}<div class="out-line mono hljs" dir="ltr">{@html highlightLine(line || ' ', lang)}</div>{/snippet}
         </VirtualList>
       {:else if text}
-        <pre class="out mono" class:err={status === 'err'} dir="ltr">{text}</pre>
+        <pre class="out mono hljs" class:err={status === 'err'} dir="ltr" data-lang={lang}>{@html outHtml}</pre>
       {:else if !block.result.image_ids.length}
         <div class="pending dim">(no output)</div>
       {/if}
@@ -254,6 +309,38 @@
     overflow: hidden;
     max-height: 520px;
     overflow-y: auto;
+  }
+  /* Added / removed lines must be unmistakable inside a chat: stronger tint
+     than the git diff viewer's default plus a colored edge, theme-mixed. */
+  .diff-wrap :global(tr.dline.add),
+  .diff-wrap :global(.vrow.dline.add),
+  .diff-wrap :global(.code.half.add) {
+    background: color-mix(in srgb, var(--status-working, #3fb950) 22%, transparent);
+    box-shadow: inset 3px 0 0 var(--status-working, #3fb950);
+  }
+  .diff-wrap :global(tr.dline.del),
+  .diff-wrap :global(.vrow.dline.del),
+  .diff-wrap :global(.code.half.del) {
+    background: color-mix(in srgb, var(--status-exited, #e5534b) 20%, transparent);
+    box-shadow: inset 3px 0 0 var(--status-exited, #e5534b);
+  }
+  .step-stats {
+    font-size: 10.5px;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .step-stats .add {
+    color: var(--status-working, #3fb950);
+    font-weight: 600;
+  }
+  .step-stats .del {
+    color: var(--status-exited, #e5534b);
+    font-weight: 600;
+  }
+  /* hljs paints tokens only; the block keeps the chat's surface. */
+  .out.hljs,
+  .out-line.hljs {
+    color: var(--text);
   }
   .file-chip {
     align-self: flex-start;

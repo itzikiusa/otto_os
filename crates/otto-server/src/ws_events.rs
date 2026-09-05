@@ -207,6 +207,11 @@ fn scope_of(event: &Event) -> Scope<'_> {
             workspace_id,
             ..
         }
+        | Event::TranscriptLive {
+            session_id,
+            workspace_id,
+            ..
+        }
         | Event::ArtifactAdded {
             session_id,
             workspace_id,
@@ -625,6 +630,11 @@ mod tests {
                 workspace_id: "ws1".into(),
                 cursor: "0".into(),
                 turns: Vec::new(),
+            },
+            Event::TranscriptLive {
+                session_id: "s1".into(),
+                workspace_id: "ws1".into(),
+                text: String::new(),
             },
             Event::ArtifactAdded {
                 session_id: "s1".into(),

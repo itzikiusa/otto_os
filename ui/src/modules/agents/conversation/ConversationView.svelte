@@ -19,6 +19,7 @@
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import TurnItem from './TurnItem.svelte';
   import Composer from './Composer.svelte';
+  import LiveDraft from './LiveDraft.svelte';
   import { transcript, type TranscriptSource } from '../../../lib/stores/transcript.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
@@ -89,6 +90,113 @@
   const live = $derived(!!sessionId && (status === 'working' || status === 'running'));
   const canCompose = $derived(!!sessionId && !readonly && ws.myRole !== 'viewer');
   const showSystem = $derived(transcript.showSystem);
+  // The session is alive (has a PTY) — the tail is worth keeping warm.
+  const alive = $derived(!!sessionId && status !== 'exited' && status !== 'reconnectable');
+
+  // ---- liveness: this VIEW keeps the server tail armed -----------------------
+  // The tail stops a few minutes after the last touch, so an open chat pings
+  // once a minute (only while mounted and the session is alive — closing the
+  // view lets it die; nothing else in the app arms tails).
+  const TOUCH_EVERY_MS = 60_000;
+  $effect(() => {
+    if (!alive) return;
+    const c = conv;
+    const id = setInterval(() => void c.touch(), TOUCH_EVERY_MS);
+    return () => clearInterval(id);
+  });
+  // No transcript yet (first prompt not sent, provider id not captured, Codex
+  // rollout not matched): nothing will push an event, so retry the read every
+  // few seconds while the session is alive instead of leaving a dead page.
+  const RETRY_EVERY_MS = 5_000;
+  $effect(() => {
+    if (!alive || !t?.unavailable_reason || conv.loading) return;
+    const c = conv;
+    const id = setTimeout(() => void c.load(), RETRY_EVERY_MS);
+    return () => clearTimeout(id);
+  });
+
+  // ---- live draft (sub-turn streaming off the terminal screen) --------------
+  // Shown only while the agent is WORKING and the draft is not already folded.
+  const lastAssistantText = $derived.by(() => {
+    for (let i = conv.turns.length - 1; i >= 0; i--) {
+      const turn = conv.turns[i];
+      if (turn.role !== 'assistant') continue;
+      const texts = turn.blocks.filter((b) => b.kind === 'text').map((b) => (b as { md: string }).md);
+      return texts.join('\n');
+    }
+    return '';
+  });
+  const draft = $derived(sessionId && status === 'working' ? conv.liveDraft : '');
+  // Follow the tail while the draft grows (same rule as appended turns).
+  $effect(() => {
+    void draft.length;
+    if (untrack(() => atBottom)) void tick().then(scrollToBottom);
+  });
+
+  // ---- search within the loaded conversation ---------------------------------
+  let searchOpen = $state(false);
+  let query = $state('');
+  let searchEl = $state<HTMLInputElement | null>(null);
+  let hitIdx = $state(0);
+  function turnText(turn: (typeof conv.turns)[number]): string {
+    const parts: string[] = [];
+    for (const b of turn.blocks) {
+      if (b.kind === 'text') parts.push(b.md);
+      else if (b.kind === 'tool_call') parts.push(b.title, b.name, b.result?.text ?? '');
+      else if (b.kind === 'queued') parts.push(b.text);
+    }
+    return parts.join('\n').toLowerCase();
+  }
+  const hits = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [] as string[];
+    return conv.turns.filter((turn) => turnText(turn).includes(q)).map((turn) => turn.id);
+  });
+  $effect(() => {
+    void hits.length;
+    hitIdx = 0;
+  });
+  function jumpTo(i: number): void {
+    if (!hits.length) return;
+    hitIdx = ((i % hits.length) + hits.length) % hits.length;
+    const id = hits[hitIdx];
+    // Make sure the turn is in the mounted window, then scroll it into view.
+    const at = conv.turns.findIndex((turn) => turn.id === id);
+    if (at >= 0 && (at < winStart || at >= winEnd)) {
+      followTail = false;
+      manualStart = Math.max(0, at - Math.floor(MAX_MOUNTED / 2));
+    }
+    void tick().then(() => {
+      const el = listEl?.querySelector(`[data-turn-id="${CSS.escape(id)}"]`);
+      el?.scrollIntoView({ block: 'center' });
+      atBottom = false;
+    });
+  }
+  function openSearch(): void {
+    searchOpen = true;
+    void tick().then(() => searchEl?.select());
+  }
+  function closeSearch(): void {
+    searchOpen = false;
+    query = '';
+  }
+  function onSearchKey(e: KeyboardEvent): void {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSearch();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      jumpTo(hitIdx + (e.shiftKey ? -1 : 1));
+    }
+  }
+  function onConvKey(e: KeyboardEvent): void {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      openSearch();
+    }
+  }
+  const currentHit = $derived(hits[hitIdx] ?? null);
 
   // ---- scroll: follow the tail unless the reader scrolled up ------------------
   let listEl = $state<HTMLDivElement | null>(null);
@@ -168,7 +276,8 @@
   const unavailable = $derived(t?.unavailable_reason ? UNAVAILABLE[t.unavailable_reason] : null);
 </script>
 
-<div class="conv" data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null}>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="conv" data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey}>
   <header class="conv-head">
     {#if t?.provider && hasProviderIcon(t.provider)}<ProviderIcon provider={t.provider} size={13} />{/if}
     <span class="conv-title" title={t?.title ?? ''}>{t?.title ?? (conv.loading ? 'Loading…' : 'Conversation')}</span>
@@ -182,6 +291,25 @@
       </span>
     {/if}
     <span class="grow"></span>
+    {#if searchOpen}
+      <div class="search" role="search">
+        <Icon name="search" size={12} />
+        <input
+          bind:this={searchEl}
+          bind:value={query}
+          class="search-in"
+          placeholder="Search this conversation"
+          aria-label="Search this conversation"
+          onkeydown={onSearchKey}
+        />
+        <span class="search-n dim" data-search-hits={hits.length}>{hits.length ? `${hitIdx + 1}/${hits.length}` : query ? '0' : ''}</span>
+        <button class="icon-btn" title="Previous match (⇧⏎)" aria-label="Previous match" disabled={!hits.length} onclick={() => jumpTo(hitIdx - 1)}><Icon name="chevronUp" size={11} /></button>
+        <button class="icon-btn" title="Next match (⏎)" aria-label="Next match" disabled={!hits.length} onclick={() => jumpTo(hitIdx + 1)}><Icon name="chevronDown" size={11} /></button>
+        <button class="icon-btn" title="Close (Esc)" aria-label="Close search" onclick={closeSearch}><Icon name="x" size={11} /></button>
+      </div>
+    {:else}
+      <button class="icon-btn" title="Search this conversation (⌘F)" aria-label="Search this conversation" onclick={openSearch}><Icon name="search" size={12} /></button>
+    {/if}
     <label class="sys-toggle" title="Reveal system reminders, hooks, attachments and injected queue items">
       <input type="checkbox" checked={showSystem} onchange={(e) => transcript.setShowSystem((e.currentTarget as HTMLInputElement).checked)} />
       Show system
@@ -214,8 +342,16 @@
         </div>
       {/if}
       {#each items as item, i (item.id)}
-        <TurnItem {item} live={live && !hasLater && i === items.length - 1 && item.role === 'assistant'} />
+        <TurnItem
+          {item}
+          live={live && !hasLater && i === items.length - 1 && item.role === 'assistant'}
+          hit={!!query && hits.includes(item.id)}
+          current={item.id === currentHit}
+        />
       {/each}
+      {#if draft && !hasLater}
+        <LiveDraft text={draft} lastText={lastAssistantText} />
+      {/if}
       {#if hasLater}
         <div class="earlier">
           <button class="btn small ghost" onclick={loadLater} data-later={conv.turns.length - winEnd}>
@@ -283,6 +419,39 @@
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
+  }
+  .search {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+    border-radius: var(--radius-s);
+    background: var(--bg);
+    padding: 0 4px 0 6px;
+    height: 22px;
+    color: var(--text-dim);
+    min-width: 0;
+  }
+  .search-in {
+    border: 0;
+    outline: 0;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-size: 11.5px;
+    width: 180px;
+    min-width: 0;
+  }
+  .search-n {
+    font-size: 10.5px;
+    min-width: 28px;
+    text-align: center;
+    white-space: nowrap;
+  }
+  @media (max-width: 640px) {
+    .search-in {
+      width: 110px;
+    }
   }
   .sys-toggle {
     display: inline-flex;
