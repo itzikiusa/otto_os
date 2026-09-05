@@ -122,7 +122,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
 
         // Create the run row, then execute in a background task.
         let run = match workflows_repo
-            .create_run(&wf.id, &wf.workspace_id, &input)
+            .create_run(&wf.id, &wf.workspace_id, &input, None)
             .await
         {
             Ok(r) => r,
@@ -352,7 +352,7 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
                 let input = Value::Object(input_map);
 
                 let run = match workflows_repo
-                    .create_run(&wf.id, &wf.workspace_id, &input)
+                    .create_run(&wf.id, &wf.workspace_id, &input, None)
                     .await
                 {
                     Ok(r) => r,

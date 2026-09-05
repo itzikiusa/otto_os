@@ -216,6 +216,42 @@ impl Spawner for RecordingSpawner {
     }
 }
 
+/// In-memory `MonitorSink`: records every statement, answers queries with
+/// canned rows keyed by a substring of the SQL.
+#[derive(Default)]
+struct FakeSink {
+    available: bool,
+    execs: Mutex<Vec<String>>,
+    inserts: Mutex<Vec<(String, String)>>,
+    /// `(sql substring, rows)` — first match wins; no match ⇒ empty.
+    canned: Mutex<Vec<(String, Vec<serde_json::Value>)>>,
+}
+
+impl otto_k8s::MonitorSink for FakeSink {
+    fn available(&self) -> bool {
+        self.available
+    }
+    fn exec<'a>(&'a self, sql: &'a str) -> otto_k8s::BoxFut<'a, Result<()>> {
+        self.execs.lock().unwrap().push(sql.to_string());
+        Box::pin(async { Ok(()) })
+    }
+    fn insert_ndjson<'a>(&'a self, table: &'a str, ndjson: &'a str) -> otto_k8s::BoxFut<'a, Result<()>> {
+        self.inserts.lock().unwrap().push((table.to_string(), ndjson.to_string()));
+        Box::pin(async { Ok(()) })
+    }
+    fn query_rows<'a>(&'a self, sql: &'a str) -> otto_k8s::BoxFut<'a, Result<Vec<serde_json::Value>>> {
+        let rows = self
+            .canned
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(needle, _)| sql.contains(needle.as_str()))
+            .map(|(_, rows)| rows.clone())
+            .unwrap_or_default();
+        Box::pin(async move { Ok(rows) })
+    }
+}
+
 #[derive(Clone)]
 struct TestCtx {
     pool: SqlitePool,
@@ -224,10 +260,15 @@ struct TestCtx {
     data_dir: Arc<tempfile::TempDir>,
     spawner: Arc<dyn Spawner>,
     recorder: Arc<RecordingSpawner>,
+    sink: Arc<FakeSink>,
 }
 
 impl TestCtx {
     async fn new() -> (Self, User) {
+        Self::with_sink(true).await
+    }
+
+    async fn with_sink(available: bool) -> (Self, User) {
         let _ = fake();
         let pool = mem_pool().await;
         let user = seed_root(&pool).await;
@@ -241,6 +282,10 @@ impl TestCtx {
                 data_dir: Arc::new(tempfile::tempdir().unwrap()),
                 spawner: recorder.clone(),
                 recorder,
+                sink: Arc::new(FakeSink {
+                    available,
+                    ..FakeSink::default()
+                }),
             },
             user,
         )
@@ -262,6 +307,9 @@ impl K8sCtx for TestCtx {
     }
     fn spawner(&self) -> &Arc<dyn Spawner> {
         &self.spawner
+    }
+    fn monitor_sink(&self) -> Option<Arc<dyn otto_k8s::MonitorSink>> {
+        Some(self.sink.clone())
     }
 }
 
@@ -909,6 +957,331 @@ async fn logs_endpoint_returns_text_and_streams_when_following() {
         !follow.contains("--request-timeout"),
         "streams carry no request timeout"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Monitoring routes
+// ---------------------------------------------------------------------------
+
+fn monitor_cfg(enabled: bool, interval: u32) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": enabled,
+        "interval_secs": interval,
+        "namespaces": [],
+        "probes": [{
+            "name": "info", "port": 9000, "path": "/actuator/info", "format": "json",
+            "mappings": [{"field": "memory_stats.sys", "metric": "mem_sys_bytes", "unit": "bytes_human"}]
+        }, {
+            "name": "health", "port": 9000, "path": "/actuator/health", "format": "health"
+        }],
+        "exclusions": [{"kind": "pod", "match": "old-*"}],
+        "transport": "auto",
+        "concurrency": 4,
+        "retention_days": 7
+    })
+}
+
+#[tokio::test]
+async fn monitor_put_validates_and_persists() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+
+    let (st, body, text) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}/monitor"), None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["config"]["enabled"], false);
+    assert!(body["status"].is_null());
+    assert!(body["presets"].as_array().unwrap().len() >= 3);
+
+    let (st, body, _) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(monitor_cfg(true, 5)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid");
+    assert!(body["message"].as_str().unwrap().contains("interval_secs"));
+
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(monitor_cfg(true, 60)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["config"]["enabled"], true);
+    assert_eq!(body["config"]["probes"][0]["mappings"][0]["unit"], "bytes_human");
+    assert_eq!(body["config"]["exclusions"][0]["kind"], "pod");
+
+    let (st, body, _) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}/monitor"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["config"]["enabled"], true);
+    assert_eq!(body["config"]["retention_days"], 7);
+}
+
+#[tokio::test]
+async fn monitor_enabling_without_sink_is_409() {
+    let (ctx, user) = TestCtx::with_sink(false).await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let (st, body, _) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(monitor_cfg(true, 60)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "conflict");
+    // Saving it disabled is fine without ClickHouse.
+    let (st, _, text) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(monitor_cfg(false, 60)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+}
+
+#[tokio::test]
+async fn monitor_overview_rejects_bad_window_and_lists_clusters() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/overview?window=1y", None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/overview?window=6h", None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["cluster"]["id"], c["id"]);
+    assert_eq!(rows[0]["enabled"], false);
+    assert_eq!(rows[0]["health"], "off");
+}
+
+#[tokio::test]
+async fn monitor_series_rejects_bad_ident() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let (st, body, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor/series?metric=x;drop&window=1h"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid");
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor/series?metric=http_requests_total&workload=web&window=1h"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["kind"], "rate");
+    assert!(body["points"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn monitor_run_now_sweeps_pods_and_writes_samples() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let (st, _, text) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(monitor_cfg(true, 60)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+
+    let (st, body, text) = call(&ctx, &user, "POST", &format!("/k8s/clusters/{id}/monitor/run"), None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["pods_seen"], 7, "{body}");
+    assert!(body["last_ok_at"].is_string(), "{body}");
+    assert_eq!(body["metrics_server"], "ok");
+    // The fake kubectl answers every unknown argv with `{}` and exit 0, so the
+    // proxy probe "succeeds" and the auto transport picks it.
+    assert_eq!(body["transport_used"], "proxy");
+    assert!(body.get("snapshot").is_none(), "snapshot is never serialised");
+
+    let inserts = ctx.sink.inserts.lock().unwrap().clone();
+    let samples: Vec<&str> = inserts
+        .iter()
+        .filter(|(t, _)| t == "k8s_samples")
+        .flat_map(|(_, nd)| nd.lines())
+        .collect();
+    assert!(samples.iter().any(|l| l.contains("\"metric\":\"restarts_total\"")));
+    assert!(samples.iter().any(|l| l.contains("\"metric\":\"cpu_millis\"")), "metrics-server merged");
+    assert!(samples.iter().any(|l| l.contains("\"metric\":\"up\"")), "health probe");
+    assert!(samples.iter().all(|l| l.contains(&format!("\"cluster_id\":\"{id}\""))));
+    // Excluded pod (old-*) is swept but never scraped.
+    assert!(!samples.iter().any(|l| l.contains("old-terminating") && l.contains("\"metric\":\"up\"")));
+    let execs = ctx.sink.execs.lock().unwrap().clone();
+    assert!(execs.iter().any(|q| q.contains("CREATE TABLE IF NOT EXISTS k8s_samples")));
+
+    let (st, body, _) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}/monitor"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["status"]["pods_seen"], 7);
+
+    // Second run diffs against the stored snapshot: no restarts, no churn.
+    let (st, _, _) = call(&ctx, &user, "POST", &format!("/k8s/clusters/{id}/monitor/run"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let inserts = ctx.sink.inserts.lock().unwrap().clone();
+    let churn = inserts
+        .iter()
+        .filter(|(t, _)| t == "k8s_events")
+        .flat_map(|(_, nd)| nd.lines())
+        .filter(|l| l.contains("\"kind\":\"churn\"") || l.contains("\"kind\":\"restart\""))
+        .count();
+    assert_eq!(churn, 0);
+}
+
+#[tokio::test]
+async fn monitor_test_probes_reports_per_probe_parse() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(monitor_cfg(false, 60)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/monitor/test"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["namespace"], "shop");
+    assert_eq!(body["transport"], "proxy");
+    assert_eq!(body["metrics_server"], "ok");
+    let probes = body["probes"].as_array().unwrap();
+    assert_eq!(probes.len(), 2);
+    let info = probes.iter().find(|p| p["name"] == "info").unwrap();
+    assert_eq!(info["ok"], true);
+    assert_eq!(info["parse_errors"], 1, "mapping path missing in the `{{}}` body");
+    let health = probes.iter().find(|p| p["name"] == "health").unwrap();
+    assert!(health["samples"].as_array().unwrap().iter().any(|s| s["metric"] == "up" && s["value"] == 1.0));
+
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/monitor/test"),
+        Some(serde_json::json!({"pod": "nope"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn monitor_events_parse_detail_and_filter() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    ctx.sink.canned.lock().unwrap().push((
+        "FROM k8s_events".into(),
+        vec![serde_json::json!({
+            "ts": "2026-09-05 08:00:00.000", "namespace": "shop", "workload": "frb", "pod": "frb-1", "container": "frb",
+            "kind": "restart", "class": "oom", "reason": "OOMKilled", "exit_code": 137,
+            "detail": "{\"planned_by\":\"\",\"prev_restarts\":0,\"next_restarts\":1}", "actor": ""
+        })],
+    ));
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor/events?window=24h&class=oom"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body[0]["class"], "oom");
+    assert_eq!(body[0]["detail"]["next_restarts"], 1, "detail JSON is parsed");
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor/events?class=bad%20class"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn monitor_health_digest_reports_disabled_then_stats() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap();
+    let (st, body, _) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}/monitor/health"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["collector"]["enabled"], false);
+
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(monitor_cfg(true, 60)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, _) = call(&ctx, &user, "POST", &format!("/k8s/clusters/{id}/monitor/run"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    ctx.sink.canned.lock().unwrap().push((
+        "argMax(value, ts) AS mem".into(),
+        vec![serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web-5d4c-abcde", "pod": "web-5d4c-abcde", "mem": 900.0, "metric": "mem_sys_bytes"})],
+    ));
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor/health?window=1h"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["collector"]["enabled"], true);
+    assert_eq!(body["pods"]["total"], 7);
+    assert!(body["thresholds"]["mem_pct"].is_number());
+    assert!(body["restarts"]["oom"].is_array());
+
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor/workloads?window=1h"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let wls = body["workloads"].as_array().unwrap();
+    let web = wls.iter().find(|w| w["workload"] == "web-5d4c-abcde").expect("web workload from snapshot");
+    assert_eq!(web["mem_bytes"], 900.0);
+    assert!(web["spark"]["mem"].is_array());
 }
 
 #[tokio::test]

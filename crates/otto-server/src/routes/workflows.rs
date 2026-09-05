@@ -466,7 +466,7 @@ pub async fn run_workflow(
 
     let input = req.input.unwrap_or(Value::Null);
     let run = repo(&ctx)
-        .create_run(&wf.id, &wf.workspace_id, &input)
+        .create_run(&wf.id, &wf.workspace_id, &input, Some(&user.id))
         .await
         .map_err(ApiError)?;
 
@@ -1359,7 +1359,7 @@ pub async fn webhook_trigger(
     }
 
     let run = repo(&ctx)
-        .create_run(&wf.id, &wf.workspace_id, &input)
+        .create_run(&wf.id, &wf.workspace_id, &input, None)
         .await
         .map_err(ApiError)?;
 

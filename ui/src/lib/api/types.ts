@@ -1087,6 +1087,16 @@ export type OttoEvent =
       state: string;
     }
   | {
+      /** Kubernetes monitoring: a collector cycle finished for `cluster_id`.
+       *  The Monitor dashboard re-fetches its overview / workloads. */
+      type: 'k8s_monitor_cycle';
+      cluster_id: Id;
+      ok: boolean;
+      pods_scraped: number;
+      pods_failed: number;
+      cycle_ms: number;
+    }
+  | {
       /** A canvas scene's source doc changed — pushed LIVE while an agent edits
        *  the backing file (per-poll) and once with the committed result. The
        *  Canvas page re-renders `doc` for the matching `scene_id`. */
@@ -2475,6 +2485,8 @@ export interface DraftCommitMessageResp {
   message: string;
   /** True when drafted from the staged diff; false when it fell back to the working diff. */
   from_staged: boolean;
+  /** The `commit-draft` session that drafted this (same path as `DraftPrResp.session_id`). */
+  session_id?: Id | null;
 }
 
 export interface UpdatePrReq {
@@ -4348,6 +4360,8 @@ export interface WorkflowRun {
   id: Id;
   workflow_id: Id;
   workspace_id: Id;
+  /** User who started the run (its agent sessions are owned by them); null for trigger/schedule/chat runs. */
+  created_by?: Id | null;
   status: WorkflowRunStatus;
   input: unknown;
   nodes: NodeRunState[];
@@ -7258,6 +7272,260 @@ export interface K8sActionResp {
   ok: boolean;
   message: string;
   output?: string | null;
+}
+
+// ---- Kubernetes monitoring (`/k8s/monitor/*`, `/k8s/clusters/{id}/monitor*`) ----
+
+export type K8sProbeFormat = 'prometheus' | 'json' | 'health';
+export type K8sUnit = 'number' | 'bytes' | 'bytes_human' | 'duration_human' | 'percent';
+export type K8sMonitorTransport = 'auto' | 'proxy' | 'port_forward';
+
+export interface K8sMapping {
+  /** Dotted path into the JSON body, e.g. `memory_stats.sys`; numeric segments index arrays. */
+  field: string;
+  /** Emit a sample under this metric name. */
+  metric?: string | null;
+  /** Attach the (string) value as a pod-level label on every sample of the cycle. */
+  label?: string | null;
+  unit?: K8sUnit;
+}
+
+export interface K8sProbe {
+  name: string;
+  /** Omitted ⇒ the container's first declared port. */
+  port?: number | null;
+  /** Must start with `/`. */
+  path: string;
+  format: K8sProbeFormat;
+  mappings?: K8sMapping[];
+  /** Series-name globs (prometheus only); empty include = everything. */
+  include?: string[];
+  exclude?: string[];
+  timeout_ms?: number;
+}
+
+export type K8sExclusion =
+  | { kind: 'namespace'; match: string }
+  | { kind: 'pod'; match: string }
+  /** Glob against `<kind>:<workload>`, e.g. `cronjob:*`. */
+  | { kind: 'workload'; match: string }
+  /** `k=v,k2!=v2,k3` (bare key = exists). */
+  | { kind: 'label'; selector: string };
+
+export interface K8sMonitorConfig {
+  enabled: boolean;
+  /** 15..3600 */
+  interval_secs: number;
+  /** `[]` ⇒ the cluster's default namespace (required when that is null). */
+  namespaces: string[];
+  /** ≤ 10 */
+  probes: K8sProbe[];
+  exclusions: K8sExclusion[];
+  transport: K8sMonitorTransport;
+  /** 1..32 parallel port-forwards */
+  concurrency: number;
+  /** 1..90 */
+  retention_days: number;
+  /** Prometheus series kept per pod per cycle (100..10000, default 1500); `_bucket` series are dropped first. */
+  series_cap: number;
+  /** Probe metrics-server every cycle; off = the call is skipped and status reports `disabled`. */
+  metrics_server: boolean;
+}
+
+export interface K8sMonitorStatus {
+  cluster_id: Id;
+  last_cycle_at?: string | null;
+  last_ok_at?: string | null;
+  last_error: string;
+  transport_used: string;
+  /** `ok` | `absent` | `disabled` | `unknown` | `forbidden: <kubectl message>` */
+  metrics_server: string;
+  pods_seen: number;
+  pods_scraped: number;
+  pods_failed: number;
+  cycle_ms: number;
+}
+
+export interface K8sMonitorPreset {
+  id: string;
+  title: string;
+  probes: K8sProbe[];
+}
+
+export interface K8sMonitorResp {
+  config: K8sMonitorConfig;
+  status: K8sMonitorStatus | null;
+  presets: K8sMonitorPreset[];
+}
+
+export interface K8sMonitorTestProbe {
+  name: string;
+  ok: boolean;
+  status?: number;
+  ms?: number;
+  port?: number;
+  samples?: { metric: string; labels: Record<string, string>; value: number }[];
+  sample_count?: number;
+  labels?: Record<string, string>;
+  parse_errors?: number;
+  capped?: boolean;
+  body_preview?: string;
+  error?: string;
+}
+
+export interface K8sMonitorTestResp {
+  namespace: string;
+  pod: string;
+  workload: string;
+  transport: string;
+  metrics_server: string;
+  probes: K8sMonitorTestProbe[];
+}
+
+export interface K8sRestartCounts {
+  oom: number;
+  crash: number;
+  probe: number;
+  unknown: number;
+}
+
+export type K8sMonitorHealth = 'healthy' | 'degraded' | 'incident' | 'off' | 'unknown';
+
+export interface K8sMonitorOverviewRow {
+  cluster: { id: Id; name: string; environment: Environment; color?: string | null };
+  enabled: boolean;
+  interval_secs: number;
+  status: K8sMonitorStatus | null;
+  health: K8sMonitorHealth;
+  window: string;
+  pods: { running: number; pending: number; failed: number; crashloop: number; total: number };
+  /** In-place, unplanned restarts in the window. */
+  restarts: K8sRestartCounts;
+  /** Planned pod replacements (rollouts, scales, drains, Otto actions). */
+  churn: number;
+  mem: { used: number; limit: number; pct: number };
+  rps: number;
+  err_pct: number;
+  drift: { workload: string; versions: string[] }[];
+  workloads: number;
+}
+
+/** One replica of a workload (the per-pod view). */
+export interface K8sMonitorPodStat {
+  pod: string;
+  node: string;
+  phase: string;
+  ready: boolean;
+  version: string;
+  /** Latest memory sample; 0 = not sampled. */
+  mem_bytes: number;
+  mem_limit: number;
+  /** % of this pod's own limit. */
+  mem_pct: number;
+  restarts_lifetime: number;
+  /** Unplanned restarts inside the window. */
+  restarts: K8sRestartCounts;
+  crashloop: boolean;
+  age_seconds: number;
+}
+
+export interface K8sMonitorWorkloadRow {
+  namespace: string;
+  workload: string;
+  kind: string;
+  pods: number;
+  ready: number;
+  /** Sum over pods (capacity view). */
+  mem_bytes: number;
+  mem_limit: number;
+  /** % of limit for the worst pod. */
+  mem_pct: number;
+  /** Per-pod: average and hungriest pod. */
+  mem_avg: number;
+  mem_max: number;
+  mem_max_pod: string;
+  mem_sampled: number;
+  pods_detail: K8sMonitorPodStat[];
+  mem_trend_pct?: number | null;
+  restarts: K8sRestartCounts;
+  churn_planned: number;
+  churn_unknown: number;
+  rps: number;
+  err_pct: number;
+  err_pct_baseline: number;
+  rps_baseline: number;
+  latency_kind: 'p95' | 'avg' | '';
+  latency_ms: number;
+  latency_baseline_ms: number;
+  versions: string[];
+  crashloop: number;
+  spark: { mem: number[]; rps: number[] };
+}
+
+export interface K8sMonitorWorkloadsResp {
+  window: string;
+  step_secs: number;
+  enabled: boolean;
+  status: K8sMonitorStatus | null;
+  /** Every namespace in the last snapshot, regardless of the `ns` filter. */
+  namespaces: string[];
+  workloads: K8sMonitorWorkloadRow[];
+}
+
+export interface K8sMonitorSeries {
+  metric: string;
+  kind: 'gauge' | 'rate';
+  step_secs: number;
+  points: { t: string; v: number }[];
+}
+
+export type K8sRestartClass = 'oom' | 'crash' | 'probe' | 'planned' | 'completed' | 'unknown';
+
+export interface K8sMonitorEvent {
+  ts: string;
+  namespace: string;
+  workload: string;
+  pod: string;
+  container: string;
+  /** `version` = a workload's dominant build version changed (`reason` is `<from> → <to>`). */
+  kind: 'restart' | 'churn' | 'version' | 'k8s_event';
+  class: K8sRestartClass | '';
+  reason: string;
+  exit_code: number;
+  detail: Record<string, unknown> | null;
+  actor: string;
+}
+
+/** The `k8s_health` digest (`GET /k8s/clusters/{id}/monitor/health`). */
+export interface K8sHealthDigest {
+  cluster: string;
+  cluster_id: Id;
+  environment?: Environment;
+  window: string;
+  collected_at?: string | null;
+  collector: {
+    enabled: boolean;
+    ok: boolean;
+    last_ok_at?: string | null;
+    error: string;
+    transport?: string;
+    metrics_server?: string;
+    pods_seen?: number;
+    pods_scraped?: number;
+    pods_failed?: number;
+    cycle_ms?: number;
+  };
+  pods?: { running: number; pending: number; failed: number; succeeded: number; crashloop: number; total: number };
+  unplanned_restarts?: number;
+  restarts?: Record<'oom' | 'crash' | 'probe' | 'unknown', Record<string, unknown>[]>;
+  churn?: { workload: string; class: string; pods: number; by: string }[];
+  /** Workloads whose dominant version changed in the window ("a new version came up"). */
+  deployments?: { namespace: string; workload: string; from: string; to: string; at: string }[];
+  memory_outliers?: Record<string, unknown>[];
+  error_rate?: Record<string, unknown>[];
+  latency?: Record<string, unknown>[];
+  drift?: { namespace: string; workload: string; versions: string[] }[];
+  thresholds?: Record<string, number>;
 }
 
 // Per-resource authorization: feature access, resource visibility, then operations.

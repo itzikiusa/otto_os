@@ -1765,6 +1765,10 @@ pub struct DraftCommitMessageResp {
     /// Whether the message was drafted from the staged diff (`true`) or fell
     /// back to the full working diff because nothing was staged (`false`).
     pub from_staged: bool,
+    /// The Otto session that drafted this (a visible `commit-draft` lean turn
+    /// on the drafting model — same path as `DraftPrResp.session_id`).
+    #[serde(default)]
+    pub session_id: Option<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

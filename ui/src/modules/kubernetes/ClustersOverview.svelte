@@ -101,6 +101,9 @@
       </div>
     </div>
     <div class="actions">
+      <button class="btn" onclick={() => router.go('kubernetes/monitor')} title="Monitoring dashboard: pod metrics, restarts, health" data-testid="k8s-monitor-btn">
+        <Icon name="gauge" size={14} /> Monitor
+      </button>
       <button class="btn ghost" onclick={() => void k8s.loadClusters()} title="Refresh" aria-label="Refresh clusters">
         <Icon name="refresh" size={14} />
       </button>

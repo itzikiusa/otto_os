@@ -42,13 +42,15 @@ test.describe('new-session keyboard flow', () => {
 
     // Focus is pulled into the selected provider card on open, so the
     // advertised arrow keys work immediately.
+    // (The card is a container: its body button carries the roving tabindex,
+    // with the batch-count stepper beside it.)
     const selected = dialog.locator('.provider-card.selected');
-    await expect(selected).toBeFocused();
+    await expect(selected.locator('.card-main')).toBeFocused();
     const before = await selected.locator('.provider-name').innerText();
 
     // Arrow keys move the selection (and the roving focus).
     await page.keyboard.press('ArrowRight');
-    await expect(dialog.locator('.provider-card.selected')).toBeFocused();
+    await expect(dialog.locator('.provider-card.selected .card-main')).toBeFocused();
     const after = await dialog.locator('.provider-card.selected .provider-name').innerText();
     expect(after).not.toBe(before);
     await page.keyboard.press('ArrowLeft');
@@ -61,7 +63,7 @@ test.describe('new-session keyboard flow', () => {
 
     // Pick the plain shell (no external CLI needed in the throwaway daemon)
     // and launch with ⌘Enter from a text field — the sheet-level shortcut.
-    await dialog.locator('.provider-card', { hasText: 'shell' }).click();
+    await dialog.locator('.provider-card', { hasText: 'shell' }).locator('.card-main').click();
     await dialog.locator('#ns-title').fill('e2e keys');
     await page.keyboard.press('Meta+Enter');
 

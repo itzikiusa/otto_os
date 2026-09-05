@@ -3632,6 +3632,7 @@ dependencies = [
  "otto-pty",
  "otto-rbac",
  "otto-state",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

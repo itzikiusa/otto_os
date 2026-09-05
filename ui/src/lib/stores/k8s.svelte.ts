@@ -490,9 +490,19 @@ class K8sStore {
 
   // --- live events ----------------------------------------------------------------------
 
+  /** Bumped on every `k8s_monitor_cycle`; the Monitor views `$effect` on it
+   *  (plus the cluster id of the cycle) to re-fetch without polling. */
+  monitorTick = $state(0);
+  monitorTickCluster: string | null = $state(null);
+
   applyEvent(
-    ev: Extract<OttoEvent, { type: 'k8s_cluster_updated' | 'k8s_install_updated' }>,
+    ev: Extract<OttoEvent, { type: 'k8s_cluster_updated' | 'k8s_install_updated' | 'k8s_monitor_cycle' }>,
   ): void {
+    if (ev.type === 'k8s_monitor_cycle') {
+      this.monitorTickCluster = ev.cluster_id;
+      this.monitorTick += 1;
+      return;
+    }
     if (ev.type === 'k8s_cluster_updated') {
       if (ev.deleted) {
         this.clusters = this.clusters.filter((c) => c.id !== ev.cluster_id);

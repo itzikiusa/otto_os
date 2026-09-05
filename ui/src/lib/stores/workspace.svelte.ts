@@ -53,6 +53,7 @@ const BACKGROUND_SOURCES = new Set([
   'vault-docs',
   'vault-docs-review',
   'pr-draft',
+  'commit-draft',
   'insights',
   'run_with_otto',
   'goal_loop',

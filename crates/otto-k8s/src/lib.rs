@@ -33,6 +33,7 @@ pub mod clusters;
 pub mod http;
 pub mod install;
 pub mod logs;
+pub mod monitor;
 pub mod resources;
 pub mod sessions;
 
@@ -51,6 +52,22 @@ pub trait K8sCtx: Clone + Send + Sync + 'static {
     /// `<data_dir>/kube`.
     fn data_dir(&self) -> &std::path::Path;
     fn spawner(&self) -> &Arc<dyn Spawner>;
+    /// Time-series store for the monitoring module (`None` = the daemon has
+    /// no usage engine; monitoring cannot be enabled).
+    fn monitor_sink(&self) -> Option<Arc<dyn MonitorSink>>;
+}
+
+/// Boxed `Send` future used by the object-safe [`MonitorSink`].
+pub type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// Time-series store the monitor writes to / the dashboard reads from. The
+/// server implements it over the embedded ClickHouse usage engine; tests use
+/// an in-memory recorder.
+pub trait MonitorSink: Send + Sync {
+    fn available(&self) -> bool;
+    fn exec<'a>(&'a self, sql: &'a str) -> BoxFut<'a, otto_core::Result<()>>;
+    fn insert_ndjson<'a>(&'a self, table: &'a str, ndjson: &'a str) -> BoxFut<'a, otto_core::Result<()>>;
+    fn query_rows<'a>(&'a self, sql: &'a str) -> BoxFut<'a, otto_core::Result<Vec<serde_json::Value>>>;
 }
 
 /// All `/k8s/*` routes (handler-relative templates; nested under `/api/v1`).

@@ -1077,7 +1077,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/k8s/clusters/import" {
         return Require(Kubernetes, Admin);
     }
-    if p == "/k8s/status" {
+    // Monitoring dashboard: the cross-cluster overview is a read; the per-cluster
+    // `/monitor*` routes fall under the `{id}/` rule above (GET View, else Edit).
+    if matches!(p, "/k8s/status" | "/k8s/monitor/overview") {
         return Require(Kubernetes, View);
     }
     if matches!(p, "/k8s/install" | "/k8s/discover") {

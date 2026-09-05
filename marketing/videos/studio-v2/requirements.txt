@@ -1,0 +1,4 @@
+# Soundtrack synthesis (Python 3.9+).
+numpy==1.26.4
+# Only required to regenerate narration. Existing voice takes are versioned.
+edge-tts==7.2.8

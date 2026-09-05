@@ -1,1 +1,4 @@
 stills/
+# v2 deliverables and derived lossless mixes; source narration remains versioned.
+out-v2/
+public/studio-v2/audio/*.wav

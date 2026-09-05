@@ -645,7 +645,7 @@ impl WorkflowChatTriggerImpl {
             wf.id,
             wf.workspace_id
         );
-        let run = repo.create_run(&wf.id, &wf.workspace_id, &input).await.ok()?;
+        let run = repo.create_run(&wf.id, &wf.workspace_id, &input, None).await.ok()?;
         let ws = self.ctx.workspaces.get(&wf.workspace_id).await.ok()?;
         crate::workflow_engine::spawn_run(
             self.ctx.clone(),

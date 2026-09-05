@@ -368,6 +368,9 @@
     <button class="pill-toggle" class:on={k8s.autoRefresh} onclick={() => k8s.setAutoRefresh(!k8s.autoRefresh)} aria-pressed={k8s.autoRefresh} title="Auto-refresh every 10 s">
       <Icon name="clock" size={11} /> Auto
     </button>
+    <button class="btn small" onclick={() => router.go(`kubernetes/monitor/${encodeURIComponent(cluster.id)}/workloads`)} title="Monitoring dashboard for this cluster" data-testid="k8s-monitor-cluster-btn">
+      <Icon name="gauge" size={12} /> Monitor
+    </button>
     {#if canK9s}
       <button class="btn small" onclick={() => void openK9s()} disabled={k9sOpening} title="Open k9s in a terminal" data-testid="k8s-k9s-btn">
         <Icon name="terminal" size={12} /> k9s
