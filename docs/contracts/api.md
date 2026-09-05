@@ -3318,3 +3318,82 @@ are fully qualified — `rollouts.argoproj.io`, `applications.argoproj.io`):
 | `argocd_app_restart` | applications | `resource_kind?`, `resource_name?` | for every Deployment / StatefulSet / DaemonSet / Rollout in `.status.resources[]` (filtered by the params) run the `restart` verb above in that resource's namespace, in this cluster's context |
 | `cronjob_trigger` | cronjobs | — | `create job --from=cronjob/<name> <name>-manual-<unix ts> -n <ns>` (job name trimmed to 63 chars) |
 | `cronjob_suspend` / `cronjob_resume` | cronjobs | — | `patch … --type merge -p {"spec":{"suspend":true\|false}}` |
+
+### Monitoring (`/k8s/monitor/*`, `/k8s/clusters/{id}/monitor*`)
+
+Opt-in, per-cluster metric collection from **user-defined HTTP probes on the
+pods themselves** (Otto's Go services expose `/actuator/info` +
+`/actuator/prometheus`, but nothing is hard-wired), plus whatever
+metrics-server allows, with restart classification and a ClickHouse-backed
+dashboard. Samples live in the embedded usage engine (`k8s_samples`,
+`k8s_events`, TTL = the largest configured `retention_days`); config + last
+cycle status live in SQLite (migration 0116). A collector loop runs per
+**enabled** cluster (`crates/otto-server/src/k8s_monitor_scheduler.rs`), every
+`interval_secs`: sweep pods → events → metrics-server (re-probed every cycle;
+a 403 is reported verbatim as `metrics_server: "forbidden: …"`) → pick
+transport (`auto` tries `pods/proxy` once, else `kubectl port-forward` with
+`concurrency` parallel forwards) → scrape → classify → write → status →
+WS `k8s_monitor_cycle`. Guide: `docs/features/kubernetes-monitoring.md`.
+
+Auth: `/k8s/monitor/overview` is `kubernetes:View`; `/k8s/clusters/{id}/monitor*`
+is View on GET, Edit on PUT/POST. Enabling requires the usage engine
+(ClickHouse) to be available ⇒ `409 conflict` otherwise.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /k8s/clusters/{id}/monitor | View | — | `{ config: MonitorConfig, status: MonitorStatus \| null, presets: [{ id, title, probes: Probe[] }] }` |
+| PUT /k8s/clusters/{id}/monitor | Edit | `MonitorConfig` (full replace) | same as GET; `400 invalid` names the offending field; `409` when `enabled` and ClickHouse is off; audited `k8s.monitor.update` |
+| POST /k8s/clusters/{id}/monitor/test | Edit | `{ ns?, pod? }` (defaults: first configured namespace, first Running non-excluded pod) | `{ namespace, pod, workload, transport, metrics_server, probes: [{ name, ok, status?, ms?, port?, samples: [{metric, labels, value}] (≤50), sample_count, labels, parse_errors, capped, body_preview, error? }] }` |
+| POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
+| GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
+| GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, workloads: WorkloadRow[] }` |
+| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates |
+| GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
+| GET /k8s/clusters/{id}/monitor/health?window=1h | View | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
+
+`window` accepts `<n>m|h|d` (max `90d`). `metric`, `workload`, `pod`, `ns`
+and `class` must match `^[A-Za-z0-9_.:/-]{1,128}$` (400 otherwise).
+
+```ts
+MonitorConfig {
+  enabled: boolean; interval_secs: number /* 15..3600 */;
+  namespaces: string[] /* [] => cluster.default_namespace; required when that is null */;
+  probes: Probe[] /* ≤10 */; exclusions: Exclusion[];
+  transport: 'auto' | 'proxy' | 'port_forward'; concurrency: number /* 1..32 */;
+  retention_days: number /* 1..90 */;
+}
+Probe { name; port?: number /* default: container's first port */; path /* starts with '/' */;
+        format: 'prometheus' | 'json' | 'health';
+        mappings?: { field: 'a.b.0.c'; metric?: string; label?: string;
+                     unit?: 'number'|'bytes'|'bytes_human'|'duration_human'|'percent' }[];
+        include?: string[]; exclude?: string[] /* series-name globs, prometheus only */;
+        timeout_ms?: number /* 100..30000, default 3000 */ }
+Exclusion = { kind:'namespace'|'pod'|'workload'; match: glob }   // workload glob matches "<kind>:<name>", e.g. "cronjob:*"
+          | { kind:'label'; selector: 'k=v,k2!=v2,k3' }
+MonitorStatus { cluster_id; last_cycle_at; last_ok_at; last_error; transport_used;
+                metrics_server: 'ok' | 'absent' | 'unknown' | 'forbidden: <kubectl message>';
+                pods_seen; pods_scraped; pods_failed; cycle_ms }
+OverviewRow { cluster: { id, name, environment, color }; enabled; interval_secs; status: MonitorStatus|null;
+              health: 'healthy'|'degraded'|'incident'|'off'|'unknown'; window;
+              pods: { running, pending, failed, crashloop, total };
+              restarts: { oom, crash, probe, unknown } /* in-place, unplanned */; churn /* planned pod replacements */;
+              mem: { used, limit, pct }; rps; err_pct; drift: [{ workload, versions[] }]; workloads }
+WorkloadRow { namespace; workload; kind; pods; ready; mem_bytes; mem_limit; mem_pct; mem_trend_pct?;
+              restarts: { oom, crash, probe, unknown }; churn_planned; churn_unknown;
+              rps; err_pct; err_pct_baseline; rps_baseline; latency_kind: 'p95'|'avg'|''; latency_ms; latency_baseline_ms;
+              versions: string[]; crashloop; spark: { mem: number[]; rps: number[] } }
+MonitorEvent { ts; namespace; workload; pod; container; kind: 'restart'|'churn'|'k8s_event';
+               class; reason; exit_code; detail: object; actor }
+Health { cluster; cluster_id; environment; window; collected_at;
+         collector: { enabled, ok, last_ok_at, error, transport, metrics_server, pods_seen, pods_scraped, pods_failed, cycle_ms };
+         pods; unplanned_restarts; restarts: { oom: [...], crash: [...], probe: [...], unknown: [...] };
+         churn: [{ workload, class, pods, by }]; memory_outliers; error_rate; latency; drift; thresholds }
+```
+
+Restart classes (spec `docs/superpowers/specs/2026-09-05-k8s-monitoring-dashboard-design.md`):
+`oom` (lastState `OOMKilled` / `OOMKilling` event), `probe` (`Unhealthy` liveness
++ `Killing` within 2 min), `crash` (`Error`, non-zero exit, `CrashLoopBackOff`),
+`planned` churn (`rollout` = new ReplicaSet, `scale`, `drain` = Evicted/Preempted,
+`otto:<user>` = an Otto `k8s.action.*` on the workload within 5 min),
+`completed` (Jobs), else `unknown` with the raw reason kept. Restart counters are
+per pod, so a rollout never inflates "restarts" — it shows up as churn.

@@ -326,6 +326,12 @@ pub fn classify(
     let mut out = Vec::new();
     let now_s = now.to_rfc3339();
 
+    // First cycle after enabling: no baseline, nothing to diff against. A
+    // burst of "unknown churn" for every existing pod would be noise.
+    if prev.is_empty() {
+        return out;
+    }
+
     // In-place restarts.
     for (key, p) in cur {
         let Some(old) = prev.get(key) else { continue };
@@ -573,6 +579,12 @@ mod tests {
         let out = classify(&prev, &cur, &[], &[], Utc::now());
         assert_eq!(out[0].class, Class::Unknown);
         assert_eq!(out[0].reason, "");
+    }
+
+    #[test]
+    fn first_cycle_without_baseline_emits_nothing() {
+        let cur = snaps(vec![snap("a-1", "a-1111111111", 3, "Error", 1), snap("b-1", "b-1111111111", 0, "", 0)]);
+        assert!(classify(&Snapshot::new(), &cur, &[], &[], Utc::now()).is_empty());
     }
 
     #[test]

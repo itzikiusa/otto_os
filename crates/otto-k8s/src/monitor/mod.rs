@@ -16,6 +16,7 @@
 pub mod classify;
 pub mod collector;
 pub mod health;
+pub mod http;
 pub mod parse;
 pub mod probes;
 pub mod queries;
