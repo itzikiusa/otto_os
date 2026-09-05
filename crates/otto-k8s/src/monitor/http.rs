@@ -393,8 +393,10 @@ async fn workloads<S: K8sCtx>(
     let mut stats = health::workload_stats(sink.as_ref(), cluster.id.as_str(), &snap, ns, window).await?;
     stats.sort_by(|a, b| a.workload.cmp(&b.workload));
 
-    // Sparklines: memory (gauge) + rps (counter) per workload, ~40 buckets.
-    let step = (window.num_seconds() / 40).clamp(30, 3600) as u32;
+    // Sparklines: memory (gauge) + rps (counter) per workload, ~40 buckets —
+    // but never finer than 3 collection cycles, or a counter bucket flips
+    // between one sample (Δ = 0) and two (Δ > 0) and draws a sawtooth.
+    let step = ((window.num_seconds() / 40).clamp(30, 3600) as u32).max(cfg.interval_secs.saturating_mul(3));
     let mut spark_mem: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let mut spark_rps: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let mem_rows = sink
@@ -457,14 +459,16 @@ async fn series<S: K8sCtx>(
     }
     check_ident("workload", q.workload.as_deref())?;
     check_ident("pod", q.pod.as_deref())?;
-    let cluster = Clusters::new(&ctx).get(&id).await?;
+    let (cluster, cfg, _) = load(&ctx, &id).await?;
     let sink = ctx
         .monitor_sink()
         .filter(|s| s.available())
         .ok_or_else(|| Error::Conflict("usage engine (ClickHouse) is not available".into()))?;
+    // Same rule as the sparklines: a bucket must span ≥ 3 cycles.
     let step = q
         .step
         .unwrap_or_else(|| (window.num_seconds() / 120).clamp(10, 3600) as u32)
+        .max(cfg.interval_secs.saturating_mul(3))
         .clamp(10, 86_400);
     let counter = queries::is_counter(&q.metric);
     let sql = queries::series_sql(

@@ -98,18 +98,26 @@ fn parse_labels(s: &str) -> Option<BTreeMap<String, String>> {
 /// exporter lists them before `http_requests_total`, so a plain "first N
 /// lines" cap silently lost the request counter on every busy service.
 pub fn parse_prometheus(text: &str, include: &[String], exclude: &[String], cap: usize) -> Parsed {
-    let mut p = parse_prometheus_all(text, include, exclude, cap.saturating_mul(4).max(cap));
+    let mut p = parse_prometheus_all(text, include, exclude, cap.saturating_mul(6).max(cap));
     if p.samples.len() > cap {
         p.capped = true;
-        let (mut keep, buckets): (Vec<Sample>, Vec<Sample>) =
-            p.samples.drain(..).partition(|s| !s.metric.ends_with("_bucket"));
-        if keep.len() > cap {
-            keep.truncate(cap);
-        } else {
-            let room = cap - keep.len();
-            keep.extend(buckets.into_iter().take(room));
-        }
-        p.samples = keep;
+        // Tiers: plain counters / gauges (`http_requests_total`, `up`,
+        // `process_*`) → histogram `_count` / `_sum` → `_bucket`. An API
+        // gateway with hundreds of paths has thousands of `_count`/`_sum`
+        // lines that would otherwise bury the request counter.
+        let tier = |m: &str| -> u8 {
+            if m.ends_with("_bucket") {
+                2
+            } else if m.ends_with("_count") || m.ends_with("_sum") {
+                1
+            } else {
+                0
+            }
+        };
+        let mut all: Vec<Sample> = std::mem::take(&mut p.samples);
+        all.sort_by_key(|s| tier(&s.metric)); // stable: file order within a tier
+        all.truncate(cap);
+        p.samples = all;
     }
     p
 }
@@ -425,14 +433,25 @@ nan_metric NaN
                 t.push_str(&format!("http_request_duration_seconds_bucket{{path=\"/p{i}\",le=\"{le}\"}} 1\n"));
             }
         }
+        // …then per-path _count / _sum (an API gateway has hundreds of paths)…
+        for i in 0..40 {
+            t.push_str(&format!("http_request_duration_seconds_count{{path=\"/p{i}\"}} 9\n"));
+            t.push_str(&format!("http_request_duration_seconds_sum{{path=\"/p{i}\"}} 1.5\n"));
+        }
+        // …and only then the request counter.
         for i in 0..40 {
             t.push_str(&format!("http_requests_total{{path=\"/p{i}\",code=\"200\"}} 5\n"));
         }
         let p = parse_prometheus(&t, &[], &[], 100);
         assert!(p.capped);
         assert_eq!(p.samples.len(), 100);
-        assert_eq!(p.samples.iter().filter(|s| s.metric == "http_requests_total").count(), 40, "counters kept");
-        assert_eq!(p.samples.iter().filter(|s| s.metric.ends_with("_bucket")).count(), 60, "buckets trimmed to the room left");
+        assert_eq!(p.samples.iter().filter(|s| s.metric == "http_requests_total").count(), 40, "tier 0 kept whole");
+        assert_eq!(
+            p.samples.iter().filter(|s| s.metric.ends_with("_count") || s.metric.ends_with("_sum")).count(),
+            60,
+            "tier 1 fills the rest"
+        );
+        assert_eq!(p.samples.iter().filter(|s| s.metric.ends_with("_bucket")).count(), 0, "buckets go first");
     }
 
     #[test]
