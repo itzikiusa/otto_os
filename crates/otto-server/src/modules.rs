@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use otto_connections::{ConnectionsService, Spawner};
 use otto_core::api::{
@@ -548,6 +548,15 @@ impl otto_product::ProductCtx for ServerCtx {
     fn swarm_repo(&self) -> Option<&otto_state::SwarmRepo> {
         Some(&self.swarm_repo)
     }
+    fn attachments_root(&self) -> Option<std::path::PathBuf> {
+        Some(self.data_dir.join(crate::product_media::ATTACH_ROOT))
+    }
+    fn mockup_scratch_root(&self) -> Option<std::path::PathBuf> {
+        Some(self.data_dir.join(crate::mockup_assist::SCRATCH_ROOT))
+    }
+    fn attachment_repo(&self) -> Option<&otto_state::ProductAttachmentRepo> {
+        Some(&self.attachment_repo)
+    }
 }
 
 impl otto_memory::MemoryCtx for ServerCtx {
@@ -808,11 +817,37 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
                 .patch(crate::product_media::patch_attachment)
                 .delete(crate::product_media::delete_attachment),
         )
-        // In-place mockup agent: generate / refine a mockup attachment with a live,
-        // file-backed agent session (hidden from the Agents list).
+        // Design arena: save an edited artifact from the UI editor. Same 40 MB
+        // body cap as the upload (base64 inflation over the 25 MB raw cap).
+        .route(
+            "/product/attachments/{aid}/content",
+            put(crate::product_media::put_attachment_content)
+                .layer(DefaultBodyLimit::max(40 * 1024 * 1024)),
+        )
+        // In-place design agent: generate / refine an artifact (html | mermaid |
+        // excalidraw | scene3d) with a live, file-backed agent session (hidden
+        // from the Agents list).
         .route(
             "/product/stories/{sid}/mockups/assist",
             post(crate::mockup_assist::assist_mockup),
+        )
+        // Blender bridge (optional, detected): status, headless render job,
+        // job poll, generated-script download.
+        .route(
+            "/product/design/blender",
+            get(crate::design_blender::blender_status),
+        )
+        .route(
+            "/product/design/jobs/{id}",
+            get(crate::design_blender::get_job),
+        )
+        .route(
+            "/product/stories/{sid}/design/{aid}/blender-render",
+            post(crate::design_blender::blender_render),
+        )
+        .route(
+            "/product/stories/{sid}/design/{aid}/blender-script",
+            get(crate::design_blender::blender_script),
         )
         .route(
             "/product/attachments/{aid}/annotations",
@@ -1741,6 +1776,12 @@ pub(crate) fn resolve_skill_inline(library: &otto_context::Library, name: &str) 
     // 2. Compiled-in bundled skill body (no separate references).
     if let Some(body) = otto_product::skill_body(name) {
         return body.to_string();
+    }
+    // 2b. `otto-skills` bundles (`otto-design-2d`, `otto-design-3d`, …). These
+    //     are never auto-installed into the Library, so the assist prompts inline
+    //     them from the compiled-in asset when the user hasn't installed them.
+    if let Some(body) = otto_skills::bundled_body(name) {
+        return body;
     }
     // 3. Operator's global Claude skills dir, for skills authored outside the
     //    Library (e.g. `golang-feature-implementation`). Inline the `SKILL.md`

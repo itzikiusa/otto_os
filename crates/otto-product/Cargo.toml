@@ -16,10 +16,10 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
 include_dir = "0.7"
 
 [dev-dependencies]
-tokio = { workspace = true }
 sqlx = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

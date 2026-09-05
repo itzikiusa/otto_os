@@ -269,18 +269,23 @@ pub enum Event {
         scene_id: Id,
         session_id: Id,
     },
-    /// A product mockup's source changed — emitted LIVE while the mockup agent
-    /// edits the backing file (per-poll, mid-turn) and once more with the committed
-    /// result. `content` is the raw mockup source (a self-contained HTML page or a
-    /// Mermaid diagram); `format` is `html` | `mermaid`. The Product → Mockups
-    /// Assistant panel subscribes and re-renders the live preview for the matching
-    /// `attachment_id`.
+    /// A product design artifact's source changed — emitted LIVE while the
+    /// design agent edits the backing file (per-poll, mid-turn), once more with
+    /// the committed result, on every `PUT /product/attachments/{aid}/content`
+    /// save from the UI, and for each output a Blender render job attaches. The
+    /// Product → Design arena subscribes and re-renders the viewer for the
+    /// matching `attachment_id`.
     MockupUpdated {
         workspace_id: Id,
         story_id: Id,
         attachment_id: Id,
+        /// A `DesignFormat` name (`html` | `mermaid` | `excalidraw` | `scene3d`)
+        /// or, for uploaded binaries (`glb`/`gltf`/images), the attachment's mime.
         format: String,
-        content: String,
+        /// The new source for text formats; `None` (serialized as an explicit
+        /// `null`, never omitted) for binary / oversized payloads — clients
+        /// re-fetch `GET /product/attachments/{aid}` instead.
+        content: Option<String>,
     },
     /// A mockup agent session just became live (at the START of a turn). Lets the
     /// Mockups Assistant panel attach the agent's shell/Terminal immediately,

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Landing page</title>
+<style>
+  :root { --ink:#0f172a; --dim:#475569; --accent:#0ea5e9; --line:#e2e8f0; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; font:16px/1.55 -apple-system,Inter,system-ui,sans-serif; color:var(--ink); background:#fff; }
+  .wrap { max-width:1040px; margin:0 auto; padding:0 24px; }
+  nav { display:flex; align-items:center; justify-content:space-between; padding:18px 0; }
+  nav .logo { font-weight:800; letter-spacing:-.02em; }
+  nav .links a { margin-left:22px; color:var(--dim); text-decoration:none; font-size:14px; }
+  nav .cta { background:var(--ink); color:#fff; border-radius:999px; padding:8px 16px; font-size:14px; }
+  .hero { display:grid; grid-template-columns:1.1fr 1fr; gap:36px; align-items:center; padding:60px 0 50px; }
+  .hero h1 { font-size:46px; line-height:1.08; letter-spacing:-.03em; margin:0 0 16px; }
+  .hero p { color:var(--dim); font-size:18px; margin:0 0 26px; }
+  .hero .btns { display:flex; gap:10px; }
+  .btn { border-radius:10px; padding:12px 18px; font-weight:600; text-decoration:none; }
+  .btn.p { background:var(--accent); color:#fff; }
+  .btn.s { border:1px solid var(--line); color:var(--ink); }
+  .shot { aspect-ratio:4/3; border-radius:18px; background:linear-gradient(135deg,#e0f2fe,#bae6fd 60%,#7dd3fc); box-shadow:0 30px 60px -30px rgba(2,132,199,.5); }
+  .logos { display:flex; gap:28px; justify-content:center; padding:10px 0 40px; color:#94a3b8; font-weight:700; letter-spacing:.06em; font-size:12px; }
+  .features { display:grid; grid-template-columns:repeat(3,1fr); gap:18px; padding:0 0 60px; }
+  .f { border:1px solid var(--line); border-radius:16px; padding:22px; }
+  .f i { display:block; width:38px; height:38px; border-radius:10px; background:#e0f2fe; margin-bottom:14px; }
+  .f h3 { margin:0 0 6px; font-size:17px; }
+  .f p { margin:0; color:var(--dim); font-size:14.5px; }
+  footer { border-top:1px solid var(--line); padding:22px 0 40px; color:var(--dim); font-size:13px; display:flex; justify-content:space-between; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav><div class="logo">◈ Brand</div><div class="links"><a>Product</a><a>Pricing</a><a>Docs</a><a class="cta">Get started</a></div></nav>
+  <section class="hero">
+    <div>
+      <h1>Withdrawals that settle before the kettle boils.</h1>
+      <p>Push-to-card payouts in under 30 seconds, with a silent fallback when a request isn't eligible. No new KYC, no new endpoint.</p>
+      <div class="btns"><a class="btn p">Start free</a><a class="btn s">See how it works</a></div>
+    </div>
+    <div class="shot"></div>
+  </section>
+  <div class="logos"><span>VISA</span><span>MASTERCARD</span><span>APPLE PAY</span><span>STRIPE</span></div>
+  <section class="features">
+    <div class="f"><i></i><h3>Instant by default</h3><p>Eligible requests take the fast rail automatically.</p></div>
+    <div class="f"><i></i><h3>Safe fallback</h3><p>Over-limit or flagged? It quietly joins the nightly batch.</p></div>
+    <div class="f"><i></i><h3>Ledger first</h3><p>Every payout writes intent before the rail call — no double pay.</p></div>
+  </section>
+  <footer><span>© Brand</span><span>Privacy · Terms · Status</span></footer>
+</div>
+</body>
+</html>

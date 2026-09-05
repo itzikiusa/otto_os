@@ -248,6 +248,9 @@ impl ProductService {
                 issue_type: src.issue_type.clone(),
                 stage: "imported".into(),
                 cwd: req.cwd.clone(),
+                parent_id: None,
+                tree_kind: "story".into(),
+                folder: String::new(),
                 created_by: user_id.clone(),
             })
             .await?;
@@ -1266,7 +1269,29 @@ impl ProductService {
         by: &Id,
         title: Option<&str>,
     ) -> Result<ProductStoryDetail> {
+        self.create_draft_in_tree(ws, by, title, "story", None, "").await
+    }
+
+    /// Create a draft story at a given place in the epic tree. `tree_kind` is
+    /// validated (`story` | `epic` | `doc`); a `parent_id` must point at a
+    /// TOP-LEVEL story (one level of nesting — see `validate_parent`). Used by
+    /// `create_draft` (top-level), `create_child` (the `…/children` route) and
+    /// swarm ingest (which mints one `epic` per project and files children in
+    /// folders under it).
+    pub async fn create_draft_in_tree(
+        &self,
+        ws: &Id,
+        by: &Id,
+        title: Option<&str>,
+        tree_kind: &str,
+        parent_id: Option<&Id>,
+        folder: &str,
+    ) -> Result<ProductStoryDetail> {
         let draft_title = title.unwrap_or("Untitled draft");
+        let tree_kind = validate_tree_kind(tree_kind)?;
+        if let Some(pid) = parent_id {
+            self.validate_parent(pid, None).await?;
+        }
 
         // 1. Create the story row with source_kind="draft".
         let story = self
@@ -1281,6 +1306,9 @@ impl ProductService {
                 issue_type: None,
                 stage: "draft".into(),
                 cwd: None,
+                parent_id: parent_id.cloned(),
+                tree_kind: tree_kind.to_string(),
+                folder: folder.trim().to_string(),
                 created_by: by.clone(),
             })
             .await?;
@@ -1311,6 +1339,61 @@ impl ProductService {
             .await?;
 
         self.story_detail(&story.id).await
+    }
+
+    /// `POST /product/stories/{sid}/children` — a `story` or `doc` child filed
+    /// under the epic `parent_id` in `folder`. The child inherits the epic's
+    /// workspace (a child never lives in a different workspace than its root).
+    pub async fn create_child(
+        &self,
+        parent_id: &Id,
+        by: &Id,
+        title: Option<&str>,
+        tree_kind: &str,
+        folder: &str,
+    ) -> Result<ProductStoryDetail> {
+        if tree_kind == "epic" {
+            return Err(Error::Invalid(
+                "a child cannot be an epic (one level of nesting)".into(),
+            ));
+        }
+        let parent = self.repo.get_story(parent_id).await?;
+        self.create_draft_in_tree(
+            &parent.workspace_id,
+            by,
+            title,
+            tree_kind,
+            Some(parent_id),
+            folder,
+        )
+        .await
+    }
+
+    /// One-level rule for re-parenting: the target parent must exist and be
+    /// top-level (no parent of its own); a story that already has children
+    /// cannot itself become a child; a story cannot parent itself.
+    pub async fn validate_parent(&self, parent_id: &Id, child_id: Option<&Id>) -> Result<()> {
+        if child_id == Some(parent_id) {
+            return Err(Error::Invalid("a story cannot be its own parent".into()));
+        }
+        let parent = self
+            .repo
+            .get_story(parent_id)
+            .await
+            .map_err(|_| Error::Invalid(format!("parent story {parent_id} not found")))?;
+        if parent.parent_id.is_some() {
+            return Err(Error::Invalid(
+                "parent is itself a child — epics nest one level only".into(),
+            ));
+        }
+        if let Some(cid) = child_id {
+            if !self.repo.get_children(cid).await?.is_empty() {
+                return Err(Error::Invalid(
+                    "this story has children and cannot be moved under an epic".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------
@@ -1557,6 +1640,9 @@ impl ProductService {
                     issue_type: Some(issue_type.into()),
                     stage: "imported".into(),
                     cwd: story.cwd.clone(),
+                    parent_id: None,
+                    tree_kind: "story".into(),
+                    folder: String::new(),
                     created_by: by.clone(),
                 })
                 .await?;
@@ -1656,6 +1742,19 @@ pub fn build_watch_cursor(comments: &[CommentInfo]) -> Option<String> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+
+/// Accept only Otto's three tree roles. Anything else is a 400 — never silently
+/// coerced, so a typo in `--kind` surfaces instead of filing a mislabeled row.
+pub fn validate_tree_kind(kind: &str) -> Result<&str> {
+    match kind.trim() {
+        "" => Ok("story"),
+        k @ ("story" | "epic" | "doc") => Ok(k),
+        other => Err(Error::Invalid(format!(
+            "unknown tree_kind {other:?} (expected story | epic | doc)"
+        ))),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2433,6 +2532,9 @@ mod tests {
                 issue_type: Some("Story".into()),
                 stage: "imported".into(),
                 cwd: None,
+                parent_id: None,
+                tree_kind: "story".into(),
+                folder: String::new(),
                 created_by: user_id.clone(),
             })
             .await
@@ -2861,6 +2963,9 @@ mod tests {
                 issue_type: None,
                 stage: "imported".into(),
                 cwd: None,
+                parent_id: None,
+                tree_kind: "story".into(),
+                folder: String::new(),
                 created_by: owner.clone(),
             })
             .await

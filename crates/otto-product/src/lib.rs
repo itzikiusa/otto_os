@@ -14,5 +14,5 @@ pub mod types;
 
 pub use http::{router, ProductCtx};
 pub use memory_facade::ProductMemory;
-pub use service::{build_watch_cursor, CommentInfo, ProductService};
+pub use service::{build_watch_cursor, validate_tree_kind, CommentInfo, ProductService};
 pub use skills::{analysis_lenses, seed_skills, skill_body, SKILL_NAMES};

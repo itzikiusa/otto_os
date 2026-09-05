@@ -103,6 +103,49 @@ impl SandboxPolicy {
         }
     }
 
+    /// Build the policy for a **daemon-spawned tool** (today: a headless Blender
+    /// render of a daemon-generated script — see `otto-server::design_blender`).
+    /// Much tighter than `for_agent`: writes are confined to the job's `out_dir`,
+    /// the system temp dirs and the tool's own cache/config dirs under `$HOME`
+    /// (Blender writes its `userpref`/cache on first launch); **no network** —
+    /// the tool has nothing to fetch. Reads stay global so the binary, its
+    /// bundled Python and system libraries load.
+    pub fn for_tool(out_dir: &Path) -> Self {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        let mut push = |p: PathBuf| {
+            if !p.as_os_str().is_empty() {
+                roots.push(canonicalize_lenient(&p));
+            }
+        };
+
+        push(out_dir.to_path_buf());
+        push(std::env::temp_dir());
+        push(PathBuf::from("/tmp"));
+        push(PathBuf::from("/private/tmp"));
+        push(PathBuf::from("/private/var/folders"));
+
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            for rel in [
+                // Blender: prefs/scripts/cache (macOS + XDG layouts).
+                "Library/Application Support/Blender",
+                "Library/Caches",
+                ".config/blender",
+                ".cache",
+            ] {
+                push(home.join(rel));
+            }
+        }
+
+        roots.sort();
+        roots.dedup();
+
+        Self {
+            writable_roots: roots,
+            deny_read: Vec::new(),
+            network: NetworkPolicy::None,
+        }
+    }
+
     /// Render the macOS Seatbelt (SBPL) profile for this policy.
     pub fn to_sbpl(&self) -> String {
         let mut p = String::new();
@@ -237,6 +280,20 @@ mod tests {
         assert_eq!(args[3], "--foo");
         assert_eq!(args[4], "bar");
         assert!(args[1].contains("(deny default)"));
+    }
+
+    #[test]
+    fn for_tool_confines_writes_to_out_dir_and_cuts_network() {
+        let out = std::env::temp_dir().join("otto-tool-out");
+        let pol = SandboxPolicy::for_tool(&out);
+        assert!(pol.writable_roots.iter().any(|r| r.ends_with("otto-tool-out")));
+        // A tool never gets the workspace-ish agent dirs…
+        assert!(!pol.writable_roots.iter().any(|r| r.ends_with(".claude")));
+        // …nor any network.
+        assert_eq!(pol.network, NetworkPolicy::None);
+        let sbpl = pol.to_sbpl();
+        assert!(!sbpl.contains("network-outbound"));
+        assert!(sbpl.contains("(allow file-write* (subpath \""));
     }
 
     #[test]

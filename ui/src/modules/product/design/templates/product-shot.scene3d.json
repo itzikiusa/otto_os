@@ -1,0 +1,23 @@
+{
+  "type": "otto-scene3d",
+  "version": 1,
+  "background": "#e2e8f0",
+  "grid": false,
+  "camera": { "position": [3.2, 2.2, 4.2], "target": [0, 0.7, 0], "fov": 35 },
+  "lights": [
+    { "id": "key", "name": "Key", "type": "spot", "position": [3, 5, 3], "target": [0, 0.7, 0], "intensity": 2.2, "color": "#ffffff", "angle": 40, "shadow": true },
+    { "id": "fill", "name": "Fill", "type": "point", "position": [-3, 2, 2], "intensity": 0.8, "color": "#dbeafe", "distance": 12 },
+    { "id": "rim", "name": "Rim", "type": "directional", "position": [-2, 3, -4], "intensity": 1.1, "color": "#fef3c7" },
+    { "id": "amb", "name": "Ambient", "type": "ambient", "intensity": 0.3 }
+  ],
+  "objects": [
+    { "id": "backdrop", "name": "Backdrop", "type": "plane", "position": [0, 0, 0], "rotation": [-90, 0, 0], "scale": [12, 12, 1], "material": { "color": "#f8fafc", "roughness": 0.85 } },
+    { "id": "sweep", "name": "Sweep", "type": "plane", "position": [0, 3, -3], "rotation": [0, 0, 0], "scale": [12, 6, 1], "material": { "color": "#f1f5f9", "roughness": 0.9 } },
+    { "id": "plinth", "name": "Plinth", "type": "cylinder", "position": [0, 0.15, 0], "rotation": [0, 0, 0], "scale": [1.6, 0.3, 1.6], "material": { "color": "#cbd5e1", "roughness": 0.4, "metalness": 0.1 } },
+    { "id": "hero", "name": "Hero product", "type": "box", "position": [0, 0.9, 0], "rotation": [0, 25, 0], "scale": [1.0, 1.2, 0.5], "material": { "color": "#4f46e5", "metalness": 0.35, "roughness": 0.25 }, "notes": "Swap for a gltf object (attachment_id) when the model is uploaded." },
+    { "id": "accent", "name": "Accent sphere", "type": "sphere", "position": [-1.3, 0.55, 0.6], "rotation": [0, 0, 0], "scale": [0.5, 0.5, 0.5], "material": { "color": "#f472b6", "metalness": 0.6, "roughness": 0.15 } }
+  ],
+  "groups": [
+    { "id": "grp-set", "name": "Set", "children": ["backdrop", "sweep", "plinth"] }
+  ]
+}

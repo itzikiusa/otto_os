@@ -1,43 +1,75 @@
 <script lang="ts">
-  // The Mockups "Assistant": a specialized agent that builds a mockup IN PLACE —
-  // its live shell (the same Terminal as Agents, reused) embedded right here on the
-  // Product page (never in the Agents section), beside a LIVE preview of the mockup
-  // as the agent writes it. You type what you want; the agent edits the mockup's
-  // backing file and the preview + committed attachment update.
+  // The Design "Assistant": a specialized agent that builds a design artifact IN
+  // PLACE — its live shell (the same Terminal as Agents, reused) embedded right
+  // here on the Product page (never in the Agents section). Two layouts:
+  //   • full (default) — CREATING a new artifact: a live preview of the source
+  //     as the agent writes it, beside the shell + composer.
+  //   • embedded — REFINING the artifact open in the arena: the arena's viewport
+  //     already IS the live preview (edits arrive over mockup_updated), so this
+  //     is just the shell + composer, docked in the inspector column.
+  // The format chips cover every DesignFormat (§2.2); they lock once the
+  // artifact exists (a refine resumes the existing session and format).
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import MockupLivePreview from './MockupLivePreview.svelte';
-  import { mockupAssist, type MockupFormat } from '../../lib/stores/mockup-assist.svelte';
+  import { mockupAssist } from '../../lib/stores/mockup-assist.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { ProductAttachment } from './types';
+  import type { DesignFormat, ProductAttachment } from './types';
+  import { DESIGN_FORMATS } from './types';
+  import { FORMATS } from './design/format';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
 
   interface Props {
-    /** Called after a turn commits, with the committed mockup attachment. */
+    /** Called after a turn commits, with the committed attachment. */
     oncommit?: (att: ProductAttachment) => void;
     onclose: () => void;
+    /** Docked (shell + composer only) — see the header comment. */
+    embedded?: boolean;
   }
-  const { oncommit, onclose }: Props = $props();
+  const { oncommit, onclose, embedded = false }: Props = $props();
 
   let draft = $state('');
 
-  // Provider for the mockup's agent session — honored only when a NEW mockup is
+  // Provider for the agent session — honored only when a NEW artifact is
   // created (a refine resumes the existing session). Sourced from the live
   // registry so custom providers (e.g. grok) work.
   let provider = $state(defaultAgentProvider());
 
-  // The format (and provider) can only be chosen before the mockup exists; once
+  // The format (and provider) can only be chosen before the artifact exists; once
   // it does (or we're refining), it's locked.
   const locked = $derived(mockupAssist.attachmentId !== null);
 
-  const STARTERS = [
-    'A dashboard with KPI cards and a recent-activity table',
-    'A settings page with tabs for profile, security, and billing',
-    'A sign-up form with validation states',
-    'A sequence diagram of the checkout flow',
-  ];
+  /** Format-aware starters (design §4.1: "format-aware placeholder"). */
+  const STARTERS: Record<DesignFormat, string[]> = {
+    html: [
+      'A dashboard with KPI cards and a recent-activity table',
+      'A settings page with tabs for profile, security, and billing',
+      'A sign-up form with validation states',
+    ],
+    mermaid: [
+      'A sequence diagram of the checkout flow',
+      'A state diagram for a withdrawal: queued → sent → settled',
+      'An ER diagram of players, wallets and payouts',
+    ],
+    excalidraw: [
+      'Wireframe two mobile screens as frames: onboarding and home',
+      'A user-journey board with sticky notes grouped by stage',
+      'A system context diagram with boxes and labelled arrows',
+    ],
+    scene3d: [
+      'A greybox level: ground, three platforms, cover crates and a goal marker',
+      'A product shot: a plinth, a hero box and three-point lighting',
+      'A kiosk in a lobby with a floor, two walls and a screen',
+    ],
+  };
+  const HINT: Record<DesignFormat, string> = {
+    html: 'a self-contained HTML screen',
+    mermaid: 'a Mermaid diagram',
+    excalidraw: 'an Excalidraw board (frames as artboards, 8-pt grid)',
+    scene3d: 'a scene3d document (metres, y-up, origin at the floor)',
+  };
 
-  function setFormat(f: MockupFormat): void {
+  function setFormat(f: DesignFormat): void {
     if (!locked) mockupAssist.format = f;
   }
 
@@ -49,7 +81,7 @@
       const att = await mockupAssist.ask(p, provider);
       oncommit?.(att);
     } catch (e) {
-      toasts.error('Mockup agent failed', e instanceof Error ? e.message : String(e));
+      toasts.error('Design agent failed', e instanceof Error ? e.message : String(e));
     }
   }
   function onKey(e: KeyboardEvent): void {
@@ -63,37 +95,37 @@
   }
 </script>
 
-<section class="mockup-assist">
+<section class="mockup-assist" class:embedded>
   <header class="ma-head">
-    <span class="ma-title"><Icon name="zap" size={15} /> Mockup agent</span>
-    <div class="ma-format" role="group" aria-label="Mockup format">
-      <button class:on={mockupAssist.format === 'html'} disabled={locked} onclick={() => setFormat('html')}>
-        HTML
-      </button>
-      <button
-        class:on={mockupAssist.format === 'mermaid'}
-        disabled={locked}
-        onclick={() => setFormat('mermaid')}
-      >
-        Diagram
-      </button>
+    <span class="ma-title"><Icon name="zap" size={15} /> {embedded ? 'Assistant' : 'Design agent'}</span>
+    <div class="ma-format" role="group" aria-label="Design format">
+      {#each DESIGN_FORMATS as f (f)}
+        <button
+          class:on={mockupAssist.format === f}
+          disabled={locked}
+          onclick={() => setFormat(f)}
+          title={FORMATS[f].hint}
+        >{f === 'html' ? 'HTML' : FORMATS[f].label}</button>
+      {/each}
     </div>
-    <label class="ma-provider" title="Agent provider (locked once the mockup exists)">
-      <select bind:value={provider} aria-label="Mockup provider" disabled={locked || mockupAssist.busy}>
+    <label class="ma-provider" title="Agent provider (locked once the artifact exists)">
+      <select bind:value={provider} aria-label="Design provider" disabled={locked || mockupAssist.busy}>
         {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
       </select>
     </label>
     {#if mockupAssist.busy}<span class="ma-working">working…</span>{/if}
-    <button class="ma-close" onclick={onclose} aria-label="Close mockup agent">
+    <button class="ma-close" onclick={onclose} aria-label="Close design agent">
       <Icon name="x" size={15} />
     </button>
   </header>
 
   <div class="ma-body">
-    <!-- Live preview of the mockup as the agent writes it. -->
-    <div class="ma-preview">
-      <MockupLivePreview format={mockupAssist.format} content={mockupAssist.liveContent} />
-    </div>
+    {#if !embedded}
+      <!-- Live preview of the artifact as the agent writes it. -->
+      <div class="ma-preview">
+        <MockupLivePreview format={mockupAssist.format} content={mockupAssist.liveContent} />
+      </div>
+    {/if}
 
     <!-- The agent's live shell + the request composer. -->
     <aside class="ma-side">
@@ -104,13 +136,13 @@
           {/key}
         {:else}
           <div class="ma-empty">
-            <p class="lead">Describe the mockup and the agent builds it here.</p>
-            <p class="hint">It writes a self-contained {mockupAssist.format === 'mermaid'
-                ? 'Mermaid diagram'
-                : 'HTML screen'} and the preview updates live. Keep chatting to refine it. The
-              agent's shell appears here once it starts.</p>
+            <p class="lead">
+              {embedded ? 'Ask for a change and the agent edits this artifact in place.' : 'Describe the mockup and the agent builds it here.'}
+            </p>
+            <p class="hint">It writes {HINT[mockupAssist.format]} and the preview updates live. Keep chatting
+              to refine it. The agent's shell appears here once it starts.</p>
             <div class="ma-starters">
-              {#each STARTERS as s (s)}
+              {#each STARTERS[mockupAssist.format] as s (s)}
                 <button class="ma-starter" onclick={() => useStarter(s)}>{s}</button>
               {/each}
             </div>
@@ -122,7 +154,7 @@
         <textarea
           bind:value={draft}
           onkeydown={onKey}
-          placeholder={locked ? 'Ask for a change…' : 'Describe the mockup to create…'}
+          placeholder={locked ? 'Ask for a change…' : `Describe the ${FORMATS[mockupAssist.format].label.toLowerCase()} to create…`}
           rows="2"
           disabled={mockupAssist.busy}
         ></textarea>
@@ -150,6 +182,10 @@
     overflow: hidden;
     background: var(--surface);
   }
+  .mockup-assist.embedded {
+    border: none;
+    border-radius: 0;
+  }
   .ma-head {
     display: flex;
     align-items: center;
@@ -157,6 +193,11 @@
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
     flex: none;
+    flex-wrap: wrap;
+  }
+  .embedded .ma-head {
+    padding: 6px 10px;
+    gap: 6px;
   }
   .ma-title {
     display: inline-flex;
@@ -180,6 +221,10 @@
     padding: 3px 10px;
     cursor: pointer;
   }
+  .embedded .ma-format button {
+    padding: 2px 7px;
+    font-size: 10.5px;
+  }
   .ma-format button.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     color: var(--accent);
@@ -187,6 +232,10 @@
   .ma-format button:disabled {
     cursor: default;
     opacity: 0.55;
+  }
+  /* Locked chips: only the active one matters — hide the rest in the narrow dock. */
+  .embedded .ma-format button:disabled:not(.on) {
+    display: none;
   }
   .ma-provider {
     display: inline-flex;
@@ -246,12 +295,20 @@
     flex-direction: column;
     border-inline-start: 1px solid var(--border);
   }
+  .embedded .ma-side {
+    min-width: 0;
+    max-width: none;
+    border-inline-start: none;
+  }
   .ma-shell {
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
     position: relative;
     background: #1e1e1e;
+  }
+  .embedded .ma-shell {
+    min-height: 180px;
   }
   .ma-shell > :global(*) {
     flex: 1 1 auto;
@@ -263,17 +320,26 @@
     color: var(--text-dim, #aaa);
     padding: 20px;
   }
+  .embedded .ma-empty {
+    padding: 12px;
+  }
   .ma-empty .lead {
     margin: 0 0 6px;
     font-size: 14px;
     font-weight: 600;
     color: #eee;
   }
+  .embedded .ma-empty .lead {
+    font-size: 12.5px;
+  }
   .ma-empty .hint {
     margin: 0 0 14px;
     font-size: 12px;
     line-height: 1.5;
     max-width: 320px;
+  }
+  .embedded .ma-empty .hint {
+    font-size: 11px;
   }
   .ma-starters {
     display: flex;
@@ -302,6 +368,9 @@
     gap: 8px;
     padding: 10px 12px;
     border-top: 1px solid var(--border);
+  }
+  .embedded .ma-composer {
+    padding: 8px;
   }
   .ma-composer textarea {
     flex: 1;
@@ -345,6 +414,9 @@
       max-width: none;
       border-inline-start: none;
       border-top: 1px solid var(--border);
+    }
+    .embedded .ma-side {
+      border-top: none;
     }
   }
 </style>

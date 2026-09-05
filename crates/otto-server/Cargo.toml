@@ -27,6 +27,7 @@ dirs.workspace = true
 rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
 otto-sessions.workspace = true
+otto-sandbox.workspace = true
 otto-connections.workspace = true
 otto-aws.workspace = true
 otto-k8s.workspace = true

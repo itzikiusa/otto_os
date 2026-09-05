@@ -990,13 +990,34 @@ collections live under `/workspaces/{ws}/product/*`; item routes resolve the wor
 the row. AI-producing actions (analyze/rewrite/generate/plan) live under
 `/workspaces/{id}/product/...` and return 202 Accepted, streaming progress over `/ws/events`.
 
+### Product rows — the epic tree
+
+`ProductStory` carries three tree fields (migration `0124_product_epic_tree.sql`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `parent_id` | `Id \| null` | the epic this story is filed under; `null` = top level |
+| `tree_kind` | `'story' \| 'epic' \| 'doc'` | Otto's **tree role** — distinct from `source_kind` (jira/confluence/draft), Jira's `issue_type` and `product_story_versions.kind`. A row renders as an epic when `tree_kind == 'epic'` **or** it has children (a Jira story linked to a swarm project roots its tree without Otto rewriting it). `doc` is a lightweight child (design note / spec section). |
+| `folder` | `string` | folder inside the parent epic (`''`, `'Design'`, `'PO'` …) — the visual sub-hierarchy; unrelated to a design artifact's `meta.group` |
+
+Rules: **one level of nesting** — a `parent_id` must point at a top-level story, a story
+that has children cannot itself get a parent, and a child is never an `epic` (all 400).
+Deleting a parent **re-parents** its children to top level (never cascades); deleting any
+story also removes its `product_attachments` + `product_mockup_annotations` rows and, best
+effort, `data_dir/product/attachments/<sid>/`.
+
+`PATCH /product/stories/{sid}` (`UpdateStoryReq`) accepts `parent_id` (`"parent_id": null`
+**detaches**; an absent key leaves it unchanged), `tree_kind` (400 on anything but the three
+values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cadence_min/tags`.
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /workspaces/{ws}/product/stories | ws viewer | — | `Story[]` |
+| GET /workspaces/{ws}/product/stories | ws viewer | — | `Story[]` (flat; the UI derives the tree from `parent_id` → `folder`) |
 | POST /workspaces/{ws}/product/stories | ws editor | ImportStoryReq | Story |
 | GET /product/stories/{sid} | ws viewer | — | Story |
-| PATCH /product/stories/{sid} | ws editor | PatchStoryReq | Story |
-| DELETE /product/stories/{sid} | ws editor | — | 204 |
+| PATCH /product/stories/{sid} | ws editor | PatchStoryReq (`+ parent_id?, tree_kind?, folder?`) | Story |
+| DELETE /product/stories/{sid} | ws editor | — | 204 (re-parents children; removes attachment/annotation rows + `product/attachments/<sid>/` + each artifact's `product/mockup_assist/<aid>/` scratch dir, best effort) |
+| POST /product/stories/{sid}/children | ws editor | CreateChildReq `{ title?, tree_kind?: 'story'\|'doc' (default doc), folder? }` | ProductStoryDetail — a draft child filed under the epic `sid` (400 if `sid` is itself a child or `tree_kind` is `epic`) |
 | POST /product/stories/{sid}/refresh | ws editor | — | re-pull the source story |
 | GET /product/stories/{sid}/versions | ws viewer | — | `Version[]` |
 | GET /product/versions/{vid} | ws viewer | — | Version |
@@ -1048,25 +1069,81 @@ the row. AI-producing actions (analyze/rewrite/generate/plan) live under
 | POST /product/analyses/{aid}/agents/{agent_id}/retry | ws editor | — | 202 (re-run one analysis lens agent) |
 | POST /product/analyses/{aid}/agents/{agent_id}/stop | ws editor | — | 202 (stop a running analysis agent) |
 
-### Product story attachments & mockups
+### Product story attachments & the Design arena
 
 Local story attachments (paste/drag/file-picker) stored under
 `data_dir/product/attachments/<story_id>/`, served back as bytes; plus pinned
 mockup annotations. The story's workspace gates each route (Viewer reads, Editor
-mutations). The upload route carries a 40 MB body cap (raw content cap 25 MB).
+mutations). The upload and content-PUT routes carry a 40 MB body cap (raw
+content cap 25 MB).
+
+**Design artifacts** ride the same table. `product_attachments.kind` is `file` |
+`image` | `mockup` | `design`; the arena lists `mockup`, `design` and `image`
+together. `meta_json` carries `{ "format", "assist_session_id"?, "group",
+"derived_from"? }` (`group` is the arena's asset grouping — Screens / Diagrams /
+Boards / 3D / Renders — unrelated to the story `folder`). **One format enum**,
+`DesignFormat`, mirrored in TS:
+
+| format | mime | ext | kind when agent-minted |
+|---|---|---|---|
+| `html` | `text/html` | `.html` | `mockup` |
+| `mermaid` | `text/vnd.mermaid` | `.mmd` | `mockup` |
+| `excalidraw` | `application/vnd.excalidraw+json` | `.excalidraw` | `design` |
+| `scene3d` | `application/vnd.otto.scene3d+json` | `.json` | `design` |
+| (upload) | `model/gltf-binary` / `model/gltf+json` | `.glb` / `.gltf` | `design` |
+| (upload) | `image/*` | — | `image` |
+
+Unknown formats are a **400** everywhere (assist, ingest, content PUT) — never a
+silent fallback to HTML. No `text/x-python`: a Blender script is a server-side
+export of a validated `scene3d` document (§ Blender bridge), never an upload.
+The upload allow-list gains the four design mimes; `sniff_ok` checks the `glTF`
+magic header and a `{`-after-whitespace JSON case; a `scene3d` payload is also
+schema-validated (`design_scene3d::validate`: known `type`s only, finite
+numbers, ≤ 2 000 objects, `attachment_id` a safe id component).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /product/stories/{sid}/attachments | ws editor | UploadReq (base64) | ProductAttachment |
+| POST /product/stories/{sid}/attachments | ws editor | UploadReq (base64) | ProductAttachment (`kind` defaults from the mime: `image` / `design` / `file`) |
 | GET /product/stories/{sid}/attachments | ws viewer | — | ProductAttachment[] |
 | GET /product/attachments/{aid} | ws viewer | — | the file bytes (inline; nosniff) |
 | PATCH /product/attachments/{aid} | ws editor | AttachmentPatch | ProductAttachment (e.g. mark as mockup) |
+| PUT /product/attachments/{aid}/content | ws editor | `{ data_b64, base_updated_at? }` | ProductAttachment — save an edited artifact from the UI (3D inspector, Excalidraw board, code view). Same guards as the upload (allow-list, sniff, 25 MB raw, confined path; `scene3d` schema-validated → 400); the row's `mime`/`filename` never change; `size_bytes`+`updated_at` bump; broadcasts `mockup_updated` (text formats carry `content`, binaries / >4 MB carry `content: null`). **Optimistic concurrency:** `base_updated_at` (RFC 3339, the `updated_at` the editor loaded) → **409** when it no longer matches the row (compared as instants; another save landed — re-fetch, then retry), 400 when unparseable; absent = unconditional save |
 | DELETE /product/attachments/{aid} | ws editor | — | 204 (row + file) |
 | GET /product/attachments/{aid}/annotations | ws viewer | — | MockupAnnotation[] |
 | POST /product/attachments/{aid}/annotations | ws editor | AnnotationCreateReq | MockupAnnotation |
 | PATCH /product/annotations/{id} | ws editor | AnnotationPatchReq | MockupAnnotation |
 | DELETE /product/annotations/{id} | ws editor | — | 204 |
-| POST /product/stories/{sid}/mockups/assist | ws editor | MockupAssistReq `{prompt, format?, mockup_id?, provider?, model?}` | ProductAttachment — in-place mockup agent: generates (`format`: `html`\|`mermaid`) or refines (`mockup_id`) a `kind:mockup` attachment; streams `mockup_session_started` + `mockup_updated` WS events. `provider`/`model` pick the agent (resolved via configured default when empty; honored on the first/new-mockup session) |
+| POST /product/stories/{sid}/mockups/assist | ws editor | MockupAssistReq `{prompt, format?, mockup_id?, provider?, model?}` | ProductAttachment — in-place design agent: generates (`format`: `html` (default) \| `mermaid` \| `excalidraw` \| `scene3d`; **400 otherwise**) or refines (`mockup_id`, any `kind:mockup`/`kind:design` row whose mime is a `DesignFormat`) an attachment; streams `mockup_session_started` + `mockup_updated` WS events. An agent-produced `scene3d` that fails validation is not committed (prior source kept). `provider`/`model` pick the agent (resolved via configured default when empty; honored on the first/new session). The `excalidraw`/`scene3d` prompts inline the bundled `otto-design-2d` / `otto-design-3d` skills |
+
+#### Blender bridge (optional, detected)
+
+Blender is never required: every 3D feature works without it. Detection order:
+`$OTTO_BLENDER`, then `PATH`, then `/Applications/Blender.app/Contents/MacOS/Blender`
+(no `which` subprocess). Render jobs live in an **in-memory map** on the daemon —
+not persisted, poll-only; the attached outputs survive as ordinary attachments.
+The server **generates** the Python from the validated `scene3d` document
+(`design_scene3d::to_blender_script`, a fixed template interpolating only
+validated numbers / enums / escaped names) and runs
+`blender -b --python <generated.py> -- --out <dir>` under
+`SandboxPolicy::for_tool(out_dir)` (writes confined to the out-dir + Blender's
+own cache dirs, **no network**), `kill_on_drop`, 120 s timeout. The script
+renders `render.png` (Eevee, 1280×720) and exports `scene.glb`; each output is
+attached (`kind:'design'`, `meta.derived_from = aid`, `meta.group` Renders / 3D)
+and announced with `mockup_updated { content: null }`. Render is Editor-only.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /product/design/blender | authenticated (`/product/` feature gate) | — | `{ installed: bool, path: string\|null, version: string\|null }` — `installed:false` cleanly when absent; the probe is cached ~60 s |
+| POST /product/stories/{sid}/design/{aid}/blender-render | ws editor | — | `202 { id }`; **409** when Blender is not installed, when a job for this attachment is already queued/running, or when 2 renders are already in flight (daemon-wide cap); 400 when `aid` is not a valid `scene3d` document |
+| GET /product/design/jobs/{id} | ws viewer (of the source attachment's workspace) | — | `{ id, attachment_id, status: 'queued'\|'running'\|'done'\|'error', error: string\|null, outputs: Id[] /* new attachment ids */, started_at, finished_at: string\|null }`; 404 once pruned (finished jobs live ~1 h) |
+| GET /product/stories/{sid}/design/{aid}/blender-script | ws viewer | — | the generated `.py` (`text/x-python`, `Content-Disposition: attachment`) for opening in Blender by hand |
+
+#### Swarm ingest (per-session token; `X-Otto-Session` + `X-Otto-Token`)
+
+| Method & path | Request | Response |
+|---|---|---|
+| POST /ingest/swarm/product | `ProductIngestReq { title?, body_md, tree_kind?: 'doc'\|'story', folder? }` (the `otto-product --kind` flag maps to `tree_kind`) | 204. With a swarm **project** in the session meta the draft is filed under the project's **epic** — `project.story_id` if set (untouched), else ONE `tree_kind:'epic'` draft minted per project (race-safe: first writer links it; a loser drops its orphan and files under the winner's). `folder` defaults to the agent's role title. A child with the same normalized title is **updated** (new `suggested` version) instead of duplicated. Without a project: a top-level draft, unchanged. 400 on a bad `tree_kind` / empty body; auth failures stay 204. Broadcasts `product_changed { section: "tree", status: "changed" }` |
+| POST /ingest/swarm/mockup | `MockupIngestReq { title, format?: DesignFormat, content, folder? /* meta.group */ }` | 204. Target story = the project's Discovery run's story **or** `project.story_id` **or** the project's epic (minted if needed). 400 on an unknown `format` or an invalid `scene3d`. Broadcasts `mockup_updated` |
 
 ### Product story refinement (talk-to-agent)
 

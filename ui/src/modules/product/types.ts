@@ -27,10 +27,22 @@ export interface ProductStory {
   confluence_tests_page_id: string | null;
   confluence_tests_url: string | null;
   tags: string;
+  /** Epic tree (design §2.1): the parent epic's id, or null at top level. One
+   *  level only — a child never has children. */
+  parent_id: string | null;
+  /** Otto's TREE role — `'story' | 'epic' | 'doc'` — distinct from `source_kind`
+   *  and Jira's `issue_type`. The UI also treats a row with children as an epic. */
+  tree_kind: string;
+  /** Folder inside the parent epic (`''` = unfiled). Unrelated to a design
+   *  attachment's `meta.group`. */
+  folder: string;
   created_by: string;
   created_at: string;
   updated_at: string;
 }
+
+/** `tree_kind` values (mirrors the CHECK-free TEXT column). */
+export type TreeKind = 'story' | 'epic' | 'doc';
 
 export interface ProductStoryVersion {
   id: string;
@@ -241,6 +253,18 @@ export interface UpdateStoryReq {
   watch_enabled?: boolean | null;
   watch_cadence_min?: number | null;
   tags?: string;
+  /** Epic tree: `null` detaches from the epic (Rust `Option<Option<Id>>`);
+   *  omit to leave untouched. The server rejects a parent that itself has a parent. */
+  parent_id?: string | null;
+  tree_kind?: TreeKind | null;
+  folder?: string | null;
+}
+
+/** Body for `POST /product/stories/{sid}/children` → ProductStoryDetail. */
+export interface CreateChildReq {
+  title: string;
+  tree_kind: TreeKind;
+  folder: string;
 }
 
 export interface NewQuestionReq {
@@ -559,11 +583,57 @@ export interface UploadAttachmentReq {
   data_b64: string;
 }
 
+// ---------------------------------------------------------------------------
+// Design Arena (design/product-design-arena.md §2.2, §4.4)
+// ---------------------------------------------------------------------------
+
+/** The ONE design-format enum (Rust `DesignFormat`); unknown values are a 400. */
+export type DesignFormat = 'html' | 'mermaid' | 'excalidraw' | 'scene3d';
+export const DESIGN_FORMATS: readonly DesignFormat[] = ['html', 'mermaid', 'excalidraw', 'scene3d'];
+
+/** Parsed `meta_json` of a `kind:'design'|'mockup'` attachment. */
+export interface DesignMeta {
+  format?: string;
+  assist_session_id?: string;
+  /** The arena's asset grouping (e.g. "Screens") — NOT the story `folder`. */
+  group?: string;
+  /** Set on Blender-render outputs: the scene3d attachment they came from. */
+  derived_from?: string;
+}
+
+/** Body for `PUT /product/attachments/{aid}/content` → ProductAttachment.
+ *  `base_updated_at` = the row's `updated_at` the editor last loaded/saved
+ *  (optimistic concurrency): the server answers 409 when the row moved on. */
+export interface SaveAttachmentContentReq {
+  data_b64: string;
+  base_updated_at?: string | null;
+}
+
+/** `GET /product/design/blender`. */
+export interface BlenderStatus {
+  installed: boolean;
+  path: string | null;
+  version: string | null;
+}
+
+/** `GET /product/design/jobs/{id}` — an in-memory (unpersisted) render job. */
+export interface BlenderJob {
+  id: string;
+  attachment_id: string;
+  status: 'queued' | 'running' | 'done' | 'error';
+  error: string | null;
+  /** New attachment ids (render.png + scene.glb). */
+  outputs: string[];
+  started_at: string;
+  finished_at: string | null;
+}
+
 /** Body for `POST /product/stories/{sid}/mockups/assist` (in-place mockup agent). */
 export interface ProductMockupAssistReq {
   prompt: string;
-  /** `html` (default) | `mermaid`. Only honored when creating a NEW mockup. */
-  format?: 'html' | 'mermaid';
+  /** `html` (default) | `mermaid` | `excalidraw` | `scene3d`. Only honored when
+   *  creating a NEW artifact; unknown values are a 400. */
+  format?: DesignFormat;
   /** Refine an existing agent mockup (resume its session); omit to create one. */
   mockup_id?: string;
   /** Agent provider (built-in or custom, e.g. `grok`). Honored only when a NEW

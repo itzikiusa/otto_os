@@ -1133,7 +1133,9 @@ export type OttoEvent =
       story_id: Id;
       attachment_id: Id;
       format: string;
-      content: string;
+      /** The new source for text formats; an explicit `null` for binary/large
+       *  payloads (glb, oversized) — clients re-fetch the attachment bytes. */
+      content: string | null;
     }
   | {
       /** The mockup agent session became live (turn start) — the Mockups Assistant

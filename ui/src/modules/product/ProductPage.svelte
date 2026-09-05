@@ -7,8 +7,10 @@
   import './product.css';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import { product } from '../../lib/stores/product.svelte';
+  import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import OverviewTab from './OverviewTab.svelte';
   import AnalysisTab from './AnalysisTab.svelte';
@@ -25,10 +27,161 @@
   import ChatTab from './ChatTab.svelte';
   import LearningsView from './LearningsView.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import type { ProductStory } from './types';
+  import type { ProductStory, TreeKind } from './types';
 
   let importOpen = $state(false);
   let draftCreating = $state(false);
+
+  // ── Epic tree state (design §3.2) ─────────────────────────────────────────
+  // Collapsed epics / folders (keys: epic id, `${epicId}/${folder}`). The tree
+  // itself is derived from the (tag-filtered) flat list via the store's buildTree.
+  let collapsedEpics = $state<Record<string, boolean>>({});
+  let collapsedFolders = $state<Record<string, boolean>>({});
+
+  async function createEpic(): Promise<void> {
+    draftCreating = true;
+    try {
+      await product.createEpic();
+      product.tab = 'overview';
+      mobileSection = 'content';
+    } catch (e) {
+      toasts.error('Could not create the epic', product.errMsg(e));
+    } finally {
+      draftCreating = false;
+    }
+  }
+
+  /** Toolbar **New ▾** → Draft · Epic. */
+  function newMenu(e: MouseEvent): void {
+    ctxMenu.show(e, [
+      { label: 'Draft', icon: 'file', action: () => void createDraft() },
+      { label: 'Epic', icon: 'folder', action: () => void createEpic() },
+    ]);
+  }
+
+  /** Inside an epic: **Add child ▾** → Story · Doc (a folder is asked for). */
+  function addChildMenu(e: MouseEvent, epic: ProductStory): void {
+    ctxMenu.show(e, [
+      { label: 'Story (full tab strip)', icon: 'file', action: () => void addChild(epic, 'story') },
+      { label: 'Doc (lightweight note / spec section)', icon: 'note', action: () => void addChild(epic, 'doc') },
+    ]);
+  }
+  async function addChild(epic: ProductStory, kind: TreeKind): Promise<void> {
+    const title = await confirmer.promptText(`Title of the new ${kind} under "${epic.title}":`, {
+      title: kind === 'doc' ? 'Add doc' : 'Add story', confirmLabel: 'Create', placeholder: 'e.g. Tier ladder screens',
+    });
+    if (!title) return;
+    const existing = [...new Set(product.childrenOf(epic.id).map((c) => c.folder).filter(Boolean))];
+    const folder = await confirmer.promptText(
+      existing.length ? `Folder (existing: ${existing.join(', ')}) — leave empty for none:` : 'Folder (e.g. Design, PO) — leave empty for none:',
+      { title: 'Folder', confirmLabel: 'Create', placeholder: 'Design' },
+    );
+    try {
+      await product.createChild(epic.id, { title, tree_kind: kind, folder: folder ?? '' });
+      collapsedEpics = { ...collapsedEpics, [epic.id]: false };
+      product.tab = 'overview';
+      mobileSection = 'content';
+    } catch (e) {
+      toasts.error('Could not add the child', product.errMsg(e));
+    }
+  }
+
+  /** Right-click / ⋯ on a story row: Move to epic… · Set folder… · Mark as epic ·
+   *  Detach from epic · Delete. */
+  function storyMenu(e: MouseEvent | KeyboardEvent, s: ProductStory, node?: TreeNode): void {
+    const isEpicRow = !!node?.isEpic;
+    const items: MenuItem[] = [];
+    // Nested menus: ContextMenu runs `action()` THEN closes, so a menu opened
+    // synchronously from an action would be closed on the same tick — defer it.
+    if (isEpicRow) {
+      items.push({ label: 'Add child…', icon: 'plus', action: () => setTimeout(() => addChildMenu(e as MouseEvent, s), 0) });
+      items.push({ separator: true });
+    }
+    if (!isEpicRow || node?.childCount === 0) {
+      items.push({ label: 'Move to epic…', icon: 'folder', action: () => setTimeout(() => moveToEpicMenu(e, s), 0) });
+    }
+    if (s.parent_id) {
+      items.push({ label: 'Set folder…', icon: 'edit', action: () => void setFolder(s) });
+      items.push({ label: 'Detach from epic', icon: 'x', action: () => void detach(s) });
+    }
+    if (!s.parent_id) {
+      items.push(
+        s.tree_kind === 'epic'
+          ? { label: 'Unmark as epic', icon: 'folder', disabled: (node?.childCount ?? 0) > 0, action: () => void mark(s, 'story') }
+          : { label: 'Mark as epic', icon: 'folder', action: () => void mark(s, 'epic') },
+      );
+    } else {
+      items.push(
+        s.tree_kind === 'doc'
+          ? { label: 'Make a full story', icon: 'file', action: () => void mark(s, 'story') }
+          : { label: 'Make a doc', icon: 'note', action: () => void mark(s, 'doc') },
+      );
+    }
+    items.push({ separator: true });
+    items.push({ label: 'Delete', icon: 'trash', danger: true, action: () => void deleteStory(s) });
+    ctxMenu.show(e, items);
+  }
+  /** Picker: every top-level row can become the parent (epics first). The menu is
+   *  filterable + capped, so a long story list stays scrollable/reachable. */
+  function moveToEpicMenu(e: MouseEvent | KeyboardEvent, s: ProductStory): void {
+    const tops = product.tree.filter((n) => n.story.id !== s.id);
+    const epics = tops.filter((n) => n.isEpic);
+    const others = tops.filter((n) => !n.isEpic && !n.story.parent_id);
+    const item = (n: TreeNode): MenuItem => ({
+      label: `${n.story.title}${n.isEpic ? ` (epic · ${n.childCount})` : ''}`,
+      icon: n.isEpic ? 'folder' : 'file',
+      action: () => void moveTo(s, n.story),
+    });
+    const items: MenuItem[] = [...epics.map(item)];
+    if (epics.length && others.length) items.push({ separator: true, pinned: true });
+    items.push(...others.map(item));
+    if (!items.length) items.push({ label: 'No other top-level story to move under', disabled: true });
+    // Re-anchor at the same spot (the first menu closed on click).
+    ctxMenu.show(e, items, { filter: true, filterPlaceholder: 'Find an epic…', maxVisible: 12 });
+  }
+  async function moveTo(s: ProductStory, epic: ProductStory): Promise<void> {
+    try {
+      await product.moveStory(s.id, epic.id, s.folder || '');
+      collapsedEpics = { ...collapsedEpics, [epic.id]: false };
+    } catch (e) {
+      toasts.error('Move failed', product.errMsg(e));
+    }
+  }
+  async function setFolder(s: ProductStory): Promise<void> {
+    const existing = s.parent_id ? [...new Set(product.childrenOf(s.parent_id).map((c) => c.folder).filter(Boolean))] : [];
+    const folder = await confirmer.promptText(
+      existing.length ? `Folder (existing: ${existing.join(', ')}). Empty = unfiled:` : 'Folder name (e.g. Design, PO). Empty = unfiled:',
+      { title: 'Set folder', confirmLabel: 'Save', initial: s.folder, placeholder: 'Design' },
+    );
+    if (folder === s.folder) return;
+    try {
+      await product.patchStory(s.id, { folder: folder ?? '' });
+    } catch (e) {
+      toasts.error('Could not set the folder', product.errMsg(e));
+    }
+  }
+  async function detach(s: ProductStory): Promise<void> {
+    try {
+      await product.moveStory(s.id, null, '');
+    } catch (e) {
+      toasts.error('Detach failed', product.errMsg(e));
+    }
+  }
+  async function mark(s: ProductStory, kind: TreeKind): Promise<void> {
+    try {
+      await product.setTreeKind(s.id, kind);
+    } catch (e) {
+      toasts.error('Could not change the tree role', product.errMsg(e));
+    }
+  }
+  function toggleEpic(id: string): void {
+    collapsedEpics = { ...collapsedEpics, [id]: !collapsedEpics[id] };
+  }
+  function toggleFolder(epicId: string, folder: string): void {
+    const k = `${epicId}/${folder}`;
+    collapsedFolders = { ...collapsedFolders, [k]: !collapsedFolders[k] };
+  }
+  const tabsHiddenForDoc = new Set(['analysis', 'discovery', 'plan', 'testcases', 'inject']);
 
   // ── Mobile (≤640px) accordion state ───────────────────────────────────────
   // On a phone the two panels (story list + the per-story content) stack and
@@ -76,10 +229,22 @@
       ? product.stories
       : product.stories.filter((s) => parseTags(s.tags).includes(activeTagFilter!)),
   );
+  /** The epic tree over the FILTERED list (the tag filter applies to the
+   *  flattened list; a matching child whose epic didn't match shows at top level). */
+  const tree = $derived(buildTree(filteredStories));
+  /** The selected story's parent epic (breadcrumb) and epic-ness (Add child ▾). */
+  const selectedStory = $derived(product.detail?.story ?? null);
+  const selectedParent = $derived(product.parentOf(selectedStory));
+  const selectedIsEpic = $derived(
+    !!selectedStory && (selectedStory.tree_kind === 'epic' || product.childrenOf(selectedStory.id).length > 0),
+  );
 
   // Reload stories whenever the workspace changes (mirrors DatabasePage pattern).
   $effect(() => {
     if (ws.currentId) {
+      // A workspace switch leaves no artifact open: release the arena's cached
+      // blob URLs / editor bases before the new list loads.
+      product.teardown();
       void product.loadStories();
     }
   });
@@ -103,7 +268,7 @@
       subs: [
         { id: 'overview', label: 'Overview' },
         { id: 'rewrite', label: 'Rewrite' },
-        { id: 'mockups', label: 'Mockups' },
+        { id: 'mockups', label: 'Design' },
       ],
     },
     {
@@ -137,10 +302,21 @@
     },
   ];
 
+  /** A `tree_kind:'doc'` child is a lightweight note: it hides the analysis /
+   *  plan / delivery tabs (design §2.1); `story` children get the full strip. */
+  const visibleGroups = $derived.by(() => {
+    if (selectedStory?.tree_kind !== 'doc') return GROUPS;
+    return GROUPS.map((g) => ({ ...g, subs: g.subs.filter((s) => !tabsHiddenForDoc.has(s.id)) })).filter((g) => g.subs.length > 0);
+  });
+  // A doc landing on a hidden tab (deep link / kind change) falls back to overview.
+  $effect(() => {
+    if (selectedStory?.tree_kind === 'doc' && tabsHiddenForDoc.has(product.tab)) product.tab = 'overview';
+  });
+
   /** The group that owns the currently-active sub (`product.tab`). Falls back to
    *  the first group if the tab is somehow unknown (keeps the top bar coherent). */
   const activeGroup = $derived(
-    GROUPS.find((g) => g.subs.some((s) => s.id === product.tab)) ?? GROUPS[0],
+    visibleGroups.find((g) => g.subs.some((s) => s.id === product.tab)) ?? visibleGroups[0],
   );
 
   /** Click a group: if the current sub isn't already inside it, land on the
@@ -225,6 +401,74 @@
   }
 </script>
 
+{#snippet storyRow(s: ProductStory, node?: TreeNode, depth: number = 0)}
+  <!-- One tree row: an epic (▾/▸ + 🗂 + count), a top-level story (unchanged
+       look) or an indented child (depth 1 = unfiled, 2 = inside a folder). -->
+  <div
+    class="story-row-wrap"
+    class:active={product.selectedId === s.id}
+    class:child={depth > 0}
+    class:epic={node?.isEpic}
+    style={depth ? `--depth:${depth}` : undefined}
+    role="presentation"
+    oncontextmenu={(e) => storyMenu(e, s, node)}
+  >
+    {#if node?.isEpic}
+      <button class="tree-toggle" onclick={() => toggleEpic(s.id)} aria-label={collapsedEpics[s.id] ? 'Expand epic' : 'Collapse epic'} aria-expanded={!collapsedEpics[s.id]}>
+        <Icon name={collapsedEpics[s.id] ? 'chevronRight' : 'chevronDown'} size={12} />
+      </button>
+    {/if}
+    <button
+      class="story-row"
+      class:active={product.selectedId === s.id}
+      onclick={() => selectStory(s)}
+      title={s.source_key}
+    >
+      <span class="story-icon"><Icon name={node?.isEpic ? 'folder' : s.tree_kind === 'doc' ? 'note' : sourceIcon(s.source_kind)} size={13} /></span>
+      <span class="story-info">
+        <span class="story-title">{s.title}</span>
+        <span class="story-meta">
+          {#if node?.isEpic}
+            <span class="epic-badge">epic · {node.childCount}</span>
+          {:else}
+            <span class="stage-badge {stageColor(s.stage)}">{s.stage}</span>
+          {/if}
+          {#if s.tree_kind === 'doc'}
+            <span class="draft-badge doc">DOC</span>
+          {:else if s.source_kind === 'draft'}
+            <span class="draft-badge">DRAFT</span>
+          {:else}
+            <span class="story-key mono">{s.source_key}</span>
+          {/if}
+        </span>
+        {#if parseTags(s.tags).length > 0}
+          <span class="story-tags">
+            {#each parseTags(s.tags) as tag (tag)}
+              <span class="story-tag-chip">{tag}</span>
+            {/each}
+          </span>
+        {/if}
+      </span>
+    </button>
+    <button
+      class="row-menu-btn"
+      onclick={(e) => storyMenu(e, s, node)}
+      aria-label="Story menu"
+      title="Move to epic, set folder, mark as epic…"
+    >
+      <Icon name="grip" size={12} />
+    </button>
+    <button
+      class="delete-btn"
+      onclick={() => deleteStory(s)}
+      aria-label="Delete story"
+      title="Delete story"
+    >
+      <Icon name="trash" size={12} />
+    </button>
+  </div>
+{/snippet}
+
 <div class="product-page" class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
   <!-- ── Mobile accordion header for the list panel (phone only) ───────── -->
   <button
@@ -269,11 +513,11 @@
         <div class="side-head-actions">
           <button
             class="p-btn"
-            onclick={createDraft}
-            title="Start a blank draft (Discovery): jot ideas, refine with agents, then publish as a Story or RFC"
+            onclick={newMenu}
+            title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
             disabled={draftCreating}
           >
-            <Icon name="file" size={12} /> {draftCreating ? 'Creating…' : 'New draft'}
+            <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={10} />
           </button>
           <button
             class="p-btn primary"
@@ -315,46 +559,29 @@
         {:else if filteredStories.length === 0}
           <div class="list-empty">No stories match the selected tag.</div>
         {:else}
-          {#each filteredStories as s (s.id)}
-            <div
-              class="story-row-wrap"
-              class:active={product.selectedId === s.id}
-            >
-              <button
-                class="story-row"
-                class:active={product.selectedId === s.id}
-                onclick={() => selectStory(s)}
-                title={s.source_key}
-              >
-                <span class="story-icon"><Icon name={sourceIcon(s.source_kind)} size={13} /></span>
-                <span class="story-info">
-                  <span class="story-title">{s.title}</span>
-                  <span class="story-meta">
-                    <span class="stage-badge {stageColor(s.stage)}">{s.stage}</span>
-                    {#if s.source_kind === 'draft'}
-                      <span class="draft-badge">DRAFT</span>
-                    {:else}
-                      <span class="story-key mono">{s.source_key}</span>
-                    {/if}
-                  </span>
-                  {#if parseTags(s.tags).length > 0}
-                    <span class="story-tags">
-                      {#each parseTags(s.tags) as tag (tag)}
-                        <span class="story-tag-chip">{tag}</span>
-                      {/each}
-                    </span>
-                  {/if}
-                </span>
-              </button>
-              <button
-                class="delete-btn"
-                onclick={() => deleteStory(s)}
-                aria-label="Delete story"
-                title="Delete story"
-              >
-                <Icon name="trash" size={12} />
-              </button>
-            </div>
+          {#each tree as node (node.story.id)}
+            {@render storyRow(node.story, node)}
+            {#if node.isEpic && !collapsedEpics[node.story.id]}
+              {#each node.folders as f (f.name)}
+                {#if f.name}
+                  <button
+                    class="folder-head"
+                    onclick={() => toggleFolder(node.story.id, f.name)}
+                    aria-expanded={!collapsedFolders[`${node.story.id}/${f.name}`]}
+                  >
+                    <Icon name={collapsedFolders[`${node.story.id}/${f.name}`] ? 'chevronRight' : 'chevronDown'} size={10} />
+                    <Icon name="folder" size={11} />
+                    <span class="folder-name">{f.name}/</span>
+                    <span class="folder-count">{f.children.length}</span>
+                  </button>
+                {/if}
+                {#if !f.name || !collapsedFolders[`${node.story.id}/${f.name}`]}
+                  {#each f.children as c (c.id)}
+                    {@render storyRow(c, undefined, f.name ? 2 : 1)}
+                  {/each}
+                {/if}
+              {/each}
+            {/if}
           {/each}
         {/if}
       </div>
@@ -426,9 +653,36 @@
          inline-end (wrapping on a narrow window); a single-sub group (Log)
          shows no pills, since the group click already navigates there. -->
     {#if product.view === 'stories' && product.selectedId}
+      {#if selectedStory && (selectedParent || selectedIsEpic)}
+        <!-- Breadcrumb `Epic › Folder › Title` for a child; an epic shows its
+             child count + the Add child ▾ menu (design §3.2). -->
+        <div class="crumb-row">
+          <nav class="crumbs" aria-label="Epic breadcrumb">
+            {#if selectedParent}
+              <button class="crumb" onclick={() => void product.select(selectedParent.id)} title="Open the epic">
+                <Icon name="folder" size={11} /> {selectedParent.title}
+              </button>
+              <span class="crumb-sep">›</span>
+              {#if selectedStory.folder}
+                <span class="crumb dim">{selectedStory.folder}</span>
+                <span class="crumb-sep">›</span>
+              {/if}
+              <span class="crumb cur">{selectedStory.title}</span>
+            {:else}
+              <span class="crumb cur"><Icon name="folder" size={11} /> {selectedStory.title}</span>
+              <span class="crumb dim">epic · {product.childrenOf(selectedStory.id).length} children</span>
+            {/if}
+          </nav>
+          {#if selectedIsEpic}
+            <button class="p-btn add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic">
+              <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={10} />
+            </button>
+          {/if}
+        </div>
+      {/if}
       <div class="product-header-row2">
         <div class="tab-strip" role="tablist" aria-label="Story tabs">
-          {#each GROUPS as g (g.id)}
+          {#each visibleGroups as g (g.id)}
             <button
               class="st"
               class:active={activeGroup.id === g.id}
@@ -658,6 +912,147 @@
   .delete-btn:hover {
     background: color-mix(in srgb, #ef4444 15%, transparent) !important;
     color: #ef4444 !important;
+  }
+  /* ── Epic tree rows ─────────────────────────────────────────── */
+  .row-menu-btn {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: transparent;
+    cursor: pointer;
+    padding: 0;
+    transition: color 100ms, background 100ms;
+  }
+  .story-row-wrap:hover .row-menu-btn,
+  .story-row-wrap.active .row-menu-btn {
+    color: var(--text-dim);
+  }
+  .row-menu-btn:hover {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+  }
+  .tree-toggle {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 18px;
+    height: 22px;
+    margin-inline-start: 2px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0;
+  }
+  .story-row-wrap.epic > .story-row {
+    padding-inline-start: 2px;
+  }
+  /* Children indent by depth (1 = unfiled under the epic, 2 = inside a folder). */
+  .story-row-wrap.child {
+    margin-inline-start: calc(var(--depth, 1) * 14px);
+  }
+  .story-row-wrap.child .story-row {
+    padding-block: 5px;
+  }
+  .story-row-wrap.child .story-title {
+    font-size: 12px;
+  }
+  .folder-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: calc(100% - 14px);
+    margin-inline-start: 14px;
+    padding: 4px 6px 2px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    text-align: start;
+  }
+  .folder-head:hover {
+    color: var(--text);
+  }
+  .folder-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .folder-count {
+    font-weight: 600;
+    opacity: 0.8;
+  }
+  .epic-badge {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  .draft-badge.doc {
+    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    color: var(--text-dim);
+  }
+  /* ── Breadcrumb row (child / epic header) ────────────────────── */
+  .crumb-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 14px 0;
+    flex-shrink: 0;
+  }
+  .crumbs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .crumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font-size: 12px;
+    padding: 0;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 40%;
+  }
+  .crumb.dim {
+    color: var(--text-dim);
+    cursor: default;
+  }
+  .crumb.cur {
+    color: var(--text);
+    cursor: default;
+    font-weight: 600;
+  }
+  .crumb-sep {
+    color: var(--text-dim);
+  }
+  .add-child-btn {
+    flex-shrink: 0;
   }
   .story-icon {
     flex-shrink: 0;

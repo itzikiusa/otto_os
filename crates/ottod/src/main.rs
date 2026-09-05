@@ -514,6 +514,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         discovery_chat_repo,
         canvas_repo,
         product_agent_cancels: otto_server::product_run::new_cancel_registry(),
+        design_jobs: otto_server::design_blender::new_job_registry(),
         memory,
         vault,
         vault_docs_runs: otto_server::vault_docs_agent::new_run_registry(),

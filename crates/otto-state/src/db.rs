@@ -131,6 +131,8 @@ const RENUMBERED: &[(i64, &str, i64)] = &[
     // feat/resource-access-governance shipped as 0116/0117.
     (116, "resource access", 119),
     (117, "database changes", 120),
+    // feat/product-design-arena shipped as 0115.
+    (115, "product epic tree", 124),
 ];
 
 /// Generalised form of [`repair_renumbered_vault_migrations`]: for every
@@ -280,6 +282,11 @@ mod tests {
         .await;
         repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
         assert_eq!(versions(&pool).await, vec![115, 119, 120]);
+
+        // Population D ran the product-design-arena build (0115 = epic tree).
+        let pool = migrations_pool(&[(114, "x"), (115, "product epic tree")]).await;
+        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        assert_eq!(versions(&pool).await, vec![114, 124]);
 
         // Population C is a correct main install: nothing moves.
         let pool = migrations_pool(&[

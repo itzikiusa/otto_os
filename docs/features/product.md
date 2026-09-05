@@ -29,6 +29,8 @@ operator reference for the feature.
 | Capture recurring wisdom | **Learnings** — a global patterns/avoids knowledge base, auto-suggested by agents |
 | Stay in sync with the source | **Watcher** — periodic poll that reconciles new comments into answered questions |
 | Feed a coding agent the full picture | **Inject** — a consolidated context bundle dropped into a new agent session |
+| Design what it looks like — 2D and 3D | **Design** — one arena for HTML screens (device frames), Excalidraw boards, Mermaid diagrams and `scene3d` 3D scenes (viewport + hierarchy + inspector), each agent-assisted, file-backed and autosaved; GLB / Blender-script export, optional Blender render |
+| Keep a swarm's output under one roof | **Epic tree** — a story can be an *epic* with children in *folders*; swarm agents publish INTO their project's epic instead of piling up top-level drafts |
 
 ---
 
@@ -50,7 +52,12 @@ the session manager + improvement engine), and a Svelte UI module.
 | Swarm bridge | `crates/otto-server/src/product_swarm.rs` | `story_to_swarm` (Plan → Swarm) |
 | Memory route | `crates/otto-server/src/routes/product_memory.rs` | `POST …/memory/ingest` |
 | Issue trackers | `crates/otto-issues/` | The Jira/Confluence clients (`JiraClient`, `ConfluenceClient`) Product proxies through |
+| Design formats | `crates/otto-server/src/design_format.rs`, `design_scene3d.rs`, `design_blender.rs` | The single `DesignFormat` enum (html · mermaid · excalidraw · scene3d), the `scene3d` validator + deterministic Blender-script generator, Blender detection / render jobs |
+| Media | `crates/otto-server/src/product_media.rs`, `mockup_assist.rs` | Attachment upload / content PUT (mime allow-list, sniffing, size caps), the in-place file-backed assist agent |
 | UI | `ui/src/modules/product/` | `ProductPage.svelte` + per-tab components; `types.ts` mirrors the DTOs |
+| · Design Arena | `ui/src/modules/product/design/` | `DesignArena.svelte` (assets / viewport / inspector / assistant shell), `DesignBoard.svelte` (Excalidraw island), `DeviceFrame.svelte`, templates, exporters |
+| · 3D | `ui/src/modules/product/design/scene3d/` | `Scene3DViewport.svelte` (lazy three.js), `Hierarchy.svelte`, `Inspector.svelte`, `types.ts` / `validate.ts` / `ops.ts` (pure doc mutations) / `exportGlb.ts` |
+| Skills | `crates/otto-skills/assets/skills/development/otto-{mockup,design-2d,design-3d}/` | What the assistant / swarm agents know about the four formats and their authoring rules |
 | Contracts (authoritative) | `docs/contracts/product.md`, `api.md` (§ Product), `ws.md` (Product events) | The source-of-truth API spec |
 
 In the app, Product is reached from the left nav (the **Product** item) or the
@@ -92,10 +99,13 @@ The Product page is a two-pane layout: a left sidebar with the **story list**
 (plus import controls and a tag filter) and a main area with a **Stories /
 Learnings** toggle. With a story selected, the main area shows a tab strip:
 
-> **Overview · Analysis · Questions · Notes · Rewrite · Test Cases · Plan · History · Inject**
+> **Overview · Analysis · Questions · Notes · Rewrite · Test Cases · Plan · Design · History · Inject**
 
 (For a draft, Overview becomes an editor; for a Jira-backed story, Overview adds
-a live Jira metadata panel.)
+a live Jira metadata panel. The tab id `mockups` is kept as a deep-link alias for
+**Design**; a `tree_kind:"doc"` child hides the analysis/plan tabs.) The story
+list itself is a **tree** — epics with folders and children — see
+[§4.13](#413-epic-tree--epics-folders-and-swarm-publishing).
 
 ### 4.1 Importing a story (search by project/space — no key prefix)
 
@@ -416,6 +426,178 @@ stories about every **60 seconds**; a story is polled when its cadence elapses
 
 ---
 
+### 4.13 Epic tree — epics, folders and swarm publishing
+
+A story can be the **parent** of other stories. There is exactly **one level**
+of nesting (an epic → children), and each child sits in a **folder** inside the
+epic (`Design`, `PO`, `QA`, … — free text, `''` = unfiled). Three columns on
+`product_stories` carry it: `parent_id`, `tree_kind` (`story` | `epic` | `doc`)
+and `folder`. `tree_kind` is Otto's *tree role* — deliberately independent of
+`source_kind` (jira/confluence/draft) and of Jira's own issue type — so a Jira
+story linked to a swarm project shows as the root of its tree **without Otto
+ever rewriting the Jira row**: the UI treats a row as an epic when
+`tree_kind == 'epic'` **or** it has children.
+
+**UI (list pane)**
+
+```
+▾ 🗂 Loyalty programme (epic · 6)        ← click = epic overview; ▸ collapses
+    Design/                              ← folder header (collapsible)
+      ◻ Tier ladder screens      DRAFT
+      ◻ Rewards 3D kiosk         DRAFT
+    PO/
+      ◻ Feature draft v2
+  ○ GS-1204 Bonus wallet limits          ← top-level story, unchanged look
+```
+
+- The story header shows a breadcrumb `Epic › Folder › Title`.
+- Right-click a story: **Move to epic…** (picker), **Set folder…**, **Mark as
+  epic**, **Detach from epic**. Toolbar **New ▾** → *Draft* / *Epic*; inside an
+  epic **Add child ▾** → *Story* / *Doc*. (Drag-and-drop is a follow-up.)
+- An epic's **Overview** adds a *Children* board (folder → cards) with rolled-up
+  counts, and its **Design** tab shows every child's design artifacts
+  (filterable by child) — the epic is the single place to review a feature.
+- The tag filter still applies (to the flattened list).
+- **Deleting an epic re-parents its children to top level** — it never cascades
+  into them. Deleting any story now also removes its attachments and annotation
+  rows (and, best-effort, its files under `data_dir/product/attachments/<sid>/`).
+
+**Swarm publishing.** Before, every `otto-product` call from a swarm agent
+created a fresh top-level draft — a project with a PO, an analyst and a designer
+(plus retries) produced a pile of pages. Now `POST /ingest/swarm/product`:
+
+1. resolves the **epic** — the swarm project's `story_id` if set (that story is
+   left untouched and simply gains children); otherwise ONE `tree_kind:'epic'`
+   draft named after the project goal is created and stored on the project (a
+   unique index + `Conflict` mapping make two racing agents converge on the same
+   epic); a swarm without a project keeps the old top-level behaviour;
+2. files the **child** with `otto-product --title T --folder F --kind doc|story`
+   (defaults: folder = the agent's role title, kind = `doc`). A child with the
+   same normalised title already under the epic is **updated** (a new `suggested`
+   version) rather than duplicated;
+3. broadcasts `product_changed { section:"tree" }` so the list refreshes.
+
+`otto-mockup` follows the same target resolution (discovery run's story →
+project's story → the resolved epic) and accepts `--format
+html|mermaid|excalidraw|scene3d`. Both helpers now **fail loudly** (`curl -f`,
+HTTP status printed, non-zero exit) instead of silently 204-ing.
+
+### 4.14 Design Arena — screens, boards, diagrams and 3D scenes
+
+The **Design** tab (formerly *Mockups*) is one arena for every visual artifact on
+a story. Desktop layout; on mobile it collapses to a segmented top bar with a
+single pane, like the Database Explorer:
+
+```
+┌──────────────┬─────────────────────────────────────────────┬────────────────┐
+│ ASSETS       │  ⟵ toolbar: New ▾ · Import · Export ▾ · ⋯  │ INSPECTOR      │
+│ Screens (3)  │                                             │ (per format)   │
+│  ◻ Home      │            VIEWPORT / BOARD                 │  Transform     │
+│  ◻ Checkout  │   html: sandboxed iframe (device frames)    │  Material  …   │
+│ Boards (1)   │   excalidraw: full editor (React island)    │────────────────│
+│ Diagrams (2) │   mermaid: existing renderer                │ ASSISTANT      │
+│ 3D (1)       │   scene3d: three.js + orbit + gizmo         │  (live agent   │
+│  ◈ Kiosk     │                                             │   shell +      │
+│ Images (4)   │  status: 12 objects · 2 lights · saved 2s   │   composer)    │
+└──────────────┴─────────────────────────────────────────────┴────────────────┘
+```
+
+**Artifacts are attachments.** Every design is a `product_attachments` row of
+`kind:'design'` (legacy `kind:'mockup'` rows and `image`s are listed alongside)
+whose `meta_json` carries `{ format, assist_session_id, group }` — `group` is the
+asset-list heading (*Screens*, *Boards*, …), unrelated to the epic `folder`.
+There is **one format enum**, `DesignFormat`, on both sides of the wire; anything
+else is a **400**, never a silent fallback to HTML:
+
+| format | file | mime | renders with |
+|---|---|---|---|
+| `html` | `design.html` | `text/html` | sandboxed iframe in a **device frame** (iPhone / iPad / desktop / none) with a light/dark toggle |
+| `mermaid` | `design.mmd` | `text/vnd.mermaid` | the Mermaid renderer |
+| `excalidraw` | `design.excalidraw` | `application/vnd.excalidraw+json` | the Excalidraw board (`DesignBoard.svelte`; the user edits by hand, autosaved) |
+| `scene3d` | `scene.json` | `application/vnd.otto.scene3d+json` | the three.js viewport (lazy-loaded on first use) |
+| `glb` / `gltf` | uploaded | `model/gltf-binary` / `model/gltf+json` | as a `gltf` object inside a scene, or standalone |
+| images | uploaded | `image/*` | `<img>` |
+
+**Common to every format**
+
+- **New ▾**: Screen · Board · Diagram · 3D scene · **From template** (Canva-like
+  starters: mobile app screen, dashboard, landing page, user flow, game level
+  blockout, product shot — static files under `design/templates/`).
+- **Import**: files (`.glb .gltf .png .svg .excalidraw`, …) through the existing
+  upload; **Export ▾**: PNG (viewport/board snapshot), SVG (mermaid/excalidraw),
+  the source file, **GLB** (scene3d, via three's `GLTFExporter`) and **Blender
+  script** (scene3d, generated server-side).
+- **Annotations**: the pin-comment layer stays on html/image/mermaid/excalidraw.
+  Camera-anchored 3D pins are deferred; a scene object has a per-object **notes**
+  field in the document instead (the assistant reads them as instructions).
+- **Assistant**: the in-place agent (`MockupAssistPanel`, generalised) with a
+  format-aware prompt, provider/model pick and a live preview of every format,
+  resumable per artifact. It edits the artifact's file; each save is validated
+  and broadcast as `mockup_updated`.
+- **Autosave**: the UI's own edits (inspector, board, code view) go through
+  `PUT /product/attachments/{aid}/content` with a 600 ms debounce; the status line
+  shows *saved / saving / conflict*. If an agent edit arrives while you have
+  unsaved local changes the panel asks before replacing — no silent clobber.
+
+**2D — Figma/Canva side.** The Excalidraw board is the freeform tool (frames as
+artboards, shapes, text, arrows, groups, align — Excalidraw provides them). HTML
+screens render in a device frame with a scheme toggle. The **`otto-design-2d`**
+skill teaches agents Excalidraw JSON authoring (frames as artboards, 8-pt grid,
+palette, components, bound labels/arrows) and the script-free HTML screen rules.
+
+**3D — game-studio side.** Opening a `scene3d` artifact swaps the asset list for
+a **Hierarchy** and the right pane for the scene **Inspector**:
+
+- **Viewport** (`Scene3DViewport.svelte`): orbit / pan / zoom, grid + axes,
+  shadows, PBR lighting from the document, click-to-select (drag-select is off in
+  v1), a **gizmo** (`TransformControls`) — `W` move · `E` rotate · `R` scale ·
+  `F` frame selection · `Delete`/`⌫` delete · `⌘D`/`Ctrl+D` duplicate · `Esc`
+  deselect (keys are ignored while an input has focus). **Play** hides the gizmo,
+  grid and light markers and looks through the document camera — a presentation
+  view; **View → camera** stores your current orbit view into the document so
+  Play, the agent and the Blender export all see it.
+- **Hierarchy**: objects and nested groups, lights in their own section; click to
+  select, double-click / `F2` to rename inline, the eye to hide (hidden ancestors
+  dim their subtree), a filter box, and a `+` menu with the seven primitives, the
+  five light types, *Group* and **Import GLB / glTF…** (an upload that becomes a
+  `gltf` object). Right-click / ⋯: rename, duplicate, move up/down, move to a
+  group / top level, group this, delete (a group deletes its subtree).
+- **Inspector**: with nothing selected — **Scene** (background, grid) and
+  **Camera** (position, target, FOV, clip planes); for an object — **Transform**
+  (position m, rotation °, scale; scrub-drag numeric fields, reset / snap-to-floor
+  buttons), **Material** (color, metalness, roughness, opacity, emissive,
+  wireframe), **Text** or **Model** (attachment id) panels; for a light — type,
+  intensity, color, position/target, angle/distance, shadows; for a group — its
+  members; every node has **Notes**. Each field patches the JSON document → autosave.
+- **The document** (`otto-scene3d` v1) is small and declarative — the browser
+  renders it, the agent edits it, the inspector round-trips it. Units are
+  **metres, y-up, floor at y = 0**; rotation is in **degrees**; `type ∈ box |
+  sphere | cylinder | cone | torus | plane | text | gltf`; a `gltf` object
+  references an uploaded model by **`attachment_id`, never a URL** (the viewer
+  resolves it through the authed attachment route). It is validated on both
+  sides before render and before save: known types only, finite numbers, ≤ 2 000
+  objects / 64 lights / 500 groups, unique ids, safe `attachment_id`s, `#rrggbb`
+  colours. All UI mutations are pure functions in `scene3d/ops.ts` — no component
+  mutates the document directly. The **`otto-design-3d`** skill carries the full
+  schema, unit sizes, blockout conventions and lighting recipes.
+
+**Blender bridge (optional, detected).** Everything above works without Blender.
+When `GET /product/design/blender` reports it installed (`$OTTO_BLENDER`, then
+`PATH`, then `/Applications/Blender.app`), a scene gains **Render in Blender**:
+the daemon **generates** a Python script from the *validated* document (a fixed
+template interpolating only validated numbers/enums/escaped names — never a user
+or agent file), runs `blender -b --python … -- --out <dir>` under a sandbox
+profile with a 120 s timeout, and attaches the resulting `render.png` (Eevee,
+1280×720) and `scene.glb` as new design artifacts (`meta.derived_from = <aid>`),
+each announced by `mockup_updated`. **Download Blender script** returns the same
+`.py` to open in Blender by hand. For agents that have the **Blender MCP**
+available (the MCP page offers a *Blender* template — `stdio`, `uvx
+blender-mcp`, tool access *ask*, disabled until saved), `otto-design-3d` says to
+prefer it for real modelling and export a GLB back into the scene; otherwise the
+agent edits `scene.json`.
+
+---
+
 ## 5. API / contract reference
 
 `docs/contracts/product.md` is authoritative; `api.md` (§ Product) and `ws.md`
@@ -453,6 +635,35 @@ and resolve the workspace from the owning row.
 | `GET /workspaces/{ws}/product/drafts` | viewer | list drafts |
 | `GET /product/stories/{sid}/inject` | viewer | the consolidated inject bundle |
 | `GET /product/stories/{sid}/swarm` | viewer | the linked-swarm closure (tasks/runs/PRs/cost) |
+| `POST /product/stories/{sid}/children` | editor | `{ title, tree_kind, folder }` → `ProductStoryDetail` — add a child to an epic (one level only; a parent that itself has a parent is rejected) |
+
+`ProductStory` carries the tree: `parent_id: Id | null`, `tree_kind: "story" |
+"epic" | "doc"`, `folder: string`. `PATCH /product/stories/{sid}` accepts them
+(`parent_id` may be set to `null` to detach); `DELETE` re-parents children to top
+level and removes the story's attachments + annotations.
+
+### Design Arena (attachments, assist, Blender)
+
+> Written from §5 of `docs/design/product-design-arena.md`; `docs/contracts/api.md`
+> and `ws.md` are authoritative once Track A lands — re-check them if a name below
+> disagrees.
+
+| Method & path | Auth | Purpose |
+|---|---|---|
+| `GET /product/stories/{sid}/attachments` · `POST …/attachments` (multipart) | viewer / editor | list / upload. Allowed mimes now include `application/vnd.excalidraw+json`, `application/vnd.otto.scene3d+json`, `model/gltf-binary`, `model/gltf+json` (sniffed: glTF magic / JSON); their default `kind` is `design` |
+| `GET /product/attachments/{aid}` | viewer | the bytes (the viewer's `authedBlobUrl` — also how `gltf` objects load) |
+| `PUT /product/attachments/{aid}/content` | editor | `{ "data_b64": "<base64>" }` → `ProductAttachment`. Saves an edited artifact (inspector / board / code view). Same guards as upload (`allowed_mime`, `sniff_ok`, size cap, confined path, 40 MB body limit); the row's `mime`/`filename` never change; bumps `size_bytes` + `updated_at`; broadcasts `mockup_updated` |
+| `POST /product/stories/{sid}/mockups/assist` | editor | start / resume the in-place assistant — `format ∈ html \| mermaid \| excalidraw \| scene3d`, anything else **400** |
+| `GET /product/design/blender` | viewer | `{ installed, path, version }` |
+| `POST /product/stories/{sid}/design/{aid}/blender-render` | editor | **202** `{ id }` — queue a headless render + GLB export of a `scene3d` artifact |
+| `GET /product/design/jobs/{id}` | viewer | `{ id, attachment_id, status: queued\|running\|done\|error, error, outputs: [aid…], started_at, finished_at }` — in-memory, not persisted across daemon restarts |
+| `GET /product/stories/{sid}/design/{aid}/blender-script` | viewer | the generated `.py` for the scene |
+| `POST /ingest/swarm/product` · `POST /ingest/swarm/mockup` | session token | `ProductIngestReq { title?, body_md, tree_kind?, folder? }` (the `otto-product` helper) and the `otto-mockup` helper with `format` — resolve the project's epic as in §4.13 |
+
+The `scene3d` document schema (v1) is in §4.14 and, in full, in the
+`otto-design-3d` skill; the TS mirror lives in
+`ui/src/modules/product/design/scene3d/types.ts` + `validate.ts`, the Rust
+validator in `crates/otto-server/src/design_scene3d.rs`.
 
 ### AI orchestration (served by `otto-server`)
 
@@ -472,8 +683,16 @@ and resolve the workspace from the owning row.
 ### WebSocket events (`/ws/events`)
 
 - **`product_changed`** — `{ workspace_id, story_id, section:
-  "analysis"|"rewrite"|"testcases"|"plan", status: "done"|"error" }`. Emitted at
-  the end of every AI run; each Product tab polls once on its matching section.
+  "analysis"|"rewrite"|"testcases"|"plan"|"tree", status: "done"|"error"|"changed" }`.
+  Emitted at the end of every AI run (each Product tab polls once on its matching
+  section) and, with `section:"tree"`, when swarm ingest adds or updates a child
+  under an epic (the list pane refreshes).
+- **`mockup_updated`** — `{ story_id, attachment_id, format, content: string | null }`.
+  Every save of a design artifact — by the assistant, by `PUT …/content`, or a
+  Blender job's outputs. Text formats carry the new source in `content`; binary /
+  large payloads (GLB, images) carry an explicit `null` and clients re-fetch.
+- **`mockup_session_started`** — the assist session for an artifact is live
+  (the Assistant panel attaches its terminal).
 - **`plan_run`** — `{ workspace_id, story_id, session_ids[], interactive }`.
   Re-emitted as each planning/summarizer session appears (later frames are
   supersets), so the Plan tab can tile and watch them live.
@@ -500,8 +719,25 @@ and resolve the workspace from the owning row.
 - Keep a **global learnings** base and **inject** a story's full context into a
   fresh coding agent.
 - Have a **watcher** fold new comments into answered questions automatically.
+- Organise stories as **epics with folders**, and have swarm agents publish into
+  their project's epic instead of creating top-level drafts.
+- Design in one arena: HTML **screens** in device frames, Excalidraw **boards**,
+  Mermaid **diagrams** and **3D scenes** (viewport, hierarchy, inspector, gizmo,
+  Play view), each agent-assisted, autosaved, exportable (PNG / SVG / source /
+  GLB / Blender script) and, with a local Blender, rendered headlessly.
 
 **You cannot (today):**
+
+- Nest epics **recursively** — one level plus folders (Jira's epic → story shape).
+  Drag-and-drop in the tree is a follow-up; use the context menu.
+- Pin **3D annotations** — per-object `notes` in the scene document stand in
+  until `product_mockup_annotations` grows a `meta_json` column.
+- Import **Figma** files, sculpt / UV-edit meshes in the browser, or co-edit with
+  live cursors — Blender (via the bridge) is the modelling tool; the arena is for
+  layout, review and iteration.
+- Upload **Python** / Blender scripts as attachments — the Blender export is always
+  generated by the daemon from a validated scene; `text/x-python` is not an
+  accepted mime.
 
 - Use a **non-Atlassian** issue tracker. `IssueProviderKind` recognizes only
   `jira`; Confluence rides the same Atlassian account.
@@ -535,6 +771,13 @@ and resolve the workspace from the owning row.
 - **No new outward surface.** Product reaches Jira/Confluence over HTTPS using
   your token; the daemon itself stays loopback-only unless you explicitly enable a
   network listener.
+- **Design artifacts are untrusted content.** HTML screens render only in the
+  sandboxed iframe (scripts disabled); `scene3d` JSON is validated on both sides
+  before it is rendered or saved; models load solely by `attachment_id` through
+  the authed attachment route (no URL surface); the content `PUT` reuses the
+  upload's mime allow-list, sniffing and size caps; Blender only ever runs a
+  daemon-generated script, under a sandbox profile, a 120 s timeout and
+  Editor-only RBAC. All `/product/` routes ride the existing `Feature::Product` gate.
 - **Note: global visibility ≠ no auth.** Stories and learnings are visible across
   workspaces, but every read/write still passes the feature + workspace gates, and
   publishing still requires owning the credential.
@@ -556,6 +799,13 @@ and resolve the workspace from the owning row.
 | Watcher isn't picking up comments | `watch_enabled` must be on; cadence is clamped to a 5-minute floor and the supervisor rescans ~every 60s, so allow a few minutes. |
 | Learning appears in another workspace | Expected — learnings and stories are a **global** library. |
 | Injected agent missing test cases / plan | The inject bundle only includes **approved** test cases and the latest `plan` version — approve the run / generate a plan first, then **Rebuild**. |
+| Swarm agents still create top-level drafts | The swarm has no project, or the project has no `story_id` and epic creation failed — check the helper's printed HTTP status (`otto-product` no longer swallows errors). A story linked via Plan → Swarm becomes the epic automatically. |
+| Design tab shows "3D viewport unavailable" | WebGL is disabled/blocked in the webview, or the lazy `three` chunk failed to load (offline dev server). Reload; check the browser console for the import error. |
+| A model shows as a red wireframe box | The `gltf` object's `attachment_id` did not resolve (deleted attachment, no viewer rights, or a non-glTF file). The status line lists the failing models; re-import the GLB. |
+| "Save rejected" / conflict on a scene | The document failed validation (unknown `type`, non-finite number, > 2 000 objects, duplicate id) or an agent saved in between — the panel asks before replacing your local edits; **Reload** to take the agent's version or **Keep mine** to overwrite. |
+| Assistant returns 400 on create | Unknown `format` — only `html`, `mermaid`, `excalidraw`, `scene3d`; there is no fallback to HTML any more. |
+| Blender buttons missing | `GET /product/design/blender` reports `installed:false`: set `$OTTO_BLENDER` to the binary, put `blender` on `PATH`, or install to `/Applications/Blender.app`. Everything else in 3D works without it. |
+| Blender render job stuck `running` / `error` | Jobs are in-memory (lost on daemon restart) and killed after 120 s; check `error` on `GET /product/design/jobs/{id}` — large scenes with many shadow-casting lights are the usual timeout. |
 
 ---
 
@@ -574,3 +824,8 @@ and resolve the workspace from the owning row.
   permission model that gates Product.
 - Authoritative contracts: `docs/contracts/product.md`, `docs/contracts/api.md`
   (§ Product / § Issue trackers), `docs/contracts/ws.md` (Product events).
+- `docs/design/product-design-arena.md` — the reviewed design for the Design
+  Arena + epic tree (data model, `scene3d` schema, Blender bridge, delivery plan).
+- [`./canvas.md`](./canvas.md) — the separate Canvas module (Excalidraw / D2 /
+  Mermaid scenes not bound to a story); [`./mcp-control-plane.md`](./mcp-control-plane.md) — where the
+  Blender MCP template lives.

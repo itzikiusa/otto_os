@@ -119,6 +119,9 @@ pub struct ServerCtx {
     /// Per-run cancellation flags for in-flight product analysis agents (manual
     /// Stop). Mirrors `skill_eval_cancels`.
     pub product_agent_cancels: crate::product_run::CancelRegistry,
+    /// Design arena: in-memory Blender render jobs (`design_blender.rs`). Not
+    /// persisted — poll-only, like `vault_docs_runs`.
+    pub design_jobs: crate::design_blender::JobRegistry,
     /// Memory layer — workspace-scoped keyword (FTS) knowledge store.
     pub memory: std::sync::Arc<otto_memory::MemoryService>,
     /// Vault v3 — the file-backed docs home (markdown vaults, OKF).

@@ -3,10 +3,14 @@ import { join } from 'node:path';
 import { apiCtx, seedWorkspace } from './seed';
 import { seedProductStory } from './seed-product';
 
-// ── E2E: mockup viewer + pinned annotations ────────────────────────────────────
+// ── E2E: mockup viewer + pinned annotations (now inside the Design Arena) ──────
+//
+// The Mockups tab became **Design** (tab id `mockups` kept as an alias — see
+// docs/design/product-design-arena.md §6); the arena keeps the viewer / annotation
+// / assistant surfaces this spec drives, so the selectors below are unchanged.
 //
 // Attaches a small HTML mockup on the Overview (file input), marks it as a
-// mockup, opens the Mockups tab, selects it, and asserts it renders inside a
+// mockup, opens the Design tab, selects it, and asserts it renders inside a
 // SANDBOXED <iframe> (the security-critical isolation). Then it switches to
 // Annotate mode, clicks the overlay to drop a pin, adds note text, reloads, and
 // asserts the annotation persists (server round-trip, not optimistic state).
@@ -56,7 +60,7 @@ async function selectStory(page: Page): Promise<void> {
   await expect(page.locator('.overview')).toBeVisible({ timeout: 20_000 });
 }
 
-/** Switch to one of the per-story tabs by its visible label. Mockups lives under
+/** Switch to one of the per-story tabs by its visible label. Design lives under
  *  the "Story" workflow group, so pick the group first, then the sub-view. */
 async function openTab(page: Page, label: string): Promise<void> {
   await page.getByRole('tab', { name: 'Story', exact: true }).click();
@@ -85,8 +89,8 @@ test('mockups: attach HTML → mark as mockup → renders in sandboxed iframe �
   // The row flips to a "mockup" badge.
   await expect(panel.locator('.mockup-badge')).toBeVisible({ timeout: 10_000 });
 
-  // ── 3. Open the Mockups tab and select the mockup. ─────────────────────────
-  await openTab(page, 'Mockups');
+  // ── 3. Open the Design tab and select the mockup. ──────────────────────────
+  await openTab(page, 'Design');
   await expect(page.locator('.mockups-tab')).toBeVisible({ timeout: 15_000 });
 
   const row = page.locator('.mockup-row', { hasText: 'mockup.html' }).first();
@@ -121,7 +125,7 @@ test('mockups: attach HTML → mark as mockup → renders in sandboxed iframe �
   await page.reload();
   await expect(page.locator('.product-page')).toBeVisible({ timeout: 30_000 });
   await selectStory(page);
-  await openTab(page, 'Mockups');
+  await openTab(page, 'Design');
   await expect(page.locator('.mockups-tab')).toBeVisible({ timeout: 15_000 });
   await page.locator('.mockup-row', { hasText: 'mockup.html' }).first().click();
   await expect(page.locator('.mockup-stage iframe.mockup-frame')).toBeVisible({ timeout: 15_000 });
@@ -131,9 +135,9 @@ test('mockups: attach HTML → mark as mockup → renders in sandboxed iframe �
   await expect(page.locator('.overlay .pin').first()).toBeVisible({ timeout: 10_000 });
 });
 
-// ── Manual import + the in-place "Create with AI" / Refine mockup agent ─────────
+// ── Manual import + the in-place "Create with AI" / Refine design agent ─────────
 //
-// These exercise the new Mockups-tab toolbar: Import (manual upload, no Overview
+// These exercise the arena's asset toolbar: Import (manual upload, no Overview
 // detour) and Create with AI (a specialized agent that builds the mockup IN PLACE
 // — a live shell + live preview embedded on the Product page, never in Agents).
 // Runs against the OFFLINE E2E daemon: run_session_turn short-circuits to the
@@ -142,7 +146,7 @@ test('mockups: attach HTML → mark as mockup → renders in sandboxed iframe �
 
 async function openMockups(page: Page): Promise<void> {
   await selectStory(page);
-  await openTab(page, 'Mockups');
+  await openTab(page, 'Design');
   await expect(page.locator('.mockups-tab')).toBeVisible({ timeout: 15_000 });
 }
 
@@ -160,7 +164,7 @@ async function newestAgentMockup(mime: string): Promise<{ id: string; body: stri
     updated_at: string;
   }>;
   const agent = atts
-    .filter((a) => a.kind === 'mockup' && a.source === 'agent' && a.mime === mime)
+    .filter((a) => (a.kind === 'mockup' || a.kind === 'design') && a.source === 'agent' && a.mime === mime)
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
   expect(agent, `an agent mockup of ${mime} should exist`).toBeTruthy();
   const body = await (await ctx.get(`${base}/api/v1/product/attachments/${agent.id}`)).text();
@@ -168,7 +172,7 @@ async function newestAgentMockup(mime: string): Promise<{ id: string; body: stri
   return { id: agent.id, body };
 }
 
-test('mockups: manual Import adds a mockup straight from the Mockups tab', async ({ page }) => {
+test('mockups: manual Import adds a mockup straight from the Design tab', async ({ page }) => {
   test.setTimeout(60_000);
   await openMockups(page);
   const before = await page.locator('.mockup-row').count();
@@ -183,9 +187,10 @@ test('mockups: Create with AI (HTML) builds an agent mockup in place', async ({ 
   test.setTimeout(90_000);
   await openMockups(page);
 
-  // Open the Create-with-AI menu → HTML → the in-place panel appears (not Agents).
+  // Open the Create-with-AI menu (the global, viewport-clamped ctxMenu) → HTML
+  // screen → the in-place panel appears (not Agents).
   await page.locator('.act-btn.primary', { hasText: 'Create with AI' }).click();
-  await page.locator('.create-menu button', { hasText: 'HTML screen' }).click();
+  await page.getByRole('menuitem', { name: 'HTML screen' }).click();
   const panel = page.locator('.mockup-assist');
   await expect(panel).toBeVisible({ timeout: 10_000 });
 
@@ -214,7 +219,7 @@ test('mockups: Create with AI (Diagram) commits a Mermaid mockup', async ({ page
   await openMockups(page);
 
   await page.locator('.act-btn.primary', { hasText: 'Create with AI' }).click();
-  await page.locator('.create-menu button', { hasText: 'Diagram' }).click();
+  await page.getByRole('menuitem', { name: 'Diagram', exact: true }).click();
   const panel = page.locator('.mockup-assist');
   await expect(panel).toBeVisible({ timeout: 10_000 });
   // The Diagram format chip is active (locked once the mockup exists).

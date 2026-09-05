@@ -30,6 +30,16 @@ pub struct ProductStory {
     pub confluence_tests_page_id: Option<String>,
     pub confluence_tests_url: Option<String>,
     pub tags: String,
+    /// Epic tree: the parent story (an *epic*) this row is filed under; `None` =
+    /// top level. One level only — a child never has children.
+    pub parent_id: Option<Id>,
+    /// Otto's tree role: `story` | `epic` | `doc`. Distinct from `source_kind`
+    /// (jira/confluence/draft) and Jira's `issue_type`; a row also renders as an
+    /// epic when it has children, without this ever being rewritten.
+    pub tree_kind: String,
+    /// Folder inside the parent epic (`''` | `Design` | `PO` …) — the visual
+    /// sub-hierarchy; unrelated to a design artifact's `meta.group`.
+    pub folder: String,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -188,6 +198,11 @@ pub struct NewStory {
     pub issue_type: Option<String>,
     pub stage: String,
     pub cwd: Option<String>,
+    /// Epic tree placement (see `ProductStory`). Ingest creates children in one
+    /// insert, so these ride the constructor rather than a follow-up patch.
+    pub parent_id: Option<Id>,
+    pub tree_kind: String,
+    pub folder: String,
     pub created_by: Id,
 }
 
@@ -206,6 +221,10 @@ pub struct StoryPatch {
     pub account_id: Option<Id>,
     pub source_key: Option<String>,
     pub tags: Option<String>,
+    /// `Some(None)` detaches the story from its epic (clears `parent_id`).
+    pub parent_id: Option<Option<Id>>,
+    pub tree_kind: Option<String>,
+    pub folder: Option<String>,
 }
 
 pub struct NewVersion {
@@ -352,6 +371,9 @@ fn row_to_story(r: &sqlx::sqlite::SqliteRow) -> Result<ProductStory> {
         confluence_tests_page_id: r.get("confluence_tests_page_id"),
         confluence_tests_url: r.get("confluence_tests_url"),
         tags: r.get::<Option<String>, _>("tags").unwrap_or_default(),
+        parent_id: r.get("parent_id"),
+        tree_kind: r.get("tree_kind"),
+        folder: r.get("folder"),
         created_by: r.get("created_by"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         updated_at: ts(&r.get::<String, _>("updated_at"))?,
@@ -531,8 +553,9 @@ impl ProductRepo {
             "INSERT INTO product_stories
              (id, workspace_id, source_kind, account_id, source_key, title, url, issue_type,
               stage, cwd, watch_enabled, watch_cadence_min, watch_cursor,
-              confluence_tests_page_id, confluence_tests_url, created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 15, NULL, NULL, NULL, ?, ?, ?)",
+              confluence_tests_page_id, confluence_tests_url,
+              parent_id, tree_kind, folder, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 15, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&s.workspace_id)
@@ -544,6 +567,9 @@ impl ProductRepo {
         .bind(&s.issue_type)
         .bind(&s.stage)
         .bind(&s.cwd)
+        .bind(&s.parent_id)
+        .bind(&s.tree_kind)
+        .bind(&s.folder)
         .bind(&s.created_by)
         .bind(&now)
         .bind(&now)
@@ -600,6 +626,12 @@ impl ProductRepo {
         let account_id = p.account_id.as_ref().unwrap_or(&existing.account_id);
         let source_key = p.source_key.as_deref().unwrap_or(&existing.source_key);
         let tags = p.tags.as_deref().unwrap_or(&existing.tags);
+        let parent_id = match p.parent_id {
+            Some(v) => v,
+            None => existing.parent_id.clone(),
+        };
+        let tree_kind = p.tree_kind.as_deref().unwrap_or(&existing.tree_kind);
+        let folder = p.folder.as_deref().unwrap_or(&existing.folder);
         let now = fmt(Utc::now());
         sqlx::query(
             "UPDATE product_stories
@@ -607,7 +639,7 @@ impl ProductRepo {
                  watch_enabled = ?, watch_cadence_min = ?,
                  confluence_tests_page_id = ?, confluence_tests_url = ?,
                  source_kind = ?, account_id = ?, source_key = ?,
-                 tags = ?,
+                 tags = ?, parent_id = ?, tree_kind = ?, folder = ?,
                  updated_at = ?
              WHERE id = ?",
         )
@@ -624,12 +656,28 @@ impl ProductRepo {
         .bind(account_id)
         .bind(source_key)
         .bind(tags)
+        .bind(&parent_id)
+        .bind(tree_kind)
+        .bind(folder)
         .bind(&now)
         .bind(id)
         .execute(&self.pool)
         .await
         .map_err(dberr("update story"))?;
         self.get_story(id).await
+    }
+
+    /// Direct children of an epic (one level — children never nest), oldest
+    /// first so folders keep their creation order in the tree pane.
+    pub async fn get_children(&self, parent_id: &Id) -> Result<Vec<ProductStory>> {
+        let rows = sqlx::query(
+            "SELECT * FROM product_stories WHERE parent_id = ? ORDER BY created_at ASC",
+        )
+        .bind(parent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("get children"))?;
+        rows.iter().map(row_to_story).collect()
     }
 
     pub async fn delete_story(&self, id: &Id) -> Result<()> {
@@ -684,6 +732,26 @@ impl ProductRepo {
             .execute(&self.pool)
             .await
             .map_err(dberr("delete story transcripts"))?;
+        // Design artifacts: annotation rows hang off attachments, so they go
+        // first. The files under `data_dir/product/attachments/<sid>/` are
+        // removed best-effort by the server delete route (the repo has no fs).
+        sqlx::query("DELETE FROM product_mockup_annotations WHERE story_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete story mockup annotations"))?;
+        sqlx::query("DELETE FROM product_attachments WHERE story_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("delete story attachments"))?;
+        // Epic tree: deleting a parent re-parents its children to top level —
+        // never cascades (a child's own rows are user work).
+        sqlx::query("UPDATE product_stories SET parent_id = NULL WHERE parent_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("re-parent story children"))?;
         sqlx::query("DELETE FROM product_stories WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -1750,6 +1818,9 @@ mod tests {
             issue_type: Some("Story".into()),
             stage: "imported".into(),
             cwd: None,
+            parent_id: None,
+            tree_kind: "story".into(),
+            folder: String::new(),
             created_by: user.clone(),
         }
     }
@@ -2322,5 +2393,121 @@ mod tests {
 
         let list = repo.list_transcripts(&story.id).await.unwrap();
         assert_eq!(list.len(), 0);
+    }
+    // -----------------------------------------------------------------------
+    // Epic tree: parent_id / tree_kind / folder
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn create_story_defaults_to_top_level_story() {
+        let pool = mem_pool().await;
+        let repo = ProductRepo::new(pool.clone());
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool, &user).await;
+        let s = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        assert_eq!(s.parent_id, None);
+        assert_eq!(s.tree_kind, "story");
+        assert_eq!(s.folder, "");
+    }
+
+    #[tokio::test]
+    async fn children_are_filed_under_their_epic_and_patchable() {
+        let pool = mem_pool().await;
+        let repo = ProductRepo::new(pool.clone());
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool, &user).await;
+        let mut epic_in = new_story_input(&ws, &user);
+        epic_in.tree_kind = "epic".into();
+        let epic = repo.create_story(epic_in).await.unwrap();
+        assert_eq!(epic.tree_kind, "epic");
+
+        let mut child_in = new_story_input(&ws, &user);
+        child_in.parent_id = Some(epic.id.clone());
+        child_in.tree_kind = "doc".into();
+        child_in.folder = "Design".into();
+        let child = repo.create_story(child_in).await.unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some(epic.id.as_str()));
+        assert_eq!(child.folder, "Design");
+
+        let kids = repo.get_children(&epic.id).await.unwrap();
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].id, child.id);
+
+        // Patch: move to another folder, then detach (Some(None) clears).
+        let moved = repo
+            .update_story(
+                &child.id,
+                StoryPatch {
+                    folder: Some("PO".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved.folder, "PO");
+        assert_eq!(moved.parent_id.as_deref(), Some(epic.id.as_str()));
+        let detached = repo
+            .update_story(
+                &child.id,
+                StoryPatch {
+                    parent_id: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(detached.parent_id, None);
+        assert!(repo.get_children(&epic.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_parent_reparents_children_and_removes_attachment_rows() {
+        let pool = mem_pool().await;
+        let repo = ProductRepo::new(pool.clone());
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool, &user).await;
+        let epic = repo.create_story(new_story_input(&ws, &user)).await.unwrap();
+        let mut child_in = new_story_input(&ws, &user);
+        child_in.parent_id = Some(epic.id.clone());
+        let child = repo.create_story(child_in).await.unwrap();
+
+        // An attachment + a pinned annotation on the epic itself.
+        let atts = crate::ProductAttachmentRepo::new(pool.clone());
+        let att = atts
+            .create(crate::NewAttachment {
+                story_id: epic.id.clone(),
+                workspace_id: ws.clone(),
+                filename: "design.html".into(),
+                mime: "text/html".into(),
+                size_bytes: 1,
+                sha256: None,
+                storage_path: format!("product/attachments/{}/x.html", epic.id),
+                kind: "design".into(),
+                source: "user".into(),
+                meta_json: None,
+                created_by: user.clone(),
+            })
+            .await
+            .unwrap();
+        let anns = crate::ProductMockupRepo::new(pool.clone());
+        anns.create(crate::NewAnnotation {
+            attachment_id: att.id.clone(),
+            story_id: epic.id.clone(),
+            workspace_id: ws.clone(),
+            x_pct: 0.5,
+            y_pct: 0.5,
+            body: "pin".into(),
+            author_id: user.clone(),
+        })
+        .await
+        .unwrap();
+
+        repo.delete_story(&epic.id).await.unwrap();
+
+        // Child survives at top level; the epic's artifact rows are gone.
+        let orphan = repo.get_story(&child.id).await.unwrap();
+        assert_eq!(orphan.parent_id, None);
+        assert!(atts.get(&att.id).await.unwrap().is_none());
+        assert!(anns.list_for_attachment(&att.id).await.unwrap().is_empty());
     }
 }
