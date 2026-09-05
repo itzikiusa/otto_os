@@ -943,7 +943,7 @@ the row. AI-producing actions (analyze/rewrite/generate/plan) live under
 
 ### Product rows — the epic tree
 
-`ProductStory` carries three tree fields (migration `0115_product_epic_tree.sql`):
+`ProductStory` carries three tree fields (migration `0124_product_epic_tree.sql`):
 
 | Field | Type | Meaning |
 |---|---|---|

@@ -38,7 +38,7 @@ module and links to a story only loosely (`LinkedCanvases`).
 
 ## 2. Data model
 
-### 2.1 `product_stories` — epic tree (migration `0115_product_epic_tree.sql`)
+### 2.1 `product_stories` — epic tree (migration `0124_product_epic_tree.sql`)
 
 ```sql
 ALTER TABLE product_stories ADD COLUMN parent_id TEXT;                          -- NULL = top level
@@ -391,7 +391,7 @@ written into the doc's §8 "hand-offs" list instead.
 Owns: `crates/**` EXCEPT `crates/otto-skills/assets/skills/development/{otto-design-2d,otto-design-3d,otto-mockup}/`,
 plus `docs/contracts/**`. Does NOT touch `docs/features/product.md`; A posts the
 API summary text for it into §8 and C folds it in.
-1. `0115_product_epic_tree.sql`; `ProductStory/NewStory/StoryPatch` + row mapper;
+1. `0124_product_epic_tree.sql`; `ProductStory/NewStory/StoryPatch` + row mapper;
    `delete_story` re-parent + attachment/annotation row cleanup (+ best-effort file
    cleanup in the server delete path); `get_children(parent_id)`; `make_story`
    test fix.
