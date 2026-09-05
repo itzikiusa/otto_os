@@ -3361,6 +3361,7 @@ MonitorConfig {
   probes: Probe[] /* ≤10 */; exclusions: Exclusion[];
   transport: 'auto' | 'proxy' | 'port_forward'; concurrency: number /* 1..32 */;
   retention_days: number /* 1..90 */;
+  series_cap: number /* 100..10000, default 1500 — prometheus series kept per pod per cycle, `_bucket` dropped first */;
 }
 Probe { name; port?: number /* default: container's first port */; path /* starts with '/' */;
         format: 'prometheus' | 'json' | 'health';

@@ -17,6 +17,13 @@ pub const MAX_INTERVAL: u32 = 3600;
 pub const MAX_CONCURRENCY: u32 = 32;
 pub const MAX_RETENTION_DAYS: u32 = 90;
 pub const DEFAULT_TIMEOUT_MS: u64 = 3000;
+pub const MIN_SERIES_CAP: u32 = 100;
+pub const MAX_SERIES_CAP: u32 = 10_000;
+pub const DEFAULT_SERIES_CAP: u32 = 1500;
+
+fn default_series_cap() -> u32 {
+    DEFAULT_SERIES_CAP
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -135,6 +142,10 @@ pub struct MonitorConfig {
     pub transport: Transport,
     pub concurrency: u32,
     pub retention_days: u32,
+    /// Prometheus series kept per pod per cycle; `_bucket` series are dropped
+    /// first when a body overflows it.
+    #[serde(default = "default_series_cap")]
+    pub series_cap: u32,
 }
 
 impl Default for MonitorConfig {
@@ -148,6 +159,7 @@ impl Default for MonitorConfig {
             transport: Transport::Auto,
             concurrency: 8,
             retention_days: 14,
+            series_cap: DEFAULT_SERIES_CAP,
         }
     }
 }
@@ -165,6 +177,9 @@ impl MonitorConfig {
         }
         if !(1..=MAX_RETENTION_DAYS).contains(&self.retention_days) {
             return Err(inv(format!("retention_days must be 1..{MAX_RETENTION_DAYS}")));
+        }
+        if !(MIN_SERIES_CAP..=MAX_SERIES_CAP).contains(&self.series_cap) {
+            return Err(inv(format!("series_cap must be {MIN_SERIES_CAP}..{MAX_SERIES_CAP}")));
         }
         if self.probes.len() > MAX_PROBES {
             return Err(inv(format!("at most {MAX_PROBES} probes")));
@@ -415,6 +430,7 @@ pub fn from_row(row: &K8sMonitorConfigRow) -> MonitorConfig {
         transport: Transport::parse(&row.transport),
         concurrency: row.concurrency.clamp(0, i64::from(u32::MAX)) as u32,
         retention_days: row.retention_days.clamp(0, i64::from(u32::MAX)) as u32,
+        series_cap: row.series_cap.clamp(0, i64::from(u32::MAX)) as u32,
     }
 }
 
@@ -429,6 +445,7 @@ pub fn to_row(cluster_id: &str, c: &MonitorConfig) -> K8sMonitorConfigRow {
         transport: c.transport.as_str().into(),
         concurrency: i64::from(c.concurrency),
         retention_days: i64::from(c.retention_days),
+        series_cap: i64::from(c.series_cap),
         updated_at: String::new(),
     }
 }

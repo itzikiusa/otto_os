@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use super::classify::{self, Snapshot};
 use super::collector;
 use super::health::{self, WorkloadStat};
-use super::parse::{self, SERIES_CAP};
+use super::parse;
 use super::probes::{self, is_excluded, MonitorConfig, PodRef, ProbeFormat};
 use super::queries;
 use super::scrape::{self, ScrapeTarget};
@@ -192,7 +192,7 @@ async fn test_probes<S: K8sCtx>(
             match res {
                 Ok(r) => {
                     let parsed = match probe.format {
-                        ProbeFormat::Prometheus => parse::parse_prometheus(&r.body, &probe.include, &probe.exclude, SERIES_CAP),
+                        ProbeFormat::Prometheus => parse::parse_prometheus(&r.body, &probe.include, &probe.exclude, cfg.series_cap as usize),
                         ProbeFormat::Json => parse::parse_json(&r.body, &probe.mappings),
                         ProbeFormat::Health => parse::parse_health(r.status),
                     };

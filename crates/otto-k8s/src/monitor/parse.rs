@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::probes::{glob_match, Mapping, Unit};
 
 /// Spec: at most this many distinct series per pod per cycle.
-pub const SERIES_CAP: usize = 500;
+pub const SERIES_CAP: usize = 1500;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sample {
@@ -92,15 +92,36 @@ fn parse_labels(s: &str) -> Option<BTreeMap<String, String>> {
 }
 
 /// Parse a prometheus text-format body. `include`/`exclude` are series-name
-/// globs (empty include = all); `cap` bounds the number of samples.
+/// globs (empty include = all); `cap` bounds the number of samples. When a
+/// body overflows the cap, histogram `_bucket` series are dropped FIRST —
+/// they are the bulk of any exporter with per-path labels, and Go's
+/// exporter lists them before `http_requests_total`, so a plain "first N
+/// lines" cap silently lost the request counter on every busy service.
 pub fn parse_prometheus(text: &str, include: &[String], exclude: &[String], cap: usize) -> Parsed {
+    let mut p = parse_prometheus_all(text, include, exclude, cap.saturating_mul(4).max(cap));
+    if p.samples.len() > cap {
+        p.capped = true;
+        let (mut keep, buckets): (Vec<Sample>, Vec<Sample>) =
+            p.samples.drain(..).partition(|s| !s.metric.ends_with("_bucket"));
+        if keep.len() > cap {
+            keep.truncate(cap);
+        } else {
+            let room = cap - keep.len();
+            keep.extend(buckets.into_iter().take(room));
+        }
+        p.samples = keep;
+    }
+    p
+}
+
+fn parse_prometheus_all(text: &str, include: &[String], exclude: &[String], hard_cap: usize) -> Parsed {
     let mut p = Parsed::default();
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if p.samples.len() >= cap {
+        if p.samples.len() >= hard_cap {
             p.capped = true;
             break;
         }
@@ -393,6 +414,25 @@ nan_metric NaN
         let p = parse_prometheus(&t, &[], &[], 500);
         assert_eq!(p.samples.len(), 500);
         assert!(p.capped);
+    }
+
+    #[test]
+    fn prometheus_cap_drops_buckets_before_counters() {
+        // Go exporter order: buckets (many) come before http_requests_total.
+        let mut t = String::new();
+        for i in 0..40 {
+            for le in ["0.1", "0.5", "1", "+Inf"] {
+                t.push_str(&format!("http_request_duration_seconds_bucket{{path=\"/p{i}\",le=\"{le}\"}} 1\n"));
+            }
+        }
+        for i in 0..40 {
+            t.push_str(&format!("http_requests_total{{path=\"/p{i}\",code=\"200\"}} 5\n"));
+        }
+        let p = parse_prometheus(&t, &[], &[], 100);
+        assert!(p.capped);
+        assert_eq!(p.samples.len(), 100);
+        assert_eq!(p.samples.iter().filter(|s| s.metric == "http_requests_total").count(), 40, "counters kept");
+        assert_eq!(p.samples.iter().filter(|s| s.metric.ends_with("_bucket")).count(), 60, "buckets trimmed to the room left");
     }
 
     #[test]

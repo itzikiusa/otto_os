@@ -21,7 +21,7 @@ use otto_state::{AuditRepo, K8sCluster, K8sMonitorRepo, K8sMonitorStatusRow};
 use serde_json::{json, Value};
 
 use super::classify::{self, ActionHint, Classified, EventHint, PodSnap, Snapshot};
-use super::parse::{self, Parsed, Sample, SERIES_CAP};
+use super::parse::{self, Parsed, Sample};
 use super::probes::{self, is_excluded, MonitorConfig, PodRef, ProbeFormat};
 use super::schema;
 use super::scrape::{self, ScrapeTarget, TransportUsed};
@@ -291,7 +291,7 @@ async fn scrape_pod(
                     let parsed = match probe.format {
                         ProbeFormat::Prometheus => {
                             if (200..300).contains(&r.status) {
-                                parse::parse_prometheus(&r.body, &probe.include, &probe.exclude, SERIES_CAP)
+                                parse::parse_prometheus(&r.body, &probe.include, &probe.exclude, cfg.series_cap as usize)
                             } else {
                                 Parsed {
                                     parse_errors: 1,

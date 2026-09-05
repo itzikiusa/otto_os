@@ -297,7 +297,11 @@
             <tr>
               <th class="sortable" onclick={() => sortBy('workload')}>Workload</th>
               <th class="num sortable" onclick={() => sortBy('pods')}>Pods</th>
-              <th class="num sortable" onclick={() => sortBy('mem_max')} title="Per pod: average · hungriest pod; % = worst pod vs its own limit. Click a row for every pod.">Memory / pod</th>
+              <th class="num" title="Per pod: average · hungriest pod; % = worst pod vs its own limit. Click a row for every pod.">
+                <button class="th-btn" class:on={sortKey === 'mem_max'} onclick={() => sortBy('mem_max')}>Memory / pod</button>
+                <span class="dim"> · </span>
+                <button class="th-btn" class:on={sortKey === 'mem_pct'} onclick={() => sortBy('mem_pct')} title="Sort by % of limit (worst pod)">%</button>
+              </th>
               <th class="spark">Trend</th>
               <th class="num sortable" onclick={() => sortBy('restarts_total')}>Restarts</th>
               <th class="num sortable" onclick={() => sortBy('churn_planned')}>Churn</th>
@@ -518,6 +522,20 @@
     cursor: pointer;
   }
   .wl th.sortable:hover {
+    color: var(--text);
+  }
+  .th-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
+    cursor: pointer;
+  }
+  .th-btn:hover,
+  .th-btn.on {
     color: var(--text);
   }
   .wl td {

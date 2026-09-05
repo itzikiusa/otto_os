@@ -183,14 +183,18 @@ pub async fn workload_stats(
 
     // Memory now + at the start of the window (trend).
     let mem_now = sink.query_rows(&queries::latest_memory_sql(&cids, ns, LATEST_SECS)).await?;
-    let mut mem_then_by_wl: BTreeMap<String, f64> = BTreeMap::new();
+    // Baseline for the trend: AVERAGE per pod at the start of the window (a
+    // sum would explode when the first cycle scraped 2 of 15 pods).
+    let mut mem_then_by_wl: BTreeMap<String, (f64, u32)> = BTreeMap::new();
     if secs > LATEST_SECS {
         let then = sink
             .query_rows(&queries::memory_between_sql(&cids, ns, secs + LATEST_SECS, secs - LATEST_SECS))
             .await
             .unwrap_or_default();
         for r in then {
-            *mem_then_by_wl.entry(key(st(&r, "namespace"), st(&r, "workload"))).or_default() += f(&r, "mem");
+            let e = mem_then_by_wl.entry(key(st(&r, "namespace"), st(&r, "workload"))).or_default();
+            e.0 += f(&r, "mem");
+            e.1 += 1;
         }
     }
     for r in mem_now {
@@ -224,9 +228,10 @@ pub async fn workload_stats(
                 s.mem_pct = 100.0 * s.mem_bytes / s.mem_limit;
             }
         }
-        if let Some(then) = mem_then_by_wl.get(k) {
-            if *then > 0.0 {
-                s.mem_trend_pct = Some(100.0 * (s.mem_bytes - then) / then);
+        if let Some((sum, n)) = mem_then_by_wl.get(k) {
+            let then_avg = if *n > 0 { sum / f64::from(*n) } else { 0.0 };
+            if then_avg > 0.0 && s.mem_avg > 0.0 {
+                s.mem_trend_pct = Some(100.0 * (s.mem_avg - then_avg) / then_avg);
             }
         }
     }

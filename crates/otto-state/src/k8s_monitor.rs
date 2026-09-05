@@ -23,6 +23,8 @@ pub struct K8sMonitorConfigRow {
     pub transport: String,
     pub concurrency: i64,
     pub retention_days: i64,
+    /// Prometheus series kept per pod per cycle (buckets dropped first).
+    pub series_cap: i64,
     pub updated_at: String,
 }
 
@@ -39,6 +41,7 @@ impl K8sMonitorConfigRow {
             transport: "auto".into(),
             concurrency: 8,
             retention_days: 14,
+            series_cap: 1500,
             updated_at: fmt(Utc::now()),
         }
     }
@@ -96,6 +99,7 @@ fn row_to_config(r: &sqlx::sqlite::SqliteRow) -> K8sMonitorConfigRow {
         transport: r.get("transport"),
         concurrency: r.get("concurrency"),
         retention_days: r.get("retention_days"),
+        series_cap: r.try_get("series_cap").unwrap_or(1500),
         updated_at: r.get("updated_at"),
     }
 }
@@ -141,14 +145,14 @@ impl K8sMonitorRepo {
         sqlx::query(
             "INSERT INTO k8s_monitor_configs (cluster_id, enabled, interval_secs, namespaces_json,
                                               probes_json, exclusions_json, transport, concurrency,
-                                              retention_days, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                              retention_days, series_cap, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(cluster_id) DO UPDATE SET
                 enabled = excluded.enabled, interval_secs = excluded.interval_secs,
                 namespaces_json = excluded.namespaces_json, probes_json = excluded.probes_json,
                 exclusions_json = excluded.exclusions_json, transport = excluded.transport,
                 concurrency = excluded.concurrency, retention_days = excluded.retention_days,
-                updated_at = excluded.updated_at",
+                series_cap = excluded.series_cap, updated_at = excluded.updated_at",
         )
         .bind(&row.cluster_id)
         .bind(row.enabled as i64)
@@ -159,6 +163,7 @@ impl K8sMonitorRepo {
         .bind(&row.transport)
         .bind(row.concurrency)
         .bind(row.retention_days)
+        .bind(row.series_cap)
         .bind(&now)
         .execute(&self.pool)
         .await

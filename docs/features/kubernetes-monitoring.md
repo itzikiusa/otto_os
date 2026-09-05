@@ -65,7 +65,7 @@ Status series written from the sweep alone: `restarts_total`, `ready`,
 | `include` / `exclude` (prometheus) | series-name globs (`http_*`, `*_bucket`); empty include = everything |
 | `timeout_ms` | 100..30000, default 3000 |
 
-Limits: 10 probes, 200 mappings, 500 distinct series per pod per cycle (the
+Limits: 10 probes, 200 mappings, and `series_cap` distinct series per pod per cycle (default 1500, 100..10000 in Settings; `_bucket` series are dropped first when a body overflows it — the
 status shows `series_capped` when a probe overflows — tighten the globs).
 
 **Exclusions** skip the scrape but keep the pod in the sweep: `pod` / `namespace`

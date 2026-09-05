@@ -79,6 +79,7 @@
     if (c.interval_secs < 15 || c.interval_secs > 3600) e.interval_secs = 'Interval must be 15..3600 seconds.';
     if (c.concurrency < 1 || c.concurrency > 32) e.concurrency = 'Concurrency must be 1..32.';
     if (c.retention_days < 1 || c.retention_days > 90) e.retention_days = 'Retention must be 1..90 days.';
+    if (c.series_cap < 100 || c.series_cap > 10000) e.series_cap = 'Series cap must be 100..10000.';
     if (c.probes.length > 10) e.probes = 'At most 10 probes.';
     const names = new Set<string>();
     c.probes.forEach((p, i) => {
@@ -281,6 +282,11 @@
           <span>Retention (days)</span>
           <input class="input" type="number" min="1" max="90" bind:value={cfg.retention_days} disabled={!canEdit} />
           {#if errors.retention_days}<em class="err">{errors.retention_days}</em>{/if}
+        </label>
+        <label class="field">
+          <span>Series cap / pod <span class="dim">(prometheus; buckets dropped first)</span></span>
+          <input class="input" type="number" min="100" max="10000" step="100" bind:value={cfg.series_cap} disabled={!canEdit} data-testid="k8s-monitor-series-cap" />
+          {#if errors.series_cap}<em class="err">{errors.series_cap}</em>{/if}
         </label>
       </div>
       <div class="grid2">

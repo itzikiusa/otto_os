@@ -7326,6 +7326,8 @@ export interface K8sMonitorConfig {
   concurrency: number;
   /** 1..90 */
   retention_days: number;
+  /** Prometheus series kept per pod per cycle (100..10000, default 1500); `_bucket` series are dropped first. */
+  series_cap: number;
 }
 
 export interface K8sMonitorStatus {
