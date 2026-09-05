@@ -9,6 +9,7 @@
   import { router } from '../../../lib/router.svelte';
   import { k8s } from '../../../lib/stores/k8s.svelte';
   import { auth } from '../../../lib/stores/auth.svelte';
+  import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { k8sApi } from '../../../lib/api/k8s';
   import type { K8sCluster, K8sMonitorEvent, K8sMonitorSeries, K8sMonitorStatus, K8sMonitorWorkloadRow } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -47,6 +48,7 @@
   let rows = $state<K8sMonitorWorkloadRow[]>([]);
   let status = $state<K8sMonitorStatus | null>(null);
   let enabled = $state(true);
+  let allNamespaces = $state<string[]>([]);
   let loading = $state(true);
   let error = $state('');
   let ns = $state('');
@@ -61,6 +63,17 @@
   function goTab(id: string): void {
     router.go(`kubernetes/monitor/${encodeURIComponent(cluster.id)}/${id}`);
   }
+  function clusterMenu(e: MouseEvent): void {
+    ctxMenu.show(
+      e,
+      k8s.clusters.map((c) => ({
+        label: `${c.name} · ${envBadge(c.environment)}`,
+        icon: 'helm',
+        disabled: c.id === cluster.id,
+        action: () => router.go(`kubernetes/monitor/${encodeURIComponent(c.id)}/${activeTab}`),
+      })),
+    );
+  }
 
   async function loadWorkloads(quiet = false): Promise<void> {
     abort?.abort();
@@ -71,6 +84,7 @@
       rows = r.workloads;
       status = r.status;
       enabled = r.enabled;
+      allNamespaces = r.namespaces ?? [];
       error = '';
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
@@ -107,7 +121,10 @@
     }
   });
 
-  const namespaces = $derived([...new Set(rows.map((r) => r.namespace))].sort());
+  // Picker options come from the daemon's unfiltered snapshot, never from the
+  // (possibly namespace-filtered) rows — otherwise picking one namespace made
+  // every other option vanish.
+  const namespaces = $derived(allNamespaces.length ? allNamespaces : [...new Set(rows.map((r) => r.namespace))].sort());
   function restartsTotal(r: K8sMonitorWorkloadRow): number {
     return r.restarts.oom + r.restarts.crash + r.restarts.probe + r.restarts.unknown;
   }
@@ -209,9 +226,12 @@
         <span class="sep">/</span>
         <button class="crumb" onclick={() => router.go('kubernetes/monitor')}>Monitor</button>
         <span class="sep">/</span>
-        <span class="dot" style="background: {cluster.color ?? 'var(--accent)'}"></span>
-        {cluster.name}
-        <span class="env-badge" class:prod={cluster.environment === 'prod'}>{envBadge(cluster.environment)}</span>
+        <button class="cluster-pick" onclick={clusterMenu} title="Switch cluster" data-testid="k8s-monitor-cluster-pick">
+          <span class="dot" style="background: {cluster.color ?? 'var(--accent)'}"></span>
+          {cluster.name}
+          <span class="env-badge" class:prod={cluster.environment === 'prod'}>{envBadge(cluster.environment)}</span>
+          <Icon name="dot" size={10} />
+        </button>
       </h1>
       <div class="sub" title={status?.last_error || ''}>{collectorLine(status, enabled)}</div>
     </div>
@@ -278,6 +298,8 @@
         <span class="chip" title={rbacMessage(status?.metrics_server) ?? ''}>metrics-server: RBAC denied — CPU unavailable</span>
       {:else if status?.metrics_server === 'ok'}
         <span class="chip ok">metrics-server ok</span>
+      {:else if status?.metrics_server === 'disabled'}
+        <span class="chip" title="Metrics-server probing is off in Settings">metrics-server off</span>
       {/if}
       <span class="spacer"></span>
       <button class="btn ghost small" onclick={() => void loadWorkloads()} aria-label="Refresh workloads"><Icon name="refresh" size={13} /></button>
@@ -423,6 +445,22 @@
   }
   .crumb:hover {
     color: var(--accent);
+  }
+  .cluster-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 2px 6px;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+  .cluster-pick:hover {
+    border-color: var(--border);
+    background: var(--surface-2);
   }
   .sep {
     color: var(--text-dim);

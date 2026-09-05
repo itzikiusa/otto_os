@@ -300,6 +300,10 @@
           <button class="input picker" onclick={transportMenu} disabled={!canEdit}>{cfg.transport} <Icon name="dot" size={10} /></button>
         </div>
       </div>
+      <label class="toggle small">
+        <input type="checkbox" bind:checked={cfg.metrics_server} disabled={!canEdit} data-testid="k8s-monitor-metrics-server" />
+        <span>Probe metrics-server every cycle <span class="dim">(CPU + working-set memory; turn off when RBAC denies it — saves one call per namespace per cycle)</span></span>
+      </label>
     </section>
 
     <section class="card block">

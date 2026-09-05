@@ -7328,6 +7328,8 @@ export interface K8sMonitorConfig {
   retention_days: number;
   /** Prometheus series kept per pod per cycle (100..10000, default 1500); `_bucket` series are dropped first. */
   series_cap: number;
+  /** Probe metrics-server every cycle; off = the call is skipped and status reports `disabled`. */
+  metrics_server: boolean;
 }
 
 export interface K8sMonitorStatus {
@@ -7336,7 +7338,7 @@ export interface K8sMonitorStatus {
   last_ok_at?: string | null;
   last_error: string;
   transport_used: string;
-  /** `ok` | `absent` | `unknown` | `forbidden: <kubectl message>` */
+  /** `ok` | `absent` | `disabled` | `unknown` | `forbidden: <kubectl message>` */
   metrics_server: string;
   pods_seen: number;
   pods_scraped: number;
@@ -7465,6 +7467,8 @@ export interface K8sMonitorWorkloadsResp {
   step_secs: number;
   enabled: boolean;
   status: K8sMonitorStatus | null;
+  /** Every namespace in the last snapshot, regardless of the `ns` filter. */
+  namespaces: string[];
   workloads: K8sMonitorWorkloadRow[];
 }
 

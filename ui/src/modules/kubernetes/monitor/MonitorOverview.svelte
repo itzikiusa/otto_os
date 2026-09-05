@@ -186,6 +186,8 @@
               </div>
             {:else if r.status?.metrics_server === 'ok'}
               <div class="dim tiny">metrics-server: CPU + memory per container available</div>
+            {:else if r.status?.metrics_server === 'disabled'}
+              <div class="dim tiny">metrics-server probing is off (Settings)</div>
             {/if}
           {/if}
         </div>

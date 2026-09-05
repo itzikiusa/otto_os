@@ -25,6 +25,10 @@ fn default_series_cap() -> u32 {
     DEFAULT_SERIES_CAP
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeFormat {
@@ -146,6 +150,10 @@ pub struct MonitorConfig {
     /// first when a body overflows it.
     #[serde(default = "default_series_cap")]
     pub series_cap: u32,
+    /// Probe metrics-server every cycle. Off when the cluster's RBAC will not
+    /// allow it anyway — saves a call per namespace per cycle.
+    #[serde(default = "default_true")]
+    pub metrics_server: bool,
 }
 
 impl Default for MonitorConfig {
@@ -160,6 +168,7 @@ impl Default for MonitorConfig {
             concurrency: 8,
             retention_days: 14,
             series_cap: DEFAULT_SERIES_CAP,
+            metrics_server: true,
         }
     }
 }
@@ -431,6 +440,7 @@ pub fn from_row(row: &K8sMonitorConfigRow) -> MonitorConfig {
         concurrency: row.concurrency.clamp(0, i64::from(u32::MAX)) as u32,
         retention_days: row.retention_days.clamp(0, i64::from(u32::MAX)) as u32,
         series_cap: row.series_cap.clamp(0, i64::from(u32::MAX)) as u32,
+        metrics_server: row.metrics_server,
     }
 }
 
@@ -446,6 +456,7 @@ pub fn to_row(cluster_id: &str, c: &MonitorConfig) -> K8sMonitorConfigRow {
         concurrency: i64::from(c.concurrency),
         retention_days: i64::from(c.retention_days),
         series_cap: i64::from(c.series_cap),
+        metrics_server: c.metrics_server,
         updated_at: String::new(),
     }
 }

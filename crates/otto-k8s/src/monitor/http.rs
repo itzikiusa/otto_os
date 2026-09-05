@@ -162,10 +162,14 @@ async fn test_probes<S: K8sCtx>(
             .ok_or_else(|| Error::NotFound(format!("no running, non-excluded pod in {ns}")))?,
     };
 
-    let metrics_server = match resources::pod_metrics(&k, Some(&ns)).await {
-        Ok(_) => "ok".to_string(),
-        Err(Error::Forbidden(m)) => format!("forbidden: {m}"),
-        Err(_) => "absent".to_string(),
+    let metrics_server = if !cfg.metrics_server {
+        "disabled".to_string()
+    } else {
+        match resources::pod_metrics(&k, Some(&ns)).await {
+            Ok(_) => "ok".to_string(),
+            Err(Error::Forbidden(m)) => format!("forbidden: {m}"),
+            Err(_) => "absent".to_string(),
+        }
     };
 
     let probe0 = &cfg.probes[0];
@@ -389,6 +393,11 @@ async fn workloads<S: K8sCtx>(
         .filter(|s| s.available())
         .ok_or_else(|| Error::Conflict("usage engine (ClickHouse) is not available".into()))?;
     let snap = snapshot_of(status.as_ref());
+    // Every namespace in the snapshot — independent of the `ns` filter, so the
+    // picker keeps its full list while one namespace is selected.
+    let mut all_namespaces: Vec<String> = snap.values().map(|p| p.namespace.clone()).collect();
+    all_namespaces.sort();
+    all_namespaces.dedup();
     let ns = q.ns.as_deref().filter(|n| !n.is_empty());
     let mut stats = health::workload_stats(sink.as_ref(), cluster.id.as_str(), &snap, ns, window).await?;
     stats.sort_by(|a, b| a.workload.cmp(&b.workload));
@@ -427,7 +436,8 @@ async fn workloads<S: K8sCtx>(
         })
         .collect();
     Ok(Json(json!({
-        "window": window_label, "step_secs": step, "enabled": cfg.enabled, "status": status, "workloads": rows,
+        "window": window_label, "step_secs": step, "enabled": cfg.enabled, "status": status,
+        "namespaces": all_namespaces, "workloads": rows,
     })))
 }
 

@@ -3346,7 +3346,7 @@ is View on GET, Edit on PUT/POST. Enabling requires the usage engine
 | POST /k8s/clusters/{id}/monitor/test | Edit | `{ ns?, pod? }` (defaults: first configured namespace, first Running non-excluded pod) | `{ namespace, pod, workload, transport, metrics_server, probes: [{ name, ok, status?, ms?, port?, samples: [{metric, labels, value}] (≤50), sample_count, labels, parse_errors, capped, body_preview, error? }] }` |
 | POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
 | GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
-| GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, workloads: WorkloadRow[] }` |
+| GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
 | GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates |
 | GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
 | GET /k8s/clusters/{id}/monitor/health?window=1h | View | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
@@ -3362,6 +3362,7 @@ MonitorConfig {
   transport: 'auto' | 'proxy' | 'port_forward'; concurrency: number /* 1..32 */;
   retention_days: number /* 1..90 */;
   series_cap: number /* 100..10000, default 1500 — prometheus series kept per pod per cycle, `_bucket` dropped first */;
+  metrics_server: boolean /* default true; false = never call metrics.k8s.io (status.metrics_server = 'disabled') */;
 }
 Probe { name; port?: number /* default: container's first port */; path /* starts with '/' */;
         format: 'prometheus' | 'json' | 'health';
@@ -3372,7 +3373,7 @@ Probe { name; port?: number /* default: container's first port */; path /* start
 Exclusion = { kind:'namespace'|'pod'|'workload'; match: glob }   // workload glob matches "<kind>:<name>", e.g. "cronjob:*"
           | { kind:'label'; selector: 'k=v,k2!=v2,k3' }
 MonitorStatus { cluster_id; last_cycle_at; last_ok_at; last_error; transport_used;
-                metrics_server: 'ok' | 'absent' | 'unknown' | 'forbidden: <kubectl message>';
+                metrics_server: 'ok' | 'absent' | 'disabled' | 'unknown' | 'forbidden: <kubectl message>';
                 pods_seen; pods_scraped; pods_failed; cycle_ms }
 OverviewRow { cluster: { id, name, environment, color }; enabled; interval_secs; status: MonitorStatus|null;
               health: 'healthy'|'degraded'|'incident'|'off'|'unknown'; window;

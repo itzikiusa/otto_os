@@ -410,9 +410,11 @@ pub async fn run_cycle<S: K8sCtx>(
         }
     }
 
-    // 3. Metrics-server (re-probed every cycle, never cached).
-    let mut ms_state = "absent".to_string();
-    for ns in &namespaces {
+    // 3. Metrics-server (re-probed every cycle, never cached) — unless the
+    // config turns it off (RBAC that will never be granted = a wasted call).
+    let mut ms_state = if cfg.metrics_server { "absent".to_string() } else { "disabled".to_string() };
+    let ms_namespaces: &[String] = if cfg.metrics_server { &namespaces } else { &[] };
+    for ns in ms_namespaces {
         match resources::pod_metrics(&k, Some(ns)).await {
             Ok(pods) => {
                 ms_state = "ok".into();
