@@ -20,6 +20,7 @@ import { browser } from './stores/browser.svelte';
 import { personalAgents } from './stores/personalAgents.svelte';
 import { k8s } from './stores/k8s.svelte';
 import { aws } from './stores/aws.svelte';
+import { transcript } from './stores/transcript.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -495,6 +496,16 @@ class EventsClient {
         } else if (parsed.type === 'aws_account_updated' || parsed.type === 'aws_install_updated') {
           // AWS console: account rows changed / the CLI installer advanced.
           aws.applyEvent(parsed);
+        } else if (
+          parsed.type === 'transcript_appended' ||
+          parsed.type === 'artifact_added' ||
+          parsed.type === 'history_index_progress'
+        ) {
+          // Conversation view: live tail deltas (+ artifact chips) for the open
+          // session's chat; History page index progress. The activity store
+          // also takes the artifact / index events (Outputs panel + rescan bar).
+          transcript.applyEvent(parsed);
+          if (parsed.type !== 'transcript_appended') activity.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

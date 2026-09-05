@@ -71,6 +71,11 @@ pub struct K8sCluster {
     pub environment: Environment,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Namespaces the user told Otto about. Rancher-style RBAC often forbids
+    /// listing namespaces cluster-wide, so the picker cannot discover them;
+    /// this list survives restarts (it used to live in the browser only).
+    #[serde(default)]
+    pub known_namespaces: Vec<String>,
     /// Non-secret extras (`eks_region`, `eks_cluster`, …) — `color` is lifted
     /// out of here into its own field for the UI.
     pub params: Value,
@@ -111,6 +116,8 @@ pub struct K8sClusterPatch {
     pub default_namespace: Option<Option<String>>,
     pub environment: Option<Environment>,
     pub color: Option<Option<String>>,
+    /// Replace the persisted namespace list (lowercased, deduped by the API).
+    pub known_namespaces: Option<Vec<String>>,
 }
 
 fn row_to_cluster(r: &sqlx::sqlite::SqliteRow) -> Result<K8sCluster> {
@@ -119,6 +126,11 @@ fn row_to_cluster(r: &sqlx::sqlite::SqliteRow) -> Result<K8sCluster> {
         .get("color")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let known_namespaces: Vec<String> = params
+        .get("known_namespaces")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
     let capabilities = r
         .get::<Option<String>, _>("capabilities_json")
         .as_deref()
@@ -136,6 +148,7 @@ fn row_to_cluster(r: &sqlx::sqlite::SqliteRow) -> Result<K8sCluster> {
         environment: Environment::parse(&r.get::<String, _>("environment"))
             .ok_or_else(|| Error::Internal("bad k8s cluster environment".into()))?,
         color,
+        known_namespaces,
         params,
         capabilities,
         created_by: r.get("created_by"),
@@ -240,7 +253,12 @@ impl K8sClustersRepo {
             Some(c) => c,
             None => cur.color,
         };
-        let params = params_with_color(cur.params, color.as_deref());
+        let mut params = params_with_color(cur.params, color.as_deref());
+        if let Some(list) = p.known_namespaces {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("known_namespaces".into(), Value::Array(list.into_iter().map(Value::String).collect()));
+            }
+        }
         sqlx::query(
             "UPDATE k8s_clusters SET name = ?, kubeconfig_path = ?, context_name = ?,
                     default_namespace = ?, environment = ?, params_json = ?, updated_at = ?
@@ -343,6 +361,7 @@ mod tests {
                 K8sClusterPatch {
                     name: Some(" renamed ".into()),
                     color: Some(None),
+                    known_namespaces: None,
                     default_namespace: Some(None),
                     ..Default::default()
                 },
@@ -394,6 +413,7 @@ mod tests {
             aws_account_id: None,
             environment: Environment::Dev,
             color: None,
+            known_namespaces: Vec::new(),
             params: serde_json::json!({}),
             capabilities: None,
             created_by: None,

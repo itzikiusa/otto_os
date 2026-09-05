@@ -295,6 +295,44 @@ pub async fn claude_ingest(
         }
     }
 
+    // Incremental task upsert (TaskCreate / TaskUpdate): by ext_id, adopting a
+    // same-titled board task; broadcasts the full list like a plan sync.
+    if let Some(op) = norm.task_op {
+        let prior = activity.repo().list_tasks(&sid).await.unwrap_or_default();
+        let prior_all_done = all_done(&prior);
+        if let Ok(updated) = activity
+            .repo()
+            .upsert_task(&sid, &wid, &op.ext_id, op.title.as_deref(), op.status)
+            .await
+        {
+            let _ = ctx.events.send(otto_core::event::Event::TasksUpdated {
+                workspace_id: wid.clone(),
+                session_id: sid.clone(),
+                tasks: updated.clone(),
+            });
+            if let Some(summary) = task_transition_summary(&prior, &updated) {
+                let _ = activity
+                    .append_trail(NewTrail {
+                        session_id: sid.clone(),
+                        workspace_id: wid.clone(),
+                        source: TrailSource::Agent,
+                        kind: TrailKind::Task,
+                        level: TrailLevel::Info,
+                        summary,
+                        detail: None,
+                    })
+                    .await;
+            }
+            if !prior_all_done && all_done(&updated) {
+                let cx = ctx.clone();
+                let s = session.clone();
+                tokio::spawn(async move {
+                    crate::proof::gate_session(&cx, &s).await;
+                });
+            }
+        }
+    }
+
     // Non-task trail entry.
     if let Some(d) = norm.trail {
         let _ = activity
@@ -496,12 +534,21 @@ struct TrailDraft {
     detail: Option<Value>,
 }
 
+/// An incremental task update (Claude `TaskCreate` / `TaskUpdate`, which carry
+/// a provider task id instead of the whole list — design §4.5).
+struct TaskOp {
+    ext_id: String,
+    title: Option<String>,
+    status: Option<TaskStatus>,
+}
+
 /// What a Claude hook payload maps to: an optional trail entry and/or a task
-/// list replacement (TodoWrite).
+/// list replacement (TodoWrite) or a single-task upsert (TaskCreate/TaskUpdate).
 #[derive(Default)]
 struct Normalized {
     trail: Option<TrailDraft>,
     tasks: Option<Vec<NewTask>>,
+    task_op: Option<TaskOp>,
 }
 
 /// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
@@ -589,7 +636,7 @@ fn normalize_claude(p: &Value) -> Normalized {
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
             let input = p.get("tool_input").cloned();
             let failed = tool_failed(p);
-            normalize_tool(tool, input.as_ref(), failed, &mut out);
+            normalize_tool(tool, input.as_ref(), p.get("tool_response"), failed, &mut out);
         }
         _ => {}
     }
@@ -599,7 +646,7 @@ fn normalize_claude(p: &Value) -> Normalized {
 /// Normalize one PostToolUse event by tool name. Read-only/navigation tools
 /// (Read/Glob/Grep/LS) are intentionally dropped to keep the trail signal-rich.
 /// `failed` raises the entry's level to error.
-fn normalize_tool(tool: &str, input: Option<&Value>, failed: bool, out: &mut Normalized) {
+fn normalize_tool(tool: &str, input: Option<&Value>, response: Option<&Value>, failed: bool, out: &mut Normalized) {
     let s = |k: &str| -> String {
         input
             .and_then(|i| i.get(k))
@@ -636,6 +683,37 @@ fn normalize_tool(tool: &str, input: Option<&Value>, failed: bool, out: &mut Nor
                         })
                         .collect(),
                 );
+            }
+        }
+        // TaskCreate: the provider id arrives in the tool RESPONSE
+        // (`tool_response.task.id`); TaskUpdate carries it in the input.
+        "TaskCreate" => {
+            let subject = s("subject");
+            let ext_id = response
+                .and_then(|r| r.get("task"))
+                .and_then(|t| t.get("id"))
+                .and_then(|v| match v {
+                    Value::String(x) => Some(x.clone()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                });
+            if let Some(ext_id) = ext_id {
+                out.task_op = Some(TaskOp {
+                    ext_id,
+                    title: (!subject.trim().is_empty()).then_some(subject),
+                    status: Some(TaskStatus::Pending),
+                });
+            }
+        }
+        "TaskUpdate" => {
+            let task_id = s("taskId");
+            if !task_id.is_empty() {
+                let subject = s("subject");
+                out.task_op = Some(TaskOp {
+                    ext_id: task_id,
+                    title: (!subject.trim().is_empty()).then_some(subject),
+                    status: TaskStatus::parse(&s("status")),
+                });
             }
         }
         "Bash" => {
@@ -735,7 +813,41 @@ mod tests {
             position: 0,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            source: "agent".into(),
+            description: None,
+            nudge_pending: false,
+            nudged_at: None,
         }
+    }
+
+    #[test]
+    fn task_create_and_update_become_upserts() {
+        let p = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "TaskCreate",
+            "tool_input": { "subject": "Make it generic" },
+            "tool_response": { "task": { "id": "1", "subject": "Make it generic" } }
+        });
+        let n = normalize_claude(&p);
+        let op = n.task_op.expect("task op");
+        assert_eq!(op.ext_id, "1");
+        assert_eq!(op.title.as_deref(), Some("Make it generic"));
+        assert_eq!(op.status, Some(TaskStatus::Pending));
+        assert!(n.tasks.is_none() && n.trail.is_none());
+
+        let p = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "TaskUpdate",
+            "tool_input": { "taskId": "1", "status": "completed" },
+            "tool_response": { "success": true, "taskId": "1", "statusChange": { "from": "in_progress", "to": "completed" } }
+        });
+        let op = normalize_claude(&p).task_op.expect("task op");
+        assert_eq!(op.ext_id, "1");
+        assert_eq!(op.status, Some(TaskStatus::Completed));
+        assert!(op.title.is_none());
+        // No response id yet → nothing to upsert (the create is not confirmed).
+        let p = json!({ "hook_event_name": "PostToolUse", "tool_name": "TaskCreate", "tool_input": { "subject": "x" } });
+        assert!(normalize_claude(&p).task_op.is_none());
     }
 
     #[test]

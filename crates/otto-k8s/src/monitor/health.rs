@@ -181,21 +181,42 @@ pub async fn workload_stats(
     let secs = window.num_seconds();
     let mut stats = seed_from_snapshot(snap, ns);
 
+    // Every query below is independent — issue them together. Sequential
+    // awaits made the workloads tab wait ~9× one ClickHouse round trip.
+    let q_mem_now = queries::latest_memory_sql(&cids, ns, LATEST_SECS);
+    let q_mem_then = queries::memory_between_sql(&cids, ns, secs + LATEST_SECS, (secs - LATEST_SECS).max(1));
+    let q_restarts = queries::restart_counts_sql(&cids, ns, window);
+    let q_rates_now = queries::request_rates_sql(&cids, ns, secs, 0);
+    let q_rates_then = queries::request_rates_sql(&cids, ns, secs + 86_400, secs);
+    let q_buckets_now = queries::latency_buckets_sql(&cids, ns, secs, 0);
+    let q_buckets_then = queries::latency_buckets_sql(&cids, ns, secs + 86_400, secs);
+    let q_versions = queries::versions_sql(&cids, ns, LATEST_SECS);
+    let (mem_now, mem_then, restarts, rates_now, rates_then, buckets_now, buckets_then, versions) = tokio::join!(
+        sink.query_rows(&q_mem_now),
+        async {
+            if secs > LATEST_SECS {
+                sink.query_rows(&q_mem_then).await.unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        },
+        sink.query_rows(&q_restarts),
+        sink.query_rows(&q_rates_now),
+        async { sink.query_rows(&q_rates_then).await.unwrap_or_default() },
+        sink.query_rows(&q_buckets_now),
+        async { sink.query_rows(&q_buckets_then).await.unwrap_or_default() },
+        async { sink.query_rows(&q_versions).await.unwrap_or_default() },
+    );
+    let (mem_now, restarts, rates_now, buckets_now) = (mem_now?, restarts?, rates_now?, buckets_now?);
+
     // Memory now + at the start of the window (trend).
-    let mem_now = sink.query_rows(&queries::latest_memory_sql(&cids, ns, LATEST_SECS)).await?;
     // Baseline for the trend: AVERAGE per pod at the start of the window (a
     // sum would explode when the first cycle scraped 2 of 15 pods).
     let mut mem_then_by_wl: BTreeMap<String, (f64, u32)> = BTreeMap::new();
-    if secs > LATEST_SECS {
-        let then = sink
-            .query_rows(&queries::memory_between_sql(&cids, ns, secs + LATEST_SECS, secs - LATEST_SECS))
-            .await
-            .unwrap_or_default();
-        for r in then {
-            let e = mem_then_by_wl.entry(key(st(&r, "namespace"), st(&r, "workload"))).or_default();
-            e.0 += f(&r, "mem");
-            e.1 += 1;
-        }
+    for r in mem_then {
+        let e = mem_then_by_wl.entry(key(st(&r, "namespace"), st(&r, "workload"))).or_default();
+        e.0 += f(&r, "mem");
+        e.1 += 1;
     }
     for r in mem_now {
         let k = key(st(&r, "namespace"), st(&r, "workload"));
@@ -237,7 +258,7 @@ pub async fn workload_stats(
     }
 
     // Restarts / churn.
-    for r in sink.query_rows(&queries::restart_counts_sql(&cids, ns, window)).await? {
+    for r in restarts {
         // The events table has no namespace filter on workload key; match by workload name within ns.
         // Keyed by (namespace, workload): the same deployment name in two
         // namespaces (gateway in cbo + mscasino) must never share counts.
@@ -267,11 +288,6 @@ pub async fn workload_stats(
     }
 
     // Request rates now vs 24 h baseline (the 24 h preceding the window).
-    let rates_now = sink.query_rows(&queries::request_rates_sql(&cids, ns, secs, 0)).await?;
-    let rates_then = sink
-        .query_rows(&queries::request_rates_sql(&cids, ns, secs + 86_400, secs))
-        .await
-        .unwrap_or_default();
     for r in rates_now {
         if let Some(s) = stats.get_mut(&key(st(&r, "namespace"), st(&r, "workload"))) {
             s.rps = f(&r, "rps");
@@ -289,13 +305,8 @@ pub async fn workload_stats(
     // Latency: p95 from buckets, else avg from sum/count.
     let mut had_p95 = false;
     for (rows, baseline) in [
-        (sink.query_rows(&queries::latency_buckets_sql(&cids, ns, secs, 0)).await?, false),
-        (
-            sink.query_rows(&queries::latency_buckets_sql(&cids, ns, secs + 86_400, secs))
-                .await
-                .unwrap_or_default(),
-            true,
-        ),
+        (buckets_now, false),
+        (buckets_then, true),
     ] {
         let mut by_wl: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
         for r in rows {
@@ -347,7 +358,7 @@ pub async fn workload_stats(
     }
 
     // Versions.
-    for r in sink.query_rows(&queries::versions_sql(&cids, ns, LATEST_SECS)).await.unwrap_or_default() {
+    for r in versions {
         let k = key(st(&r, "namespace"), st(&r, "workload"));
         let v = st(&r, "version").to_string();
         if v.is_empty() {

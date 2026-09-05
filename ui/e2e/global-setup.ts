@@ -24,8 +24,24 @@ const STATE_FILE = join(STATE_DIR, 'state.json');
 const META_FILE = join(STATE_DIR, 'daemon.json');
 const PASSWORD = 'otto-e2e-password';
 
+// A route that only exists on a daemon built from this tree — used to detect a
+// STALE installed binary (new UI against an old daemon → every new-feature spec
+// fails with 404s that look like UI bugs). Axum's bare fallback answers a
+// missing route with an EMPTY 404; the app's own not-found is a JSON problem.
+const NEW_ROUTE_PROBE = '/sessions/e2e-probe/transcript';
+
 export default async function globalSetup(_config: FullConfig): Promise<void> {
   sweepOrphanedClickhouse();
+  if (!process.env.OTTO_E2E_BIN) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[e2e] WARNING: OTTO_E2E_BIN is unset — running the INSTALLED daemon (${OTTOD}). ` +
+        'Specs for routes added in this tree will 404. Set OTTO_E2E_BIN=<repo>/target/debug/ottod.',
+    );
+  }
+  if (!existsSync(OTTOD)) {
+    throw new Error(`[e2e] ottod binary not found at ${OTTOD} (set OTTO_E2E_BIN or install Otto)`);
+  }
   const dataDir = mkdtempSync(join(tmpdir(), 'otto-e2e-'));
   // eslint-disable-next-line no-console
   console.log(`[e2e] launching test daemon: ${OTTOD}\n[e2e]   OTTO_DATA_DIR=${dataDir} OTTO_PORT=${PORT}`);
@@ -100,6 +116,27 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
     throw new Error(`[e2e] onboarding failed: ${onb.status()} ${await onb.text()}`);
   }
   const { token } = (await onb.json()) as { token: string };
+
+  // Stale-daemon probe: a route from this tree must be ROUTED (any status but a
+  // bare 404). 404 with a JSON problem body = routed, session just doesn't exist.
+  const probe = await ctx.get(`${API}${NEW_ROUTE_PROBE}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (probe.status() === 404) {
+    let routed = false;
+    try {
+      routed = typeof ((await probe.json()) as { code?: unknown }).code === 'string';
+    } catch {
+      routed = false;
+    }
+    if (!routed) {
+      child.kill('SIGKILL');
+      throw new Error(
+        `[e2e] stale daemon: ${OTTOD} does not serve ${NEW_ROUTE_PROBE} (bare 404). ` +
+          'Rebuild with `cargo build -p ottod` and set OTTO_E2E_BIN=<repo>/target/debug/ottod.',
+      );
+    }
+  }
 
   // Persist storageState (token + base) for the UI origin, and daemon meta for
   // teardown.

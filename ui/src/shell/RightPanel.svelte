@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Collapsible right panel (⌘J): Git / Files / Notes / Info / Browser tabs ⇄ 36px icon strip.
+  // Collapsible right panel (⌘J): Git / Files / Notes / Activity / Outputs / Canvas / Info / Browser / API tabs ⇄ 36px icon strip.
   import Icon from '../lib/components/Icon.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
   import GitPanel from '../modules/git/GitPanel.svelte';
@@ -8,6 +8,7 @@
   import BrowserPanelV2 from '../modules/panels/BrowserPanelV2.svelte';
   import FilesPanel from '../modules/panels/FilesPanel.svelte';
   import ActivityPanel from '../modules/panels/ActivityPanel.svelte';
+  import OutputsPanel from '../modules/panels/OutputsPanel.svelte';
   import CanvasPanel from '../modules/panels/CanvasPanel.svelte';
   import ApiPanel from '../modules/api/ApiPanel.svelte';
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
@@ -59,6 +60,10 @@
     { id: 'files', icon: 'file', label: 'Files' },
     { id: 'notes', icon: 'note', label: 'Notes' },
     { id: 'activity', icon: 'zap', label: 'Activity' },
+    // Outputs — artifacts the focused agent produced, with sandboxed previews
+    // (docs/design/conversation-view.md §5.6). Gated like the rest on an
+    // active agent session by the shell.
+    { id: 'outputs', icon: 'layers', label: 'Outputs' },
     { id: 'canvas', icon: 'shapes', label: 'Canvas' },
     { id: 'info', icon: 'info', label: 'Info' },
     { id: 'browser', icon: 'globe', label: 'Browser' },
@@ -153,6 +158,8 @@
         <FilesPanel />
       {:else if ui.rightTab === 'activity'}
         <ActivityPanel />
+      {:else if ui.rightTab === 'outputs'}
+        <OutputsPanel />
       {:else if ui.rightTab === 'canvas'}
         <CanvasPanel />
       {:else if ui.rightTab === 'info'}

@@ -331,8 +331,28 @@ async fn namespaces<S: K8sCtx>(
     let svc = Clusters::new(&ctx);
     let c = svc.get(&id).await?;
     let k = clusters::kubectl_for(&ctx, &c).await?;
+    // Cluster-scope listing is often forbidden (Rancher project users); the
+    // persisted `known_namespaces` fill in, and are appended even when the
+    // list succeeds but is partial.
+    let mut listed = match resources::namespaces(&k).await {
+        Ok(l) => l,
+        Err(e) if !c.known_namespaces.is_empty() => {
+            tracing::debug!("k8s namespaces: list failed ({e}); using known namespaces");
+            Vec::new()
+        }
+        Err(e) => return Err(e.into()),
+    };
+    for known in &c.known_namespaces {
+        if !listed.iter().any(|n| &n.name == known) {
+            listed.push(resources::NamespaceRow {
+                name: known.clone(),
+                status: String::new(),
+                age_seconds: 0,
+            });
+        }
+    }
     let mut ns = Vec::new();
-    for candidate in resources::namespaces(&k).await? {
+    for candidate in listed {
         for op in [
             "workloads_view",
             "resources_view",

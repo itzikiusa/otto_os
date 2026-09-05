@@ -3289,3 +3289,38 @@ pub struct RepoProofConfigResp {
     #[serde(flatten)]
     pub config: crate::proof::RepoProofConfig,
 }
+
+// ── Conversation view (design docs/design/conversation-view.md §4.3) ─────────
+
+/// `POST /sessions/{id}/tasks` — add a task to a session's board from the UI /
+/// Mission Control. The row is `source: "user"`, `nudge_pending: true`; the
+/// nudge sweep hands it to the agent once the session is idle.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAgentTaskReq {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `POST /sessions/{id}/inbox` — drop a pasted image next to the session so the
+/// composer can reference it as `[Image: <path>]`. `image/*` only, ≤ 10 MB.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InboxUploadReq {
+    pub filename: String,
+    pub mime: String,
+    pub data_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxUploadResp {
+    pub path: String,
+}
+
+/// `POST /workspaces/{wid}/history/import` — adopt an on-disk transcript as a
+/// `reconnectable` session row so the normal resume path continues it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HistoryImportReq {
+    /// `claude` | `codex`.
+    pub provider: String,
+    pub transcript_path: String,
+}

@@ -3,6 +3,12 @@
   // what's going on (skills loaded, commands run, files touched, prompts,
   // notes) — by user and by agent. Fed by REST load + the events WS.
   // Supports source filtering, search, level coloring and expandable detail.
+  //
+  // The task tracker is two-way (docs/design/conversation-view.md §4.5/§5.4):
+  // the agent's own plan (TodoWrite/TaskCreate, `source:'agent'`) is merged with
+  // tasks pushed from here or the Mission Control board (`source:'user'`, shown
+  // with a `from board` badge). A user task waits as *queued* until the nudge
+  // sweep hands it to the agent's PTY (idle, or after the 120 s max defer).
   import { ws } from '../../lib/stores/workspace.svelte';
   import { activity } from '../../lib/stores/activity.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -18,6 +24,55 @@
 
   const doneCount = $derived(tasks.filter((t) => t.status === 'completed').length);
   const progress = $derived(tasks.length ? Math.round((doneCount / tasks.length) * 100) : 0);
+  const pendingNudges = $derived(tasks.filter((t) => t.nudge_pending).length);
+  // Codex has no task tool, so its list is only ever what users add here.
+  const isCodex = $derived(session?.provider === 'codex');
+  const canEdit = $derived(ws.myRole !== 'viewer' && session?.kind === 'agent');
+  const sessionEnded = $derived(
+    !!session && (ws.statusMap[session.id] ?? session.status) === 'exited',
+  );
+
+  // "+ Add task" inline form.
+  let addingTask = $state(false);
+  let taskTitle = $state('');
+  let taskDesc = $state('');
+  let taskBusy = $state(false);
+  let taskTitleEl = $state<HTMLInputElement | null>(null);
+
+  function openAddTask(): void {
+    addingTask = true;
+    queueMicrotask(() => taskTitleEl?.focus());
+  }
+
+  function cancelAddTask(): void {
+    addingTask = false;
+    taskTitle = '';
+    taskDesc = '';
+  }
+
+  async function submitTask(): Promise<void> {
+    const title = taskTitle.trim();
+    if (!title || !session || taskBusy) return;
+    taskBusy = true;
+    try {
+      await activity.addTask(session.id, title, taskDesc.trim() || undefined);
+      cancelAddTask();
+    } catch (e) {
+      toasts.error('Could not add task', e instanceof Error ? e.message : String(e));
+    } finally {
+      taskBusy = false;
+    }
+  }
+
+  function onTaskKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void submitTask();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelAddTask();
+    }
+  }
 
   // Filters: source + free-text search. Newest first for at-a-glance scanning.
   type SourceFilter = 'all' | 'agent' | 'user' | 'otto';
@@ -140,23 +195,91 @@
     <section class="section">
       <div class="section-title">
         <span>Task tracker</span>
-        {#if tasks.length > 0}<span class="count">{doneCount}/{tasks.length}</span>{/if}
+        <span class="title-right">
+          {#if pendingNudges > 0}
+            <span class="count nudge" title="Waiting to be handed to the agent (delivered when idle, or after 120 s)">
+              {pendingNudges} queued
+            </span>
+          {/if}
+          {#if tasks.length > 0}<span class="count" data-testid="task-count">{doneCount}/{tasks.length}</span>{/if}
+          {#if canEdit && !addingTask}
+            <button
+              class="add-task-btn"
+              onclick={openAddTask}
+              title={sessionEnded ? 'The session has exited — the task is kept and handed over on resume' : 'Push a task to this agent'}
+              data-testid="add-task-btn"
+            >
+              <Icon name="plus" size={11} /> Add task
+            </button>
+          {/if}
+        </span>
       </div>
 
+      {#if addingTask}
+        <form class="task-add" onsubmit={(e) => { e.preventDefault(); void submitTask(); }} data-testid="add-task-form">
+          <input
+            class="task-input"
+            placeholder="Task title — the agent adds it to its list and does it next"
+            bind:value={taskTitle}
+            bind:this={taskTitleEl}
+            onkeydown={onTaskKeydown}
+            spellcheck="false"
+            aria-label="Task title"
+          />
+          <textarea
+            class="task-input desc"
+            placeholder="Details (optional) — sent along with the nudge"
+            bind:value={taskDesc}
+            onkeydown={onTaskKeydown}
+            rows="2"
+            spellcheck="false"
+            aria-label="Task description"
+          ></textarea>
+          <div class="task-add-row">
+            <button type="button" class="tbtn" onclick={cancelAddTask}>Cancel</button>
+            <button type="submit" class="tbtn primary" disabled={taskTitle.trim() === '' || taskBusy}>
+              {taskBusy ? 'Adding…' : 'Add'}
+            </button>
+          </div>
+        </form>
+      {/if}
+
       {#if tasks.length === 0}
-        <p class="empty-line dim">No tasks yet. They appear when the agent plans its work.</p>
+        {#if isCodex}
+          <p class="empty-line dim">
+            Codex does not publish a plan — only tasks you add here appear (Codex picks them up as prompts).
+          </p>
+        {:else}
+          <p class="empty-line dim">No tasks yet. They appear when the agent plans its work.</p>
+        {/if}
       {:else}
         <div class="progress-track" aria-hidden="true">
           <div class="progress-fill" style="width:{progress}%"></div>
         </div>
-        <ul class="tasks">
+        <ul class="tasks" data-testid="task-list">
           {#each tasks as t (t.id)}
-            <li class="task task-{t.status}" title={t.status.replace('_', ' ')}>
+            <li
+              class="task task-{t.status}"
+              class:from-board={t.source === 'user'}
+              class:nudge-pending={t.nudge_pending}
+              title={t.description ? `${t.status.replace('_', ' ')} — ${t.description}` : t.status.replace('_', ' ')}
+              data-testid="task-row"
+              data-source={t.source}
+            >
               <span class="task-glyph">{TASK_GLYPH[t.status]}</span>
               <span class="task-title">{t.title}</span>
+              {#if t.source === 'user'}
+                <span class="badge board" title="Added from the board / Activity panel">from board</span>
+              {/if}
+              {#if t.nudge_pending}
+                <span class="badge queued" title="Waiting to be handed to the agent">queued</span>
+              {/if}
             </li>
           {/each}
         </ul>
+        {#if isCodex}
+          <p class="empty-line dim hint">Codex does not publish a plan — this list holds only the tasks you added.</p>
+        {/if}
       {/if}
     </section>
 
@@ -268,6 +391,120 @@
   }
 
   /* Task tracker */
+  .title-right {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .count.nudge {
+    color: var(--status-warn, #d29922);
+    background: color-mix(in srgb, var(--status-warn, #d29922) 14%, transparent);
+  }
+  .add-task-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    height: 18px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    cursor: pointer;
+  }
+  .add-task-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .task-add {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin: 2px 0 4px;
+  }
+  .task-input {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+    font-size: 11.5px;
+    padding: 4px 8px;
+    outline: none;
+    resize: vertical;
+  }
+  .task-input:focus {
+    border-color: var(--accent);
+  }
+  .task-input.desc {
+    min-height: 34px;
+  }
+  .task-add-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .tbtn {
+    height: 22px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .tbtn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-contrast, #fff);
+  }
+  .tbtn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .badge {
+    flex-shrink: 0;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-radius: 999px;
+    padding: 0 5px;
+    line-height: 14px;
+    align-self: center;
+  }
+  .badge.board {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .badge.queued {
+    color: var(--status-warn, #d29922);
+    background: color-mix(in srgb, var(--status-warn, #d29922) 14%, transparent);
+  }
+  .task.nudge-pending .task-glyph {
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+  .hint {
+    margin-top: 4px;
+  }
   .progress-track {
     height: 4px;
     border-radius: 999px;

@@ -41,6 +41,7 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
     // Must run BEFORE sqlx::migrate!() — repairs DBs bricked by the vault-docs
     // migration renumber before sqlx validates recorded checksums by version.
     repair_renumbered_vault_migrations(&pool).await?;
+    repair_renumbered_migrations(&pool, RENUMBERED).await?;
 
     sqlx::migrate!()
         .run(&pool)
@@ -111,6 +112,61 @@ async fn repair_renumbered_vault_migrations(pool: &SqlitePool) -> Result<()> {
             "migrate: repaired renumbered vault-docs migrations (103/104 -> 105/106); \
              sqlx will now apply external_app + web_logins"
         );
+    }
+    Ok(())
+}
+
+/// Migrations that were RENUMBERED while feature branches raced for the same
+/// version on 2026-09-05: `(old version, sqlx description, new version)`.
+/// An install that applied a branch build under the old number has the
+/// identical file content recorded (sqlx checksum = sha384 of the file, and
+/// the files were only renamed), so re-versioning the row makes sqlx see the
+/// new number as already applied and then apply whatever it genuinely lacks —
+/// in either order the two populations upgraded.
+const RENUMBERED: &[(i64, &str, i64)] = &[
+    // feat/conversation-view shipped as 0115–0117; main took those numbers.
+    (115, "sessions transcript path", 121),
+    (116, "agent tasks source", 122),
+    (117, "transcript index", 123),
+    // feat/resource-access-governance shipped as 0116/0117.
+    (116, "resource access", 119),
+    (117, "database changes", 120),
+];
+
+/// Generalised form of [`repair_renumbered_vault_migrations`]: for every
+/// `(old, description, new)` move the applied row from `old` to `new` when it
+/// carries that description and `new` is not applied yet. Idempotent; a
+/// no-op on fresh DBs and on DBs that never ran the old numbering.
+async fn repair_renumbered_migrations(pool: &SqlitePool, table: &[(i64, &str, i64)]) -> Result<()> {
+    let has_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| Error::Internal(format!("migrate repair probe: {e}")))?;
+    if !has_table {
+        return Ok(());
+    }
+    for (old, description, new) in table {
+        let moved = sqlx::query(
+            "UPDATE _sqlx_migrations SET version = ? \
+             WHERE version = ? AND description = ? \
+               AND NOT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = ?)",
+        )
+        .bind(new)
+        .bind(old)
+        .bind(description)
+        .bind(new)
+        .execute(pool)
+        .await
+        .map_err(|e| Error::Internal(format!("migrate repair {old}->{new}: {e}")))?
+        .rows_affected();
+        if moved > 0 {
+            tracing::warn!(
+                "migrate: repaired renumbered migration '{description}' ({old} -> {new}); \
+                 sqlx will now apply the migrations this install lacks"
+            );
+        }
     }
     Ok(())
 }
@@ -197,6 +253,47 @@ mod tests {
         // Running again must not move anything (103/104 are gone now).
         repair_renumbered_vault_migrations(&pool).await.unwrap();
         assert_eq!(versions(&pool).await, vec![100, 101, 102, 105, 106]);
+    }
+
+    #[tokio::test]
+    async fn repair_moves_branch_numbered_rows_in_either_population() {
+        // Population A ran the conversation-view build: transcript migrations
+        // sit at 115/116/117 and main's 0115 (workflow runs) never applied.
+        let pool = migrations_pool(&[
+            (114, "k8s clusters"),
+            (115, "sessions transcript path"),
+            (116, "agent tasks source"),
+            (117, "transcript index"),
+        ])
+        .await;
+        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        assert_eq!(versions(&pool).await, vec![114, 121, 122, 123]);
+        // sqlx will now apply 115 (workflow runs) .. 120 as genuinely pending.
+
+        // Population B ran the governance build (116/117 = access + changes)
+        // on top of main's 0115; the k8s-monitor 116/117 are still pending.
+        let pool = migrations_pool(&[
+            (115, "workflow runs created by"),
+            (116, "resource access"),
+            (117, "database changes"),
+        ])
+        .await;
+        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        assert_eq!(versions(&pool).await, vec![115, 119, 120]);
+
+        // Population C is a correct main install: nothing moves.
+        let pool = migrations_pool(&[
+            (115, "workflow runs created by"),
+            (116, "k8s monitor"),
+            (117, "k8s monitor series cap"),
+            (119, "resource access"),
+        ])
+        .await;
+        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        assert_eq!(versions(&pool).await, vec![115, 116, 117, 119]);
+        // Idempotent.
+        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        assert_eq!(versions(&pool).await, vec![115, 116, 117, 119]);
     }
 
     #[tokio::test]

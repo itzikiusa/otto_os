@@ -63,6 +63,7 @@ Status series written from the sweep alone: `restarts_total`, `ready`,
 | `mappings` (json) | `field` is a dotted path (`memory_stats.sys`, `items.0.x`); `metric` emits a sample, `label` attaches a pod-level label (e.g. `build_info.version → version`, used for **version drift**) |
 | `unit` | `number`, `bytes`, `bytes_human` (`"27 MB"`, `512Mi`, `1.5GiB` — all binary multiples), `duration_human` (`1m30s`, `250ms`), `percent` |
 | `include` / `exclude` (prometheus) | series-name globs (`http_*`, `*_bucket`); empty include = everything |
+| labels kept (prometheus) | only `code` / `status` / `status_code` / `le` survive ingest; every other label (`path`, `method`, `handler`…) is folded away and values summed. A gateway with hundreds of paths shrinks from ~1500 rows per pod per cycle to a few dozen, which is what keeps the dashboard queries fast |
 | `timeout_ms` | 100..30000, default 3000 |
 
 Limits: 10 probes, 200 mappings, and `series_cap` distinct series per pod per cycle (default 1500, 100..10000 in Settings; `_bucket` series are dropped first when a body overflows it — the
@@ -100,6 +101,12 @@ counted separately as **churn**. The first cycle after enabling has no baseline
 and records nothing.
 
 ## Dashboard
+
+Reads are cached per (cluster, window, namespace) and invalidated by the
+collector's cycle timestamp, so a tab switch or the watchdog's poll never
+re-runs ClickHouse aggregations for unchanged data. The queries behind the
+workloads table run concurrently.
+
 
 - **Overview** (`#/kubernetes/monitor`): one card per cluster — health badge
   (`healthy` / `degraded` / `incident`), pods, unplanned restarts by class,

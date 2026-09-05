@@ -455,11 +455,60 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 | POST /sessions/{id}/unarchive | session owner-or-admin | — | Session (restore an archived session; it becomes `reconnectable`) |
 | POST /sessions/{id}/kill | session owner-or-admin | — | Session (kill the PTY but KEEP the row un-archived; resumable providers can be reopened) |
 | POST /sessions/bulk | per-id session owner-or-admin | `BulkSessionsReq {action: "archive"\|"delete"\|"kill", ids}` (≤200 ids) | `BulkSessionResult[]` — non-owned/missing ids come back `ok:false` instead of failing the batch |
-| POST /sessions/{id}/input | ws editor + **session owner-or-admin** | `SendInputReq{text, submit?}` — writes a keystroke/paste into the PTY (`submit` omitted/true appends a newline) | 200 |
+| POST /sessions/{id}/input | ws editor + **session owner-or-admin** | `SendInputReq{text, submit?}` — `submit` omitted/true: bracketed paste + a real Enter (`SessionManager::submit_text`, the path that actually sends in Claude Code / Codex); `submit: false`: the text verbatim, no newline | 200 |
 | POST /sessions/{id}/handover | ws editor + **owner-or-admin of the source (and of an existing target)** | — | starts a handover; progress via `SessionMetaUpdated` |
 | POST /sessions/{id}/handover/brief | ws editor + **session owner-or-admin** (the brief digests the session's transcript) | — | generates a handover brief for the session |
 | POST /sessions/{session_id}/attach-product | ws editor | `{story_id}` | attaches a product story to the session |
 | POST /app/kill-sessions | **root only** | — | terminate every live PTY (desktop quit hook); non-root receives 403 |
+
+## Conversation view, History, Tasks board & Outputs
+
+Design: `docs/design/conversation-view.md`. The conversation is rebuilt from the
+provider's own transcript on disk (Claude `~/.claude/projects/<cwd-slug>/<sid>.jsonl`,
+Codex `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<sid>.jsonl`) by the shared
+`otto-transcript` crate (also the usage tailer's parser). Wire types
+(`Transcript`, `Turn`, `Block`, `ToolResult`, `TaskItem`, `SystemNote`,
+`Artifact`, `HistoryEntry`, `SubagentMeta`) are `crates/otto-transcript/src/model.rs`,
+mirrored in `ui/src/lib/api/types.ts` under `// ── Transcript`. RBAC: `Agents`
+View for every GET, `Agents` Edit for every POST (explicit `policy.rs` arms above
+the `/sessions/{id}/*` catch-all); every session route additionally applies the
+owner-or-admin gate; history routes require workspace `viewer` (GET) / `editor`
+(POST).
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /sessions/{id}/transcript?before=&limit=&sub= | ws viewer + owner-or-admin | `before` = opaque cursor from a prior page (exclusive), `limit` turns (default 60, max 500), `sub` = subagent id (Claude `subagents/agent-<id>.jsonl`) | `Transcript` — the last `limit` turns (or the page before `before`); `cursor` = record index of the oldest returned turn, `has_earlier` drives "Load earlier". No resolvable transcript → **200** with `turns: []` and `unavailable_reason` ∈ `no_provider_session_id \| transcript_missing \| provider_unsupported \| codex_rollout_unresolved` (agy is always `provider_unsupported`). A `sub` view carries only turns + `stats.turns/tool_calls`. For a live session the call also (re)arms the live tail (`transcript_appended` events; ≤ 32 concurrent, stops 60 s after exit / 5 min without a fetch) |
+| GET /sessions/{id}/transcript/images/{img_id} | ws viewer + owner-or-admin | `img_id` from an `image` block / `ToolResult.image_ids` (hex only) | image bytes, `inline`, `X-Content-Type-Options: nosniff`. Images are extracted once to `<data>/transcripts/<provider_session_id>/img/` and never inlined in JSON |
+| GET /sessions/{id}/artifacts | ws viewer + owner-or-admin | — | `Artifact[]` newest first — files written by `Write`/`Edit`/`FileChange`, PR links (`pr-link` records + PR URLs in prose), pasted/extracted images. `id = sha1(kind + ':' + (path ?? url))`, deduped per path (last producing turn wins). Best-effort mirrored into `work_artifacts` |
+| GET /sessions/{id}/artifacts/{artifact_id} | ws viewer + owner-or-admin | opaque `artifact_id` only — never a client path | bytes; the server maps the id back to the path it folded, then `canonicalize` → allow-list (session cwd, daemon data dir, `std::env::temp_dir()`) + fs.rs deny-list (`.git`, `.env*`, keys) → 25 MB cap → `nosniff` + `Content-Security-Policy: sandbox; default-src 'none'` + `X-Frame-Options: DENY`; `inline` for raster `image/*` only, `attachment` for everything else (HTML/SVG never render on the daemon origin — the UI previews them from srcdoc in its own `sandbox=""` iframe). 403 outside the roots, 413 over the cap, 400 for a link-only artifact |
+| POST /sessions/{id}/tasks | ws editor + owner-or-admin | `CreateAgentTaskReq {title, description?}` | `AgentTask` (`source: "user"`, `nudge_pending: true`); broadcasts `tasks_updated`. 400 unless the session is a `claude`/`codex` **agent** session — its own provider or the one captured running inside a terminal (`meta.nested_provider`); 409 `agent not running in this terminal` when that captured CLI has exited (the sweep likewise keeps such tasks pending); title/description are reduced to one line with every control character stripped. The nudge sweep (atomic per-task claim; PTY must be ≥ 10 s old, drawn and quiet 600 ms) submits `Otto board: new task — "<title>". <description> Add it to your task list and do it next.` via `submit_text` when the session is `idle`, or after at most 120 s while `working`; it waits (no override) while an approval/permission prompt is on screen. Then `nudge_pending: false`, `nudged_at` set |
+| POST /sessions/{id}/inbox | ws editor + owner-or-admin | `InboxUploadReq {filename, mime, data_b64}` — `image/*` only, ≤ 10 MB decoded | `{path}` under `<data>/sessions/<id>/inbox/` for the composer's `[Image: <path>]` line. 415 for non-images, 413 over the cap |
+| GET /workspaces/{wid}/history?q=&provider=&cwd=&status=&before=&limit= | ws viewer | `q` (title / first prompt / cwd, case-insensitive), `provider` ∈ `claude\|codex`, `cwd` (exact or prefix), `status` ∈ `running\|idle\|exited\|reconnectable\|on_disk`, `before` = `last_active_at` cursor (exclusive), `limit` (default 100, max 1000) | `HistoryEntry[]` newest activity first: the workspace's agent sessions with a resolvable transcript (all statuses incl. archived; own sessions only for non-admins; `status` from the row) merged with indexed transcripts no session claims by path or `provider_session_id` (`status: "on_disk"`, `session_id: null`) — **`on_disk` rows are returned to workspace Admins/root only**; other members see exactly their own sessions |
+| GET /workspaces/{wid}/history/transcript?path=&before=&limit=&sub= | ws viewer | `path` = an absolute `.jsonl` that must resolve (symlink-aware) under `~/.claude/projects` or `$CODEX_HOME/sessions` — the ONE route that accepts a client path | `Transcript` (same paging as the session route); 403 for any other location, and 403 unless the caller is a workspace Admin/root or the path is the transcript of one of the caller's own sessions in `wid` (same rule for `…/images/{img_id}` and `import`) |
+| GET /workspaces/{wid}/history/transcript/images/{img_id}?path= | ws viewer | same `path` confinement | image bytes (same store as the session route, keyed by the provider session id in the filename) |
+| POST /workspaces/{wid}/history/import | ws editor | `HistoryImportReq {provider, transcript_path}` (same confinement) | `Session` — a new `reconnectable` agent row with `provider_session_id` + `transcript_path` (so `resume_args` continues it) and `meta.imported_from = "history"`; when a session already owns the id it is returned instead (409 if it lives in another workspace). Broadcasts `session_created` |
+| POST /workspaces/{wid}/history/rescan | ws editor | — | **202**; a background walk of both roots (skips unchanged `(mtime,size)`, reads head 64 KB + tail 16 KB only) refreshes `transcript_index`; progress via `history_index_progress`. One scan at a time (a second request is a no-op 202). The same scan runs at daemon boot |
+
+**Provider roots.** All reads (session transcripts, History index, `history/*`
+confinement) use two roots: `<claude projects>` and `<codex sessions>`.
+`OTTO_TRANSCRIPT_ROOTS=<claude root>:<codex root>` (two absolute paths) overrides
+both; otherwise under `OTTO_E2E=1` they default to the EMPTY per-daemon dirs
+`<data_dir>/e2e-transcripts/{claude,codex}` (the Playwright throwaway daemon never
+reads the real trees); otherwise `~/.claude/projects` and `$CODEX_HOME/sessions`
+(else `~/.codex/sessions`). E2E-only hooks (`OTTO_E2E=1`): a session whose
+`meta.e2e_transcript_path` names an absolute fixture JSONL is folded from it
+(provider from the filename), and `history/transcript?path=` / `history/import`
+also accept `…/crates/otto-transcript/fixtures/**.jsonl`.
+
+`AgentTask` gained `source` (`"agent"` \| `"user"`), `description`, `nudge_pending`,
+`nudged_at` (migration 0122). The provider plan sync (`PUT …/tasks`, TodoWrite
+ingest) now MERGES: it updates matching rows in place (by `ext_id`, else
+normalized title), inserts new `agent` rows, deletes only unmatched `agent` rows
+and keeps unmatched `user` rows after the plan — ids never regenerate. Claude
+`TaskCreate` / `TaskUpdate` hooks upsert a single row by `ext_id`
+(`tool_response.task.id` / `tool_input.taskId`). `GET …/activity/summary` counts
+ALL rows, so board-added tasks show in `done/total`. Codex publishes no plan:
+its list holds only user-added tasks.
 
 ## Connection sections (sidebar grouping)
 
@@ -3239,10 +3288,10 @@ Admin = cluster registry + installs (see `crates/otto-server/src/policy.rs`).
 | POST /k8s/install | kubernetes:Admin | `{ tool: "kubectl"\|"k9s" }` | 202 `InstallJob` — background job (brew if present, else direct download into `<data_dir>/bin`); idempotent while `running`; progress via `/k8s/status` + WS `k8s_install_updated` |
 | GET /k8s/discover | kubernetes:View | — | `{ contexts: DiscoveredContext[] }` from `~/.kube/config` + every `$KUBECONFIG` entry via `kubectl config view -o json` (only `contexts[]` + `clusters[].cluster.server` are read — never key/cert/token material) |
 | GET /k8s/clusters | kubernetes:View | — | `K8sCluster[]` (name-sorted global library) |
-| POST /k8s/clusters | kubernetes:Admin | `UpsertK8sClusterReq { name, source?: "kubeconfig", kubeconfig_path?, context_name, default_namespace?, environment?, color? }` | 201 `K8sCluster` — `kubeconfig_path` (`~` ok) must exist; `source` other than `kubeconfig` ⇒ 400 |
+| POST /k8s/clusters | kubernetes:Admin | `UpsertK8sClusterReq { name, source?: "kubeconfig", kubeconfig_path?, context_name, default_namespace?, environment?, color?, known_namespaces?: string[] }` | 201 `K8sCluster` — `kubeconfig_path` (`~` ok) must exist; `source` other than `kubeconfig` ⇒ 400 |
 | POST /k8s/clusters/import | kubernetes:Admin | `{ name, kubeconfig_yaml, context_name?, default_namespace?, environment?, color? }` | 201 `K8sCluster` (`source: "imported"`) — writes `<data_dir>/kube/<id>.yaml` 0600, validates with `kubectl --kubeconfig <file> config view -o json`; `context_name` defaults to the file's `current-context`, `default_namespace` to that context's namespace; 1 MiB cap (413) |
 | GET /k8s/clusters/{id} | kubernetes:View | — | `K8sCluster` |
-| PATCH /k8s/clusters/{id} | kubernetes:Admin | partial `{ name?, kubeconfig_path?, context_name?, default_namespace?, environment?, color? }` (`""` clears nullable strings) | `K8sCluster` — `kubeconfig_path` is refused (400) for `imported`/`eks` rows (Otto-managed) |
+| PATCH /k8s/clusters/{id} | kubernetes:Admin | partial `{ name?, kubeconfig_path?, context_name?, default_namespace?, environment?, color?, known_namespaces?: string[] }` (`""` clears nullable strings; `known_namespaces` replaces the persisted list — namespaces offered in the picker even when the cluster forbids listing them; lowercased + deduped) | `K8sCluster` — `kubeconfig_path` is refused (400) for `imported`/`eks` rows (Otto-managed) |
 | DELETE /k8s/clusters/{id} | kubernetes:Admin | — | 204 — also removes the Otto-owned kubeconfig file for `imported`/`eks` sources (user files are never touched) |
 | POST /k8s/clusters/{id}/test | kubernetes:View | — | `{ ok, latency_ms, message, server_version? }` (`kubectl version -o json --request-timeout=8s`; success bumps `last_used_at`) |
 | GET /k8s/clusters/{id}/capabilities?refresh= | kubernetes:View | — | `K8sCapabilities { server_version?, metrics_server, argo_rollouts, argocd, checked_at }` — cached in the row (`capabilities`), `refresh=true` re-probes (`version`, `get --raw /apis/metrics.k8s.io/v1beta1`, `api-resources --api-group=argoproj.io -o name`) |

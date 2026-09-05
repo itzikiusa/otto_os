@@ -45,6 +45,22 @@ pub struct UpsertK8sClusterReq {
     pub default_namespace: Option<String>,
     pub environment: Option<Environment>,
     pub color: Option<String>,
+    /// Namespaces to offer in the picker even when the cluster forbids
+    /// listing them (persisted on the row; lowercased + deduped on save).
+    #[serde(default)]
+    pub known_namespaces: Option<Vec<String>>,
+}
+
+/// Normalise a namespace list: trim, lowercase, drop blanks, dedupe, sort.
+pub fn normalise_namespaces(list: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = list
+        .iter()
+        .map(|n| n.trim().to_ascii_lowercase())
+        .filter(|n| !n.is_empty())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// `PATCH /k8s/clusters/{id}` body — every field optional; `""` clears the
@@ -57,6 +73,8 @@ pub struct PatchK8sClusterReq {
     pub default_namespace: Option<String>,
     pub environment: Option<Environment>,
     pub color: Option<String>,
+    #[serde(default)]
+    pub known_namespaces: Option<Vec<String>>,
 }
 
 /// `POST /k8s/clusters/import` body.
@@ -319,7 +337,10 @@ impl<S: K8sCtx> Clusters<S> {
                 aws_account_id: None,
                 environment: req.environment.unwrap_or_default(),
                 color: clean(req.color),
-                params: json!({}),
+                params: match &req.known_namespaces {
+                    Some(list) => json!({"known_namespaces": normalise_namespaces(list)}),
+                    None => json!({}),
+                },
                 created_by: Some(user.id.clone()),
             })
             .await?;
@@ -536,6 +557,7 @@ impl<S: K8sCtx> Clusters<S> {
                     default_namespace: req.default_namespace.map(|d| clean_ns(Some(d))),
                     environment: req.environment,
                     color: req.color.map(|c| clean(Some(c))),
+                    known_namespaces: req.known_namespaces.as_deref().map(normalise_namespaces),
                 },
             )
             .await?;

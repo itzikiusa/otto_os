@@ -8,6 +8,8 @@ license.workspace = true
 shell-words.workspace = true
 otto-core = { workspace = true }
 otto-state = { workspace = true }
+# Conversation view: `UnavailableReason` for transcript resolution (design §4.2).
+otto-transcript = { workspace = true }
 otto-pty = { workspace = true }
 otto-sandbox = { workspace = true }
 tokio = { workspace = true }

@@ -26,6 +26,7 @@
   import NotificationBell from './NotificationBell.svelte';
   import { serviceHealth } from '../lib/stores/serviceHealth.svelte';
   import AgentsPage from '../modules/agents/AgentsPage.svelte';
+  import { HistoryPage } from '../modules/agents/history';
   import NewSession from '../modules/agents/NewSession.svelte';
   import NewWorkspace from '../modules/settings/NewWorkspace.svelte';
   import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
@@ -617,6 +618,11 @@
   <div class="content" class:bell-gutter={moduleName !== 'agents' && !wfDocked}>
     {#if moduleName === 'agents'}
       <AgentsPage />
+    {:else if moduleName === 'history'}
+      <!-- Past agent sessions (Otto rows + transcripts found on disk) with a
+           read-only conversation view. `#/history`, not `#/agents/…`, whose
+           second segment is a session id. -->
+      <HistoryPage />
     {:else if moduleName === 'mission-control'}
       <MissionControlPage />
     {:else if moduleName === 'connections' || moduleName === 'database'}

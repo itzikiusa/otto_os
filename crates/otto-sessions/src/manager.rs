@@ -244,13 +244,73 @@ fn descendant_cpu_ms(root: u32, table: &[ProcRow]) -> u64 {
 
 /// Root directory codex writes session rollouts to: `$CODEX_HOME/sessions`,
 /// else `~/.codex/sessions`.
-fn codex_sessions_root() -> std::path::PathBuf {
+pub fn codex_sessions_root() -> std::path::PathBuf {
     let home = std::env::var("CODEX_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex")
         });
     home.join("sessions")
+}
+
+/// Locate the rollout file for a codex conversation id: the file named
+/// `rollout-<ts>-<psid>.jsonl` somewhere under `YYYY/MM/DD/` (conversation
+/// view, design §4.2). A directory walk — callers persist the result on the
+/// session row (`sessions.transcript_path`) so this runs once per session.
+pub fn codex_rollout_path(psid: &str) -> Option<std::path::PathBuf> {
+    codex_rollout_path_under(&codex_sessions_root(), psid)
+}
+
+/// [`codex_rollout_path`] under an explicit sessions root.
+pub fn codex_rollout_path_under(root: &std::path::Path, psid: &str) -> Option<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, suffix: &str, depth: usize) -> Option<std::path::PathBuf> {
+        if depth > 5 {
+            return None;
+        }
+        // Newest date dirs first: the rollout we want is almost always recent.
+        let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
+        entries.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+        for entry in entries {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => {
+                    if let Some(p) = walk(&path, suffix, depth + 1) {
+                        return Some(p);
+                    }
+                }
+                Ok(_) => {
+                    if path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(suffix))
+                    {
+                        return Some(path);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        None
+    }
+    if psid.is_empty() {
+        return None;
+    }
+    walk(root, &format!("-{psid}.jsonl"), 0)
+}
+
+/// Best-effort: resolve + persist `sessions.transcript_path` right after a
+/// provider id is captured (design §4.2), so the conversation view never has to
+/// scan `~/.codex/sessions` for this session again. Failures only log.
+async fn persist_transcript_path(repo: &SessionsRepo, id: &Id, provider: &str, cwd: &str, psid: &str) {
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    match crate::lifecycle::transcript_path(&home, provider, cwd, Some(psid)) {
+        Ok(path) => {
+            if let Err(e) = repo.set_transcript_path(id, &path.to_string_lossy()).await {
+                tracing::debug!(session = %id, "transcript path persist failed: {e}");
+            }
+        }
+        Err(why) => tracing::debug!(session = %id, ?why, "transcript path not resolvable yet"),
+    }
 }
 
 /// Normalize raw PTY input bytes into the plain text codex will record as the
@@ -1295,6 +1355,13 @@ impl SessionManager {
     /// newline as pasted content — it inserts a newline instead of submitting,
     /// so the message is pasted but never sent. Mirrors the handover injector.
     pub async fn submit_text(&self, id: &Id, text: &str) -> Result<()> {
+        // Defensive: a control byte inside the pasted text (an `ESC [ 2 0 1 ~`
+        // in a task title, say) would END the bracketed paste and turn the rest
+        // into keystrokes. Newlines/tabs are legitimate paste content.
+        let text: String = text
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+            .collect();
         let paste = format!("\x1b[200~{text}\x1b[201~");
         self.input(id, paste.as_bytes()).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2143,7 +2210,10 @@ impl SessionManager {
                         // Persist under the lock so the next capture's claimed
                         // set already contains this id.
                         match repo.set_provider_session(&id, &psid).await {
-                            Ok(()) => captured = Some(psid),
+                            Ok(()) => {
+                                persist_transcript_path(&repo, &id, &provider, &cwd, &psid).await;
+                                captured = Some(psid)
+                            }
                             Err(e) => tracing::warn!(
                                 session = %id, "provider id capture: persist failed: {e}"
                             ),
@@ -2391,6 +2461,7 @@ impl SessionManager {
                             session = %id, provider = %session.provider, provider_session = %psid,
                             "late provider id capture — session is now resumable"
                         );
+                        persist_transcript_path(&self.repo, id, &session.provider, &session.cwd, &psid).await;
                         session.provider_session_id = Some(psid);
                     }
                     Err(e) => {
@@ -2562,6 +2633,7 @@ impl SessionManager {
                 tracing::warn!(session = %id, "nested-agent capture: persist failed: {e}");
                 continue;
             }
+            persist_transcript_path(&self.repo, &id, provider, &cwd, &psid).await;
             let _ = self
                 .repo
                 .merge_meta(
@@ -4047,6 +4119,20 @@ mod tests {
         });
         std::fs::write(&path, format!("{meta}\n")).unwrap();
         path
+    }
+
+    #[test]
+    fn codex_rollout_path_finds_by_uuid_suffix() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026").join("07").join("12");
+        std::fs::create_dir_all(&day).unwrap();
+        let psid = "019ed94a-994a-7010-b01f-9b840c5b7068";
+        let f = day.join(format!("rollout-2026-07-12T20-00-00-{psid}.jsonl"));
+        std::fs::write(&f, b"{}").unwrap();
+        std::fs::write(day.join("rollout-2026-07-12T21-00-00-other-uuid-here.jsonl"), b"{}").unwrap();
+        assert_eq!(codex_rollout_path_under(root.path(), psid), Some(f));
+        assert_eq!(codex_rollout_path_under(root.path(), "nope"), None);
+        assert_eq!(codex_rollout_path_under(root.path(), ""), None);
     }
 
     #[test]

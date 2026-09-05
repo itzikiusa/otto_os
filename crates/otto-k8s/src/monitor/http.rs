@@ -28,6 +28,60 @@ use crate::K8sCtx;
 
 type ApiResult<T> = std::result::Result<T, ApiErr>;
 
+/// Dashboard read cache. Every read is a function of (cluster, window,
+/// namespace) and the collector's last cycle, so an entry is valid exactly
+/// until the next cycle writes new samples — no TTL guessing. Bounded by the
+/// number of distinct views actually opened.
+mod cache {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    use serde_json::Value;
+
+    struct Entry {
+        cycle: String,
+        at: Instant,
+        value: Value,
+    }
+
+    static CACHE: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
+    /// Safety net when a collector stops writing (disabled, unreachable).
+    const MAX_AGE: Duration = Duration::from_secs(10 * 60);
+
+    fn map() -> &'static Mutex<HashMap<String, Entry>> {
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub fn get(key: &str, cycle: &str) -> Option<Value> {
+        let m = map().lock().ok()?;
+        let e = m.get(key)?;
+        (e.cycle == cycle && e.at.elapsed() < MAX_AGE).then(|| e.value.clone())
+    }
+
+    pub fn put(key: String, cycle: &str, value: &Value) {
+        if let Ok(mut m) = map().lock() {
+            if m.len() > 512 {
+                m.clear();
+            }
+            m.insert(
+                key,
+                Entry {
+                    cycle: cycle.to_string(),
+                    at: Instant::now(),
+                    value: value.clone(),
+                },
+            );
+        }
+    }
+}
+
+fn cycle_key(status: Option<&K8sMonitorStatusRow>) -> String {
+    status
+        .and_then(|s| s.last_cycle_at.clone())
+        .unwrap_or_default()
+}
+
 pub fn routes<S: K8sCtx>() -> Router<S> {
     Router::new()
         .route("/k8s/monitor/overview", get(overview::<S>))
@@ -328,6 +382,12 @@ async fn overview<S: K8sCtx>(State(ctx): State<S>, Query(q): Query<WindowQuery>)
             .map(|r| probes::from_row(&r))
             .unwrap_or_default();
         let status = repo.get_status(cluster.id.as_str()).await?;
+        let ck = format!("ov:{}:{}", cluster.id, window_label);
+        let cycle = cycle_key(status.as_ref());
+        if let Some(v) = cache::get(&ck, &cycle) {
+            rows.push(v);
+            continue;
+        }
         let snap = snapshot_of(status.as_ref());
         let pods = pods_json(&snap);
         let stats: Vec<WorkloadStat> = match (&sink, cfg.enabled, status.as_ref()) {
@@ -358,7 +418,7 @@ async fn overview<S: K8sCtx>(State(ctx): State<S>, Query(q): Query<WindowQuery>)
             }
         }
         let badge = health_badge(cfg.enabled, status.as_ref(), &stats, &pods);
-        rows.push(json!({
+        let row = json!({
             "cluster": {"id": cluster.id, "name": cluster.name, "environment": cluster.environment, "color": cluster.color},
             "enabled": cfg.enabled,
             "interval_secs": cfg.interval_secs,
@@ -373,7 +433,9 @@ async fn overview<S: K8sCtx>(State(ctx): State<S>, Query(q): Query<WindowQuery>)
             "err_pct": if rps > 0.0 { 100.0 * err_rps / rps } else { 0.0 },
             "drift": drift,
             "workloads": stats.len(),
-        }));
+        });
+        cache::put(ck, &cycle, &row);
+        rows.push(row);
     }
     Ok(Json(rows))
 }
@@ -388,6 +450,11 @@ async fn workloads<S: K8sCtx>(
     let window = queries::parse_window(&window_label)?;
     check_ident("ns", q.ns.as_deref())?;
     let (cluster, cfg, status) = load(&ctx, &id).await?;
+    let ck = format!("wl:{}:{}:{}", cluster.id, window_label, q.ns.as_deref().unwrap_or(""));
+    let cycle = cycle_key(status.as_ref());
+    if let Some(v) = cache::get(&ck, &cycle) {
+        return Ok(Json(v));
+    }
     let sink = ctx
         .monitor_sink()
         .filter(|s| s.available())
@@ -435,10 +502,12 @@ async fn workloads<S: K8sCtx>(
             v
         })
         .collect();
-    Ok(Json(json!({
+    let out = json!({
         "window": window_label, "step_secs": step, "enabled": cfg.enabled, "status": status,
         "namespaces": all_namespaces, "workloads": rows,
-    })))
+    });
+    cache::put(ck, &cycle, &out);
+    Ok(Json(out))
 }
 
 fn num(v: &Value, k: &str) -> f64 {
@@ -567,6 +636,12 @@ async fn health_digest<S: K8sCtx>(
             "collector": {"enabled": false, "ok": false, "error": "monitoring is disabled for this cluster"},
         })));
     }
+    let ck = format!("hd:{}:{}", cluster.id, label);
+    let cycle = status.last_cycle_at.clone().unwrap_or_default();
+    if let Some(v) = cache::get(&ck, &cycle) {
+        return Ok(Json(v));
+    }
     let v = health::health(sink.as_ref(), &cluster, &status, cfg.enabled, window, &label).await?;
+    cache::put(ck, &cycle, &v);
     Ok(Json(v))
 }

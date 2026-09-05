@@ -343,6 +343,7 @@ mod tests {
             aws_account_id: None,
             environment: Environment::Dev,
             color: None,
+            known_namespaces: Vec::new(),
             params: serde_json::json!({}),
             capabilities: None,
             created_by: None,

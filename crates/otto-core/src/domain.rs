@@ -743,6 +743,24 @@ pub struct AgentTask {
     pub position: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Who created the row: `"agent"` (the provider's plan sync — TodoWrite /
+    /// TaskCreate) or `"user"` (added from the Tasks panel / Mission Control
+    /// board via `POST /sessions/{id}/tasks`). User rows survive plan syncs.
+    #[serde(default = "default_task_source")]
+    pub source: String,
+    /// Free-form detail for a board-added task (sent to the agent in the nudge).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// A user task the nudge sweep has not yet handed to the agent.
+    #[serde(default)]
+    pub nudge_pending: bool,
+    /// When the nudge prompt was submitted to the session (user tasks only).
+    #[serde(default)]
+    pub nudged_at: Option<DateTime<Utc>>,
+}
+
+fn default_task_source() -> String {
+    "agent".to_string()
 }
 
 /// A Jira project (key + display name) returned by the project listing endpoint.

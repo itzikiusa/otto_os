@@ -85,6 +85,70 @@ pub fn claude_transcript_exists(
     Resumability::Gone
 }
 
+/// Resolve the on-disk transcript for an agent session (conversation view,
+/// design §4.2). Claude → the cwd-encoded path (falling back to a scan of every
+/// project dir, like [`claude_transcript_exists`]); Codex →
+/// [`crate::manager::codex_rollout_path`]; agy → `ProviderUnsupported` (its
+/// history is SQLite, not JSONL); anything else (a plain shell) →
+/// `ProviderUnsupported` too. A resolved path that does not exist yet (the CLI
+/// has not flushed) is `TranscriptMissing`.
+pub fn transcript_path(
+    home: &Path,
+    provider: &str,
+    cwd: &str,
+    provider_session_id: Option<&str>,
+) -> Result<PathBuf, otto_transcript::UnavailableReason> {
+    transcript_path_in_roots(
+        &home.join(".claude").join("projects"),
+        &crate::manager::codex_sessions_root(),
+        provider,
+        cwd,
+        provider_session_id,
+    )
+}
+
+/// [`transcript_path`] against explicit provider roots (`<claude projects>`,
+/// `<codex sessions>`) — the daemon derives them from `OTTO_TRANSCRIPT_ROOTS`
+/// (or empty per-daemon dirs under `OTTO_E2E=1`) so a throwaway daemon never
+/// reads the real `~/.claude` / `~/.codex`.
+pub fn transcript_path_in_roots(
+    claude_root: &Path,
+    codex_root: &Path,
+    provider: &str,
+    cwd: &str,
+    provider_session_id: Option<&str>,
+) -> Result<PathBuf, otto_transcript::UnavailableReason> {
+    use otto_transcript::UnavailableReason as R;
+    match provider {
+        "claude" | "codex" => {}
+        _ => return Err(R::ProviderUnsupported),
+    }
+    let Some(psid) = provider_session_id.filter(|s| !s.is_empty()) else {
+        return Err(R::NoProviderSessionId);
+    };
+    match provider {
+        "claude" => {
+            let exact = claude_root
+                .join(claude_project_dir_name(cwd))
+                .join(format!("{psid}.jsonl"));
+            if exact.is_file() {
+                return Ok(exact);
+            }
+            let target = format!("{psid}.jsonl");
+            if let Ok(entries) = std::fs::read_dir(claude_root) {
+                for entry in entries.flatten() {
+                    let candidate = entry.path().join(&target);
+                    if candidate.is_file() {
+                        return Ok(candidate);
+                    }
+                }
+            }
+            Err(R::TranscriptMissing)
+        }
+        _ => crate::manager::codex_rollout_path_under(codex_root, psid).ok_or(R::CodexRolloutUnresolved),
+    }
+}
+
 /// Does an agy (Antigravity Gemini CLI) conversation for `provider_session_id`
 /// exist under `home`? agy stores each conversation as
 /// `~/.gemini/antigravity-cli/conversations/<id>.db` (or `.pb`). Returns
@@ -225,6 +289,25 @@ mod tests {
             claude_transcript_exists(home.path(), "/Users/x/proj", "id"),
             Resumability::Gone
         );
+    }
+
+    #[test]
+    fn transcript_path_resolves_claude_and_classifies_failures() {
+        use otto_transcript::UnavailableReason as R;
+        let home = tempfile::tempdir().unwrap();
+        let sid = "11111111-2222-3333-4444-555555555555";
+        // No id → NoProviderSessionId; shell/agy → ProviderUnsupported.
+        assert_eq!(transcript_path(home.path(), "claude", "/x", None), Err(R::NoProviderSessionId));
+        assert_eq!(transcript_path(home.path(), "shell", "/x", Some(sid)), Err(R::ProviderUnsupported));
+        assert_eq!(transcript_path(home.path(), "agy", "/x", Some(sid)), Err(R::ProviderUnsupported));
+        // Missing file → TranscriptMissing; present (even under a differently
+        // encoded project dir) → the path.
+        assert_eq!(transcript_path(home.path(), "claude", "/x", Some(sid)), Err(R::TranscriptMissing));
+        let dir = home.path().join(".claude").join("projects").join("-other");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{sid}.jsonl"));
+        std::fs::write(&file, b"{}").unwrap();
+        assert_eq!(transcript_path(home.path(), "claude", "/x", Some(sid)), Ok(file));
     }
 
     #[test]
