@@ -1529,6 +1529,11 @@ export interface ToolStatus {
   version: string | null;
 }
 
+/** `GET /walkthroughs/resolve?url=` — final, directly-playable video URL. */
+export interface ResolveWalkthroughResp {
+  url: string;
+}
+
 export interface MetaResp {
   version: string;
   api_version: number;

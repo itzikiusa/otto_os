@@ -214,6 +214,9 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/settings", get(settings::get_all).put(settings::put_all))
         // --- Dynamic model catalog (discovered per-provider model ids) ----
         .route("/providers/models", get(crate::model_catalog::list))
+        // --- Walkthrough video redirect resolver (WebKit can't follow a
+        // redirecting <video src>; see routes/meta.rs) --------------------
+        .route("/walkthroughs/resolve", get(meta::resolve_walkthrough))
         .route(
             "/providers/models/refresh",
             post(crate::model_catalog::refresh),

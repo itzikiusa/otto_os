@@ -2856,6 +2856,19 @@ picked folder's git toplevel and launches with its id.
 
 ---
 
+## Walkthrough videos (redirect resolver)
+
+The Help → Walkthroughs MP4s are assets of the rolling `walkthroughs` GitHub
+release; GitHub serves them via a 302 to a short-lived signed URL. WebKit (the
+desktop webview) refuses a `<video src>` that redirects, so the page asks the
+daemon to resolve the hop and points the element at the final URL. Exempt from
+the feature gate (static catalog, no per-user data); refuses any URL outside
+`https://github.com/`.
+
+| Method & path | Auth | Request | Response |
+|---|---|---|---|
+| GET /walkthroughs/resolve?url= | any authed user | `url` (must start with `https://github.com/`) | `{url}` — the redirect's `Location` (https only), or the input when it did not redirect; 400 for a non-GitHub URL, 502 when GitHub is unreachable |
+
 ## Snips (screenshot → annotate → clipboard)
 
 One-gesture screenshot flow: capture (or upload) a PNG, annotate it in the

@@ -162,7 +162,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // Static catalogs (no per-user data; safe to read for any authed user).
     if matches!(
         p,
-        "/swarm/presets" | "/workflows/node-types" | "/lsp/capabilities"
+        "/swarm/presets" | "/workflows/node-types" | "/lsp/capabilities" | "/walkthroughs/resolve"
     ) {
         return Exempt;
     }
@@ -1154,6 +1154,10 @@ mod tests {
 
     #[test]
     fn model_catalog_read_view_refresh_edit() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/walkthroughs/resolve"),
+            Exempt
+        );
         assert_eq!(
             pol(Method::GET, "/api/v1/providers/models"),
             Require(Agents, View)

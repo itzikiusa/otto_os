@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
 /// Current API contract version.
@@ -109,5 +109,99 @@ async fn detect_tool(name: &str) -> ToolStatus {
         name: name.to_string(),
         found,
         version,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Walkthrough video redirect resolver
+// ---------------------------------------------------------------------------
+
+/// The only origin the resolver will touch: walkthrough MP4s are assets of the
+/// rolling `walkthroughs` GitHub release. GitHub answers with a 302 to a
+/// short-lived signed `release-assets.githubusercontent.com` URL — and WebKit
+/// (the desktop webview) refuses a `<video src>` that redirects
+/// (`MEDIA_ERR_SRC_NOT_SUPPORTED`), while Chromium tolerates it. Resolving the
+/// hop here lets the page point the element straight at the final URL.
+const WALKTHROUGH_ORIGIN: &str = "https://github.com/";
+
+#[derive(serde::Deserialize)]
+pub struct ResolveWalkthroughQuery {
+    pub url: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct ResolveWalkthroughResp {
+    /// Final, directly-playable URL (after following GitHub's redirect), or
+    /// the input unchanged when it did not redirect.
+    pub url: String,
+}
+
+/// `GET /api/v1/walkthroughs/resolve?url=` — follow the GitHub release-asset
+/// redirect (one hop, HEAD, no body) and return the final URL. Refuses any
+/// URL outside `https://github.com/` so this can never become an open
+/// redirect prober.
+pub async fn resolve_walkthrough(
+    axum::extract::Query(q): axum::extract::Query<ResolveWalkthroughQuery>,
+) -> ApiResult<Json<ResolveWalkthroughResp>> {
+    if !q.url.starts_with(WALKTHROUGH_ORIGIN) {
+        return Err(ApiError(otto_core::Error::Invalid(
+            "only github.com walkthrough assets can be resolved".into(),
+        )));
+    }
+    let url = resolve_one_hop(&q.url).await.map_err(|e| ApiError(otto_core::Error::Upstream(e)))?;
+    Ok(Json(ResolveWalkthroughResp { url }))
+}
+
+/// HEAD `url` without following redirects; return its `Location` (only when
+/// it is an https URL) or `url` itself for a non-redirect answer.
+async fn resolve_one_hop(url: &str) -> Result<String, String> {
+    otto_netguard::check_url(url).await?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("otto-walkthroughs")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.head(url).send().await.map_err(|e| e.to_string())?;
+    if resp.status().is_redirection() {
+        let loc = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| "redirect without Location".to_string())?;
+        if !loc.starts_with("https://") {
+            return Err("redirect target is not https".into());
+        }
+        return Ok(loc.to_string());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("{url}: HTTP {}", resp.status()));
+    }
+    Ok(url.to_string())
+}
+
+#[cfg(test)]
+mod walkthrough_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_non_github_urls() {
+        let r = resolve_walkthrough(axum::extract::Query(ResolveWalkthroughQuery {
+            url: "https://example.com/x.mp4".into(),
+        }))
+        .await;
+        assert!(matches!(r, Err(ApiError(otto_core::Error::Invalid(_)))));
+    }
+
+    /// Network: follows GitHub's 302 to the signed release-assets URL.
+    #[tokio::test]
+    #[ignore = "needs network"]
+    async fn resolves_github_release_asset() {
+        let url = resolve_one_hop(
+            "https://github.com/itzikiusa/otto_os/releases/download/walkthroughs/Intro.mp4",
+        )
+        .await
+        .unwrap();
+        assert!(url.starts_with("https://release-assets.githubusercontent.com/"), "{url}");
     }
 }
