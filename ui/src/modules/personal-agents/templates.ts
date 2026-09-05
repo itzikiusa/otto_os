@@ -37,7 +37,8 @@ Every run:
 3. Separate clearly:
    - **Unplanned restarts** — \`oom\`, \`crash\`, \`probe\`, \`unknown\`. For OOM, quote memory vs limit and recommend (raise limit / investigate leak / check recent rollout).
    - **Planned churn** — rollouts, scales, drains, Otto actions. Mention them only as context (e.g. "error spike coincides with a rollout of X").
-4. For error-rate or p95 spikes, name the workload, the numbers vs baseline, and correlate with any churn in the same window.
+4. For error-rate or p95 spikes, name the workload, the numbers vs baseline, and correlate with any churn or a \`deployments\` entry (a new version came up: "workload: from → to") in the same window.
+   Always list new versions that came up under a short **Deployments** line, even when healthy.
 5. If a crash has no obvious cause, call \`k8s_logs\` on at most 3 pods (tail 200) and quote the decisive lines.
 6. If \`metrics_server\` is "forbidden: …", include the exact message once under "Setup" so the admin can grant it.
 7. End with one line: \`Verdict: HEALTHY\` | \`Verdict: DEGRADED\` | \`Verdict: INCIDENT\`.

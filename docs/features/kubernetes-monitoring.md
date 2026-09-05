@@ -93,6 +93,7 @@ raise concurrency or the interval.
 | `planned` (churn) | new ReplicaSet (`rollout`), `ScalingReplicaSet` (`scale`), Evicted/Preempted (`drain`), or an Otto `k8s.action.*` on the workload in the last 5 minutes (`otto:<user>`) |
 | `completed` (churn) | a Job's pod finished with exit 0 |
 | `unknown` | counter rose / pod changed but nothing matched; the raw reason is kept |
+| `version` (new version came up) | the workload's dominant build version (the `version` label from a JSON probe, e.g. `build_info.version`) changed between cycles; shown as "New version `<from> → <to>`" in Events, listed under `deployments` in the health digest, and reported by the watchdog even when everything is healthy |
 
 Restart counters are per pod, so a rollout never inflates "restarts"; it is
 counted separately as **churn**. The first cycle after enabling has no baseline

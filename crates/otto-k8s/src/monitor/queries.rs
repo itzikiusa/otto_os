@@ -273,8 +273,9 @@ pub fn workload_spark_sql(cluster_id: &str, ns: Option<&str>, metrics: &[&str], 
 pub fn events_sql(cluster_id: &str, window: Duration, class: Option<&str>, workload: Option<&str>, limit: u32) -> String {
     let kind_f = match class.filter(|c| !c.is_empty()) {
         Some("k8s_event") => " AND kind = 'k8s_event'".to_string(),
+        Some("version") => " AND kind = 'version'".to_string(),
         Some(c) => format!(" AND kind IN ('restart', 'churn') AND class = {}", sql_str(c)),
-        None => " AND kind IN ('restart', 'churn')".to_string(),
+        None => " AND kind IN ('restart', 'churn', 'version')".to_string(),
     };
     format!(
         "SELECT ts, namespace, workload, pod, container, kind, class, reason, exit_code, detail, actor \
@@ -373,6 +374,8 @@ mod tests {
         let q = events_sql("c1", Duration::hours(24), Some("oom"), None, 100);
         assert!(q.contains("class = 'oom'"));
         assert!(q.contains("kind IN ('restart', 'churn')"));
+        assert!(events_sql("c1", Duration::hours(1), None, None, 10).contains("'version'"));
+        assert!(events_sql("c1", Duration::hours(1), Some("version"), None, 10).contains("kind = 'version'"));
         assert!(q.contains("LIMIT 100"));
         let raw = events_sql("c1", Duration::hours(1), Some("k8s_event"), Some("frb"), 5000);
         assert!(raw.contains("kind = 'k8s_event'"));

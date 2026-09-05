@@ -7454,7 +7454,8 @@ export interface K8sMonitorEvent {
   workload: string;
   pod: string;
   container: string;
-  kind: 'restart' | 'churn' | 'k8s_event';
+  /** `version` = a workload's dominant build version changed (`reason` is `<from> → <to>`). */
+  kind: 'restart' | 'churn' | 'version' | 'k8s_event';
   class: K8sRestartClass | '';
   reason: string;
   exit_code: number;
@@ -7485,6 +7486,8 @@ export interface K8sHealthDigest {
   unplanned_restarts?: number;
   restarts?: Record<'oom' | 'crash' | 'probe' | 'unknown', Record<string, unknown>[]>;
   churn?: { workload: string; class: string; pods: number; by: string }[];
+  /** Workloads whose dominant version changed in the window ("a new version came up"). */
+  deployments?: { namespace: string; workload: string; from: string; to: string; at: string }[];
   memory_outliers?: Record<string, unknown>[];
   error_rate?: Record<string, unknown>[];
   latency?: Record<string, unknown>[];

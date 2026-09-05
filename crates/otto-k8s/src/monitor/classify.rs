@@ -62,6 +62,11 @@ pub struct PodSnap {
     /// `status.reason` for the pod itself (`Evicted`, `Preempted`).
     #[serde(default)]
     pub pod_reason: String,
+    /// Build version reported by the pod's probes (`version` label), carried
+    /// across cycles so a workload's version change is detectable even when a
+    /// pod was not scraped this cycle.
+    #[serde(default)]
+    pub version: String,
 }
 
 /// `"ns/name"` → pod.
@@ -186,6 +191,7 @@ pub fn snapshot_pod(item: &Value) -> PodSnap {
         deleting: item.pointer("/metadata/deletionTimestamp").is_some(),
         first_port,
         pod_reason: s(item, "/status/reason").unwrap_or("").to_string(),
+        version: String::new(),
     }
 }
 
@@ -422,6 +428,62 @@ pub fn classify(
     out
 }
 
+/// The most common non-empty version among a workload's pods.
+fn dominant_version<'a>(pods: impl Iterator<Item = &'a PodSnap>) -> String {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for p in pods {
+        if !p.version.is_empty() {
+            *counts.entry(p.version.as_str()).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(v, _)| v.to_string())
+        .unwrap_or_default()
+}
+
+/// "A new version came up": per (namespace, workload) the dominant version
+/// changed between cycles. Emitted as `kind: "version"`, class `planned`,
+/// `reason: "<from> → <to>"`. Both sides must be known (a workload seen for
+/// the first time, or one whose probes never report a version, is skipped).
+pub fn version_changes(prev: &Snapshot, cur: &Snapshot, now: DateTime<Utc>) -> Vec<Classified> {
+    let mut groups: BTreeSet<(String, String)> = BTreeSet::new();
+    for p in cur.values() {
+        groups.insert((p.namespace.clone(), p.workload.clone()));
+    }
+    let now_s = now.to_rfc3339();
+    let mut out = Vec::new();
+    for (ns, wl) in groups {
+        let before = dominant_version(prev.values().filter(|p| p.namespace == ns && p.workload == wl));
+        let after = dominant_version(cur.values().filter(|p| p.namespace == ns && p.workload == wl));
+        if before.is_empty() || after.is_empty() || before == after {
+            continue;
+        }
+        let sample = cur.values().find(|p| p.namespace == ns && p.workload == wl);
+        let pods = cur
+            .values()
+            .filter(|p| p.namespace == ns && p.workload == wl && p.version == after)
+            .count();
+        out.push(Classified {
+            kind: "version",
+            class: Class::Planned,
+            namespace: ns,
+            workload_kind: sample.map(|p| p.workload_kind.clone()).unwrap_or_default(),
+            workload: wl,
+            pod: String::new(),
+            container: String::new(),
+            reason: format!("{before} → {after}"),
+            exit_code: 0,
+            planned_by: "rollout".into(),
+            prev_restarts: 0,
+            next_restarts: pods as i64,
+            at: now_s.clone(),
+        });
+    }
+    out
+}
+
 fn churn(p: &PodSnap, class: Class, by: &str, at: &str) -> Classified {
     Classified {
         kind: "churn",
@@ -579,6 +641,28 @@ mod tests {
         let out = classify(&prev, &cur, &[], &[], Utc::now());
         assert_eq!(out[0].class, Class::Unknown);
         assert_eq!(out[0].reason, "");
+    }
+
+    #[test]
+    fn version_change_is_detected_per_workload() {
+        let mk = |name: &str, v: &str| {
+            let mut p = snap(name, "gm-1111111111", 0, "", 0);
+            p.version = v.into();
+            p
+        };
+        let prev = snaps(vec![mk("gm-a", "5.02.27-201"), mk("gm-b", "5.02.27-201"), mk("gm-c", "")]);
+        // Rolling: two pods on the new build, one still old → dominant flips.
+        let cur = snaps(vec![mk("gm-a", "5.02.28-205"), mk("gm-b", "5.02.28-205"), mk("gm-c", "5.02.27-201")]);
+        let out = version_changes(&prev, &cur, Utc::now());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, "version");
+        assert_eq!(out[0].reason, "5.02.27-201 → 5.02.28-205");
+        assert_eq!(out[0].next_restarts, 2, "pods on the new version");
+        assert_eq!(out[0].workload, "gm");
+        // Unchanged / unknown versions emit nothing.
+        assert!(version_changes(&cur, &cur, Utc::now()).is_empty());
+        let unknown = snaps(vec![mk("gm-a", "")]);
+        assert!(version_changes(&unknown, &cur, Utc::now()).is_empty());
     }
 
     #[test]

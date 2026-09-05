@@ -159,7 +159,7 @@
   let eventsLoading = $state(false);
   let eventsError = $state('');
   let classFilter = $state('');
-  const CLASS_OPTIONS = ['', 'oom', 'crash', 'probe', 'unknown', 'planned', 'completed', 'k8s_event'];
+  const CLASS_OPTIONS = ['', 'oom', 'crash', 'probe', 'unknown', 'planned', 'completed', 'version', 'k8s_event'];
 
   async function loadEvents(quiet = false): Promise<void> {
     if (!quiet) eventsLoading = true;
@@ -188,6 +188,10 @@
   }
   function eventMsg(e: K8sMonitorEvent): string {
     if (e.kind === 'k8s_event') return (e.detail?.message as string | undefined) ?? '';
+    if (e.kind === 'version') {
+      const pods = e.detail?.next_restarts as number | undefined;
+      return `new version ${e.reason}${pods ? ` · ${pods} pod${pods === 1 ? '' : 's'} on it` : ''}`;
+    }
     if (e.kind === 'restart') {
       const p = e.detail?.prev_restarts as number | undefined;
       const n = e.detail?.next_restarts as number | undefined;
@@ -254,7 +258,7 @@
           <li>
             <span class="tdot" style="background: {classColor(e.class)}"></span>
             <span class="tts mono">{fmtTs(e.ts)}</span>
-            <span class="tclass" style="color: {classColor(e.class)}">{e.kind === 'k8s_event' ? e.reason : classLabel(e.class)}</span>
+            <span class="tclass" style="color: {e.kind === 'version' ? 'var(--status-working)' : classColor(e.class)}">{e.kind === 'k8s_event' ? e.reason : e.kind === 'version' ? 'New version' : classLabel(e.class)}</span>
             <span class="twl"><b>{e.workload || e.pod}</b>{#if e.pod && e.pod !== e.workload}<span class="dim"> · {e.pod}</span>{/if}</span>
             <span class="tmsg dim">{eventMsg(e)}</span>
           </li>

@@ -59,6 +59,8 @@ export function classLabel(c: string): string {
       return 'Completed';
     case 'unknown':
       return 'Unknown';
+    case 'version':
+      return 'New version';
     default:
       return c || '—';
   }

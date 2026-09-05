@@ -270,7 +270,7 @@ async fn scrape_pod(
     cfg: &MonitorConfig,
     pod: &PodSnap,
     now: DateTime<Utc>,
-) -> (bool, u32, u32, String) {
+) -> (bool, u32, u32, String, String) {
     let (by_port, unresolved) = scrape::group_by_port(&cfg.probes, pod.first_port);
     let mut any_ok = false;
     let mut parse_errors = unresolved.len() as u32;
@@ -341,7 +341,8 @@ async fn scrape_pod(
             &pod_labels,
         ));
     }
-    (any_ok, parse_errors, capped, ndjson)
+    let version = pod_labels.get("version").cloned().unwrap_or_default();
+    (any_ok, parse_errors, capped, ndjson, version)
 }
 
 /// Run one full cycle (spec steps 1–10). Never panics on cluster errors: an
@@ -466,6 +467,7 @@ pub async fn run_cycle<S: K8sCtx>(
         .collect();
     let mut parse_errors = 0u32;
     let mut capped = 0u32;
+    let mut scraped_versions: Vec<(String, String)> = Vec::new();
     if !cfg.probes.is_empty() {
         if let Some(first) = targets.first() {
             let probe0 = &cfg.probes[0];
@@ -489,9 +491,10 @@ pub async fn run_cycle<S: K8sCtx>(
                     async move { scrape_pod(k, cid, transport, cfg, &pod, now).await }
                 })
                 .collect();
-            let results: Vec<(bool, u32, u32, String)> =
-                stream::iter(futs).buffer_unordered(concurrency).collect().await;
-            for (ok, pe, cp, nd) in results {
+            let keys: Vec<String> = targets.iter().map(|p| classify::snap_key(&p.namespace, &p.name)).collect();
+            let results: Vec<(bool, u32, u32, String, String)> =
+                stream::iter(futs).buffered(concurrency).collect().await;
+            for (key, (ok, pe, cp, nd, version)) in keys.into_iter().zip(results) {
                 if ok {
                     status.pods_scraped += 1;
                 } else {
@@ -500,13 +503,29 @@ pub async fn run_cycle<S: K8sCtx>(
                 parse_errors += pe;
                 capped += cp;
                 samples_nd.push_str(&nd);
+                scraped_versions.push((key, version));
+            }
+        }
+    }
+    // Versions: what the probes reported this cycle, else what we knew last
+    // cycle for the same pod (so an unscraped pod does not look downgraded).
+    for (key, version) in scraped_versions {
+        if let Some(p) = cur.get_mut(&key) {
+            p.version = version;
+        }
+    }
+    for (key, p) in cur.iter_mut() {
+        if p.version.is_empty() {
+            if let Some(old) = prev.get(key) {
+                p.version = old.version.clone();
             }
         }
     }
 
     // 6–7. Classify.
     let actions = action_hints(ctx, &cluster.id, now).await;
-    let classified = classify::classify(prev, &cur, &events, &actions, now);
+    let mut classified = classify::classify(prev, &cur, &events, &actions, now);
+    classified.extend(classify::version_changes(prev, &cur, now));
     let events_nd = events_ndjson(&cid, now, &classified, &events, &cur);
 
     // 8. Write.

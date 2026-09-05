@@ -393,9 +393,21 @@ pub async fn health(
         restarts.insert(c.to_string(), vec![]);
     }
     let mut churn: BTreeMap<(String, String), (u32, String)> = BTreeMap::new();
+    let mut deployments: Vec<Value> = Vec::new();
     for r in sink.query_rows(&queries::recent_restarts_sql(&cid, window, 500)).await? {
         let kind = st(&r, "kind");
         let class = st(&r, "class").to_string();
+        if kind == "version" {
+            // "A new version came up": reason is "<from> → <to>".
+            let (from, to) = st(&r, "reason").split_once(" → ").unwrap_or(("", st(&r, "reason")));
+            if deployments.len() < LIST_CAP {
+                deployments.push(json!({
+                    "namespace": st(&r, "namespace"), "workload": st(&r, "workload"),
+                    "from": from, "to": to, "at": st(&r, "ts"),
+                }));
+            }
+            continue;
+        }
         if kind == "restart" {
             let ns = st(&r, "namespace");
             let pod = st(&r, "pod");
@@ -455,6 +467,7 @@ pub async fn health(
         "unplanned_restarts": unplanned,
         "restarts": restarts,
         "churn": churn_list,
+        "deployments": deployments,
         "memory_outliers": mem,
         "error_rate": err,
         "latency": lat,

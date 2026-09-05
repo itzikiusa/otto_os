@@ -3382,12 +3382,15 @@ WorkloadRow { namespace; workload; kind; pods; ready; mem_bytes; mem_limit; mem_
               restarts: { oom, crash, probe, unknown }; churn_planned; churn_unknown;
               rps; err_pct; err_pct_baseline; rps_baseline; latency_kind: 'p95'|'avg'|''; latency_ms; latency_baseline_ms;
               versions: string[]; crashloop; spark: { mem: number[]; rps: number[] } }
-MonitorEvent { ts; namespace; workload; pod; container; kind: 'restart'|'churn'|'k8s_event';
+MonitorEvent { ts; namespace; workload; pod; container; kind: 'restart'|'churn'|'version'|'k8s_event';
                class; reason; exit_code; detail: object; actor }
+               // kind 'version' = the workload's dominant build version changed; reason "<from> → <to>",
+               // detail.next_restarts = pods already on the new version (class 'planned', planned_by 'rollout')
 Health { cluster; cluster_id; environment; window; collected_at;
          collector: { enabled, ok, last_ok_at, error, transport, metrics_server, pods_seen, pods_scraped, pods_failed, cycle_ms };
          pods; unplanned_restarts; restarts: { oom: [...], crash: [...], probe: [...], unknown: [...] };
-         churn: [{ workload, class, pods, by }]; memory_outliers; error_rate; latency; drift; thresholds }
+         churn: [{ workload, class, pods, by }]; deployments: [{ namespace, workload, from, to, at }];
+         memory_outliers; error_rate; latency; drift; thresholds }
 ```
 
 Restart classes (spec `docs/superpowers/specs/2026-09-05-k8s-monitoring-dashboard-design.md`):
