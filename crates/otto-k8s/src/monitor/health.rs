@@ -239,12 +239,14 @@ pub async fn workload_stats(
     // Restarts / churn.
     for r in sink.query_rows(&queries::restart_counts_sql(&cids, ns, window)).await? {
         // The events table has no namespace filter on workload key; match by workload name within ns.
-        let wl = st(&r, "workload");
+        // Keyed by (namespace, workload): the same deployment name in two
+        // namespaces (gateway in cbo + mscasino) must never share counts.
+        let k = key(st(&r, "namespace"), st(&r, "workload"));
         let pod = st(&r, "pod").to_string();
         let n = f(&r, "n") as u32;
         let class = st(&r, "class").to_string();
         let kind = st(&r, "kind").to_string();
-        for s in stats.values_mut().filter(|s| s.workload == wl) {
+        if let Some(s) = stats.get_mut(&k) {
             match kind.as_str() {
                 "restart" => {
                     s.restarts.bump(&class, n);
@@ -298,13 +300,13 @@ pub async fn workload_stats(
         let mut by_wl: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
         for r in rows {
             by_wl
-                .entry(st(&r, "workload").to_string())
+                .entry(key(st(&r, "namespace"), st(&r, "workload")))
                 .or_default()
                 .push((st(&r, "le").to_string(), f(&r, "delta")));
         }
-        for (wl, buckets) in by_wl {
+        for (k, buckets) in by_wl {
             if let Some(p95) = queries::p95_from_buckets(&buckets) {
-                for s in stats.values_mut().filter(|s| s.workload == wl) {
+                if let Some(s) = stats.get_mut(&k) {
                     s.latency_kind = "p95".into();
                     if baseline {
                         s.latency_baseline_ms = p95;
@@ -327,12 +329,12 @@ pub async fn workload_stats(
             ),
         ] {
             for r in rows {
-                let wl = st(&r, "workload");
+                let k = key(st(&r, "namespace"), st(&r, "workload"));
                 let v = f(&r, "avg_ms");
                 if v <= 0.0 {
                     continue;
                 }
-                for s in stats.values_mut().filter(|s| s.workload == wl) {
+                if let Some(s) = stats.get_mut(&k) {
                     s.latency_kind = "avg".into();
                     if baseline {
                         s.latency_baseline_ms = v;
@@ -346,12 +348,12 @@ pub async fn workload_stats(
 
     // Versions.
     for r in sink.query_rows(&queries::versions_sql(&cids, ns, LATEST_SECS)).await.unwrap_or_default() {
-        let wl = st(&r, "workload");
+        let k = key(st(&r, "namespace"), st(&r, "workload"));
         let v = st(&r, "version").to_string();
         if v.is_empty() {
             continue;
         }
-        for s in stats.values_mut().filter(|s| s.workload == wl) {
+        if let Some(s) = stats.get_mut(&k) {
             if !s.versions.contains(&v) {
                 s.versions.push(v.clone());
             }

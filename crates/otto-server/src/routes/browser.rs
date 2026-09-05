@@ -2507,12 +2507,15 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
 
-        // Poll the pty's scrollback until `cat` has echoed the write back.
+        // Poll the pty's scrollback until `cat` has echoed the WHOLE block
+        // back — the fence closer is the last line written, so waiting for the
+        // first line alone races the echo on slow runners (CI saw the block
+        // cut off right after "<<<u").
         let mut seen = String::new();
-        for _ in 0..100 {
+        for _ in 0..200 {
             if let Some(handle) = ctx.manager.live_handle(&session.id) {
                 seen = String::from_utf8_lossy(&handle.scrollback(10_000)).to_string();
-                if seen.contains("Browser mark") {
+                if seen.contains("<<<end-untrusted-page-content-") && seen.contains("Note from user:") {
                     break;
                 }
             }
