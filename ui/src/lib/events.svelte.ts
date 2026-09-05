@@ -501,6 +501,7 @@ class EventsClient {
           aws.applyEvent(parsed);
         } else if (
           parsed.type === 'transcript_appended' ||
+          parsed.type === 'transcript_live' ||
           parsed.type === 'artifact_added' ||
           parsed.type === 'history_index_progress'
         ) {
@@ -508,7 +509,7 @@ class EventsClient {
           // session's chat; History page index progress. The activity store
           // also takes the artifact / index events (Outputs panel + rescan bar).
           transcript.applyEvent(parsed);
-          if (parsed.type !== 'transcript_appended') activity.applyEvent(parsed);
+          if (parsed.type !== 'transcript_appended' && parsed.type !== 'transcript_live') activity.applyEvent(parsed);
         } else {
           if (parsed.type === 'session_removed') activity.forget(parsed.session_id);
           ws.applyEvent(parsed);

@@ -71,6 +71,38 @@ function escapeHtml(s: string): string {
 const hlCache = new Map<string, string>();
 const HL_CACHE_MAX = 20_000;
 
+/** Languages tried by [`autoLang`] — the ones agents actually print
+ *  (file dumps, command output, JSON/YAML). Kept short: hljs auto-detection
+ *  costs one tokenizer pass PER candidate. */
+const AUTO_SUBSET = ['typescript', 'javascript', 'rust', 'go', 'python', 'json', 'bash', 'xml', 'css', 'yaml', 'sql', 'java', 'markdown'];
+/** Auto-detection only runs on outputs up to this size (the tokenizer is
+ *  linear but a 64 KB dump × 13 candidates stalls the main thread). */
+export const AUTO_MAX_BYTES = 24 * 1024;
+
+/** Best-guess language of a text block, or null when hljs is not loaded, the
+ *  block is too big, or nothing scores convincingly (plain command output). */
+export function autoLang(text: string): string | null {
+  if (!hljs || !text || text.length > AUTO_MAX_BYTES) return null;
+  try {
+    const r = hljs.highlightAuto(text, AUTO_SUBSET);
+    // `relevance` is hljs's own confidence; below ~8 it is guessing at prose.
+    return r.language && r.relevance >= 8 ? r.language : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Highlight a whole block; returns trusted HTML (escaped on fallback). Not
+ *  memoized — callers derive it once per block, not per render. */
+export function highlightBlock(text: string, lang: string | null): string {
+  if (!lang || !hljs || !hljs.getLanguage(lang)) return escapeHtml(text);
+  try {
+    return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+  } catch {
+    return escapeHtml(text);
+  }
+}
+
 /** Highlight a single line; returns trusted HTML (escaped on fallback). */
 export function highlightLine(content: string, lang: string | null): string {
   if (!lang || !hljs || !hljs.getLanguage(lang)) return escapeHtml(content);

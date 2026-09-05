@@ -365,6 +365,19 @@ impl PtyHandle {
         out
     }
 
+    /// The CURRENT screen as plain text rows (no attributes, trailing blanks
+    /// trimmed per row, no scrollback). Cheap: one grid walk under the parser
+    /// lock. Used by the conversation view's live draft and by prompt probes.
+    pub fn screen_rows(&self) -> Vec<String> {
+        let parser = lock_unpoisoned(&self.parser);
+        let screen = parser.screen();
+        let (_, cols) = screen.size();
+        screen
+            .rows(0, cols)
+            .map(|r| r.trim_end().to_string())
+            .collect()
+    }
+
     /// Current emulator size (rows, cols) — clients sync their xterm to this.
     pub fn screen_size(&self) -> (u16, u16) {
         lock_unpoisoned(&self.parser).screen().size()

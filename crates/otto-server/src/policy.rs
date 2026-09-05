@@ -442,6 +442,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // owner-or-admin gate); board tasks + the image inbox are writes into a
     // session (`Agents:Edit`). History is workspace-axis: GET = View, POST
     // (import / rescan) = Edit. Placeholder is `{wid}`, as `routes/activity.rs`.
+    if p == "/sessions/{id}/transcript/touch" {
+        // Keep-alive for an open chat: whoever may read the transcript may
+        // keep its tail warm.
+        return Require(Agents, View);
+    }
     if p == "/sessions/{id}/transcript"
         || p.starts_with("/sessions/{id}/transcript/")
         || p == "/sessions/{id}/artifacts"
@@ -1793,6 +1798,10 @@ mod tests {
         // are NOT swallowed by the `/sessions/` Edit catch-all.
         assert_eq!(
             pol(Method::GET, "/api/v1/sessions/{id}/transcript"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/sessions/{id}/transcript/touch"),
             Require(Agents, View)
         );
         assert_eq!(

@@ -7,9 +7,13 @@
 //! decision flipped.
 //!
 //! Lifecycle: a tail starts on the first `GET …/transcript` for a live session
-//! and every such GET is a subscriber "touch"; it stops 60 s after the session
-//! exits or 5 min after the last touch. Cap 32 concurrent tails — beyond that
-//! reads still work, there is just no live push. The registry slot is an RAII
+//! and every such GET — plus the open view's `POST …/transcript/touch` ping
+//! (every 60 s) — is a subscriber "touch"; it stops 60 s after the session
+//! exits or 2 min after the last touch, so only sessions whose chat is
+//! actually open are tailed (never archived / idle-for-days ones, never the
+//! N parallel review sessions nobody is looking at). Cap 32 concurrent tails —
+//! beyond that reads still work, there is just no live push. Each poll also
+//! reads the PTY screen (one grid walk) for the `transcript_live` draft. The registry slot is an RAII
 //! [`Slot`] held by the task: a panic anywhere in the loop frees it, and the
 //! stop decision + removal happen under ONE lock so a `touch` racing the exit
 //! either refreshes a live entry or (after removal) starts a fresh tail — never
@@ -32,10 +36,14 @@ pub const POLL: Duration = Duration::from_millis(700);
 pub const MAX_TAILS: usize = 32;
 /// Keep tailing this long after the session exits (late flushes land).
 pub const EXIT_GRACE: Duration = Duration::from_secs(60);
-/// Stop when nobody fetched the transcript for this long.
-pub const IDLE_STOP: Duration = Duration::from_secs(5 * 60);
+/// Stop when nobody touched the transcript for this long. An open chat
+/// pings `POST …/transcript/touch` every 60 s, so two minutes means "the
+/// view has been closed" — tails never outlive the view that armed them.
+pub const IDLE_STOP: Duration = Duration::from_secs(2 * 60);
 /// `transcript_appended` payloads above this are sent with `turns: []`.
 pub const EVENT_CAP: usize = 64 * 1024;
+/// `transcript_live` drafts are capped to this many bytes (tail kept).
+pub const LIVE_CAP: usize = 16 * 1024;
 
 struct Entry {
     last_touch: Instant,
@@ -149,6 +157,7 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
     let mut known_artifacts: HashSet<String> = folded.artifacts.iter().map(|a| a.id.clone()).collect();
     let mut tailer = Tailer::at(&path, Tailer::current_len(&path));
     let mut exited_since: Option<Instant> = None;
+    let mut last_draft = String::new();
     loop {
         tokio::time::sleep(POLL).await;
         if !should_continue(&sid) {
@@ -160,6 +169,21 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
         } else if exited_since.get_or_insert_with(Instant::now).elapsed() >= EXIT_GRACE {
             tracing::debug!(session = %sid, "transcript tail: session exited, stopping");
             break;
+        }
+        // Sub-turn streaming: the provider only writes a transcript record when
+        // a block completes, so the in-progress text is read off the terminal
+        // screen (plain rows) and pushed whenever it changes — one frame per
+        // poll at most. Clients hide it once the folded turn lands.
+        if let Some(h) = ctx.manager.live_handle(&sid) {
+            let text = live_draft(&h.screen_rows());
+            if text != last_draft {
+                last_draft = text.clone();
+                let _ = ctx.events.send(Event::TranscriptLive {
+                    workspace_id: wid.clone(),
+                    session_id: sid.clone(),
+                    text,
+                });
+            }
         }
         let delta = match tailer.poll() {
             Ok(d) => d,
@@ -225,9 +249,105 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
     }
 }
 
+/// The in-progress response as drawn on the agent's screen: everything
+/// between the last prompt echo (`> …` / `› …`) and the input box (`❯ …` /
+/// `│ > …`, with the rule above it), minus spinner rows. Returns "" when the
+/// screen holds no such region. Tolerant by design — a TUI redesign degrades
+/// to "the whole screen above the input box", never to garbage.
+pub fn live_draft(rows: &[String]) -> String {
+    fn is_rule(r: &str) -> bool {
+        let t = r.trim();
+        t.len() >= 8 && t.chars().all(|c| matches!(c, '─' | '━' | '╌' | '-' | '═'))
+    }
+    fn is_input(r: &str) -> bool {
+        let t = r.trim_start();
+        t.starts_with('❯') || t.starts_with("│ >") || t.starts_with("│ ❯") || t.starts_with("╭─") || t.starts_with("╰─")
+    }
+    fn is_echo(r: &str) -> bool {
+        let t = r.trim_start();
+        (t.starts_with("> ") || t.starts_with("› ")) && !t.starts_with("> >")
+    }
+    fn is_spinner(r: &str) -> bool {
+        let t = r.trim_start();
+        t.contains("esc to interrupt")
+            || t.contains("(esc to")
+            || t.chars().next().is_some_and(|c| "✻✶✳✢✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)) && t.contains('…')
+    }
+    // Input box: the LAST input row; content is everything above it (and
+    // above the rule that frames it).
+    let mut end = rows.len();
+    if let Some(i) = rows.iter().rposition(|r| is_input(r)) {
+        end = i;
+        while end > 0 && (is_rule(&rows[end - 1]) || rows[end - 1].trim().is_empty()) {
+            end -= 1;
+        }
+    }
+    let content = &rows[..end];
+    let start = content.iter().rposition(|r| is_echo(r)).map(|i| i + 1).unwrap_or(0);
+    let mut out: Vec<&str> = Vec::new();
+    let mut blank_run = 0usize;
+    for r in &content[start..] {
+        if is_spinner(r) || is_rule(r) {
+            continue;
+        }
+        if r.trim().is_empty() {
+            blank_run += 1;
+            if blank_run > 1 || out.is_empty() {
+                continue;
+            }
+        } else {
+            blank_run = 0;
+        }
+        out.push(r.as_str());
+    }
+    while out.last().is_some_and(|r| r.trim().is_empty()) {
+        out.pop();
+    }
+    let mut text = out.join("\n");
+    if text.len() > LIVE_CAP {
+        let cut = text.len() - LIVE_CAP;
+        let at = text
+            .char_indices()
+            .map(|(i, _)| i)
+            .find(|&i| i >= cut)
+            .unwrap_or(text.len());
+        text = format!("…{}", &text[at..]);
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rows(s: &str) -> Vec<String> {
+        s.lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn live_draft_takes_the_region_between_echo_and_input_box() {
+        let screen = rows(
+            "⏺ earlier answer\n\n> option 2, other services still read GSS_games\n\n⏺ Still exploring. Reading the DAO.\n\n⏺ Bash(cd x && grep -n foo)\n  ⎿  3 lines\n\n✻ Cooking… (esc to interrupt)\n\n────────────────────────────\n❯ \n────────────────────────────\n  -- INSERT --",
+        );
+        let d = live_draft(&screen);
+        assert_eq!(d, "⏺ Still exploring. Reading the DAO.\n\n⏺ Bash(cd x && grep -n foo)\n  ⎿  3 lines");
+    }
+
+    #[test]
+    fn live_draft_is_empty_right_after_a_prompt_and_tolerates_no_box() {
+        assert_eq!(live_draft(&rows("> hi\n\n❯ ")), "");
+        assert_eq!(live_draft(&rows("plain output\nmore")), "plain output\nmore");
+        assert_eq!(live_draft(&[]), "");
+    }
+
+    #[test]
+    fn live_draft_caps_to_the_tail() {
+        let big: Vec<String> = (0..2000).map(|i| format!("line {i} {}", "x".repeat(20))).collect();
+        let d = live_draft(&big);
+        assert!(d.len() <= LIVE_CAP + 4);
+        assert!(d.starts_with('…'));
+        assert!(d.ends_with("line 1999 xxxxxxxxxxxxxxxxxxxx"));
+    }
 
     #[test]
     fn slot_guard_frees_the_registry_entry_on_drop() {

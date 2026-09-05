@@ -384,6 +384,27 @@ pub async fn get_transcript(
     Ok(Json(t))
 }
 
+/// `POST /sessions/{id}/transcript/touch` — keep the live tail armed for a
+/// session whose conversation is open (the tail otherwise stops 5 min after
+/// the last `GET …/transcript`; clients ping this every minute while the view
+/// is mounted). Starts the tail when it is not running. `204`; a session with
+/// no transcript yet → `409` so the client keeps retrying the GET instead.
+pub async fn touch_transcript(
+    AxPath(id): AxPath<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<StatusCode> {
+    let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    if !ctx.manager.is_live(&id) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let resolved = resolve_transcript(&ctx, &session)
+        .await
+        .map_err(|why| ApiError(Error::Conflict(format!("transcript unavailable: {why:?}"))))?;
+    crate::transcript_tail::touch(&ctx, &session, resolved.provider, &resolved.path);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `GET /sessions/{id}/transcript/images/{img_id}` — an extracted image, by id.
 pub async fn transcript_image(
     AxPath((id, img_id)): AxPath<(Id, String)>,

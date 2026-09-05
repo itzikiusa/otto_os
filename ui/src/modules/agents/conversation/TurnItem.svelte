@@ -9,6 +9,7 @@
   import WorkSteps from './WorkSteps.svelte';
   import ImageBlock from './ImageBlock.svelte';
   import { transcript } from '../../../lib/stores/transcript.svelte';
+  import { toasts } from '../../../lib/toast.svelte';
   import { fmtClock, fmtDuration, segment, type RenderItem } from './format';
   import type { Artifact, SystemNote } from '../../../lib/api/types';
   import { CONV_CTX, type ConvContext } from './context';
@@ -19,8 +20,31 @@
     live?: boolean;
     /** Inside a subagent card — tighter chrome. */
     nested?: boolean;
+    /** Matches the conversation search (soft highlight) / is the current match. */
+    hit?: boolean;
+    current?: boolean;
   }
-  let { item, live = false, nested = false }: Props = $props();
+  let { item, live = false, nested = false, hit = false, current = false }: Props = $props();
+
+  // Copy: the turn's prose as markdown; tool steps as one-line summaries so a
+  // pasted response still reads. Images/chips are skipped.
+  const copyText = $derived.by(() => {
+    const parts: string[] = [];
+    for (const b of item.blocks) {
+      if (b.kind === 'text') parts.push(b.md.trim());
+      else if (b.kind === 'tool_call') parts.push(`[${b.name}] ${b.title}`.trim());
+      else if (b.kind === 'queued' && b.op === 'enqueue') parts.push(`Queued: ${b.text}`);
+    }
+    return parts.filter(Boolean).join('\n\n');
+  });
+  async function copyTurn(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(copyText);
+      toasts.info('Copied', item.role === 'user' ? 'Your message' : 'The response');
+    } catch (e) {
+      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+    }
+  }
   const ctx = getContext<ConvContext>(CONV_CTX);
 
   const segs = $derived(segment(item.blocks));
@@ -50,7 +74,7 @@
   }
 </script>
 
-<article class="turn {item.role}" class:nested data-turn-id={item.id} data-role={item.role}>
+<article class="turn {item.role}" class:nested class:hit class:current data-turn-id={item.id} data-role={item.role}>
   {#if item.role === 'user'}
     <div class="bubble" dir="auto">
       {#each item.blocks as b, i (i)}
@@ -66,6 +90,9 @@
       {/each}
     </div>
     <div class="meta">
+      {#if copyText}
+        <button class="copy-btn" onclick={() => void copyTurn()} title="Copy message" aria-label="Copy message"><Icon name="copy" size={11} /></button>
+      {/if}
       {#if item.ts}<span class="ts">{fmtClock(item.ts)}</span>{/if}
       {#if sysNotes.length}
         <button class="sys-chip" class:on={sysOpen} onclick={() => (sysOpen = !sysOpen)} title="System notes attached to this turn">
@@ -105,6 +132,9 @@
       {/if}
     </div>
     <div class="meta">
+      {#if copyText}
+        <button class="copy-btn" onclick={() => void copyTurn()} title="Copy response" aria-label="Copy response"><Icon name="copy" size={11} /></button>
+      {/if}
       {#if item.ts}<span class="ts">{fmtClock(item.ts)}</span>{/if}
       {#if item.model}<span class="dim mono model">{item.model}</span>{/if}
       {#if item.duration_ms != null && firstStepsIdx < 0}<span class="dim">{fmtDuration(item.duration_ms)}</span>{/if}
@@ -144,10 +174,13 @@
   .turn.user {
     align-items: flex-end;
   }
+  /* User = blue (accent) bubble on the right; assistant = green-tinted card on
+     the left. Both are color-mixed over the theme surface, so they read the
+     same in light and dark schemes. */
   .bubble {
     max-width: min(78%, 720px);
-    background: color-mix(in srgb, var(--accent) 14%, var(--surface));
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
     border-radius: 14px 14px 4px 14px;
     padding: 8px 12px;
     min-width: 0;
@@ -161,6 +194,49 @@
     gap: 6px;
     min-width: 0;
     max-width: 920px;
+    background: color-mix(in srgb, var(--status-working, #3fb950) 7%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--status-working, #3fb950) 28%, var(--border));
+    border-radius: 4px 14px 14px 14px;
+    padding: 8px 12px;
+  }
+  :global([dir='rtl']) .resp {
+    border-radius: 14px 4px 14px 14px;
+  }
+  .turn.nested .resp {
+    background: none;
+    border: 0;
+    padding: 0;
+  }
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    background: none;
+    border: 0;
+    padding: 0 2px;
+    color: var(--text-dim);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 120ms;
+  }
+  .turn:hover .copy-btn,
+  .copy-btn:focus-visible {
+    opacity: 1;
+  }
+  .copy-btn:hover {
+    color: var(--text);
+  }
+  @media (hover: none) {
+    .copy-btn {
+      opacity: 1;
+    }
+  }
+  .turn.hit .bubble,
+  .turn.hit .resp {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-warn, #e0a000) 45%, transparent);
+  }
+  .turn.current .bubble,
+  .turn.current .resp {
+    box-shadow: 0 0 0 2px var(--status-warn, #e0a000);
   }
   .meta {
     display: flex;
