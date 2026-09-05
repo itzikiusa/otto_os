@@ -7406,15 +7406,42 @@ export interface K8sMonitorOverviewRow {
   workloads: number;
 }
 
+/** One replica of a workload (the per-pod view). */
+export interface K8sMonitorPodStat {
+  pod: string;
+  node: string;
+  phase: string;
+  ready: boolean;
+  version: string;
+  /** Latest memory sample; 0 = not sampled. */
+  mem_bytes: number;
+  mem_limit: number;
+  /** % of this pod's own limit. */
+  mem_pct: number;
+  restarts_lifetime: number;
+  /** Unplanned restarts inside the window. */
+  restarts: K8sRestartCounts;
+  crashloop: boolean;
+  age_seconds: number;
+}
+
 export interface K8sMonitorWorkloadRow {
   namespace: string;
   workload: string;
   kind: string;
   pods: number;
   ready: number;
+  /** Sum over pods (capacity view). */
   mem_bytes: number;
   mem_limit: number;
+  /** % of limit for the worst pod. */
   mem_pct: number;
+  /** Per-pod: average and hungriest pod. */
+  mem_avg: number;
+  mem_max: number;
+  mem_max_pod: string;
+  mem_sampled: number;
+  pods_detail: K8sMonitorPodStat[];
   mem_trend_pct?: number | null;
   restarts: K8sRestartCounts;
   churn_planned: number;

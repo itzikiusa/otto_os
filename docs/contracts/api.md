@@ -3378,7 +3378,13 @@ OverviewRow { cluster: { id, name, environment, color }; enabled; interval_secs;
               pods: { running, pending, failed, crashloop, total };
               restarts: { oom, crash, probe, unknown } /* in-place, unplanned */; churn /* planned pod replacements */;
               mem: { used, limit, pct }; rps; err_pct; drift: [{ workload, versions[] }]; workloads }
-WorkloadRow { namespace; workload; kind; pods; ready; mem_bytes; mem_limit; mem_pct; mem_trend_pct?;
+WorkloadRow { namespace; workload; kind; pods; ready;
+              mem_bytes /* sum over pods (capacity) */; mem_limit; mem_pct /* WORST pod vs its own limit */;
+              mem_avg; mem_max; mem_max_pod; mem_sampled /* pods with a memory sample */;
+              pods_detail: [{ pod, node, phase, ready, version, mem_bytes, mem_limit, mem_pct,
+                              restarts_lifetime, restarts: { oom, crash, probe, unknown } /* in window */,
+                              crashloop, age_seconds }];
+              mem_trend_pct?;
               restarts: { oom, crash, probe, unknown }; churn_planned; churn_unknown;
               rps; err_pct; err_pct_baseline; rps_baseline; latency_kind: 'p95'|'avg'|''; latency_ms; latency_baseline_ms;
               versions: string[]; crashloop; spark: { mem: number[]; rps: number[] } }

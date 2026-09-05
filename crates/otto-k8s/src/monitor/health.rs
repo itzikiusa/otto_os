@@ -52,6 +52,28 @@ impl RestartCounts {
     }
 }
 
+/// One pod of a workload — the per-pod view that shows the single misbehaving
+/// replica a per-service average would hide.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct PodStat {
+    pub pod: String,
+    pub node: String,
+    pub phase: String,
+    pub ready: bool,
+    pub version: String,
+    /// Latest memory sample (0 = not sampled).
+    pub mem_bytes: f64,
+    pub mem_limit: f64,
+    /// % of this pod's own limit (0 when unlimited / unsampled).
+    pub mem_pct: f64,
+    /// Lifetime `restartCount` (sum over containers) from the sweep.
+    pub restarts_lifetime: i64,
+    /// Unplanned restarts inside the window (from classified events).
+    pub restarts: RestartCounts,
+    pub crashloop: bool,
+    pub age_seconds: i64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct WorkloadStat {
     pub namespace: String,
@@ -59,10 +81,18 @@ pub struct WorkloadStat {
     pub kind: String,
     pub pods: u32,
     pub ready: u32,
+    /// Sum over pods — capacity view (cluster card); per-pod numbers below.
     pub mem_bytes: f64,
     pub mem_limit: f64,
-    /// 0 when no limit.
+    /// % of limit for the WORST pod (0 when no limit / no sample).
     pub mem_pct: f64,
+    /// Per-pod memory: average and the hungriest pod.
+    pub mem_avg: f64,
+    pub mem_max: f64,
+    pub mem_max_pod: String,
+    /// Pods sampled for memory this window (0 ⇒ the memory columns are empty).
+    pub mem_sampled: u32,
+    pub pods_detail: Vec<PodStat>,
     /// Δ% of memory across the window (`None` = no baseline sample).
     pub mem_trend_pct: Option<f64>,
     pub restarts: RestartCounts,
@@ -113,9 +143,28 @@ fn seed_from_snapshot(snap: &Snapshot, ns: Option<&str>) -> BTreeMap<String, Wor
             e.ready += 1;
         }
         e.mem_limit += p.mem_limit as f64;
-        if p.containers.values().any(|c| c.waiting_reason == "CrashLoopBackOff") {
+        let crashloop = p.containers.values().any(|c| c.waiting_reason == "CrashLoopBackOff");
+        if crashloop {
             e.crashloop += 1;
         }
+        let age = chrono::DateTime::parse_from_rfc3339(&p.created)
+            .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds().max(0))
+            .unwrap_or(0);
+        e.pods_detail.push(PodStat {
+            pod: p.name.clone(),
+            node: p.node.clone(),
+            phase: p.phase.clone(),
+            ready: p.ready,
+            version: p.version.clone(),
+            mem_limit: p.mem_limit as f64,
+            restarts_lifetime: p.containers.values().map(|c| c.restarts).sum(),
+            crashloop,
+            age_seconds: age,
+            ..PodStat::default()
+        });
+    }
+    for s in m.values_mut() {
+        s.pods_detail.sort_by(|a, b| a.pod.cmp(&b.pod));
     }
     m
 }
@@ -147,12 +196,33 @@ pub async fn workload_stats(
     for r in mem_now {
         let k = key(st(&r, "namespace"), st(&r, "workload"));
         if let Some(s) = stats.get_mut(&k) {
-            s.mem_bytes += f(&r, "mem");
+            let mem = f(&r, "mem");
+            s.mem_bytes += mem;
+            let pod = st(&r, "pod");
+            if let Some(p) = s.pods_detail.iter_mut().find(|p| p.pod == pod) {
+                p.mem_bytes = mem;
+                if p.mem_limit > 0.0 {
+                    p.mem_pct = 100.0 * mem / p.mem_limit;
+                }
+            }
         }
     }
     for (k, s) in stats.iter_mut() {
-        if s.mem_limit > 0.0 {
-            s.mem_pct = 100.0 * s.mem_bytes / s.mem_limit;
+        // Per-pod view: average + hungriest pod; the workload's % is the WORST
+        // pod's share of its own limit (a sum over replicas tells nobody
+        // anything about which replica is about to OOM).
+        let sampled: Vec<&PodStat> = s.pods_detail.iter().filter(|p| p.mem_bytes > 0.0).collect();
+        s.mem_sampled = sampled.len() as u32;
+        if !sampled.is_empty() {
+            s.mem_avg = sampled.iter().map(|p| p.mem_bytes).sum::<f64>() / sampled.len() as f64;
+            if let Some(top) = sampled.iter().max_by(|a, b| a.mem_bytes.partial_cmp(&b.mem_bytes).unwrap_or(std::cmp::Ordering::Equal)) {
+                s.mem_max = top.mem_bytes;
+                s.mem_max_pod = top.pod.clone();
+            }
+            s.mem_pct = sampled.iter().map(|p| p.mem_pct).fold(0.0, f64::max);
+            if s.mem_pct == 0.0 && s.mem_limit > 0.0 {
+                s.mem_pct = 100.0 * s.mem_bytes / s.mem_limit;
+            }
         }
         if let Some(then) = mem_then_by_wl.get(k) {
             if *then > 0.0 {
@@ -165,12 +235,18 @@ pub async fn workload_stats(
     for r in sink.query_rows(&queries::restart_counts_sql(&cids, ns, window)).await? {
         // The events table has no namespace filter on workload key; match by workload name within ns.
         let wl = st(&r, "workload");
+        let pod = st(&r, "pod").to_string();
         let n = f(&r, "n") as u32;
         let class = st(&r, "class").to_string();
         let kind = st(&r, "kind").to_string();
         for s in stats.values_mut().filter(|s| s.workload == wl) {
             match kind.as_str() {
-                "restart" => s.restarts.bump(&class, n),
+                "restart" => {
+                    s.restarts.bump(&class, n);
+                    if let Some(p) = s.pods_detail.iter_mut().find(|p| p.pod == pod) {
+                        p.restarts.bump(&class, n);
+                    }
+                }
                 "churn" => {
                     if class == "planned" || class == "completed" {
                         s.churn_planned += n;

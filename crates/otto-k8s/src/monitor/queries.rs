@@ -81,6 +81,13 @@ fn ts_range(back_secs: i64, until_secs: i64) -> String {
     s
 }
 
+/// Timestamps leave ClickHouse as explicit UTC ISO strings. The embedded
+/// server formats `DateTime` in ITS session timezone (the machine's), so a
+/// bare `toString(ts)` would be off by the local offset once the UI appends
+/// `Z`.
+const TS_UTC: &str = "formatDateTime(ts, '%Y-%m-%dT%H:%i:%SZ', 'UTC')";
+const T_UTC: &str = "formatDateTime(t, '%Y-%m-%dT%H:%i:%SZ', 'UTC')";
+
 /// The HTTP status label, whichever name the exporter used.
 const CODE_EXPR: &str =
     "if(labels['code'] != '', labels['code'], if(labels['status'] != '', labels['status'], labels['status_code']))";
@@ -117,13 +124,13 @@ pub fn memory_between_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i
     )
 }
 
-/// Restart / churn counts per class → `(cluster_id, workload, kind, class, n)`.
+/// Restart / churn counts per class → `(cluster_id, workload, pod, kind, class, n)`.
 pub fn restart_counts_sql(cluster_ids: &[String], ns: Option<&str>, window: Duration) -> String {
     format!(
-        "SELECT cluster_id, workload, kind, class, count() AS n
+        "SELECT cluster_id, workload, pod, kind, class, count() AS n
          FROM k8s_events
          WHERE cluster_id IN ({cids}) AND kind IN ('restart', 'churn') AND {range}{ns}
-         GROUP BY cluster_id, workload, kind, class",
+         GROUP BY cluster_id, workload, pod, kind, class",
         cids = in_list_owned(cluster_ids),
         range = ts_range(window.num_seconds(), 0),
         ns = ns_filter(ns),
@@ -225,12 +232,13 @@ pub fn series_sql(
         "avg(value)".to_string()
     };
     format!(
-        "SELECT t, sum(v) AS v FROM (
+        "SELECT {t_utc} AS t, sum(v) AS v FROM (
            SELECT toStartOfInterval(ts, INTERVAL {step} SECOND) AS t, pod, labels, {inner_agg} AS v
            FROM k8s_samples
            WHERE cluster_id = {cid} AND metric = {metric} AND {range}{wl}{pod}
            GROUP BY t, pod, labels
          ) GROUP BY t ORDER BY t",
+        t_utc = T_UTC,
         cid = sql_str(cluster_id),
         metric = sql_str(metric),
         range = ts_range(window.num_seconds(), 0),
@@ -270,10 +278,11 @@ pub fn events_sql(cluster_id: &str, window: Duration, class: Option<&str>, workl
         None => " AND kind IN ('restart', 'churn', 'version')".to_string(),
     };
     format!(
-        "SELECT ts, namespace, workload, pod, container, kind, class, reason, exit_code, detail, actor
+        "SELECT {ts_utc} AS ts, namespace, workload, pod, container, kind, class, reason, exit_code, detail, actor
          FROM k8s_events
          WHERE cluster_id = {cid} AND {range}{kind}{wl}
          ORDER BY ts DESC LIMIT {limit}",
+        ts_utc = TS_UTC,
         cid = sql_str(cluster_id),
         range = ts_range(window.num_seconds(), 0),
         kind = kind_f,

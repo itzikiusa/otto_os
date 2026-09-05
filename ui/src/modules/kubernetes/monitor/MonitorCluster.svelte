@@ -14,7 +14,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
-  import { envBadge, formatBytes } from '../k8s-util';
+  import { envBadge, formatAge, formatBytes } from '../k8s-util';
   import Sparkline from './Sparkline.svelte';
   import MonitorSettings from './MonitorSettings.svelte';
   import MonitorInsights from './MonitorInsights.svelte';
@@ -51,7 +51,7 @@
   let error = $state('');
   let ns = $state('');
   let filter = $state('');
-  let sortKey = $state<keyof K8sMonitorWorkloadRow | 'restarts_total'>('mem_bytes');
+  let sortKey = $state<keyof K8sMonitorWorkloadRow | 'restarts_total'>('mem_max');
   let sortDir = $state<1 | -1>(-1);
   let expanded = $state<string | null>(null);
   let series = $state<{ mem: K8sMonitorSeries | null; rps: K8sMonitorSeries | null; err: K8sMonitorSeries | null }>({ mem: null, rps: null, err: null });
@@ -297,7 +297,7 @@
             <tr>
               <th class="sortable" onclick={() => sortBy('workload')}>Workload</th>
               <th class="num sortable" onclick={() => sortBy('pods')}>Pods</th>
-              <th class="num sortable" onclick={() => sortBy('mem_bytes')}>Memory</th>
+              <th class="num sortable" onclick={() => sortBy('mem_max')} title="Per pod: average · hungriest pod; % = worst pod vs its own limit. Click a row for every pod.">Memory / pod</th>
               <th class="spark">Trend</th>
               <th class="num sortable" onclick={() => sortBy('restarts_total')}>Restarts</th>
               <th class="num sortable" onclick={() => sortBy('churn_planned')}>Churn</th>
@@ -319,8 +319,14 @@
                 </td>
                 <td class="num mono">{r.ready}<span class="dim">/{r.pods}</span></td>
                 <td class="num mono">
-                  {#if r.mem_bytes > 0}{formatBytes(r.mem_bytes)}{:else}<span class="dim" title="No memory sample yet — configure a memory probe (e.g. the Go actuator preset) or grant metrics-server">—</span>{/if}
-                  {#if r.mem_limit > 0}<div class="pct" class:warn={r.mem_bytes > 0 && r.mem_pct >= 85}>{#if r.mem_bytes > 0}{fmtPct(r.mem_pct, 0)} of {/if}limit {formatBytes(r.mem_limit)}</div>{/if}
+                  {#if r.mem_sampled > 0}
+                    <span title="average per pod">{formatBytes(r.mem_avg)}</span>
+                    {#if r.pods > 1}<span class="dim"> · max </span><span title="hungriest pod: {r.mem_max_pod}">{formatBytes(r.mem_max)}</span>{/if}
+                    <div class="pct" class:warn={r.mem_pct >= 85}>{fmtPct(r.mem_pct, 0)} of limit{#if r.pods > 1} (worst pod){/if}{#if r.mem_sampled < r.pods} · {r.mem_sampled}/{r.pods} sampled{/if}</div>
+                  {:else}
+                    <span class="dim" title="No memory sample yet — configure a memory probe (e.g. the Go actuator preset) or grant metrics-server">—</span>
+                    {#if r.mem_limit > 0}<div class="pct">limit {formatBytes(r.mem_limit / Math.max(1, r.pods))}/pod</div>{/if}
+                  {/if}
                   {#if r.mem_trend_pct !== null && r.mem_trend_pct !== undefined && Math.abs(r.mem_trend_pct) >= 5}<div class="pct" class:warn={r.mem_trend_pct >= 25}>{r.mem_trend_pct > 0 ? '+' : ''}{r.mem_trend_pct.toFixed(0)}% / {window}</div>{/if}
                 </td>
                 <td class="spark"><Sparkline points={r.spark.mem} label="memory trend" /></td>
@@ -342,6 +348,28 @@
               {#if expanded === key}
                 <tr class="detail">
                   <td colspan="11">
+                    <table class="pods" data-testid="k8s-monitor-pods">
+                      <thead>
+                        <tr><th>Pod</th><th>Node</th><th>Status</th><th class="num">Memory</th><th class="num">Restarts ({window})</th><th class="num">Lifetime</th><th>Version</th><th class="num">Age</th></tr>
+                      </thead>
+                      <tbody>
+                        {#each r.pods_detail as p (p.pod)}
+                          {@const pr = p.restarts.oom + p.restarts.crash + p.restarts.probe + p.restarts.unknown}
+                          <tr class="pod-row" class:bad={p.crashloop || pr > 0 || (p.mem_pct >= 85)}>
+                            <td class="mono">{p.pod}</td>
+                            <td class="mono dim">{p.node || '—'}</td>
+                            <td>{#if p.crashloop}<span class="chip bad">CrashLoopBackOff</span>{:else}<span class="chip" class:ok={p.ready}>{p.ready ? 'Ready' : p.phase}</span>{/if}</td>
+                            <td class="num mono">
+                              {#if p.mem_bytes > 0}{formatBytes(p.mem_bytes)}{#if p.mem_limit > 0}<div class="pct" class:warn={p.mem_pct >= 85}>{fmtPct(p.mem_pct, 0)} of {formatBytes(p.mem_limit)}</div>{/if}{:else}<span class="dim">—</span>{/if}
+                            </td>
+                            <td class="num mono" class:bad={pr > 0}>{pr}{#if pr}<div class="pct">{#if p.restarts.oom}oom {p.restarts.oom} {/if}{#if p.restarts.crash}crash {p.restarts.crash} {/if}{#if p.restarts.probe}probe {p.restarts.probe} {/if}{#if p.restarts.unknown}? {p.restarts.unknown}{/if}</div>{/if}</td>
+                            <td class="num mono dim">{p.restarts_lifetime}</td>
+                            <td>{#if p.version}<span class="chip" class:accent={r.versions.length > 1 && p.version !== r.versions[0]}>{p.version}</span>{:else}<span class="dim">—</span>{/if}</td>
+                            <td class="num mono dim">{formatAge(p.age_seconds)}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
                     {#if seriesLoading}
                       <Skeleton rows={2} height={60} />
                     {:else}
@@ -531,6 +559,31 @@
   }
   .detail td {
     background: var(--surface-2);
+  }
+  .pods {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+    margin-bottom: 12px;
+  }
+  .pods th {
+    text-align: left;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .pods td {
+    padding: 4px 8px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    vertical-align: top;
+    background: transparent;
+  }
+  .pod-row.bad td:first-child {
+    box-shadow: inset 3px 0 0 var(--status-exited);
   }
   .charts {
     display: flex;
