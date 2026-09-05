@@ -1087,6 +1087,16 @@ export type OttoEvent =
       state: string;
     }
   | {
+      /** Kubernetes monitoring: a collector cycle finished for `cluster_id`.
+       *  The Monitor dashboard re-fetches its overview / workloads. */
+      type: 'k8s_monitor_cycle';
+      cluster_id: Id;
+      ok: boolean;
+      pods_scraped: number;
+      pods_failed: number;
+      cycle_ms: number;
+    }
+  | {
       /** A canvas scene's source doc changed — pushed LIVE while an agent edits
        *  the backing file (per-poll) and once with the committed result. The
        *  Canvas page re-renders `doc` for the matching `scene_id`. */

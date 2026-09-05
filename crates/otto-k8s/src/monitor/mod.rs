@@ -14,6 +14,7 @@
 //! | [`health`] | the compact `k8s_health` digest |
 //! | [`http`] | `/k8s/monitor/*` + `/k8s/clusters/{id}/monitor*` routes |
 pub mod classify;
+pub mod collector;
 pub mod parse;
 pub mod probes;
 pub mod schema;
