@@ -15,7 +15,9 @@
 //! | [`http`] | `/k8s/monitor/*` + `/k8s/clusters/{id}/monitor*` routes |
 pub mod classify;
 pub mod collector;
+pub mod health;
 pub mod parse;
 pub mod probes;
+pub mod queries;
 pub mod schema;
 pub mod scrape;
