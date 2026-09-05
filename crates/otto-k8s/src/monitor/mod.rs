@@ -16,3 +16,4 @@
 pub mod parse;
 pub mod probes;
 pub mod schema;
+pub mod scrape;
