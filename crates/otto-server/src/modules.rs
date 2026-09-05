@@ -5550,18 +5550,30 @@ async fn send_input(
     crate::auth::require_ws_role(&ctx, &user, &session.workspace_id, WorkspaceRole::Editor).await?;
     crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
 
-    // Build the bytes to write: append "\n" unless submit is explicitly false.
-    let submit = req.submit.unwrap_or(true);
-    let payload = if submit {
-        format!("{}\n", req.text)
+    // `submit` omitted/true: paste + a real Enter via `submit_text` — writing
+    // `"{text}\n"` in one burst makes bracketed-paste TUIs (Claude Code, Codex)
+    // treat the newline as pasted content, so the message lands but is never
+    // sent (docs/design/conversation-view.md §1). `submit: false`: the text
+    // verbatim, for the user to inspect/edit before pressing Enter.
+    let bracketed_tui = session.kind == otto_core::domain::SessionKind::Agent
+        && matches!(session.provider.as_str(), "claude" | "codex");
+    if req.submit.unwrap_or(true) && bracketed_tui {
+        ctx.manager
+            .submit_text(&session_id, &req.text)
+            .await
+            .map_err(ApiError)?;
+    } else if req.submit.unwrap_or(true) {
+        // Shells / connections / bridges: a plain line + newline runs it.
+        ctx.manager
+            .input(&session_id, format!("{}\n", req.text).as_bytes())
+            .await
+            .map_err(ApiError)?;
     } else {
-        req.text.clone()
-    };
-
-    ctx.manager
-        .input(&session_id, payload.as_bytes())
-        .await
-        .map_err(ApiError)?;
+        ctx.manager
+            .input(&session_id, req.text.as_bytes())
+            .await
+            .map_err(ApiError)?;
+    }
 
     Ok(axum::http::StatusCode::OK)
 }

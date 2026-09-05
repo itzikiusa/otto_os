@@ -420,6 +420,25 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // POST only (mint). A GET on this path would be a typo; map it Edit too.
         return Require(Agents, Edit);
     }
+    // Conversation view (design docs/design/conversation-view.md §4.3) —
+    // explicit arms ABOVE the `/sessions/{id}/*` catch-all: transcript /
+    // images / artifacts are reads (`Agents:View`; the handler adds the
+    // owner-or-admin gate); board tasks + the image inbox are writes into a
+    // session (`Agents:Edit`). History is workspace-axis: GET = View, POST
+    // (import / rescan) = Edit. Placeholder is `{wid}`, as `routes/activity.rs`.
+    if p == "/sessions/{id}/transcript"
+        || p.starts_with("/sessions/{id}/transcript/")
+        || p == "/sessions/{id}/artifacts"
+        || p.starts_with("/sessions/{id}/artifacts/")
+    {
+        return Require(Agents, if get { View } else { Edit });
+    }
+    if p == "/sessions/{id}/tasks" || p == "/sessions/{id}/inbox" {
+        return Require(Agents, Edit);
+    }
+    if p == "/workspaces/{wid}/history" || p.starts_with("/workspaces/{wid}/history/") {
+        return Require(Agents, if get { View } else { Edit });
+    }
     if p == "/sessions/{id}/evolve" {
         // Manual trigger for the per-session live-evolve pass.
         // Requires SelfImprovement:Edit so it obeys the same gate as a workspace run.
@@ -1747,6 +1766,53 @@ mod tests {
         assert_eq!(
             pol(Method::GET, "/api/v1/workspaces/{wid}/sessions/{sid}/trail"),
             Require(Agents, View)
+        );
+        // Conversation view: reads = View, session writes = Edit; history is
+        // View on GET and Edit on POST (import/rescan). Explicit arms, so they
+        // are NOT swallowed by the `/sessions/` Edit catch-all.
+        assert_eq!(
+            pol(Method::GET, "/api/v1/sessions/{id}/transcript"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/sessions/{id}/transcript/images/{img_id}"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/sessions/{id}/artifacts"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/sessions/{id}/artifacts/{artifact_id}"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/sessions/{id}/tasks"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/sessions/{id}/inbox"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/history"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/history/transcript"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/{wid}/history/transcript/images/{img_id}"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{wid}/history/import"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{wid}/history/rescan"),
+            Require(Agents, Edit)
         );
         assert_eq!(
             pol(

@@ -38,6 +38,7 @@ pub mod settings;
 pub mod share;
 pub mod snips;
 pub mod swarm_ingest;
+pub mod transcript;
 pub mod usage;
 pub mod users;
 pub mod workflows;
@@ -410,6 +411,39 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // --- Share-link: session-level mint + list (mobile plan Task 1.9) --
         .route("/sessions/{id}/share", post(share::mint_share))
         .route("/sessions/{id}/shares", get(share::list_shares))
+        // --- Conversation view (design docs/design/conversation-view.md §4.3):
+        // transcript rebuilt from the provider's JSONL, extracted images,
+        // produced artifacts (served by opaque id), board→agent tasks, the
+        // composer's image inbox, and the History surface.
+        .route("/sessions/{id}/transcript", get(transcript::get_transcript))
+        .route(
+            "/sessions/{id}/transcript/images/{img_id}",
+            get(transcript::transcript_image),
+        )
+        .route("/sessions/{id}/artifacts", get(transcript::list_artifacts))
+        .route(
+            "/sessions/{id}/artifacts/{artifact_id}",
+            get(transcript::get_artifact),
+        )
+        .route("/sessions/{id}/tasks", post(transcript::create_task))
+        .route("/sessions/{id}/inbox", post(transcript::inbox_upload))
+        .route("/workspaces/{wid}/history", get(transcript::history))
+        .route(
+            "/workspaces/{wid}/history/transcript",
+            get(transcript::history_transcript),
+        )
+        .route(
+            "/workspaces/{wid}/history/transcript/images/{img_id}",
+            get(transcript::history_transcript_image),
+        )
+        .route(
+            "/workspaces/{wid}/history/import",
+            post(transcript::history_import),
+        )
+        .route(
+            "/workspaces/{wid}/history/rescan",
+            post(transcript::history_rescan),
+        )
         .route(
             "/sessions/{id}/handover",
             post(handover::handover_session),

@@ -41,6 +41,11 @@ export interface SidebarModule {
  */
 export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'agents', icon: 'terminal', label: 'Agents', feature: 'agents', special: true },
+  // History — every past Claude/Codex conversation (Otto sessions + transcripts
+  // found on disk), read-only, resumable. Lives in the Agents group and shares
+  // its RBAC gate; the route is `#/history` (NOT `#/agents/…`, whose second
+  // segment is a session id). See docs/design/conversation-view.md §5.3.
+  { id: 'history', icon: 'clock', label: 'History', feature: 'agents' },
   { id: 'run-with-otto', icon: 'play', label: 'Run with Otto', feature: 'run_with_otto' },
   { id: 'mission-control', icon: 'radar', label: 'Mission Control', feature: 'mission_control' },
   // The unified hub: SSH/custom terminals + databases + Kafka clusters live in

@@ -4,6 +4,7 @@
 //! integration time.
 
 pub mod agent_run;
+pub mod agent_tasks_nudge;
 pub mod agent_session;
 pub mod api_helpers;
 pub mod api_scripts;
@@ -28,6 +29,7 @@ pub mod finding_context;
 pub mod goal_loop;
 pub mod goal_loop_parse;
 pub mod goal_loop_workspace;
+pub mod history_index;
 pub mod improve_channels;
 pub mod insights;
 pub mod login_throttle;
@@ -75,6 +77,7 @@ pub mod swarm_runtime;
 pub mod swarm_scheduler;
 pub mod swarm_verify;
 pub mod swarm_workspace;
+pub mod transcript_tail;
 pub mod vault_docs_agent;
 pub mod workflow_chat;
 pub mod workflow_context;

@@ -132,11 +132,11 @@ Every variant of `otto_core::event::Event` (`crates/otto-core/src/event.rs`). Th
 the `type` field (snake_case of the variant name); the remaining keys are the payload.
 Delivery scope: **session-family events** (`session_status`, `session_created`,
 `session_meta_updated`, `session_renamed`, `session_removed`, `trail_appended`,
-`tasks_updated`) reach only the session's owner (`created_by`), a workspace
+`tasks_updated`, `transcript_appended`, `artifact_added`) reach only the session's owner (`created_by`), a workspace
 `admin`, or root — and only after the `viewer`+ membership gate on the event's
 `workspace_id`; other **workspace-scoped events** (improvement, swarm) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**broadcast events** (`Notice`) reach every authenticated client. There are 44
+**broadcast events** (`Notice`) reach every authenticated client. There are 47
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -747,6 +747,33 @@ Canvas scene is attached to or detached from an agent session.
   panel (`CanvasPanel.svelte`) re-fetches `GET /sessions/{id}/canvas-refs` when
   the event's `session_id` matches the open session.
 - TypeScript type: `{ type: 'canvas_refs_changed'; workspace_id: Id; session_id: Id }`.
+
+### `transcript_appended` / `artifact_added` / `history_index_progress`
+
+Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
+`crates/otto-server/src/transcript_tail.rs` (the per-session live tail, armed by
+`GET /sessions/{id}/transcript` on a live session; 700 ms poll) and
+`history_index.rs` (rescan progress).
+
+```json
+{"type":"transcript_appended","workspace_id":"…","session_id":"…","cursor":"<record_index>","turns":[{…Turn…}]}
+{"type":"artifact_added","workspace_id":"…","session_id":"…","artifact":{…Artifact…}}
+{"type":"history_index_progress","workspace_id":"…","scanned":120,"total":2705,"done":false}
+```
+
+- `transcript_appended` — the session's transcript grew. `turns` are the turns
+  touched by the new records, each sent WHOLE (a turn whose tool results just
+  landed is re-sent) — clients replace by `Turn.id`. `cursor` is the index of the
+  LAST folded record (`after_cursor`). A payload over 64 KB is sent with
+  `turns: []`: re-fetch `GET …/transcript`. Session-family scoped
+  (owner / workspace admin / root, viewer-gated) — transcript prose and tool
+  output never reach other users.
+- `artifact_added` — the fold found a new artifact (written file, PR link, image).
+  Carries the full `Artifact`. Session-family scoped.
+- `history_index_progress` — a `POST /workspaces/{wid}/history/rescan` walk
+  advanced; `done: true` on the final tick. Workspace-scoped (viewer+). The boot
+  scan emits nothing (it has no requesting workspace).
+- TypeScript types live in `ui/src/lib/api/types.ts` (`// ── Transcript`).
 
 ### `browser_tab_updated` / `browser_annotation_added`
 

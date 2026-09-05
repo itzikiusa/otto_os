@@ -1,5 +1,10 @@
 // Tiny hash router. Routes look like "#/agents", "#/git/<repoId>/pr/42",
-// "#/settings/appearance". No SvelteKit — App.svelte switches on `router.module`.
+// "#/settings/appearance", "#/history/<sessionId>". No SvelteKit — App.svelte
+// switches on `router.module`.
+//
+// Note: `#/agents/<x>` reads `<x>` as a SESSION id, so sibling agent surfaces
+// get their own top-level module — History is `#/history` (optional second
+// segment = the session id to preselect), Mission Control `#/mission-control`.
 //
 // Keeps a browser-style navigation stack so back/forward (buttons + ⌘⇧←/→)
 // can return to previously-viewed pages.

@@ -11,6 +11,9 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { reviewBus, workflowRunBus, budgetBus } from '../../lib/events.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { activity } from '../../lib/stores/activity.svelte';
+  import { router } from '../../lib/router.svelte';
+  import { winKey } from '../../lib/win';
 
   // ---------------------------------------------------------------------------
   // Types (module-local; mirroring the Rust DTOs without touching api/types.ts)
@@ -80,6 +83,9 @@
       const [v, sv] = await Promise.all([
         api.get<MissionView>(`/workspaces/${wsId}/mission`),
         api.get<SavedView[]>(`/workspaces/${wsId}/mission/views`),
+        // Task roll-up for the done/total strip on session-backed cards
+        // (`GET /workspaces/{wid}/activity/summary`; `tasks_updated` keeps it live).
+        activity.loadSummary(wsId),
       ]);
       view = v;
       savedViews = sv;
@@ -244,13 +250,78 @@
     return `${Math.floor(secs / 86400)}d`;
   }
 
+  /** The session a card is backed by, if any. */
+  function sessionOf(item: MissionItem): string | null {
+    return item.session_id ?? (item.kind === 'session' ? item.id : null);
+  }
+
   function openSession(item: MissionItem) {
-    const sid = item.session_id ?? (item.kind === 'session' ? item.id : null);
+    const sid = sessionOf(item);
     if (!sid) return;
+    // From the board you want the conversation, not the raw PTY: preselect the
+    // Chat view (SessionView persists the choice per session under this key —
+    // docs/design/conversation-view.md §5.1) before navigating.
+    try {
+      localStorage.setItem(winKey(`otto_session_view:${sid}`), 'chat');
+    } catch {
+      /* storage unavailable — SessionView falls back to its default */
+    }
     // Navigate for real (route + tabs view) — a bare store mutation would
     // change a tab invisibly behind the Mission Control surface.
     ws.setViewMode('tabs');
     ws.navigateToSession(sid);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sub-tasks: push a task from the board into the agent (§5.5)
+  // ---------------------------------------------------------------------------
+
+  const canEdit = $derived(ws.myRole !== 'viewer');
+  /** Card (item id) whose inline "+ Sub-task" input is open. */
+  let subtaskFor = $state<string | null>(null);
+  let subtaskTitle = $state('');
+  let subtaskBusy = $state(false);
+
+  function openSubtask(e: Event, item: MissionItem): void {
+    e.stopPropagation();
+    subtaskFor = item.id;
+    subtaskTitle = '';
+    queueMicrotask(() =>
+      (document.querySelector(`[data-subtask-for="${item.id}"] input`) as HTMLInputElement | null)?.focus(),
+    );
+  }
+
+  function closeSubtask(): void {
+    subtaskFor = null;
+    subtaskTitle = '';
+  }
+
+  async function submitSubtask(item: MissionItem): Promise<void> {
+    const sid = sessionOf(item);
+    const title = subtaskTitle.trim();
+    if (!sid || !title || subtaskBusy) return;
+    subtaskBusy = true;
+    try {
+      await activity.addTask(sid, title);
+      toasts.info('Sub-task queued', `"${title}" is handed to the agent when it is idle.`);
+      closeSubtask();
+      if (wsId) void activity.loadSummary(wsId);
+    } catch (e) {
+      toasts.error('Could not add sub-task', e instanceof Error ? e.message : String(e));
+    } finally {
+      subtaskBusy = false;
+    }
+  }
+
+  function onSubtaskKeydown(e: KeyboardEvent, item: MissionItem): void {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void submitSubtask(item);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSubtask();
+    }
   }
 </script>
 
@@ -264,6 +335,9 @@
           Clear filter ×
         </button>
       {/if}
+      <button class="chip" onclick={() => router.go('history')} title="Browse past conversations" data-testid="mission-history-btn">
+        <Icon name="clock" size={12} /> History
+      </button>
       <button class="icon-btn" onclick={() => load()} title="Refresh" aria-label="Refresh">
         <Icon name="refresh" size={13} />
       </button>
@@ -350,14 +424,18 @@
           {:else}
             <ul class="item-list">
               {#each items as item (item.id)}
+                {@const sid = sessionOf(item)}
+                {@const sum = sid ? activity.summary(sid) : null}
                 <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
                 <li
                   class="item"
-                  class:clickable={!!item.session_id || item.kind === 'session'}
-                  role={item.session_id || item.kind === 'session' ? 'button' : undefined}
-                  tabindex={item.session_id || item.kind === 'session' ? 0 : undefined}
+                  class:clickable={!!sid}
+                  role={sid ? 'button' : undefined}
+                  tabindex={sid ? 0 : undefined}
+                  data-session-id={sid}
                   onclick={() => openSession(item)}
                   onkeydown={(e) => {
+                    if (e.target !== e.currentTarget) return;
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
                       openSession(item);
@@ -374,6 +452,48 @@
                     {/if}
                     <span class="meta-tag age">{fmtAge(item.age_secs)} ago</span>
                   </div>
+                  {#if sid}
+                    <!-- Task strip: done/total from the activity roll-up (counts ALL
+                         rows, so board-added tasks are included) + inline sub-task. -->
+                    <div class="task-strip" data-testid="task-strip">
+                      {#if sum && sum.total > 0}
+                        <span class="strip-count mono" data-testid="task-strip-count">{sum.done}/{sum.total}</span>
+                        <span class="strip-track" aria-hidden="true">
+                          <span class="strip-fill" style="width:{Math.round((sum.done / sum.total) * 100)}%"></span>
+                        </span>
+                        {#if sum.in_progress}
+                          <span class="strip-now" title={sum.in_progress}>{sum.in_progress}</span>
+                        {/if}
+                      {:else}
+                        <span class="strip-count mono dim" data-testid="task-strip-count">0/0</span>
+                        <span class="strip-now dim">no tasks yet</span>
+                      {/if}
+                      {#if canEdit && subtaskFor !== item.id}
+                        <button
+                          class="subtask-btn"
+                          onclick={(e) => openSubtask(e, item)}
+                          onkeydown={(e) => e.stopPropagation()}
+                          title="Push a sub-task to this agent"
+                          data-testid="subtask-btn"
+                        >+ Sub-task</button>
+                      {/if}
+                    </div>
+                    {#if subtaskFor === item.id}
+                      <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+                      <div class="subtask-form" data-subtask-for={item.id} onclick={(e) => e.stopPropagation()}>
+                        <input
+                          class="sv-input subtask-input"
+                          placeholder="Sub-task for the agent…"
+                          bind:value={subtaskTitle}
+                          onkeydown={(e) => onSubtaskKeydown(e, item)}
+                          spellcheck="false"
+                          aria-label="Sub-task title"
+                        />
+                        <button class="btn-save" disabled={subtaskTitle.trim() === '' || subtaskBusy} onclick={() => void submitSubtask(item)}>Add</button>
+                        <button class="btn-cancel" onclick={closeSubtask}>Cancel</button>
+                      </div>
+                    {/if}
+                  {/if}
                 </li>
               {/each}
             </ul>
@@ -627,6 +747,77 @@
   }
   .meta-tag.age {
     color: var(--text-dim);
+  }
+
+  /* Task strip + sub-task (session-backed cards) */
+  .task-strip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    min-width: 0;
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .dim {
+    color: var(--text-dim);
+  }
+  .strip-count {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text);
+  }
+  .strip-track {
+    flex: 0 0 56px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--surface-2);
+    overflow: hidden;
+  }
+  .strip-fill {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width 200ms ease-out;
+  }
+  .strip-now {
+    flex: 1;
+    min-width: 0;
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .subtask-btn {
+    flex-shrink: 0;
+    margin-inline-start: auto;
+    height: 18px;
+    padding: 0 7px;
+    border: 1px dashed var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 10.5px;
+    cursor: pointer;
+  }
+  .subtask-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .subtask-form {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .subtask-input {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
   }
 
   .loading,
