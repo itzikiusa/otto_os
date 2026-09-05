@@ -211,6 +211,10 @@ async fn check_conn_access<S: ConnectionsCtx>(
     min: WorkspaceRole,
     global_cap: Capability,
 ) -> Result<(), Error> {
+    let enforced = ctx.connections().is_enforced(&conn.id).await?;
+    let min = if enforced { WorkspaceRole::Viewer } else { min };
+    let global_cap = if enforced { Capability::View } else { global_cap };
+    ctx.connections().authorize(&conn.id, &user.id, "discover").await?;
     match &conn.workspace_id {
         Some(ws) => ctx.roles().check(user, ws, min).await,
         None => {
@@ -238,12 +242,7 @@ async fn list_connections<S: ConnectionsCtx>(
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Viewer)
         .await?;
-    // When owner-private is ON, non-root users see only their own connections.
-    if owner_private_enabled(&ctx).await && !user.is_root {
-        Ok(Json(ctx.connections().list_for(&ws_id, &user.id).await?))
-    } else {
-        Ok(Json(ctx.connections().list(&ws_id).await?))
-    }
+    Ok(Json(ctx.connections().list_for(&ws_id, &user.id).await?))
 }
 
 /// #26 POST /workspaces/{id}/connections — editor
@@ -283,6 +282,7 @@ async fn import_sources<S: ConnectionsCtx>(
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(ws_id): Path<Id>,
 ) -> ApiResult<Json<Vec<SourceStatus>>> {
+    if !user.is_root || user.disabled {return Err(ApiErr(Error::Forbidden("root must discover and provision native connection identities".into())));}
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Editor)
         .await?;
@@ -306,6 +306,7 @@ async fn import_scan<S: ConnectionsCtx>(
     Path(ws_id): Path<Id>,
     Json(body): Json<ImportScanBody>,
 ) -> ApiResult<Json<ImportScanResult>> {
+    if !user.is_root || user.disabled {return Err(ApiErr(Error::Forbidden("root must discover and provision native connection identities".into())));}
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Editor)
         .await?;
@@ -325,6 +326,7 @@ async fn import_create<S: ConnectionsCtx>(
     Path(ws_id): Path<Id>,
     Json(req): Json<ImportCreateReq>,
 ) -> ApiResult<Json<ImportCreateResult>> {
+    if !user.is_root || user.disabled {return Err(ApiErr(Error::Forbidden("root must discover and provision native connection identities".into())));}
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Editor)
         .await?;
@@ -365,10 +367,10 @@ async fn update_connection<S: ConnectionsCtx>(
 ) -> ApiResult<Json<Connection>> {
     let conn = ctx.connections().get(&id).await?;
     check_conn_manage(&ctx, &user, &conn).await?;
-    if owner_private_enabled(&ctx).await {
+    if owner_private_enabled(&ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
         require_conn_owner_or_root(&user, &conn)?;
     }
-    Ok(Json(ctx.connections().update(&id, req).await?))
+    Ok(Json(ctx.connections().update(&id, &user.id, req).await?))
 }
 
 /// #28 DELETE /connections/{id} — ws editor (global: `Connections:Admin`)
@@ -379,10 +381,10 @@ async fn delete_connection<S: ConnectionsCtx>(
 ) -> ApiResult<StatusCode> {
     let conn = ctx.connections().get(&id).await?;
     check_conn_manage(&ctx, &user, &conn).await?;
-    if owner_private_enabled(&ctx).await {
+    if owner_private_enabled(&ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
         require_conn_owner_or_root(&user, &conn)?;
     }
-    ctx.connections().delete(&id).await?;
+    ctx.connections().delete(&id, &user.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -395,9 +397,10 @@ async fn open_connection<S: ConnectionsCtx>(
 ) -> ApiResult<Json<Session>> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let conn = ctx.connections().get(&id).await?;
-    if owner_private_enabled(&ctx).await {
+    if owner_private_enabled(&ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
         require_conn_owner_or_root(&user, &conn)?;
     }
+    ctx.connections().authorize(&id, &user.id, "shell").await?;
     let ws_id = conn
         .workspace_id
         .clone()
@@ -406,7 +409,7 @@ async fn open_connection<S: ConnectionsCtx>(
             Error::Invalid("opening a global connection requires 'workspace_id'".into())
         })?;
     ctx.roles()
-        .check(&user, &ws_id, WorkspaceRole::Editor)
+        .check(&user, &ws_id, if ctx.connections().is_enforced(&id).await? { WorkspaceRole::Viewer } else { WorkspaceRole::Editor })
         .await?;
     let session = ctx
         .connections()
@@ -430,7 +433,7 @@ async fn test_connection<S: ConnectionsCtx>(
 ) -> ApiResult<Json<TestConnectionResp>> {
     let conn = ctx.connections().get(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    if owner_private_enabled(&ctx).await {
+    if owner_private_enabled(&ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
         require_conn_owner_or_root(&user, &conn)?;
     }
     // DB-kind connections test via the sqlx/native driver (which also reuses the
@@ -445,14 +448,15 @@ async fn test_connection<S: ConnectionsCtx>(
             | ConnectionKind::Clickhouse
             | ConnectionKind::Postgres
     );
+    ctx.connections().authorize(&id, &user.id, "configure").await?;
     let mut resp = if is_db_kind {
         if let Some(tester) = ctx.db_tester() {
-            tester.test_db_connection(&id).await?
+            tester.test_db_connection(&id, &user.id).await?
         } else {
-            ctx.connections().test(&conn).await?
+            ctx.connections().test(&conn, &user.id).await?
         }
     } else {
-        ctx.connections().test(&conn).await?
+        ctx.connections().test(&conn, &user.id).await?
     };
     // Overlay the SSH key-permission warning here — this single spot covers both
     // the driver path (which can't see the key file) and the CLI path uniformly,
@@ -471,7 +475,7 @@ async fn pin_connection<S: ConnectionsCtx>(
 ) -> ApiResult<Json<Connection>> {
     let conn = ctx.connections().get(&id).await?;
     check_conn_role(&ctx, &user, &conn, WorkspaceRole::Editor).await?;
-    Ok(Json(ctx.connections().set_pinned(&id, req.pinned).await?))
+    Ok(Json(ctx.connections().set_pinned(&id, &user.id, req.pinned).await?))
 }
 
 // --- SFTP file browser ------------------------------------------------------
@@ -528,12 +532,14 @@ async fn open_sftp<S: ConnectionsCtx>(
     user: &User,
     id: &Id,
     min: WorkspaceRole,
+    operation: &str,
 ) -> Result<SftpSession, ApiErr> {
     let conn = ctx.connections().get(id).await?;
     check_conn_role(ctx, user, &conn, min).await?;
-    if owner_private_enabled(ctx).await {
+    if owner_private_enabled(ctx).await && !ctx.connections().is_enforced(&conn.id).await? {
         require_conn_owner_or_root(user, &conn)?;
     }
+    ctx.connections().authorize(id, &user.id, operation).await?;
     let params = sftp_params_for(&conn)?;
     Ok(SftpSession::new(params)?)
 }
@@ -562,12 +568,13 @@ async fn sftp_list<S: ConnectionsCtx>(
     Path(id): Path<Id>,
     Query(q): Query<SftpPathQuery>,
 ) -> ApiResult<Json<SftpListResp>> {
-    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Viewer, "sftp_read").await?;
     let path = match q.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) => p.to_string(),
         None => sftp.pwd().await.map_err(ApiErr)?,
     };
     let entries = sftp.list(&path).await.map_err(ApiErr)?;
+    ctx.connections().authorize(&id, &user.id, "sftp_read").await?;
     Ok(Json(SftpListResp {
         path,
         entries: entries
@@ -591,7 +598,13 @@ async fn sftp_download<S: ConnectionsCtx>(
     Path(id): Path<Id>,
     Json(req): Json<SftpDownloadReq>,
 ) -> ApiResult<Json<SftpDownloadResp>> {
-    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    if ctx.connections().is_enforced(&id).await? {
+        let current = otto_state::UsersRepo::new(ctx.pool()).get(&user.id).await?;
+        if !current.is_root || current.disabled {
+            return Err(ApiErr(Error::Forbidden("daemon-local transfer paths require root for governed connections".into())));
+        }
+    }
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_read").await?;
     let local = expand_home(&req.local_path);
     // If the destination is an existing directory, sftp `get` lands the file
     // under it using the remote basename; otherwise treat it as a full file
@@ -630,7 +643,13 @@ async fn sftp_upload<S: ConnectionsCtx>(
     Path(id): Path<Id>,
     Json(req): Json<SftpUploadReq>,
 ) -> ApiResult<StatusCode> {
-    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    if ctx.connections().is_enforced(&id).await? {
+        let current = otto_state::UsersRepo::new(ctx.pool()).get(&user.id).await?;
+        if !current.is_root || current.disabled {
+            return Err(ApiErr(Error::Forbidden("daemon-local transfer paths require root for governed connections".into())));
+        }
+    }
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_write").await?;
     let local = expand_home(&req.local_path);
     sftp.upload(&local, &req.remote_path).await.map_err(ApiErr)?;
     Ok(StatusCode::OK)
@@ -643,7 +662,7 @@ async fn sftp_mkdir<S: ConnectionsCtx>(
     Path(id): Path<Id>,
     Json(req): Json<SftpMkdirReq>,
 ) -> ApiResult<StatusCode> {
-    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_write").await?;
     sftp.mkdir(&req.path).await.map_err(ApiErr)?;
     Ok(StatusCode::OK)
 }
@@ -655,7 +674,7 @@ async fn sftp_remove<S: ConnectionsCtx>(
     Path(id): Path<Id>,
     Json(req): Json<SftpRemoveReq>,
 ) -> ApiResult<StatusCode> {
-    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_write").await?;
     if req.dir {
         sftp.rmdir(&req.path).await.map_err(ApiErr)?;
     } else {
@@ -671,7 +690,7 @@ async fn sftp_rename<S: ConnectionsCtx>(
     Path(id): Path<Id>,
     Json(req): Json<SftpRenameReq>,
 ) -> ApiResult<StatusCode> {
-    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor).await?;
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Editor, "sftp_write").await?;
     sftp.rename(&req.from, &req.to).await.map_err(ApiErr)?;
     Ok(StatusCode::OK)
 }
@@ -687,7 +706,7 @@ async fn sftp_read<S: ConnectionsCtx>(
     Path(id): Path<Id>,
     Query(q): Query<SftpPathQuery>,
 ) -> ApiResult<Json<SftpReadResp>> {
-    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    let sftp = open_sftp(&ctx, &user, &id, WorkspaceRole::Viewer, "sftp_read").await?;
     let remote = q
         .path
         .as_deref()
@@ -713,6 +732,7 @@ async fn sftp_read<S: ConnectionsCtx>(
     // Always clean up the temp dir, success or not.
     let _ = std::fs::remove_dir_all(&tmp_dir);
     let (text, truncated) = resp?;
+    ctx.connections().authorize(&id, &user.id, "sftp_read").await?;
     Ok(Json(SftpReadResp { text, truncated }))
 }
 
@@ -754,7 +774,23 @@ async fn list_sections<S: ConnectionsCtx>(
     ctx.roles()
         .check(&user, &ws_id, WorkspaceRole::Viewer)
         .await?;
-    Ok(Json(ctx.connections().list_sections().await?))
+    let sections = ctx.connections().list_sections().await?;
+    if user.is_root { return Ok(Json(sections)); }
+    let connections = ctx.connections().list_for(&ws_id, &user.id).await?;
+    let mut visible: std::collections::HashSet<Id> = connections.into_iter().filter_map(|c| c.section_id).collect();
+    for section in &sections {
+        if section.created_by == user.id { visible.insert(section.id.clone()); }
+    }
+    loop {
+        let mut changed = false;
+        for section in &sections {
+            if visible.contains(&section.id) {
+                if let Some(parent) = &section.parent_id { changed |= visible.insert(parent.clone()); }
+            }
+        }
+        if !changed { break; }
+    }
+    Ok(Json(sections.into_iter().filter(|s| visible.contains(&s.id)).collect()))
 }
 
 /// POST /workspaces/{id}/connection-sections — editor

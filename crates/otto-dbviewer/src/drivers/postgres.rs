@@ -22,7 +22,7 @@ use base64::Engine as _;
 use otto_core::Result;
 use serde_json::Value;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode};
-use sqlx::{Column as _, Executor as _, Row, TypeInfo};
+use sqlx::{Column as _, Connection as _, Executor as _, Row, TypeInfo};
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
@@ -105,6 +105,50 @@ impl Driver for PostgresDriver {
             message: "ok".into(),
             server_version: Some(version),
         })
+    }
+
+    async fn native_grants(&self, cfg: &ResolvedConfig) -> Result<Vec<crate::native_access::NativeGrant>> {
+        use crate::native_access::{NativeGrant, setup_error};
+        let pool = self.pool(cfg).await?;
+        let elevated: bool = sqlx::query_scalar("SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&pool).await.map_err(types::upstream)?;
+        let memberships: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_auth_members WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)")
+            .fetch_one(&pool).await.map_err(types::upstream)?;
+        let database_authority: bool = sqlx::query_scalar("SELECT has_database_privilege(current_database(), 'CREATE') OR has_database_privilege(current_database(), 'TEMP') OR datdba = (SELECT oid FROM pg_roles WHERE rolname = current_user) FROM pg_database WHERE datname = current_database()")
+            .fetch_one(&pool).await.map_err(types::upstream)?;
+        if elevated || memberships != 0 || database_authority {
+            return Err(setup_error("native role has administrative, inherited-role, database-owner, CREATE, or TEMP authority"));
+        }
+        let unsafe_routines: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND has_function_privilege(p.oid, 'EXECUTE')")
+            .fetch_one(&pool).await.map_err(types::upstream)?;
+        let unsafe_objects: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND c.relkind IN ('v','m','f') AND has_table_privilege(c.oid, 'SELECT,INSERT,UPDATE,DELETE')")
+            .fetch_one(&pool).await.map_err(types::upstream)?;
+        let triggers: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_trigger t WHERE NOT t.tgisinternal AND has_table_privilege(t.tgrelid, 'INSERT,UPDATE,DELETE')")
+            .fetch_one(&pool).await.map_err(types::upstream)?;
+        let cascades: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_constraint c WHERE c.contype='f' AND (c.confdeltype IN ('c','n','d') OR c.confupdtype IN ('c','n','d')) AND has_table_privilege(c.confrelid,'DELETE,UPDATE')")
+            .fetch_one(&pool).await.map_err(types::upstream)?;
+        if unsafe_routines != 0 || unsafe_objects != 0 || triggers != 0 || cascades != 0 {
+            return Err(setup_error("native routine, view, foreign-table, or trigger authority cannot prove the requested scope"));
+        }
+        let schemas: Vec<(String, bool, bool)> = sqlx::query_as("SELECT nspname, has_schema_privilege(oid,'CREATE') OR nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user), has_schema_privilege(oid,'USAGE') FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'")
+            .fetch_all(&pool).await.map_err(types::upstream)?;
+        let mut grants = Vec::new();
+        for (child, create, usage) in schemas {
+            // Caller SQL cannot address PUBLIC catalogs or metadata functions:
+            // the shared AST gate directs those reads through filtered metadata.
+            if usage { grants.push(NativeGrant { child: child.clone(), operation: "db_browse" }); }
+            if create { grants.push(NativeGrant { child: child.clone(), operation: "db_schema" }); }
+            if !usage { continue; }
+            let rights: (bool, bool, bool) = sqlx::query_as("SELECT COALESCE(bool_or(has_table_privilege(c.oid,'SELECT') OR has_any_column_privilege(c.oid,'SELECT')),false), COALESCE(bool_or(has_table_privilege(c.oid,'INSERT,UPDATE,DELETE,TRUNCATE') OR has_any_column_privilege(c.oid,'INSERT,UPDATE')),false), COALESCE(bool_or(c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)),false) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind IN ('r','p','v','m','f')")
+                .bind(&child).fetch_one(&pool).await.map_err(types::upstream)?;
+            if rights.0 { grants.push(NativeGrant { child: child.clone(), operation: "db_query" }); }
+            if rights.1 { grants.push(NativeGrant { child: child.clone(), operation: "db_data" }); }
+            if rights.2 { grants.push(NativeGrant { child: child.clone(), operation: "db_schema" }); }
+            let sequences: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND CASE WHEN c.relkind='S' THEN has_sequence_privilege(c.oid,'USAGE,UPDATE') ELSE false END)")
+                .bind(&child).fetch_one(&pool).await.map_err(types::upstream)?;
+            if sequences { grants.push(NativeGrant { child, operation: "db_data" }); }
+        }
+        Ok(grants)
     }
 
     async fn schema_root(&self, cfg: &ResolvedConfig) -> Result<Vec<SchemaNode>> {
@@ -400,6 +444,9 @@ impl Driver for PostgresDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
+        if cfg.params.get("__read_only_execution").and_then(Value::as_bool)==Some(true) {
+            return governed_read(&self.pool(cfg).await?,req,token).await;
+        }
         let text = req.statement.trim();
         if text.is_empty() {
             return Err(types::invalid("empty statement"));
@@ -465,6 +512,7 @@ impl Driver for PostgresDriver {
         }
         let pool = self.pool(cfg).await?;
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let mut conn = conn.begin_with("BEGIN READ ONLY").await.map_err(types::upstream)?;
         if let Some(schema) = node.map(str::trim).filter(|s| !s.is_empty()) {
             (&mut *conn)
                 .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
@@ -530,6 +578,7 @@ impl Driver for PostgresDriver {
 
         let pool = self.pool(cfg).await?;
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let mut conn = conn.begin_with("BEGIN READ ONLY").await.map_err(types::upstream)?;
         if let Some(schema) = node.map(str::trim).filter(|s| !s.is_empty()) {
             (&mut *conn)
                 .execute(sqlx::raw_sql(&set_search_path_sql(schema)))
@@ -1677,6 +1726,30 @@ const FUNCTIONS: &[(&str, &str)] = &[
 ];
 
 // --- Unit tests -------------------------------------------------------------
+
+/// Native read-only transaction is the authority for effects hidden behind
+/// overload resolution, operators, casts, views and routines, including root.
+/// This path is selected only by a server-derived resolved-config flag.
+async fn governed_read(pool:&sqlx::PgPool,req:&QueryRequest,token:&CancelToken)->Result<QueryResult> {
+    let mut conn=pool.acquire().await.map_err(types::upstream)?;
+    capture_backend_pid(&mut conn,token).await;
+    let mut tx=conn.begin_with("BEGIN READ ONLY").await.map_err(types::upstream)?;
+    if let Some(schema)=req.node.as_deref().filter(|n|!n.is_empty()) {(&mut *tx).execute(sqlx::raw_sql(&set_search_path_sql(schema))).await.map_err(types::upstream)?;}
+    if let Some(ms)=req.timeout_ms.filter(|ms|*ms>0) {(&mut *tx).execute(sqlx::raw_sql(&format!("SET LOCAL statement_timeout = {ms}"))).await.map_err(types::upstream)?;}
+    let spans=split_statements(req.statement.trim(),SqlDialect::Postgres);
+    if spans.is_empty(){return Err(types::invalid("empty statement"));}
+    let max_rows=req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);let single=spans.len()==1;let mut results=Vec::new();
+    for span in spans {
+        let started=Instant::now();
+        let sql=if single {types::inject_row_limit(&span.text,max_rows.saturating_add(1),req.offset)}else{types::inject_row_limit(&span.text,usize::MAX,None)};
+        let mut result=exec_read_conn(&mut tx,if single{&sql.sql}else{&span.text},max_rows).await?;
+        result.stats.duration_ms=started.elapsed().as_millis() as u64;result.stats.row_count=result.rows.len();
+        if single{result.auto_limited=sql.limited.then_some(max_rows as u64)}else{result.statement=Some(types::statement_preview(&span.text));}
+        results.push(result);
+    }
+    tx.rollback().await.map_err(types::upstream)?;
+    Ok(types::fold_batch_results(results))
+}
 
 #[cfg(test)]
 mod tests {

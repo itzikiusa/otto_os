@@ -61,6 +61,32 @@ impl McpService {
         Self { pool, secrets }
     }
 
+    /// Current identity and resource policy are checked again at execution, so
+    /// API, gateway and agent callers share the same authorization boundary.
+    pub async fn resource_allowed(&self, server: &otto_state::McpServerDetail, user: &otto_core::domain::User, operation: &str, child: Option<&str>) -> Result<bool> {
+        use otto_core::access::{ResourceKind, ResourceRef, AccessMode};
+        self.registry().get(&server.id).await?;
+        let policy = otto_state::ResourceAccessRepo::new(self.pool.clone()).get_live_policy(ResourceKind::McpServer,&server.id).await?;
+        if policy.mode == AccessMode::Legacy { return Ok(!user.disabled); }
+        let feature = otto_state::GrantsRepo::new(self.pool.clone()).capability_of(user,otto_core::domain::Feature::Mcp).await?;
+        if feature < otto_core::domain::Capability::View { return Ok(false); }
+        if !otto_state::WorkspacesRepo::new(self.pool.clone()).role_of(user,&server.workspace_id).await?.is_some() { return Ok(false); }
+        let access = otto_rbac::ResourceAccess::new(self.pool.clone());
+        let resource = ResourceRef { kind:ResourceKind::McpServer,id:server.id.clone(),child:child.map(str::to_string) };
+        if operation != "discover" && !access.evaluate(user,&resource,"discover").await?.allowed { return Ok(false); }
+        Ok(access.evaluate(user,&resource,operation).await?.allowed)
+    }
+
+    pub async fn visible_tools(&self, server: &otto_state::McpServerDetail, user: &otto_core::domain::User) -> Result<Vec<otto_state::McpTool>> {
+        let mut visible = Vec::new();
+        for tool in self.tools().list_for_server(&server.id).await? {
+            if self.resource_allowed(server,user,"discover",Some(&tool.name)).await?
+                && (self.resource_allowed(server,user,"invoke",Some(&tool.name)).await?
+                    || self.resource_allowed(server,user,"configure",Some(&tool.name)).await?) { visible.push(tool); }
+        }
+        Ok(visible)
+    }
+
     pub fn registry(&self) -> McpRegistryRepo {
         McpRegistryRepo::new(self.pool.clone())
     }
@@ -239,8 +265,23 @@ impl McpService {
             None => ("dangerous".into(), "high".into(), true, false, true),
         };
 
+        let access_policy = otto_state::ResourceAccessRepo::new(self.pool.clone())
+            .get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await?;
+        if access_policy.mode == otto_core::access::AccessMode::Enforced {
+            let permitted = match &ctx.caller_user_id {
+                Some(uid) => match otto_state::UsersRepo::new(self.pool.clone()).get(uid).await {
+                    Ok(user) => self.resource_allowed(&server,&user,"invoke",Some(tool_name)).await?,
+                    Err(otto_core::Error::NotFound(_)) => false,
+                    Err(e) => return Err(e),
+                },
+                None => false,
+            };
+            if !permitted {
+                return self.terminal_deny(&server,tool_name,args,&risk_label,&injection_risk,ctx,"resource access denied").await;
+            }
+        }
         // 0. server gate.
-        if !server.enabled || !server.managed {
+        if !server.enabled || (!server.managed && access_policy.mode == otto_core::access::AccessMode::Legacy) {
             return self
                 .terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx,
                     "server is disabled or not managed").await;
@@ -306,6 +347,10 @@ impl McpService {
                 .await?
             {
                 Some(appr_id) => {
+                    let approval = self.approvals().get(&appr_id).await?;
+                    if approval.requested_by != ctx.caller_user_id {
+                        return self.terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx, "approval belongs to another caller").await;
+                    }
                     // Single-use: consume atomically; a lost race => already used.
                     if !self.approvals().consume(&appr_id).await? {
                         return self.terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx,
@@ -392,6 +437,18 @@ impl McpService {
 
         let client = self.client_for(&server);
         let start = Instant::now();
+        let latest = otto_state::ResourceAccessRepo::new(self.pool.clone()).get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await?;
+        if latest.mode == otto_core::access::AccessMode::Enforced {
+            let permitted = match &ctx.caller_user_id {
+                Some(id) => match otto_state::UsersRepo::new(self.pool.clone()).get(id).await {
+                    Ok(user) => self.resource_allowed(&server,&user,"invoke",Some(tool_name)).await?,
+                    Err(_) => false,
+                },
+                None => false,
+            };
+            if !permitted { return self.terminal_deny(&server,tool_name,args,&risk_label,&injection_risk,ctx,"resource access revoked before execution").await; }
+        }
+        self.registry().get(&server.id).await?;
         let res = client.call_tool(tool_name, args).await;
         let latency = start.elapsed().as_millis() as i64;
         match res {

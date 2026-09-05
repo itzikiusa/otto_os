@@ -68,6 +68,7 @@ case " $* " in
     echo '{{"kind":"APIResourceList"}}' ;;
   *" api-resources "*)
     printf 'applications.argoproj.io\nrollouts.argoproj.io\n' ;;
+  *" get namespaces "*) echo '{{"items":[{{"metadata":{{"name":"shop"}},"status":{{"phase":"Active"}}}},{{"metadata":{{"name":"other"}},"status":{{"phase":"Active"}}}}]}}' ;;
   *" get pods "*) cat "{fx}/pods.json" ;;
   *" get secrets "*) cat "{fx}/secret_list.json" ;;
   *" get deployments "*) cat "{fx}/deployments.json" ;;
@@ -592,18 +593,13 @@ async fn test_endpoint_uses_base_args_and_reports_server_version() {
     assert_eq!(body["ok"], true);
     assert_eq!(body["server_version"], "v1.29.5");
     assert!(body["message"].as_str().unwrap().contains("kind-kind"));
-    let last = argv_log()
-        .into_iter()
-        .rev()
-        .find(|l| l.contains(" version "))
-        .unwrap();
-    assert_eq!(
-        last,
-        format!(
-            "--kubeconfig {} --context kind-kind version -o json --request-timeout=8s",
-            c["kubeconfig_path"].as_str().unwrap()
-        )
+    // Other tests and capability probes append to the same process-wide log.
+    // Assert this fixture's exact test command, independently of their order.
+    let expected = format!(
+        "--kubeconfig {} --context kind-kind version -o json --request-timeout=8s",
+        c["kubeconfig_path"].as_str().unwrap()
     );
+    assert!(argv_log().contains(&expected), "missing test command: {expected}");
     let (_, got, _) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}"), None).await;
     assert!(
         got.get("last_used_at").is_some(),
@@ -1286,4 +1282,286 @@ async fn monitor_health_digest_reports_disabled_then_stats() {
     let web = wls.iter().find(|w| w["workload"] == "web-5d4c-abcde").expect("web workload from snapshot");
     assert_eq!(web["mem_bytes"], 900.0);
     assert!(web["spark"]["mem"].is_array());
+}
+
+#[tokio::test]
+async fn new_clusters_are_private_and_guessed_namespace_reads_are_denied() {
+    let (ctx, owner) = TestCtx::new().await;
+    let cluster = create_cluster(&ctx, &owner).await;
+    let id = cluster["id"].as_str().unwrap();
+    let mut outsider = owner.clone();
+    outsider.id = otto_core::new_id();
+    outsider.is_root = false;
+    let (st, list, _) = call(&ctx, &outsider, "GET", "/k8s/clusters", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(list, serde_json::json!([]), "ungranted cluster leaked");
+    for suffix in [
+        "",
+        "/resources?kind=pods&ns=shop",
+        "/metrics?ns=shop",
+        "/pods/shop/web/logs",
+    ] {
+        let (st, _, _) = call(
+            &ctx,
+            &outsider,
+            "GET",
+            &format!("/k8s/clusters/{id}{suffix}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{suffix}");
+    }
+}
+
+#[tokio::test]
+async fn namespace_workloads_do_not_grant_secrets_metrics_exec_or_mutation() {
+    use otto_core::access::{AccessActor, AccessRule, ResourceKind, RuleEffect, SubjectKind};
+    let (ctx, owner) = TestCtx::new().await;
+    let cluster = create_cluster(&ctx, &owner).await;
+    let id = cluster["id"].as_str().unwrap().to_string();
+    let mut user = owner.clone();
+    user.id = otto_core::new_id();
+    user.is_root = false;
+    sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, disabled, created_at) VALUES (?, 'limited', 'x', 'limited', 0, 0, ?)")
+        .bind(&user.id).bind(Utc::now().to_rfc3339()).execute(&ctx.pool).await.unwrap();
+    sqlx::query("INSERT INTO user_feature_grants (user_id, feature, capability) VALUES (?, 'kubernetes', 'view')")
+        .bind(&user.id).execute(&ctx.pool).await.unwrap();
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(ctx.pool.clone());
+    let mut policy = repo
+        .get_policy(ResourceKind::K8sCluster, &id)
+        .await
+        .unwrap();
+    for (operations, children) in [
+        (vec!["discover"], None),
+        (
+            vec!["workloads_view", "resources_view", "logs"],
+            Some(vec!["namespace:shop"]),
+        ),
+    ] {
+        policy.rules.push(AccessRule {
+            id: otto_core::new_id(),
+            subject_kind: SubjectKind::User,
+            subject_id: user.id.clone(),
+            effect: RuleEffect::Allow,
+            operations: operations.into_iter().map(str::to_string).collect(),
+            children: children.map(|c| c.into_iter().map(str::to_string).collect()),
+            credential_connection_id: None,
+            grantable_operations: vec![],
+        });
+    }
+    let actor = AccessActor {
+        real_user_id: owner.id.clone(),
+        effective_user_id: None,
+    };
+    repo.put_policy(&policy, policy.revision, &actor)
+        .await
+        .unwrap();
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/resources?kind=deployments&ns=shop"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    for suffix in [
+        "/resources?kind=pods",
+        "/resources?kind=pods&ns=other",
+        "/resources?kind=secrets&ns=shop",
+        "/resource?kind=secret&ns=shop&name=secret",
+        "/metrics?ns=shop",
+        "/pods/other/web/logs",
+    ] {
+        let (st, _, _) = call(
+            &ctx,
+            &user,
+            "GET",
+            &format!("/k8s/clusters/{id}{suffix}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{suffix}");
+    }
+    for (suffix, body) in [
+        (
+            "/exec",
+            serde_json::json!({"workspace_id":"ws", "ns":"shop", "pod":"web"}),
+        ),
+        (
+            "/k9s",
+            serde_json::json!({"workspace_id":"ws", "ns":"shop"}),
+        ),
+        (
+            "/actions",
+            serde_json::json!({"action":"restart", "kind":"deployment", "ns":"shop", "name":"web"}),
+        ),
+    ] {
+        let (st, _, _) = call(
+            &ctx,
+            &user,
+            "POST",
+            &format!("/k8s/clusters/{id}{suffix}"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{suffix}");
+    }
+    let (st, namespaces, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/namespaces"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(namespaces["namespaces"].as_array().unwrap().len(), 1);
+    assert_eq!(namespaces["namespaces"][0]["name"], "shop");
+    // A body held open across policy revocation must stop before releasing
+    // another log chunk, even though the original HTTP request was allowed.
+    use futures_util::StreamExt;
+    let body = Body::from_stream(futures_util::stream::iter(vec![
+        Ok::<_, std::io::Error>("first"),
+        Ok("second"),
+    ]));
+    let mut stream = otto_k8s::access::guard_body(
+        body,
+        ctx.pool.clone(),
+        user.clone(),
+        id.clone(),
+        "shop".into(),
+    )
+    .into_data_stream();
+    assert_eq!(stream.next().await.unwrap().unwrap(), "first");
+    let mut revoked = repo
+        .get_policy(ResourceKind::K8sCluster, &id)
+        .await
+        .unwrap();
+    revoked.rules.retain(|rule| rule.subject_id != user.id);
+    repo.put_policy(&revoked, revoked.revision, &actor)
+        .await
+        .unwrap();
+    assert!(
+        stream.next().await.is_none(),
+        "revoked logs still emitted a chunk"
+    );
+    assert!(
+        ctx.recorder.last.lock().unwrap().is_none(),
+        "denied session must never spawn"
+    );
+}
+
+#[tokio::test]
+async fn delegated_cluster_admin_cannot_attach_repoint_or_read_hidden_configuration() {
+    use otto_core::access::{AccessActor, AccessRule, ResourceKind, RuleEffect, SubjectKind};
+    let (ctx, root) = TestCtx::new().await;
+    let cluster = create_cluster(&ctx, &root).await;
+    let id = cluster["id"].as_str().unwrap().to_string();
+    let mut user = root.clone();
+    user.is_root = false;
+    user.id = otto_core::new_id();
+    sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, disabled, created_at) VALUES (?, 'delegated', 'x', 'delegated', 0, 0, ?)").bind(&user.id).bind(Utc::now().to_rfc3339()).execute(&ctx.pool).await.unwrap();
+    sqlx::query("INSERT INTO user_feature_grants (user_id, feature, capability) VALUES (?, 'kubernetes', 'admin')").bind(&user.id).execute(&ctx.pool).await.unwrap();
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(ctx.pool.clone());
+    let actor = AccessActor {
+        real_user_id: root.id.clone(),
+        effective_user_id: None,
+    };
+    let mut policy = repo
+        .get_policy(ResourceKind::K8sCluster, &id)
+        .await
+        .unwrap();
+    policy.rules.push(AccessRule {
+        id: otto_core::new_id(),
+        subject_kind: SubjectKind::User,
+        subject_id: user.id.clone(),
+        effect: RuleEffect::Allow,
+        operations: vec![
+            "discover".into(),
+            "configure".into(),
+            "workloads_view".into(),
+            "exec".into(),
+        ],
+        children: None,
+        credential_connection_id: None,
+        grantable_operations: vec![],
+    });
+    repo.put_policy(&policy, policy.revision, &actor)
+        .await
+        .unwrap();
+    for patch in [
+        serde_json::json!({"context_name":"hidden-admin"}),
+        serde_json::json!({"kubeconfig_path":"/tmp/hidden.yaml"}),
+    ] {
+        let (st, _, _) = call(
+            &ctx,
+            &user,
+            "PATCH",
+            &format!("/k8s/clusters/{id}"),
+            Some(patch),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+    }
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "POST",
+        "/k8s/clusters",
+        Some(serde_json::json!({"name":"alias", "context_name":"hidden-admin"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "POST",
+        "/k8s/clusters/import",
+        Some(serde_json::json!({"name":"alias", "kubeconfig_yaml":"apiVersion: v1"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, renamed, _) = call(&ctx, &user, "PATCH", &format!("/k8s/clusters/{id}"), Some(serde_json::json!({"name":"renamed", "context_name":cluster["context_name"], "kubeconfig_path":cluster["kubeconfig_path"]}))).await;
+    assert_eq!(st, StatusCode::OK, "{renamed}");
+    let mut policy = repo
+        .get_policy(ResourceKind::K8sCluster, &id)
+        .await
+        .unwrap();
+    policy
+        .rules
+        .last_mut()
+        .unwrap()
+        .operations
+        .retain(|op| op != "configure");
+    repo.put_policy(&policy, policy.revision, &actor)
+        .await
+        .unwrap();
+    for path in [format!("/k8s/clusters/{id}"), "/k8s/clusters".into()] {
+        let (st, body, _) = call(&ctx, &user, "GET", &path, None).await;
+        assert_eq!(st, StatusCode::OK);
+        let body = if body.is_array() { &body[0] } else { &body };
+        assert!(body["kubeconfig_path"].is_null());
+        assert_eq!(body["context_name"], "");
+        assert!(body["default_namespace"].is_null());
+        assert_eq!(body["params"], serde_json::json!({}));
+    }
+    let (st, probe, _) = call(&ctx, &user, "POST", &format!("/k8s/clusters/{id}/test"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(probe["message"], "Connection succeeded");
+    sqlx::query("DELETE FROM user_feature_grants WHERE user_id = ?")
+        .bind(&user.id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/exec"),
+        Some(serde_json::json!({"workspace_id":"w", "ns":"shop", "pod":"web"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert!(ctx.recorder.last.lock().unwrap().is_none());
 }

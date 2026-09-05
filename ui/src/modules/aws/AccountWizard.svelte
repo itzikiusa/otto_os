@@ -7,6 +7,7 @@
   // right after save and its result (identity / login required) is shown in a
   // final panel with a "Sign in" shortcut. Editing skips discovery.
   import { untrack } from 'svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { aws } from '../../lib/stores/aws.svelte';
@@ -66,7 +67,7 @@
   $effect(() => {
     untrack(() => {
       void aws.loadRegions();
-      if (!editing) void loadProfiles();
+      if (!editing && auth.isRoot) void loadProfiles();
     });
   });
 
@@ -129,11 +130,11 @@
   }
 
   async function saveAndTest(): Promise<void> {
-    if (!step2Valid || busy) return;
+    if (!step2Valid || busy || (!editing && !auth.isRoot)) return;
     busy = true;
     error = '';
     try {
-      const a = editing && init ? await aws.updateAccount(init.id, body()) : await aws.createAccount(body());
+      const a = editing && init ? await aws.updateAccount(init.id, auth.isRoot ? body() : {name:name.trim(),color}) : await aws.createAccount(body());
       saved = a;
       step = 3;
       await runTest(a);
@@ -266,6 +267,7 @@
         </label>
       </div>
     {:else if step === 2}
+      {#if !auth.isRoot}<p class="dim">Owner manages credentials and native AWS settings. You can edit the name and color.</p>{/if}
       <label class="field">
         <span>Name</span>
         <input class="in" bind:value={name} placeholder="prod-eu / sandbox / data-lake" data-testid="aws-wizard-name" />
@@ -281,7 +283,7 @@
                 class="env-chip"
                 class:selected={environment === e}
                 class:prod={e === 'prod'}
-                onclick={() => (environment = e)}
+                disabled={!auth.isRoot} onclick={() => (environment = e)}
               >{e}</button>
             {/each}
           </div>
@@ -306,7 +308,7 @@
           </div>
         </div>
       </div>
-      {#if editing}
+      {#if editing && auth.isRoot}
         <details class="adv">
           <summary>Credentials &amp; region</summary>
           <div class="row2">

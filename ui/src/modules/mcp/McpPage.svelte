@@ -7,6 +7,7 @@
   // The active workspace comes from the shared workspace store (same as Brokers);
   // Servers + Tools are workspace-scoped, the rest are governed globally and
   // filtered server-side to the workspaces the caller can access.
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -36,11 +37,18 @@
 
   // The registry is shared between the Servers and Tools tabs (and feeds the
   // server pickers in Allowlists / Policies / Audit), so it's loaded once here.
+  let accessRevision = $state(0);
+  let loadGeneration=0;
+  $effect(()=>resourceAccess.subscribe(change=>{
+    if(change.type==='decision' && (change.kind!=='mcp_server' || !change.before || !Object.keys(change.before.operations).some(op=>change.before?.operations[op]?.allowed && !change.after?.operations[op]?.allowed)))return;
+    accessRevision++;loadGeneration++;servers=[];selectedServerId=null;void loadServers();
+  }));
   let servers = $state<McpServerDetail[]>([]);
   let loading = $state(false);
   let selectedServerId = $state<string | null>(null);
 
   async function loadServers(): Promise<void> {
+    const generation=++loadGeneration;
     const id = wsId;
     if (!id) {
       servers = [];
@@ -48,7 +56,9 @@
     }
     loading = true;
     try {
-      servers = await mcpCpApi.cpList(id);
+      const result = await mcpCpApi.cpList(id);
+      if(generation!==loadGeneration)return;
+      servers=result;
       // Keep a sensible selection for the Tools tab.
       if (selectedServerId && !servers.some((s) => s.id === selectedServerId)) {
         selectedServerId = null;
@@ -106,6 +116,7 @@
     </nav>
 
     <div class="tab-body">
+      {#key accessRevision}
       {#if tab === 'servers'}
         <ServersTab
           {wsId}
@@ -139,6 +150,7 @@
       {:else if tab === 'otto'}
         <OttoServerTab />
       {/if}
+      {/key}
     </div>
   {/if}
 </div>

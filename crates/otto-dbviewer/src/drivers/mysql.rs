@@ -17,7 +17,7 @@ use base64::Engine as _;
 use otto_core::Result;
 use serde_json::Value;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode};
-use sqlx::{Column as _, Executor as _, Row, TypeInfo};
+use sqlx::{Column as _, Connection as _, Executor as _, Row, TypeInfo};
 use tokio::sync::Mutex;
 
 use crate::driver::Driver;
@@ -112,6 +112,44 @@ impl Driver for MysqlDriver {
             message: "ok".into(),
             server_version: Some(version),
         })
+    }
+
+    async fn native_grants(&self, cfg: &ResolvedConfig) -> Result<Vec<crate::native_access::NativeGrant>> {
+        use crate::native_access::{mysql_grants, setup_error};
+        let pool = self.pool(cfg).await?;
+        let rows = sqlx::query("SHOW GRANTS").fetch_all(&pool).await.map_err(types::upstream)?;
+        let rows: Vec<String> = rows.iter().map(|r| r.try_get(0)).collect::<std::result::Result<_, _>>().map_err(types::upstream)?;
+        let mut grants = mysql_grants(&rows)?;
+        for grant in &grants {
+            if grant.operation == "db_query" && !rows.iter().any(|r| r.contains("SHOW VIEW") && r.contains(&format!(" ON `{}`.* TO ", grant.child))) {
+                return Err(setup_error("query credentials need SHOW VIEW so definer-view privileges can be inspected"));
+            }
+        }
+        // A definer view can read another database using its owner's rights.
+        // Routines/roles are already excluded by SHOW GRANTS above.
+        let views: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.views WHERE security_type <> 'INVOKER'")
+            .fetch_one(&pool).await.map_err(types::upstream)?;
+        if views != 0 { return Err(setup_error("definer views require a separately verified adapter")); }
+        // Trigger metadata is hidden without TRIGGER. Refuse write credentials
+        // without that inspection privilege rather than treating an empty list
+        // as proof. Even visible triggers are refused (definer side effects).
+        for grant in &grants {
+            if grant.operation == "db_data" {
+                let trigger_grant = rows.iter().any(|r| r.contains("TRIGGER") && r.contains(&format!(" ON `{}`.* TO ", grant.child)));
+                if !trigger_grant { return Err(setup_error("data-write credentials need inspectable trigger privileges")); }
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema = ?")
+                    .bind(&grant.child).fetch_one(&pool).await.map_err(types::upstream)?;
+                if count != 0 { return Err(setup_error("native triggers may cross the permitted database scope")); }
+            }
+        }
+        if grants.iter().any(|g| g.operation == "db_data") {
+            // MySQL hides foreign keys on inaccessible child databases, yet a
+            // DELETE/UPDATE may cascade into them. Without a separate complete
+            // catalog inspector, such credentials require all-database data
+            // permission. An empty child represents that explicit broad ceiling.
+            grants.push(crate::native_access::NativeGrant { child: String::new(), operation: "db_data" });
+        }
+        Ok(grants)
     }
 
     async fn schema_root(&self, cfg: &ResolvedConfig) -> Result<Vec<SchemaNode>> {
@@ -456,6 +494,9 @@ impl Driver for MysqlDriver {
         req: &QueryRequest,
         token: &CancelToken,
     ) -> Result<QueryResult> {
+        if cfg.params.get("__read_only_execution").and_then(Value::as_bool)==Some(true) {
+            return governed_read(&self.pool(cfg).await?,req,token).await;
+        }
         let text = req.statement.trim();
         if text.is_empty() {
             return Err(types::invalid("empty statement"));
@@ -546,6 +587,7 @@ impl Driver for MysqlDriver {
         }
         let pool = self.pool(cfg).await?;
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let mut conn = conn.begin_with("START TRANSACTION READ ONLY").await.map_err(types::upstream)?;
         if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
             (&mut *conn)
                 .execute(sqlx::raw_sql(&use_db_sql(db)))
@@ -619,6 +661,7 @@ impl Driver for MysqlDriver {
 
         let pool = self.pool(cfg).await?;
         let mut conn = pool.acquire().await.map_err(types::upstream)?;
+        let mut conn = conn.begin_with("START TRANSACTION READ ONLY").await.map_err(types::upstream)?;
         if let Some(db) = node.map(str::trim).filter(|s| !s.is_empty()) {
             (&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db)))
                 .await
@@ -1929,6 +1972,30 @@ const FUNCTIONS: &[(&str, &str)] = &[
 ];
 
 // --- Unit tests -------------------------------------------------------------
+
+/// Native read-only transaction protects against effects hidden in a read
+/// expression. RAII rollback also cleans up cancelled or failed reads.
+async fn governed_read(pool:&sqlx::MySqlPool,req:&QueryRequest,token:&CancelToken)->Result<QueryResult> {
+    let mut conn=pool.acquire().await.map_err(types::upstream)?;
+    capture_conn_id(&mut conn,token).await;
+    if let Some(db)=req.node.as_deref().filter(|n|!n.is_empty()) {(&mut *conn).execute(sqlx::raw_sql(&use_db_sql(db))).await.map_err(types::upstream)?;}
+    let mut tx=conn.begin_with("START TRANSACTION READ ONLY").await.map_err(types::upstream)?;
+    let spans=split_statements(req.statement.trim(),SqlDialect::Mysql);
+    if spans.is_empty(){return Err(types::invalid("empty statement"));}
+    let max_rows=req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);let single=spans.len()==1;let mut results=Vec::new();
+    for span in spans {
+        let started=Instant::now();
+        let limited=types::inject_row_limit(&span.text,max_rows.saturating_add(1),req.offset);
+        let mut sql=if single{limited.sql}else{span.text.clone()};
+        if let Some(ms)=req.timeout_ms.filter(|ms|*ms>0) {if sql.trim_start().to_uppercase().starts_with("SELECT") {sql=sql.replacen("SELECT",&format!("SELECT /*+ MAX_EXECUTION_TIME({ms}) */"),1);}}
+        let mut result=exec_read_conn(&mut tx,&sql,max_rows).await?;
+        result.stats.duration_ms=started.elapsed().as_millis() as u64;result.stats.row_count=result.rows.len();
+        if single{result.auto_limited=limited.limited.then_some(max_rows as u64)}else{result.statement=Some(types::statement_preview(&span.text));}
+        results.push(result);
+    }
+    tx.rollback().await.map_err(types::upstream)?;
+    Ok(types::fold_batch_results(results))
+}
 
 #[cfg(test)]
 mod tests {

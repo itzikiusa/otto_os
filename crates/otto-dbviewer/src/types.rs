@@ -185,6 +185,11 @@ impl ResolvedConfig {
     /// readable for debugging. Equality semantics are unchanged.
     pub fn cache_key(&self) -> String {
         use sha2::{Digest, Sha256};
+        // Read-only is scoped by a rollback-on-drop native transaction, not a
+        // pool/session setting. It must not orphan the tracked pool key when a
+        // separately authorized development mutation chooses writable execution.
+        let mut cache_params=self.params.clone();
+        if let Some(map)=cache_params.as_object_mut(){map.remove("__read_only_execution");}
         let raw = format!(
             "{engine}|{host}|{port}|{user}|{password}|{database}|\
              {tls_mode:?}|{verify}|{ca}|{cert}|{key}|{server_name}|{params}",
@@ -203,7 +208,7 @@ impl ResolvedConfig {
             // The full params blob carries engine extras AND the session
             // timezone — including it keeps two otherwise-identical configs that
             // differ only by timezone on separate cached sessions.
-            params = serde_json::to_string(&self.params).unwrap_or_default(),
+            params = serde_json::to_string(&cache_params).unwrap_or_default(),
         );
         format!("{}|{:x}", self.engine.as_str(), Sha256::digest(raw.as_bytes()))
     }

@@ -11,6 +11,8 @@ import {
   dbAssistClose,
   dbCloseConnection,
 } from '../api/client';
+import { auth } from './auth.svelte';
+import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import { confirmer } from '../confirm.svelte';
 import type {
   Connection,
@@ -775,6 +777,7 @@ class DatabaseStore {
    * previous session (if any) was already discarded on Close.
    */
   openAssist(mode: DbAssistMode, resultContext?: string | null): void {
+    if (!auth.can('agents','edit')) return;
     if (!this.selectedConnId) {
       toasts.error('No connection selected');
       return;
@@ -936,6 +939,102 @@ class DatabaseStore {
     return ws.currentId ? `/workspaces/${ws.currentId}/db` : null;
   }
 
+  private accessEpoch = 0;
+  accessRevision = $state(0);
+  /** Discard server-derived data on revocation. Keep this user's draft SQL. */
+  onAccessChange(change: ResourceAccessChange): void {
+    if (change.type === 'decision' && change.kind !== 'connection') return;
+    if (change.type === 'decision') {
+      const relevant = ['discover', 'db_browse', 'db_query', 'db_export'];
+      const lost =
+        change.before &&
+        relevant.some(
+          (op) => change.before?.operations[op]?.allowed && !change.after?.operations[op]?.allowed,
+        );
+      if (!lost) return;
+    }
+    if (change.type === 'reset' && change.identity) this.flushPersistTabs();
+    this.accessEpoch++;
+    this.accessRevision++;
+    const ids =
+      change.type === 'decision'
+        ? [change.id]
+        : [
+            ...new Set([
+              ...this.openConnIds,
+              ...this.snapshots.keys(),
+              ...(this.selectedConnId ? [this.selectedConnId] : []),
+            ]),
+          ];
+    const scrub = (state: ConnSnapshot | DatabaseStore) => {
+      for (const tab of state.tabs) {
+        const run = this.runControllers.get(tab.id);
+        run?.controller.abort();
+        this.runControllers.delete(tab.id);
+        tab.pending = null;
+        tab.running = false;
+        tab.result = null;
+        tab.ran_statement = null;
+        tab.ran_node = null;
+        tab.error = null;
+      }
+      state.capabilities = null;
+      state.testResult = null;
+      state.schemaRoot = [];
+      state.childrenCache = new Map();
+      state.expanded = new Set();
+      state.loadingNodes = new Set();
+      state.schemaLoading = false;
+      state.selectedObjectPath = null;
+      state.objectDetail = null;
+      state.objectError = null;
+      state.objectSearchQuery = '';
+      state.objectSearchHits = null;
+      state.objectSearchTruncated = false;
+      state.objectSearchScanned = 0;
+      state.savedQueries = [];
+      state.history = [];
+      if (state === this) this.builderTablesCache = new Map();
+      else (state as ConnSnapshot).builderTablesCache = new Map();
+    };
+    for (const id of ids) {
+      this.connEpoch.set(id, this.epochOf(id) + 1);
+      const snapshot = this.snapshots.get(id);
+      if (snapshot) scrub(snapshot);
+      if (this.selectedConnId === id) scrub(this);
+    }
+    this.queryPlan = null;
+    this.planOpen = false;
+    this.objectSearchSeq++;
+    this.objectSearching = false;
+    this.assistOpen = false;
+    if (change.type === 'reset' && change.identity) {
+      this.connections = [];
+      this.otherConnections = [];
+      this.openConnIds = [];
+      this.selectedConnId = null;
+      this.snapshots.clear();
+      this.tabs = [blankTab()];
+      this.activeTab = 0;
+      this.activeDb = null;
+      this.sshTabs = [];
+      this.activePane = null;
+      this.dashboards = [];
+      this.widgets = [];
+      this.savedQueries = [];
+      this.history = [];
+    } else if (
+      change.type === 'decision' &&
+      change.child === undefined &&
+      !change.after?.operations.discover?.allowed
+    ) {
+      this.connections = this.connections.filter((c) => c.id !== change.id);
+      this.otherConnections = this.otherConnections.filter((c) => c.id !== change.id);
+      this.openConnIds = this.openConnIds.filter((id) => id !== change.id);
+      if (this.selectedConnId === change.id) this.selectedConnId = null;
+    }
+  }
+
   // ── Open-generation guards (see `connEpoch`) ────────────────────────────
   private epochOf(id: Id): number {
     return this.connEpoch.get(id) ?? 0;
@@ -1035,10 +1134,10 @@ class DatabaseStore {
   // connection across workspaces. Legacy per-(workspace, connection) entries
   // are still read as a fallback so nothing is lost on upgrade.
   private tabsKey(connId: Id): string {
-    return `otto_db_tabs:${connId}`;
+    return auth.isRoot ? `otto_db_tabs:${connId}` : `otto_db_tabs:user:${auth.me?.id ?? 'anonymous'}:${connId}`;
   }
   private legacyTabsKey(connId: Id): string | null {
-    return ws.currentId ? `otto_db_tabs:${ws.currentId}:${connId}` : null;
+    return auth.isRoot && ws.currentId ? `otto_db_tabs:${ws.currentId}:${connId}` : null;
   }
   /** Trailing-edge debounce handle for `persistTabs` (null = nothing queued). */
   private persistTabsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1171,16 +1270,16 @@ class DatabaseStore {
   // fallback. Query-tab TEXT is persisted separately (persistTabs); RESULTS
   // are intentionally not persisted.
   private openKey(): string {
-    return 'otto_db_open';
+    return auth.isRoot ? 'otto_db_open' : `otto_db_open:user:${auth.me?.id ?? 'anonymous'}`;
   }
   private legacyOpenKey(): string | null {
-    return ws.currentId ? `otto_db_open:${ws.currentId}` : null;
+    return auth.isRoot && ws.currentId ? `otto_db_open:${ws.currentId}` : null;
   }
   private viewKey(connId: Id): string {
-    return `otto_db_view:${connId}`;
+    return auth.isRoot ? `otto_db_view:${connId}` : `otto_db_view:user:${auth.me?.id ?? 'anonymous'}:${connId}`;
   }
   private legacyViewKey(connId: Id): string | null {
-    return ws.currentId ? `otto_db_view:${ws.currentId}:${connId}` : null;
+    return auth.isRoot && ws.currentId ? `otto_db_view:${ws.currentId}:${connId}` : null;
   }
 
   /** Persist the open-connection set + selection. No-op during a restore —
@@ -1300,9 +1399,11 @@ class DatabaseStore {
    *  sidebar tree can render EVERY profile (opens route by type). */
   async loadConnections(): Promise<void> {
     const wid = ws.currentId;
+    const accessEpoch=this.accessEpoch;
     if (!wid) return;
     try {
       const all = await api.get<Connection[]>(`/workspaces/${wid}/connections`);
+      if(accessEpoch!==this.accessEpoch)return;
       const next = all.filter((c) => isDbKind(c.kind));
       this.otherConnections = all.filter((c) => !isDbKind(c.kind));
       this.connections = next;
@@ -2103,6 +2204,7 @@ class DatabaseStore {
     // cancel endpoint issue engine-native cancellation (KILL QUERY / etc.) and
     // the query-status endpoint re-attach to a run whose HTTP wait was lost.
     const queryId = newQueryId();
+    const accessEpoch=this.accessEpoch;
     this.runControllers.set(t.id, { controller, queryId, connId: id });
     t.running = true;
     t.error = null;
@@ -2151,7 +2253,7 @@ class DatabaseStore {
         // retry with the explicit confirm flag.
         if (isWriteBlocked(e)) {
           const ok = await this.confirmGuardedWrite();
-          if (!ok) {
+          if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
             toasts.info('Write cancelled');
             this.clearPending(t);
             return null;
@@ -2161,6 +2263,7 @@ class DatabaseStore {
           throw e;
         }
       }
+      if(accessEpoch!==this.accessEpoch || controller.signal.aborted || t.pending?.queryId!==queryId)return null;
       t.result = result;
       t.ran_statement = sql;
       t.ran_node = scopeNode;
@@ -2288,6 +2391,7 @@ class DatabaseStore {
       return null;
     }
     const isSql = this.capabilities?.sql === true;
+    const accessEpoch=this.accessEpoch;
     t.running = true;
     t.error = null;
     try {
@@ -2295,6 +2399,7 @@ class DatabaseStore {
         ? { statement: `EXPLAIN ${stmt}`, max_rows: this.rowLimit, node: this.activeDb || null }
         : { statement: stmt, max_rows: this.rowLimit, node: this.activeDb || null, explain: true };
       const result = await api.post<QueryResult>(`${this.connBase(id)}/query`, body);
+      if(accessEpoch!==this.accessEpoch)return null;
       t.result = result;
       t.ran_statement = stmt;
       t.ran_node = this.activeDb || null;
@@ -2316,6 +2421,7 @@ class DatabaseStore {
    * (never executed raw), so this is read-only even on a guarded connection.
    */
   async explainPlan(): Promise<void> {
+    const accessEpoch=this.accessEpoch;
     const id = this.selectedConnId;
     const stmt = this.tab.statement.trim();
     if (!id) {
@@ -2331,11 +2437,13 @@ class DatabaseStore {
         statement: stmt,
         node: this.activeDb || null,
       });
+      if(accessEpoch!==this.accessEpoch)return;
       this.queryPlan = plan;
       this.planOpen = true;
     } catch {
       // Engine can't produce a normalized plan (or the endpoint failed) — fall
       // back to the always-available raw EXPLAIN → grid path.
+      if(accessEpoch!==this.accessEpoch)return;
       this.closePlan();
       await this.runExplain();
     }
@@ -2787,10 +2895,12 @@ class DatabaseStore {
   // ── Saved queries ─────────────────────────────────────────────────────────
 
   async loadSavedQueries(): Promise<void> {
+    const accessEpoch=this.accessEpoch;
     const base = this.wsBase();
     if (!base) return;
     try {
-      this.savedQueries = await api.get<DbSavedQuery[]>(`${base}/saved-queries`);
+      const queries = await api.get<DbSavedQuery[]>(`${base}/saved-queries`);
+      if(accessEpoch===this.accessEpoch)this.savedQueries=queries;
     } catch (e) {
       toasts.error('Could not load saved queries', errMsg(e));
     }
@@ -2910,6 +3020,7 @@ class DatabaseStore {
   // ── History ─────────────────────────────────────────────────────────────
 
   async loadHistory(connId?: Id): Promise<void> {
+    const accessEpoch=this.accessEpoch;
     const id = connId ?? this.selectedConnId;
     if (!id) return;
     try {
@@ -2918,7 +3029,7 @@ class DatabaseStore {
       );
       // The singleton list shows the SELECTED connection's history — a refresh
       // for a background conn (e.g. a reattached run landing) must not clobber it.
-      if (this.selectedConnId === id) this.history = rows;
+      if (this.selectedConnId === id && accessEpoch===this.accessEpoch) this.history = rows;
     } catch (e) {
       if (this.selectedConnId !== id) return; // background refresh: stay quiet
       toasts.error('Could not load history', errMsg(e));
@@ -3112,3 +3223,4 @@ class DatabaseStore {
 }
 
 export const database = new DatabaseStore();
+resourceAccess.subscribe(change=>database.onAccessChange(change));

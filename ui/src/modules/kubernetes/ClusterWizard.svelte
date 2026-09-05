@@ -5,6 +5,7 @@
   // best-effort connectivity test toasts per cluster. Edit = step 2 only,
   // PATCHing the row.
   import { untrack } from 'svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -59,7 +60,7 @@
   let env = $state<Environment>(init?.environment ?? 'dev');
 
   $effect(() => {
-    if (existing) return;
+    if (existing || !auth.isRoot) return;
     untrack(() => void discover());
   });
 
@@ -117,15 +118,14 @@
   }
 
   async function save(): Promise<void> {
+    if(!existing && !auth.isRoot)return;
     busy = true;
     error = '';
     try {
       if (existing) {
         const c = await k8s.updateCluster(existing.id, {
           name: name.trim(),
-          context_name: contextName.trim() || existing.context_name,
-          default_namespace: defaultNs.trim().toLowerCase() || null,
-          environment: env,
+          ...(auth.isRoot ? {context_name:contextName.trim() || existing.context_name,default_namespace:defaultNs.trim().toLowerCase() || null,environment:env} : {}),
         });
         toasts.success('Cluster updated', c.name);
         onclose();
@@ -181,6 +181,7 @@
 
 <Modal title={existing ? 'Edit cluster' : step === 1 ? 'Add cluster' : 'Cluster details'} width={580} {onclose}>
   <div class="wiz" data-testid="k8s-cluster-wizard">
+    {#if !auth.isRoot}<p class="hint">Owner manages credentials and native cluster settings. You can edit the name.</p>{/if}
     {#if step === 1}
       <div class="segmented modes" role="tablist" aria-label="Cluster source">
         <button role="tab" aria-selected={mode === 'contexts'} class:active={mode === 'contexts'} onclick={() => (mode = 'contexts')}>From kubeconfig</button>
@@ -246,14 +247,14 @@
         {#if existing || mode === 'contexts'}
           <div class="field">
             <label for="k8s-ctx">Context</label>
-            <input id="k8s-ctx" class="input mono" bind:value={contextName} readonly={!existing} />
+            <input id="k8s-ctx" class="input mono" bind:value={contextName} readonly={!existing || !auth.isRoot} />
             {#if kubeconfigPath}<span class="hint mono">{kubeconfigPath}</span>{/if}
           </div>
         {/if}
       {/if}
       <div class="field">
         <label for="k8s-ns">Default namespace <span class="dim">(blank = all namespaces)</span></label>
-        <input id="k8s-ns" class="input mono" bind:value={defaultNs} placeholder="default" autocapitalize="off" autocorrect="off" spellcheck={false} />
+        <input id="k8s-ns" disabled={!auth.isRoot} class="input mono" bind:value={defaultNs} placeholder="default" autocapitalize="off" autocorrect="off" spellcheck={false} />
       </div>
       <div class="field">
         <span class="lbl">Environment</span>
@@ -266,7 +267,7 @@
               class:prod={e === 'prod'}
               role="radio"
               aria-checked={env === e}
-              onclick={() => (env = e)}
+              disabled={!auth.isRoot} onclick={() => (env = e)}
             >{e}</button>
           {/each}
         </div>

@@ -26,6 +26,14 @@ use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Map, Value};
 
+/// Session launches hold a read guard from native configuration lookup through
+/// live insertion. Governance activation holds the write guard through cleanup
+/// and policy commit, so no pending launcher can resurrect retired credentials.
+pub fn activation_gate() -> &'static tokio::sync::RwLock<()> {
+    static GATE: OnceLock<tokio::sync::RwLock<()>> = OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::RwLock::new(()))
+}
+
 const SERVER_KEY: &str = "otto-browser";
 
 /// The `.mcp.json` key for Otto's own first-party read-only tool server
@@ -879,5 +887,53 @@ mod tests {
                 "mcp_servers.jira.env={\"TOKEN\"=\"t\\\"1\"}".to_string(),
             ]
         );
+    }
+}
+
+/// Retire a formerly direct server without disturbing other launcher entries.
+/// A preview is read-only. Untracked entries require an explicit manual cleanup
+/// because Otto cannot claim ownership of somebody else's launcher config.
+pub fn retire_user_server(workspace_root: &str, name: &str, apply: bool) -> Result<(), String> {
+    let lock=cwd_lock(workspace_root);
+    let _guard=lock.lock().unwrap_or_else(|e| e.into_inner());
+    let path=mcp_path(workspace_root);
+    if path.exists() {
+        let mut doc=read_doc(&path)?;
+        if doc.get("mcpServers").and_then(Value::as_object).is_some_and(|s| s.contains_key(name)) {
+            let tracked=doc.get(MANAGED_KEY).and_then(Value::as_array).is_some_and(|names| names.iter().any(|n| n.as_str()==Some(name)));
+            if !tracked {return Err(format!("remove the untracked direct MCP entry '{name}' from {} before enforcement",path.display()));}
+            if apply {
+                doc.get_mut("mcpServers").and_then(Value::as_object_mut).unwrap().remove(name);
+                if let Some(names)=doc.get_mut(MANAGED_KEY).and_then(Value::as_array_mut) {names.retain(|n|n.as_str()!=Some(name));}
+                write_doc(&path,&doc)?;
+            }
+        }
+    }
+    let (dir,path,mut doc)=read_grok_doc(workspace_root)?;
+    if path.exists() && doc.get("mcp_servers").and_then(toml_edit::Item::as_table).is_some_and(|s|s.contains_key(name)) {
+        let tracked=doc.get(MANAGED_KEY_TOML).and_then(toml_edit::Item::as_array).is_some_and(|names|names.iter().any(|n|n.as_str()==Some(name)));
+        if !tracked {return Err(format!("remove the untracked direct MCP entry '{name}' from {} before enforcement",path.display()));}
+        if apply {
+            doc.get_mut("mcp_servers").and_then(toml_edit::Item::as_table_mut).unwrap().remove(name);
+            if let Some(names)=doc.get_mut(MANAGED_KEY_TOML).and_then(toml_edit::Item::as_array_mut) {names.retain(|n|n.as_str()!=Some(name));}
+            write_grok_doc(&dir,&path,&doc)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    #[test]
+    fn retiring_direct_credentials_preserves_other_servers_and_preview_is_readonly() {
+        let dir=tempfile::tempdir().unwrap(); let root=dir.path().to_str().unwrap();
+        let config=ManagedMcpConfig {user_servers:vec![UserMcpServer{name:"private".into(),command:"server".into(),args:vec![],env:Default::default()},UserMcpServer{name:"keep".into(),command:"other".into(),args:vec![],env:Default::default()}],..Default::default()};
+        reconcile_managed_servers(root,&config).unwrap();
+        retire_user_server(root,"private",false).unwrap();
+        assert!(read_doc(&mcp_path(root)).unwrap()["mcpServers"].get("private").is_some());
+        retire_user_server(root,"private",true).unwrap();
+        let doc=read_doc(&mcp_path(root)).unwrap();
+        assert!(doc["mcpServers"].get("private").is_none());assert!(doc["mcpServers"].get("keep").is_some());
     }
 }

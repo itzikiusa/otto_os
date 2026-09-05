@@ -7,6 +7,7 @@
 // / `perms()` never mutate `$state` (templates read them inside `$derived`);
 // creation/mutation lives in loaders called from effects/handlers.
 
+import { resourceAccess, type ResourceAccessChange } from './resource-access.svelte';
 import { awsApi } from '../api/aws';
 import { ApiError } from '../api/client';
 import type {
@@ -48,6 +49,40 @@ export const AWS_SERVICES: { id: AwsService; label: string; icon: string }[] = [
 const INSTALL_POLL_MS = 1500;
 
 class AwsStore {
+  accessRevision = $state(0);
+  onAccessChange(change: ResourceAccessChange): void {
+    if (
+      change.type === 'decision' &&
+      (change.kind !== 'aws_account' ||
+        !change.before ||
+        !Object.keys(change.before.operations).some(
+          (op) => change.before?.operations[op]?.allowed && !change.after?.operations[op]?.allowed,
+        ))
+    )
+      return;
+    this.accessRevision++;
+    if (change.type === 'decision') {
+      this.forgetAccount(change.id);
+      this.accounts = this.accounts.filter((a) => a.id !== change.id);
+      // Queue attributes are keyed by URL, so their account cannot be proven.
+      this.sqsAttrs = {};
+    } else {
+      this.accounts = [];
+      this.permissions = {};
+      this.s3Buckets = {};
+      this.sqsQueues = {};
+      this.sqsAttrs = {};
+      this.ec2 = {};
+      this.eks = {};
+      this.rds = {};
+      this.athena = {};
+      this.login = null;
+    }
+    this.accountsLoaded = false;
+    this.accountsLoading = false;
+    this.permLoading = {};
+  }
+
   status: AwsStatus | null = $state(null);
   /** Set when `/aws/status` itself fails (404 = daemon predates the module). */
   statusError = $state('');
@@ -152,9 +187,12 @@ class AwsStore {
   // ── accounts ─────────────────────────────────────────────────────────────
 
   async loadAccounts(): Promise<void> {
+    const revision=this.accessRevision;
     this.accountsLoading = true;
     try {
-      this.accounts = await awsApi.listAccounts();
+      const accounts = await awsApi.listAccounts();
+      if(revision!==this.accessRevision)return;
+      this.accounts=accounts;
       this.accountsError = '';
       // Seed the permission cache from the rows (server caches 10 min).
       const next = { ...this.permissions };
@@ -178,10 +216,12 @@ class AwsStore {
   }
 
   async loadPermissions(id: Id, refresh = false): Promise<AwsPermissions | null> {
+    const revision=this.accessRevision;
     if (this.permLoading[id]) return this.permissions[id] ?? null;
     this.permLoading = { ...this.permLoading, [id]: true };
     try {
       const p = await awsApi.permissions(id, refresh);
+    if(revision!==this.accessRevision)return null;
       this.permissions = { ...this.permissions, [id]: p };
       return p;
     } catch {
@@ -225,7 +265,9 @@ class AwsStore {
   // ── sign in (aws sso login PTY) ──────────────────────────────────────────
 
   async beginLogin(accountId: Id, workspaceId: Id): Promise<void> {
+    const revision=this.accessRevision;
     const s = await awsApi.login(accountId, workspaceId);
+    if(revision!==this.accessRevision)return ;
     this.login = { accountId, sessionId: s.id };
   }
 
@@ -236,20 +278,26 @@ class AwsStore {
   // ── service caches ───────────────────────────────────────────────────────
 
   async loadS3Buckets(id: Id): Promise<S3Bucket[]> {
+    const revision=this.accessRevision;
     const r = await awsApi.s3Buckets(id);
+    if(revision!==this.accessRevision)return [];
     this.s3Buckets = { ...this.s3Buckets, [id]: r.buckets };
     return r.buckets;
   }
 
   async loadSqsQueues(id: Id, prefix = ''): Promise<SqsQueue[]> {
+    const revision=this.accessRevision;
     const r = await awsApi.sqsQueues(id, prefix);
+    if(revision!==this.accessRevision)return [];
     this.sqsQueues = { ...this.sqsQueues, [id]: r.queues };
     return r.queues;
   }
 
   async loadSqsAttrs(id: Id, url: string): Promise<SqsQueueAttributesResp | null> {
+    const revision=this.accessRevision;
     try {
       const a = await awsApi.sqsAttributes(id, url);
+    if(revision!==this.accessRevision)return null;
       this.sqsAttrs = { ...this.sqsAttrs, [url]: a };
       return a;
     } catch {
@@ -258,25 +306,33 @@ class AwsStore {
   }
 
   async loadEc2(id: Id, region: string, state?: string, q?: string): Promise<Ec2Instance[]> {
+    const revision=this.accessRevision;
     const r = await awsApi.ec2Instances(id, region || undefined, state, q);
+    if(revision!==this.accessRevision)return [];
     this.ec2 = { ...this.ec2, [`${id}:${region}`]: r.instances };
     return r.instances;
   }
 
   async loadEks(id: Id, region: string): Promise<EksClusterSummary[]> {
+    const revision=this.accessRevision;
     const r = await awsApi.eksClusters(id, region || undefined);
+    if(revision!==this.accessRevision)return [];
     this.eks = { ...this.eks, [`${id}:${region}`]: r.clusters };
     return r.clusters;
   }
 
   async loadRds(id: Id, region: string): Promise<RdsInstance[]> {
+    const revision=this.accessRevision;
     const r = await awsApi.rdsInstances(id, region || undefined);
+    if(revision!==this.accessRevision)return [];
     this.rds = { ...this.rds, [`${id}:${region}`]: r.instances };
     return r.instances;
   }
 
   async loadAthenaCatalog(id: Id): Promise<AthenaCatalog> {
+    const revision=this.accessRevision;
     const [wg, dbs] = await Promise.all([awsApi.athenaWorkgroups(id), awsApi.athenaDatabases(id)]);
+    if(revision!==this.accessRevision)return {workgroups:[],databases:[],tables:{}};
     const cat: AthenaCatalog = {
       workgroups: wg.workgroups,
       databases: dbs.databases,
@@ -287,7 +343,9 @@ class AwsStore {
   }
 
   async loadAthenaTables(id: Id, database: string): Promise<AthenaTable[]> {
+    const revision=this.accessRevision;
     const r = await awsApi.athenaTables(id, database);
+    if(revision!==this.accessRevision)return [];
     const cur = this.athena[id] ?? { workgroups: [], databases: [], tables: {} };
     this.athena = {
       ...this.athena,
@@ -311,3 +369,4 @@ class AwsStore {
 }
 
 export const aws = new AwsStore();
+resourceAccess.subscribe(change=>aws.onAccessChange(change));

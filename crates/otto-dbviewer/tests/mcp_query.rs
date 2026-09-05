@@ -79,7 +79,7 @@ async fn seed_ws(pool: &SqlitePool) -> Id {
 }
 
 async fn seed_conn(pool: &SqlitePool, ws: Option<Id>, user: &Id, kind: ConnectionKind) -> Id {
-    ConnectionsRepo::new(pool.clone())
+    let conn = ConnectionsRepo::new(pool.clone())
         .create(NewConnection {
             workspace_id: ws,
             name: "t".into(),
@@ -94,8 +94,14 @@ async fn seed_conn(pool: &SqlitePool, ws: Option<Id>, user: &Id, kind: Connectio
             created_by: user.clone(),
         })
         .await
-        .expect("seed connection")
-        .id
+        .expect("seed connection");
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(pool.clone());
+    let mut policy = repo.get_policy(otto_core::access::ResourceKind::Connection, &conn.id).await.unwrap();
+    let revision = policy.revision;
+    policy.mode = otto_core::access::AccessMode::Legacy;
+    policy.rules.clear();
+    repo.put_policy(&policy, revision, &otto_core::access::AccessActor { real_user_id: user.clone(), effective_user_id: None }).await.unwrap();
+    conn.id
 }
 
 fn service(pool: &SqlitePool) -> DbViewerService {

@@ -11,6 +11,11 @@
   import DiagramView from './DiagramView.svelte';
   import Dashboards from './Dashboards.svelte';
   import DbAssistantPanel from './DbAssistantPanel.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
+  import DatabaseChanges from './DatabaseChanges.svelte';
+  import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import ConnectionForm from '../connections/ConnectionForm.svelte';
   import ConnectionImportDialog from '../connections/ConnectionImportDialog.svelte';
   import SftpBrowser from '../connections/SftpBrowser.svelte';
@@ -151,6 +156,13 @@
     if (!c.section_id) return '';
     return sections.find((s) => s.id === c.section_id)?.name ?? '';
   }
+  $effect(()=>resourceAccess.subscribe(change=>{
+    if(change.type==='reset' && change.identity){connFormOpen=false;connImportOpen=false;editingConn=null;accessFor=null;sftpFor=null;changesOpen=false;}
+  }));
+  let changesOpen = $state(false);
+  let accessFor = $state<Connection | null>(null);
+  const connectionAccess = (c: Connection, operation: string, capability: 'view'|'edit'|'admin'='edit') => resourceAccess.can('connection',c.id,operation,'connections',capability);
+  $effect(() => { for (const c of [...database.connections,...database.otherConnections]) void resourceAccess.load('connection',c.id); });
   function connMenu(e: MouseEvent, c: Connection): void {
     const isDb = database.connections.some((x) => x.id === c.id);
     ctxMenu.show(e, [
@@ -159,15 +171,15 @@
       ...(isDb
         ? [
             { label: 'Open beside agents (split)', icon: 'split', action: () => openConnInAgents(c) },
-            { label: 'Open terminal client', icon: 'terminal', action: () => void openTerminal(c) },
+            ...(connectionAccess(c,'shell') ? [{ label: 'Open terminal client', icon: 'terminal', action: () => void openTerminal(c) }] : []),
           ]
-        : [{ label: 'Open terminal session', icon: 'terminal', action: () => void openTerminal(c) }]),
-      ...(c.kind === 'ssh'
+        : connectionAccess(c,'shell') ? [{ label: 'Open terminal session', icon: 'terminal', action: () => void openTerminal(c) }] : []),
+      ...(c.kind === 'ssh' && connectionAccess(c,'sftp_read','view')
         ? [{ label: 'Browse files (SFTP)', icon: 'folder', action: () => (sftpFor = c) }]
         : []),
       { separator: true },
-      { label: 'Edit', icon: 'edit', action: () => editConnection(c) },
-      { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) },
+      ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
+      ...(auth.isRoot || connectionAccess(c,'manage_access','admin') ? [{ label: 'Access', icon: 'key', action: () => {accessFor=c;} }] : []),
     ]);
   }
 
@@ -435,6 +447,7 @@
   }
 
   function newConnection(): void {
+    if(!auth.isRoot)return;
     editingConn = null;
     connFormOpen = true;
   }
@@ -767,8 +780,8 @@
         </button>
         <div class="head-btns">
           <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={13} /></button>
-          <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection"><Icon name="plus" size={13} /></button>
-          <button class="icon-btn" onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={13} /></button>
+          <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title="New connection"><Icon name="plus" size={13} /></button>
+          <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={13} /></button>
         </div>
       </div>
       <div class="conn-list" class:acc-collapsed={!connOpen}>
@@ -808,7 +821,7 @@
         <span class="grow"></span>
         <!-- Persistent "New connection" — visible on every side tab, not only
              inside the Connections tab body. -->
-        <button class="icon-btn" onclick={newConnectionFromStrip} title="New connection (SSH, database or custom CLI)" aria-label="New connection"><Icon name="plus" size={12} /></button>
+        <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title="New connection (SSH, database or custom CLI)" aria-label="New connection"><Icon name="plus" size={12} /></button>
         {#if database.sideTab === 'schema' && database.selectedConnId}
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
         {/if}
@@ -832,7 +845,7 @@
             <div class="list-empty">Open a connection to browse its schema.</div>
             <div class="side-empty-actions">
               <button class="btn small" onclick={() => database.setSideTab('connections')}>Browse connections</button>
-              <button class="btn small ghost" onclick={newConnection}>New connection</button>
+              <button class="btn small ghost" disabled={!auth.isRoot} onclick={newConnection}>New connection</button>
             </div>
           </div>
         {/if}
@@ -863,8 +876,8 @@
         body={database.connections.length === 0 && brokers.clusters.length === 0
           ? 'No database, Kafka, SSH or custom connections in this workspace yet.'
           : 'Choose a connection, Kafka cluster or SSH host on the left to open it here.'}
-        actionLabel={database.connections.length === 0 ? 'New connection' : 'Show connections'}
-        onaction={database.connections.length === 0 ? newConnection : showConnections}
+        actionLabel={database.connections.length === 0 && auth.isRoot ? 'New connection' : 'Show connections'}
+        onaction={database.connections.length === 0 && auth.isRoot ? newConnection : showConnections}
       />
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
@@ -948,15 +961,16 @@
           <Icon name={database.isProd ? 'zap' : 'key'} size={13} />
           <span>
             {#if database.isProd}
-              Production connection — writes &amp; schema changes require a typed confirmation.
+              Production connection — schema changes require an approved change. Other writes require permission and confirmation.
             {:else}
-              Read-only connection — writes &amp; schema changes require a typed confirmation.
+              Read-only connection — native privileges and access rules limit execution.
             {/if}
           </span>
         </div>
       {/if}
 
       <div class="main-tabs">
+        {#if ['mysql','postgres'].includes(database.connections.find(c=>c.id===database.selectedConnId)?.kind ?? '')}<button class="mt" onclick={()=>changesOpen=true}>Changes</button>{/if}
         {#each visibleTabs as t (t.id)}
           <button class="mt" class:active={database.mainTab === t.id} role="tab" aria-selected={database.mainTab === t.id} onclick={() => database.setMainTab(t.id)}>
             {t.label}
@@ -995,6 +1009,7 @@
            agent panel side-by-side, separated by a draggable, persisted divider. -->
       <div class="main-split" class:assist-open={database.assistOpen}>
         <div class="main-body">
+          {#key database.accessRevision}
           {#if database.mainTab === 'query'}
             <QueryEditor />
           {:else if database.mainTab === 'builder'}
@@ -1006,6 +1021,7 @@
           {:else}
             <Dashboards />
           {/if}
+          {/key}
         </div>
         {#if database.assistOpen}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1121,10 +1137,11 @@
       {#if envBadge(c)}<span class="env-badge mono" class:prod={isProdConn(c)}>{envBadge(c)}</span>{/if}
     </button>
     <div class="conn-actions">
-      <button class="icon-btn" aria-label="Edit connection" title="Edit" onclick={() => editConnection(c)}>
+      {#if auth.isRoot || connectionAccess(c,'manage_access','admin')}<button class="icon-btn" aria-label={`Access for ${c.name}`} title="Access" onclick={() => accessFor=c}><Icon name="key" size={11} /></button>{/if}
+      <button class="icon-btn" disabled={!connectionAccess(c,'configure','admin')} aria-label="Edit connection" title="Edit" onclick={() => editConnection(c)}>
         <Icon name="edit" size={11} />
       </button>
-      <button class="icon-btn" aria-label="Delete connection" title="Delete" onclick={() => deleteConnection(c)}>
+      <button class="icon-btn" disabled={!connectionAccess(c,'configure','admin')} aria-label="Delete connection" title="Delete" onclick={() => deleteConnection(c)}>
         <Icon name="trash" size={11} />
       </button>
     </div>
@@ -1193,9 +1210,9 @@
       <!-- New section / connection live here on tablet/desktop (the phone keeps
            them in the accordion header), so the tab strip never overflows. -->
       <button class="icon-btn" onclick={() => createSection(null)} aria-label="New section" title="New section"><Icon name="folder" size={12} /></button>
-      <button class="icon-btn" onclick={newConnection} aria-label="New connection" title="New connection (SSH, database or custom CLI)"><Icon name="plus" size={12} /></button>
+      <button class="icon-btn" disabled={!auth.isRoot} onclick={newConnection} aria-label="New connection" title="New connection (SSH, database or custom CLI)"><Icon name="plus" size={12} /></button>
       <button class="icon-btn" onclick={newCluster} aria-label="New Kafka cluster" title="New Kafka cluster"><Icon name="split" size={12} /></button>
-      <button class="icon-btn" onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={12} /></button>
+      <button class="icon-btn" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} aria-label="Import connections" title="Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster"><Icon name="arrowDown" size={12} /></button>
     {/if}
   </div>
   <!-- Type-filter chips: one tree, narrowed by connection type. -->
@@ -1216,7 +1233,7 @@
   {#if database.connections.length === 0 && database.otherConnections.length === 0 && brokers.clusters.length === 0 && sections.length === 0}
     <div class="conn-empty">
       No connections yet.
-      <button class="link" onclick={newConnection}>New connection →</button>
+      <button class="link" disabled={!auth.isRoot} onclick={newConnection}>New connection →</button>
     </div>
   {:else if connFilter.trim()}
     {#if connMatches.length === 0 && clusterMatches.length === 0}
@@ -1352,6 +1369,11 @@
     <SchemaTree />
   {/if}
 {/snippet}
+
+
+{#if changesOpen && database.selectedConnId}<Modal title="Database changes" width={1040} onclose={() => changesOpen=false}><DatabaseChanges connectionId={database.selectedConnId} node={database.activeDb} /></Modal>{/if}
+
+{#if accessFor}<Modal title={`Access · ${accessFor.name}`} width={820} onclose={() => accessFor=null}><ResourceAccess kind="connection" resourceId={accessFor.id} /></Modal>{/if}
 
 {#if connFormOpen}
   <ConnectionForm

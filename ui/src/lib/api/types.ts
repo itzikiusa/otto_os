@@ -7527,3 +7527,27 @@ export interface K8sHealthDigest {
   drift?: { namespace: string; workload: string; versions: string[] }[];
   thresholds?: Record<string, number>;
 }
+
+// Per-resource authorization: feature access, resource visibility, then operations.
+export type ResourceKind = 'connection' | 'mcp_server' | 'aws_account' | 'k8s_cluster';
+export type AccessMode = 'legacy' | 'enforced';
+export interface AccessRule {
+  id: Id; subject_kind: 'user' | 'group'; subject_id: Id; effect: 'allow' | 'deny';
+  operations: string[]; children: string[] | null; grantable_operations: string[];
+  credential_connection_id?: Id | null;
+}
+export interface AccessPolicy { kind: ResourceKind; resource_id: Id; mode: AccessMode; revision: number; rules: AccessRule[] }
+export interface AccessDecision { allowed: boolean; reason: string; matched_rule_ids: Id[]; mode: AccessMode }
+export interface EffectiveAccess { kind: ResourceKind; resource_id: Id; user_id: Id; child: string | null; mode: AccessMode; operations: Record<string, AccessDecision> }
+export interface AccessGroup { id: Id; name: string; description: string | null; created_at: string; updated_at: string }
+export interface AccessRole { id: Id; name: string; description: string | null; kind: ResourceKind; operations: string[]; grantable_operations: string[]; created_at: string; updated_at: string }
+export interface AccessSubjects { users: Pick<User, 'id' | 'username' | 'display_name'>[]; groups: AccessGroup[]; roles: AccessRole[] }
+export interface AccessPreview { token: string; revision: number; issues: string[]; changes: {user_id: Id; display_name: string; before: Record<string, AccessDecision>; after: Record<string, AccessDecision>; children: {child: string; before: Record<string, AccessDecision>; after: Record<string, AccessDecision>}[]}[] }
+
+// Independently reviewed database-change artifacts and durable target attempts.
+export type ChangeTarget = {connection_id:string;node:string};
+export type ChangeInput = {title:string;description:string;script:string;targets:ChangeTarget[]};
+export type DatabaseChange = ChangeInput & {id:string;author_id:string;real_author_id:string;revision:number;status:string;content_hash:string;executor_id:string|null;validation:unknown;approved_by:string|null;approved_real_by:string|null;approval_hash:string|null;cancellation_requested:boolean;created_at:string;updated_at:string};
+export type ChangeAttempt = {id:string;change_id:string;connection_id:string;node:string|null;state:string;executor_id:string;ordinal:number;summary:string|null;started_at:string|null;finished_at:string|null};
+export type ChangeEvent = {id:string;revision:number;action:string;actor_id:string;real_actor_id:string;data:unknown;created_at:string};
+export type ChangeDetail = {change:DatabaseChange;attempts:ChangeAttempt[];history:ChangeEvent[]};

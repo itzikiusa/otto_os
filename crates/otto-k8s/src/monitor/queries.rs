@@ -124,13 +124,13 @@ pub fn memory_between_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i
     )
 }
 
-/// Restart / churn counts per class → `(cluster_id, workload, pod, kind, class, n)`.
+/// Restart / churn counts per class → `(cluster_id, namespace, workload, pod, kind, class, n)`.
 pub fn restart_counts_sql(cluster_ids: &[String], ns: Option<&str>, window: Duration) -> String {
     format!(
-        "SELECT cluster_id, workload, pod, kind, class, count() AS n
+        "SELECT cluster_id, namespace, workload, pod, kind, class, count() AS n
          FROM k8s_events
          WHERE cluster_id IN ({cids}) AND kind IN ('restart', 'churn') AND {range}{ns}
-         GROUP BY cluster_id, workload, pod, kind, class",
+         GROUP BY cluster_id, namespace, workload, pod, kind, class",
         cids = in_list_owned(cluster_ids),
         range = ts_range(window.num_seconds(), 0),
         ns = ns_filter(ns),
@@ -158,17 +158,17 @@ pub fn request_rates_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i6
     )
 }
 
-/// Histogram bucket deltas per workload → `(cluster_id, workload, le, delta)`;
+/// Histogram bucket deltas per workload → `(cluster_id, namespace, workload, le, delta)`;
 /// p95 is derived in Rust ([`p95_from_buckets`]).
 pub fn latency_buckets_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
     format!(
-        "SELECT cluster_id, workload, le, sum(delta) AS delta
+        "SELECT cluster_id, namespace, workload, le, sum(delta) AS delta
          FROM (
-           SELECT cluster_id, workload, pod, labels['le'] AS le, labels, greatest(0, max(value) - min(value)) AS delta
+           SELECT cluster_id, namespace, workload, pod, labels['le'] AS le, labels, greatest(0, max(value) - min(value)) AS delta
            FROM k8s_samples
            WHERE cluster_id IN ({cids}) AND metric IN ({buckets}) AND {range}{ns}
-           GROUP BY cluster_id, workload, pod, labels
-         ) GROUP BY cluster_id, workload, le",
+           GROUP BY cluster_id, namespace, workload, pod, labels
+         ) GROUP BY cluster_id, namespace, workload, le",
         cids = in_list_owned(cluster_ids),
         buckets = in_list(&LATENCY_BUCKETS),
         range = ts_range(back_secs, until_secs),
@@ -176,18 +176,18 @@ pub fn latency_buckets_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: 
     )
 }
 
-/// Mean latency fallback (`_sum` / `_count` deltas) → `(cluster_id, workload, avg_ms)`.
+/// Mean latency fallback (`_sum` / `_count` deltas) → `(cluster_id, namespace, workload, avg_ms)`.
 pub fn latency_avg_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
     format!(
-        "SELECT cluster_id, workload,
+        "SELECT cluster_id, namespace, workload,
                 if(sumIf(delta, is_count) > 0, 1000 * sumIf(delta, NOT is_count) / sumIf(delta, is_count), 0) AS avg_ms
          FROM (
-           SELECT cluster_id, workload, pod, labels, metric IN ({counts}) AS is_count,
+           SELECT cluster_id, namespace, workload, pod, labels, metric IN ({counts}) AS is_count,
                   greatest(0, max(value) - min(value)) AS delta
            FROM k8s_samples
            WHERE cluster_id IN ({cids}) AND metric IN ({sums}, {counts}) AND {range}{ns}
-           GROUP BY cluster_id, workload, pod, labels, metric
-         ) GROUP BY cluster_id, workload",
+           GROUP BY cluster_id, namespace, workload, pod, labels, metric
+         ) GROUP BY cluster_id, namespace, workload",
         counts = in_list(&LATENCY_COUNTS),
         sums = in_list(&LATENCY_SUMS),
         cids = in_list_owned(cluster_ids),
@@ -196,14 +196,14 @@ pub fn latency_avg_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64,
     )
 }
 
-/// Latest `version` label per pod → `(cluster_id, workload, version)` rows
+/// Latest `version` label per pod → `(cluster_id, namespace, workload, version)` rows
 /// (one per pod); drift = workloads with >1 distinct version.
 pub fn versions_sql(cluster_ids: &[String], ns: Option<&str>, lookback_secs: i64) -> String {
     format!(
-        "SELECT cluster_id, workload, pod, argMax(labels['version'], ts) AS version
+        "SELECT cluster_id, namespace, workload, pod, argMax(labels['version'], ts) AS version
          FROM k8s_samples
          WHERE cluster_id IN ({cids}) AND labels['version'] != '' AND {range}{ns}
-         GROUP BY cluster_id, workload, pod",
+         GROUP BY cluster_id, namespace, workload, pod",
         cids = in_list_owned(cluster_ids),
         range = ts_range(lookback_secs, 0),
         ns = ns_filter(ns),

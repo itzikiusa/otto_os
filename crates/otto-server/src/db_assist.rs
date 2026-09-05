@@ -192,6 +192,7 @@ pub async fn assist(
         .or_else(|| req.workspace_id.clone())
         .ok_or_else(|| ApiError(Error::Invalid("a workspace_id is required".into())))?;
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+    otto_state::GrantsRepo::new(ctx.pool.clone()).check_global(&user,otto_core::domain::Feature::Agents,otto_core::domain::Capability::Edit,"DB Assistant requires permission to run host agents").await?;
     let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
     let engine = Engine::from_kind(conn.kind)
         .ok_or_else(|| ApiError(Error::Invalid(format!("{} is not a browsable database", conn.name))))?;
@@ -199,6 +200,15 @@ pub async fn assist(
     // Resume an existing assist (same dir / key / session / provider / node) or
     // mint a fresh one.
     let resumed = req.assist_id.as_ref().and_then(|aid| lookup(&ctx, aid));
+    if let Some(entry)=&resumed {
+        if entry.user_id != user.id || entry.connection_id != conn_id || entry.workspace_id != ws_id
+            || req.node.as_ref().is_some_and(|node| Some(node) != entry.node.as_ref()) {
+            return Err(ApiError(Error::NotFound("DB assistant".into())));
+        }
+        let session=ctx.manager.get(&entry.session_id).await?;
+        crate::auth::require_session_owner_or_admin(&ctx,&user,&session).await?;
+    }
+
     let assist_id = match &resumed {
         Some(_) => req.assist_id.clone().expect("resumed implies assist_id present"),
         None => otto_core::new_id(),
@@ -220,6 +230,7 @@ pub async fn assist(
         None => resolve_provider(&ctx, &ws, req.provider.as_deref()).await,
     };
     let node = req.node.clone().or_else(|| resumed.as_ref().and_then(|r| r.node.clone()));
+    ctx.db_explorer.authorize(&conn_id,&user.id,node.as_deref(),"db_query").await?;
     let mode = normalize_mode(req.mode.as_deref());
 
     // Seed the working dir: SCHEMA.md (RC2 — the full schema), CONTEXT.md, the `q`
@@ -229,7 +240,7 @@ pub async fn assist(
     }
     let schema_md = ctx
         .db_explorer
-        .schema_context(&conn_id, node.as_deref())
+        .schema_context(&conn_id, &user.id, node.as_deref())
         .await
         .unwrap_or_else(|e| format!("(schema unavailable — use ./q to introspect: {e})"));
     let active_db = node_label(node.as_deref());
@@ -266,7 +277,7 @@ pub async fn assist(
     );
     let prompt = crate::modules::compose_draft_prompt(&skill, &base);
     let meta = serde_json::json!({
-        "source": "db_assist", "assist_id": assist_id, "connection_id": conn_id,
+        "source": "db_assist", "assist_id": assist_id, "connection_id": conn_id, "resource_node": node,
     });
 
     // Surface the session the MOMENT it exists (turn start) so the Database page
@@ -358,9 +369,13 @@ pub async fn summary(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<SummaryResp>> {
     let entry = lookup(&ctx, &aid)
-        .filter(|e| e.connection_id == conn_id)
+        .filter(|e| e.connection_id == conn_id && e.user_id == user.id)
         .ok_or_else(|| ApiError(Error::NotFound(format!("db assist {aid}"))))?;
     crate::auth::require_ws_role(&ctx, &user, &entry.workspace_id, WorkspaceRole::Editor).await?;
+    otto_state::GrantsRepo::new(ctx.pool.clone()).check_global(&user,otto_core::domain::Feature::Agents,otto_core::domain::Capability::Edit,"DB Assistant requires permission to run host agents").await?;
+    ctx.db_explorer.authorize(&conn_id,&user.id,entry.node.as_deref(),"db_query").await?;
+    let session=ctx.manager.get(&entry.session_id).await?;
+    crate::auth::require_session_owner_or_admin(&ctx,&user,&session).await?;
     let ws = ctx.workspaces.get(&entry.workspace_id).await.map_err(ApiError)?;
 
     let dir_str = entry.dir.to_string_lossy().to_string();
@@ -370,7 +385,7 @@ pub async fn summary(
     let _ = tokio::fs::remove_file(&summary_path).await;
     let prompt = summary_prompt();
     let meta = serde_json::json!({
-        "source": "db_assist", "assist_id": aid, "connection_id": conn_id,
+        "source": "db_assist", "assist_id": aid, "connection_id": conn_id, "resource_node": entry.node,
     });
     let (raw, _sid) = crate::agent_session::run_session_turn(
         &ctx,
@@ -406,7 +421,7 @@ pub async fn close(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Value>> {
     let entry = lookup(&ctx, &aid)
-        .filter(|e| e.connection_id == conn_id)
+        .filter(|e| e.connection_id == conn_id && e.user_id == user.id)
         .ok_or_else(|| ApiError(Error::NotFound(format!("db assist {aid}"))))?;
     crate::auth::require_ws_role(&ctx, &user, &entry.workspace_id, WorkspaceRole::Editor).await?;
 

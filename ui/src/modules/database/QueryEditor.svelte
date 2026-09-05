@@ -7,6 +7,9 @@
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import ResultsGrid from './ResultsGrid.svelte';
   import PlanView from './PlanView.svelte';
+  import { databaseAccessChild } from '../../lib/access-options';
+  import { resourceAccess } from '../../lib/stores/resource-access.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { database, ROW_LIMIT_ALL, type QueryTab } from '../../lib/stores/database.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -262,6 +265,7 @@
   // tab's text is never overwritten by the rendered SQL). Shared by Run
   // (selection / statement-at-cursor) and Run all (the whole buffer as a batch).
   function execBase(base: string): void {
+    if (!canQuery) return;
     if (!base.trim()) {
       void database.runQuery();
       return;
@@ -290,7 +294,10 @@
     void database.runQuery(finalSql, undefined, { transient: true });
   }
 
+  const canQuery = $derived(!!database.selectedConnId && ['db_query','db_data','db_schema'].some(op=>resourceAccess.can('connection',database.selectedConnId!,op,'database','edit',databaseAccessChild(database.activeDb))));
+  $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,databaseAccessChild(database.activeDb));});
   function run(): void {
+    if (!canQuery) return;
     // While a query is running, ⌘↵ (and the editor's submit) must NOT silently
     // abort-and-restart — stopping is an explicit act (the Stop button / Esc).
     if (tab.running) return;
@@ -316,6 +323,7 @@
   // returns one result set per statement — the grid shows a result switcher).
   const stmtCount = $derived(countStatements(tab.statement, splitMode));
   function runAll(): void {
+    if (!canQuery) return;
     execBase(tab.statement);
   }
 
@@ -694,7 +702,7 @@
       <button
         class="btn small primary"
         onclick={run}
-        disabled={!database.selectedConnId}
+        disabled={!canQuery}
         title={isMongoshScript
           ? 'Run the WHOLE script through mongosh — a script is indivisible, so Run never sends a single ;-delimited fragment (⌘↵)'
           : 'Run the selection, else the statement under the cursor (⌘↵)'}
@@ -707,7 +715,7 @@
         <button
           class="btn small"
           onclick={runAll}
-          disabled={!database.selectedConnId}
+          disabled={!canQuery}
           title="Run all {stmtCount} statements as one batch — one result set per statement (⇧⌘↵)"
         >
           <Icon name="play" size={12} />
@@ -740,8 +748,8 @@
       class="btn small ghost"
       class:on={database.assistOpen && database.assistMode === 'ask'}
       onclick={() => database.openAssist('ask')}
-      disabled={!database.selectedConnId}
-      title="Ask an agent anything about this database — opens the DB Assistant beside the editor"
+      disabled={!canQuery || !auth.can('agents','edit')}
+      title="Requires host agent access and query permission — opens the DB Assistant beside the editor"
     >
       <Icon name="comment" size={11} /><span class="btn-label">Ask AI</span>
     </button>
@@ -749,8 +757,8 @@
       class="btn small ghost"
       class:on={database.assistOpen && database.assistMode === 'nl'}
       onclick={() => database.openAssist('nl')}
-      disabled={!database.selectedConnId}
-      title="Describe what you want in plain English — the DB Assistant agent drafts a query you can insert or run"
+      disabled={!canQuery || !auth.can('agents','edit')}
+      title="Requires host agent access and query permission — the DB Assistant drafts a query you can insert or run"
     >
       <Icon name="comment" size={11} /><span class="btn-label">Ask in English</span>
     </button>

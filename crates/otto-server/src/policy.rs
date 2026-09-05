@@ -178,8 +178,15 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/workspaces/{id}/members" {
         return Exempt;
     }
+    if p == "/database-changes" || p == "/database-changes/{id}"
+        || ["validate","submit","approve","reject","execute","cancel","reconcile","executors"].iter().any(|action| p == format!("/database-changes/{{id}}/{action}")) {
+        return Require(Database, View);
+    }
     if p == "/mcp-servers/{id}" || p == "/workspaces/{id}/mcp-servers" {
-        return Exempt;
+        return Require(Mcp, if get { View } else { Admin });
+    }
+    if p == "/mcp/gateway/tools" || p == "/mcp/gateway/invoke" {
+        return Require(Mcp, View);
     }
 
     // ----------------------------------------------------------------------
@@ -280,6 +287,15 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // DELETE (close) are all writes ⇒ Edit.
     if p.starts_with("/connections/{id}/db/assist") {
         return Require(Connections, Edit);
+    }
+
+    // Resource management handlers resolve the resource and enforce its page,
+    // workspace and management operation themselves. No prefix-wide exemption.
+    if matches!(p, "/access/groups" | "/access/groups/{id}" | "/access/groups/{id}/members" | "/access/groups/{id}/members/{uid}" | "/access/roles" | "/access/roles/{id}") {
+        return Require(Users, Admin);
+    }
+    if matches!(p, "/access/{kind}/{id}" | "/access/{kind}/{id}/subjects" | "/access/{kind}/{id}/capabilities" | "/access/{kind}/{id}/effective" | "/access/{kind}/{id}/preview") {
+        return Exempt;
     }
 
     // ---- Database (DB Explorer over a connection + saved queries/dashboards) --
@@ -611,6 +627,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         // network-exposed) HTTP transport. Gate it tightest, before the
         // read/posture split below.
         if p == "/mcp/tokens" || p == "/mcp/tokens/{id}" {
+            return Require(Mcp, Admin);
+        }
+        if p == "/mcp/policies" || p.starts_with("/mcp/policies/") {
             return Require(Mcp, Admin);
         }
         // Posture-changing routes → Admin: outward-server config, policy
@@ -1027,11 +1046,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     // `status` = CLI presence/version + install-job state; `discover` = the
     // profile names found in ~/.aws/config (never secrets); `regions` = static.
-    if matches!(p, "/aws/status" | "/aws/discover" | "/aws/regions") {
+    if matches!(p, "/aws/status" | "/aws/regions") {
         return Require(Aws, View);
     }
     // Installing the CLI writes to the machine — admin only.
-    if p == "/aws/install" {
+    if matches!(p, "/aws/install" | "/aws/discover") {
         return Require(Aws, Admin);
     }
 
@@ -1058,12 +1077,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/k8s/clusters/import" {
         return Require(Kubernetes, Admin);
     }
-    // Monitoring dashboard: cross-cluster overview is a read; the per-cluster
+    // Monitoring dashboard: the cross-cluster overview is a read; the per-cluster
     // `/monitor*` routes fall under the `{id}/` rule above (GET View, else Edit).
-    if matches!(p, "/k8s/status" | "/k8s/discover" | "/k8s/monitor/overview") {
+    if matches!(p, "/k8s/status" | "/k8s/monitor/overview") {
         return Require(Kubernetes, View);
     }
-    if p == "/k8s/install" {
+    if matches!(p, "/k8s/install" | "/k8s/discover") {
         return Require(Kubernetes, Admin);
     }
 
@@ -1475,9 +1494,9 @@ mod tests {
         assert_eq!(pol(Method::PUT, "/api/v1/workspaces/{id}/members"), Exempt);
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{id}/mcp-servers"),
-            Exempt
+            Require(Mcp, Admin)
         );
-        assert_eq!(pol(Method::DELETE, "/api/v1/mcp-servers/{id}"), Exempt);
+        assert_eq!(pol(Method::DELETE, "/api/v1/mcp-servers/{id}"), Require(Mcp, Admin));
     }
 
     #[test]
@@ -1490,10 +1509,10 @@ mod tests {
         assert_eq!(pol(Method::GET, "/api/v1/mcp/servers/{id}/tools"), Require(Mcp, View));
         assert_eq!(pol(Method::GET, "/api/v1/mcp/audit"), Require(Mcp, View));
         assert_eq!(pol(Method::GET, "/api/v1/mcp/stats"), Require(Mcp, View));
-        assert_eq!(pol(Method::GET, "/api/v1/mcp/policies"), Require(Mcp, View));
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/policies"), Require(Mcp, Admin));
         // Non-mutating previews (POST but read-only) = View.
-        assert_eq!(pol(Method::GET, "/api/v1/mcp/policies/export"), Require(Mcp, View));
-        assert_eq!(pol(Method::POST, "/api/v1/mcp/policies/evaluate"), Require(Mcp, View));
+        assert_eq!(pol(Method::GET, "/api/v1/mcp/policies/export"), Require(Mcp, Admin));
+        assert_eq!(pol(Method::POST, "/api/v1/mcp/policies/evaluate"), Require(Mcp, Admin));
         // Mutations / invoke = Edit.
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{wid}/mcp/servers"),
@@ -1515,7 +1534,7 @@ mod tests {
             Require(Mcp, Admin)
         );
         // The legacy config CRUD is still Exempt (workspace-role axis only).
-        assert_eq!(pol(Method::GET, "/api/v1/mcp-servers/{id}"), Exempt);
+        assert_eq!(pol(Method::GET, "/api/v1/mcp-servers/{id}"), Require(Mcp, View));
     }
 
     #[test]

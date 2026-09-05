@@ -2,6 +2,7 @@
 //!
 //! Repositories map rows to `otto_core::domain` structs.
 
+pub mod database_changes;
 pub mod activity;
 pub mod api_client;
 pub mod audit;
@@ -45,6 +46,7 @@ pub mod finding_events;
 pub mod proof;
 pub mod provider_models;
 pub mod repo_rules;
+pub mod resource_access;
 pub mod review_findings;
 pub mod review_proof_packs;
 pub mod reviews;
@@ -141,6 +143,7 @@ pub use product_refinement::{
 };
 pub use finding_events::FindingEventsRepo;
 pub use repo_rules::RepoRulesRepo;
+pub use resource_access::ResourceAccessRepo;
 pub use review_findings::{
     compute_fingerprint, FindingPatch, FindingState, NewFinding, ReviewFindingRow,
     ReviewFindingsRepo,

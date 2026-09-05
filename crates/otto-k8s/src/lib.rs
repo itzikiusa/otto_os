@@ -26,6 +26,7 @@ use otto_core::secrets::SecretStore;
 use otto_state::SqlitePool;
 use tokio::sync::broadcast;
 
+pub mod access;
 pub mod actions;
 pub mod cli;
 pub mod clusters;

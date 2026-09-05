@@ -279,7 +279,7 @@
             <span class="tdot" style="background: {classColor(e.class)}"></span>
             <span class="tts mono">{fmtTs(e.ts)}</span>
             <span class="tclass" style="color: {e.kind === 'version' ? 'var(--status-working)' : classColor(e.class)}">{e.kind === 'k8s_event' ? e.reason : e.kind === 'version' ? 'New version' : classLabel(e.class)}</span>
-            <span class="twl"><b>{e.workload || e.pod}</b>{#if e.pod && e.pod !== e.workload}<span class="dim"> · {e.pod}</span>{/if}</span>
+            <span class="twl"><span class="dim">{e.namespace}/</span><b>{e.workload || e.pod}</b>{#if e.pod && e.pod !== e.workload}<span class="dim"> · {e.pod}</span>{/if}</span>
             <span class="tmsg dim">{eventMsg(e)}</span>
           </li>
         {/each}
