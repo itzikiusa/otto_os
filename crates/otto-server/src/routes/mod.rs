@@ -42,6 +42,7 @@ pub mod settings;
 pub mod share;
 pub mod snips;
 pub mod swarm_ingest;
+pub mod slash_commands;
 pub mod transcript;
 pub mod usage;
 pub mod users;
@@ -425,6 +426,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/sessions/{id}/transcript/touch",
             post(transcript::touch_transcript),
+        )
+        .route(
+            "/sessions/{id}/slash-commands",
+            get(slash_commands::slash_commands),
         )
         .route(
             "/sessions/{id}/transcript/images/{img_id}",

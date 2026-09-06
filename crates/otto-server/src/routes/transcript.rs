@@ -300,7 +300,7 @@ fn parse_before(s: Option<&str>) -> Result<Option<usize>, ApiError> {
 }
 
 /// Load a session and apply the standard per-session gate.
-async fn session_gate(ctx: &ServerCtx, user: &otto_core::domain::User, id: &Id, min: WorkspaceRole) -> Result<Session, ApiError> {
+pub(crate) async fn session_gate(ctx: &ServerCtx, user: &otto_core::domain::User, id: &Id, min: WorkspaceRole) -> Result<Session, ApiError> {
     let session = ctx.manager.get(id).await.map_err(ApiError)?;
     require_ws_role(ctx, user, &session.workspace_id, min).await?;
     require_session_owner_or_admin(ctx, user, &session).await?;

@@ -19,6 +19,25 @@ if (mockEnabled()) {
   if (!getToken()) setToken('mock-token');
 }
 
+// OS text prediction / autocorrect (the macOS WebKit candidate bubble) is
+// noise in an app where people type paths, flags, identifiers and slash
+// commands — switch it off on every text field as it gains focus, so new
+// inputs anywhere in the app inherit the rule without per-field attributes.
+document.addEventListener(
+  'focusin',
+  (e) => {
+    const el = e.target;
+    if (!(el instanceof HTMLTextAreaElement) && !(el instanceof HTMLInputElement)) return;
+    if (el instanceof HTMLInputElement && !['text', 'search', 'url', 'email', ''].includes(el.type)) return;
+    if (el.dataset.keepAutocorrect === 'true') return;
+    el.setAttribute('autocorrect', 'off');
+    el.setAttribute('autocapitalize', 'off');
+    el.spellcheck = false;
+    if (!el.getAttribute('autocomplete')) el.setAttribute('autocomplete', 'off');
+  },
+  true,
+);
+
 const app = mount(App, {
   target: document.getElementById('app')!,
 });
