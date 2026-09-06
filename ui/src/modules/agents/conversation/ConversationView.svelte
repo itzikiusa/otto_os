@@ -92,6 +92,35 @@
   const showSystem = $derived(transcript.showSystem);
   // The session is alive (has a PTY) — the tail is worth keeping warm.
   const alive = $derived(!!sessionId && status !== 'exited' && status !== 'reconnectable');
+  /** Suspended (PTY freed, still resumable via the provider id) — the state a
+   *  session lands in ~8 min after its chat was left (idle-suspend sweep). */
+  const suspended = $derived(
+    !!sessionId &&
+      status === 'reconnectable' &&
+      ws.sessions.find((s) => s.id === sessionId)?.provider_session_id != null,
+  );
+
+  // ---- parity with the terminal: opening the chat RESUMES a suspended session --
+  // Reopening a terminal auto-resumes (the WS attach calls `ensure_live`);
+  // a chat never attached, so a session you stepped away from for a few
+  // minutes came back as a dead "Resume" banner. The per-session touch now
+  // does the same `ensure_live`, so send one on mount while suspended (once —
+  // the status flip to working/idle re-runs nothing here; the `alive` effect
+  // below takes over and keeps the tail armed).
+  $effect(() => {
+    if (!suspended) return;
+    const c = conv;
+    untrack(() => void c.touch());
+  });
+  // Remount over an already-loaded conversation: the tail may have lapsed
+  // while the view was away (a fresh tail starts at the file's END, so records
+  // written in the gap never arrive as deltas) — re-read the newest page.
+  $effect(() => {
+    const c = conv;
+    untrack(() => {
+      if (c.transcript != null && !c.loading) void c.resync();
+    });
+  });
 
   // ---- liveness: this VIEW keeps the server tail armed -----------------------
   // The tail stops a few minutes after the last touch, so an open chat pings

@@ -401,6 +401,20 @@ pub async fn touch_transcript(
     // An open chat is a viewer: hold the session against the idle-suspend
     // sweep (it mounts no terminal, so this ping is its only attachment).
     ctx.manager.note_view(&id);
+    // Parity with a terminal attach: a suspended-but-resumable session is
+    // resumed (`ensure_live`, same call the `/ws/term` attach makes). Without
+    // this, stepping away from a chat for a few minutes left the session
+    // suspended and the chat dead on return, while a terminal tab came back
+    // live. Errors (archived, spawn failure) are logged; the ping still
+    // answers 204 — the view keeps retrying every minute.
+    if !ctx.manager.is_live(&id)
+        && session.status == SessionStatus::Reconnectable
+        && session.provider_session_id.is_some()
+    {
+        if let Err(e) = ctx.manager.ensure_live(&id).await {
+            tracing::warn!(session = %id, "transcript touch: resume failed: {e}");
+        }
+    }
     if !ctx.manager.is_live(&id) {
         return Ok(StatusCode::NO_CONTENT);
     }
