@@ -460,6 +460,16 @@ pub enum Event {
         workspace_id: Id,
         session_id: Id,
         text: String,
+        /// Text currently typed (unsent) in the terminal's input box — the
+        /// chat shows it so a message sent from the chat is known to be
+        /// appended to it (the CLI submits both as ONE message).
+        input: String,
+        /// The terminal's status rows below the input box (the CLI's own
+        /// status line: model, context %, plan limits, mode …), joined by
+        /// " · ".
+        status: String,
+        /// Git branch of the session cwd (from `.git/HEAD`), if any.
+        branch: Option<String>,
     },
     /// Conversation view: the transcript fold found a new artifact (a written
     /// file, PR link, image …). `artifact` is the serialized

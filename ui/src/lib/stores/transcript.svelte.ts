@@ -84,6 +84,12 @@ export class Conversation {
   /** The in-progress response read off the terminal screen (`transcript_live`);
    *  "" when nothing is streaming. Rendered as a draft under the last turn. */
   liveDraft = $state('');
+  /** Unsent text in the terminal's input box (`transcript_live.input`). */
+  liveInput = $state('');
+  /** The CLI's status rows under the input box (`transcript_live.status`). */
+  liveStatus = $state('');
+  /** Git branch of the session cwd (`transcript_live.branch`). */
+  liveBranch: string | null = $state(null);
   /** Bumped on every `transcript_appended` — the draft is hidden until the
    *  screen text moves past what the folded turn already shows. */
   lastAppendAt = $state(0);
@@ -190,10 +196,14 @@ export class Conversation {
     this.lastAppendAt = Date.now();
   }
 
-  /** Apply a `transcript_live` frame (the screen draft). */
-  applyLive(text: string): void {
-    if (text === this.liveDraft) return;
-    this.liveDraft = text;
+  /** Apply a `transcript_live` frame (the screen draft + input + status). */
+  applyLive(text: string, input = '', status = '', branch: string | null = null): void {
+    // A hidden tab never paints; skip the churn (frames are state, not history).
+    if (typeof document !== 'undefined' && document.hidden) return;
+    if (text !== this.liveDraft) this.liveDraft = text;
+    if (input !== this.liveInput) this.liveInput = input;
+    if (status !== this.liveStatus) this.liveStatus = status;
+    if (branch !== this.liveBranch) this.liveBranch = branch;
   }
 
   /** Keep the server-side tail armed while this conversation is on screen
@@ -282,6 +292,7 @@ export type SessionViewMode = 'terminal' | 'chat' | 'split';
 const LS_SHOW_SYSTEM = 'otto_conv_show_system';
 const LS_VIEW_PREFIX = 'otto_session_view:';
 const LS_SPLIT_PREFIX = 'otto_session_split_frac:';
+const LS_DRAFT_PREFIX = 'otto_chat_draft:';
 
 function lsGet(k: string): string | null {
   try {
@@ -374,7 +385,7 @@ class TranscriptStore {
         return true;
       }
       case 'transcript_live': {
-        this.convs.get(`s:${ev.session_id}`)?.applyLive(ev.text);
+        this.convs.get(`s:${ev.session_id}`)?.applyLive(ev.text, ev.input, ev.status, ev.branch);
         return true;
       }
       case 'artifact_added': {
@@ -387,6 +398,28 @@ class TranscriptStore {
         return true;
       default:
         return false;
+    }
+  }
+
+  /** Unsent composer text per session — survives leaving the page and coming
+   *  back (in-memory, mirrored to sessionStorage so a reload keeps it too). */
+  private drafts: Record<string, string> = $state({});
+  draft(sessionId: string): string {
+    const mem = this.drafts[sessionId];
+    if (mem !== undefined) return mem;
+    try {
+      return sessionStorage.getItem(LS_DRAFT_PREFIX + sessionId) ?? '';
+    } catch {
+      return '';
+    }
+  }
+  setDraft(sessionId: string, text: string): void {
+    this.drafts[sessionId] = text;
+    try {
+      if (text) sessionStorage.setItem(LS_DRAFT_PREFIX + sessionId, text);
+      else sessionStorage.removeItem(LS_DRAFT_PREFIX + sessionId);
+    } catch {
+      /* private mode / quota — the in-memory copy still works within the session */
     }
   }
 

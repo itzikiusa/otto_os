@@ -771,7 +771,7 @@ Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
 
 ```json
 {"type":"transcript_appended","workspace_id":"…","session_id":"…","cursor":"<record_index>","turns":[{…Turn…}]}
-{"type":"transcript_live","workspace_id":"…","session_id":"…","text":"⏺ Still exploring…"}
+{"type":"transcript_live","workspace_id":"…","session_id":"…","text":"⏺ Still exploring…","input":"option 2","status":"~ | Fable 5.1 | ▓▓░░ 11%","branch":"main"}
 {"type":"artifact_added","workspace_id":"…","session_id":"…","artifact":{…Artifact…}}
 {"type":"history_index_progress","workspace_id":"…","scanned":120,"total":2705,"done":false}
 ```
@@ -790,7 +790,11 @@ Conversation view (`docs/design/conversation-view.md` §4.3). Emitted by
   streaming signal; pushed at most once per tail poll (700 ms) and only when
   the text changed. `text: ""` = nothing streaming. Clients show it as a draft
   under the last turn while the session is `working` and drop it once the
-  folded turn covers it. Session-family scoped.
+  folded turn covers it. `input` = unsent text in the terminal's input box
+  (the CLI appends a chat send to it and submits ONE message, so the chat shows
+  it as the prefix); `status` = the CLI's own status rows under the box (model,
+  context %, plan limits, mode …) joined by " · "; `branch` = the session cwd's
+  git branch from `.git/HEAD` (re-read every 10 s). Session-family scoped.
 - `artifact_added` — the fold found a new artifact (written file, PR link, image).
   Carries the full `Artifact`. Session-family scoped.
 - `history_index_progress` — a `POST /workspaces/{wid}/history/rescan` walk

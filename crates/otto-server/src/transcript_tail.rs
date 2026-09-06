@@ -157,7 +157,16 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
     let mut known_artifacts: HashSet<String> = folded.artifacts.iter().map(|a| a.id.clone()).collect();
     let mut tailer = Tailer::at(&path, Tailer::current_len(&path));
     let mut exited_since: Option<Instant> = None;
-    let mut last_draft = String::new();
+    let mut last_live: Option<ScreenParts> = None;
+    let mut last_branch_at = Instant::now() - BRANCH_EVERY;
+    let mut branch: Option<String> = None;
+    let cwd = PathBuf::from(
+        session
+            .meta
+            .get("nested_cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&session.cwd),
+    );
     loop {
         tokio::time::sleep(POLL).await;
         if !should_continue(&sid) {
@@ -175,14 +184,21 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
         // screen (plain rows) and pushed whenever it changes — one frame per
         // poll at most. Clients hide it once the folded turn lands.
         if let Some(h) = ctx.manager.live_handle(&sid) {
-            let text = live_draft(&h.screen_rows());
-            if text != last_draft {
-                last_draft = text.clone();
+            if last_branch_at.elapsed() >= BRANCH_EVERY {
+                last_branch_at = Instant::now();
+                branch = git_branch(&cwd);
+            }
+            let parts = screen_parts(&h.screen_rows());
+            if last_live.as_ref() != Some(&parts) {
                 let _ = ctx.events.send(Event::TranscriptLive {
                     workspace_id: wid.clone(),
                     session_id: sid.clone(),
-                    text,
+                    text: parts.draft.clone(),
+                    input: parts.input.clone(),
+                    status: parts.status.clone(),
+                    branch: branch.clone(),
                 });
+                last_live = Some(parts);
             }
         }
         let delta = match tailer.poll() {
@@ -246,6 +262,102 @@ async fn run(ctx: ServerCtx, session: Session, provider: Provider, path: PathBuf
                 crate::routes::transcript::register_work_artifact(&ctx, &session, a).await;
             }
         }
+    }
+}
+
+/// Re-read `.git/HEAD` this often (a file read, no subprocess).
+pub const BRANCH_EVERY: Duration = Duration::from_secs(10);
+
+/// Current branch of `cwd` from `.git/HEAD` (walking up to the repo root;
+/// worktrees' `.git` FILE is followed to its `gitdir`). Detached HEAD → the
+/// short sha. No git → None.
+pub fn git_branch(cwd: &Path) -> Option<String> {
+    let mut dir = Some(cwd);
+    let mut git_dir: Option<PathBuf> = None;
+    while let Some(d) = dir {
+        let g = d.join(".git");
+        if g.is_dir() {
+            git_dir = Some(g);
+            break;
+        }
+        if g.is_file() {
+            let s = std::fs::read_to_string(&g).ok()?;
+            let target = s.trim().strip_prefix("gitdir:")?.trim();
+            let p = PathBuf::from(target);
+            git_dir = Some(if p.is_absolute() { p } else { d.join(p) });
+            break;
+        }
+        dir = d.parent();
+    }
+    let head = std::fs::read_to_string(git_dir?.join("HEAD")).ok()?;
+    let head = head.trim();
+    Some(match head.strip_prefix("ref: refs/heads/") {
+        Some(b) => b.to_string(),
+        None => head.chars().take(8).collect(),
+    })
+}
+
+/// What the tail reads off the screen each poll.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScreenParts {
+    /// The in-progress response (see [`live_draft`]).
+    pub draft: String,
+    /// Unsent text in the input box.
+    pub input: String,
+    /// Status rows below the input box, joined by " · ".
+    pub status: String,
+}
+
+/// Split the screen into the response draft, the input box text and the
+/// status rows. Input rows start at the last `❯`/`│ >` row and run until the
+/// closing rule (or the first status-looking row); everything after is status.
+pub fn screen_parts(rows: &[String]) -> ScreenParts {
+    fn is_rule(r: &str) -> bool {
+        let t = r.trim();
+        t.len() >= 8 && t.chars().all(|c| matches!(c, '─' | '━' | '╌' | '-' | '═'))
+    }
+    fn is_input(r: &str) -> bool {
+        let t = r.trim_start();
+        t.starts_with('❯') || t.starts_with("│ >") || t.starts_with("│ ❯")
+    }
+    fn strip_prompt(r: &str) -> &str {
+        let t = r.trim_start();
+        t.trim_start_matches('│')
+            .trim_start()
+            .trim_start_matches(['❯', '>'])
+            .trim_end_matches('│')
+            .trim()
+    }
+    let draft = live_draft(rows);
+    let Some(i) = rows.iter().rposition(|r| is_input(r)) else {
+        return ScreenParts {
+            draft,
+            ..Default::default()
+        };
+    };
+    // Input: the prompt row plus continuation rows until a rule / box edge /
+    // blank row.
+    let mut input_lines = vec![strip_prompt(&rows[i]).to_string()];
+    let mut j = i + 1;
+    while j < rows.len() {
+        let r = &rows[j];
+        if is_rule(r) || r.trim().is_empty() || r.trim_start().starts_with('╰') {
+            break;
+        }
+        input_lines.push(strip_prompt(r).to_string());
+        j += 1;
+    }
+    let input = input_lines.join("\n").trim().to_string();
+    let status: Vec<String> = rows[j..]
+        .iter()
+        .map(|r| r.trim())
+        .filter(|r| !r.is_empty() && !is_rule(r) && !r.starts_with('╰'))
+        .map(|r| r.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    ScreenParts {
+        draft,
+        input,
+        status: status.join(" · "),
     }
 }
 
@@ -338,6 +450,41 @@ mod tests {
         assert_eq!(live_draft(&rows("> hi\n\n❯ ")), "");
         assert_eq!(live_draft(&rows("plain output\nmore")), "plain output\nmore");
         assert_eq!(live_draft(&[]), "");
+    }
+
+    #[test]
+    fn screen_parts_splits_input_and_status_rows() {
+        let screen = rows(
+            "> hi\n\n⏺ working\n\n────────────────────────────\n❯ option 2, other services   \n────────────────────────────\n  ~ | Fable 5.1 | ▓▓░░ 11%\n  -- INSERT --  ▶▶ bypass permissions on",
+        );
+        let p = screen_parts(&screen);
+        assert_eq!(p.draft, "⏺ working");
+        assert_eq!(p.input, "option 2, other services");
+        assert_eq!(p.status, "~ | Fable 5.1 | ▓▓░░ 11% · -- INSERT -- ▶▶ bypass permissions on");
+        // No input box → draft only.
+        let p = screen_parts(&rows("just text"));
+        assert_eq!(p.input, "");
+        assert_eq!(p.status, "");
+    }
+
+    #[test]
+    fn git_branch_reads_head_and_follows_worktree_gitdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/feat/x\n").unwrap();
+        let sub = repo.join("crates/a");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(git_branch(&sub).as_deref(), Some("feat/x"));
+        // Worktree: `.git` is a file pointing at the gitdir.
+        let wt = tmp.path().join("wt");
+        let gd = tmp.path().join("gitdir");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(&gd).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gd.display())).unwrap();
+        std::fs::write(gd.join("HEAD"), "0123456789abcdef\n").unwrap();
+        assert_eq!(git_branch(&wt).as_deref(), Some("01234567"));
+        assert_eq!(git_branch(tmp.path()), None);
     }
 
     #[test]

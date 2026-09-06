@@ -1243,6 +1243,12 @@ export type OttoEvent =
       workspace_id: Id;
       session_id: Id;
       text: string;
+      /** Unsent text in the terminal's input box (a chat send is appended to it → ONE message). */
+      input: string;
+      /** The CLI's own status rows under the input box (model, context %, limits, mode …), " · "-joined. */
+      status: string;
+      /** Git branch of the session cwd, if any. */
+      branch: string | null;
     }
   | {
       /** The transcript folder registered a new artifact (file / PR / image / …)

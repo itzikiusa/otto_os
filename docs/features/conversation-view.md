@@ -228,7 +228,7 @@ All routes are under `/api/v1`. RBAC: `Agents` **View** for every GET,
 | Event | Scope | Payload |
 |---|---|---|
 | `transcript_appended` | Session | `{ workspace_id, session_id, cursor, turns }` — ≤ 64 KB per frame, else the client re-fetches |
-| `transcript_live` | Session | `{ workspace_id, session_id, text }` — the in-progress response read off the PTY screen (≤ 16 KB), at most one frame per 700 ms poll and only on change; the chat renders it as a "Streaming from the terminal" draft while the session is `working` and hides it once the folded turn covers it |
+| `transcript_live` | Session | `{ workspace_id, session_id, text, input, status, branch }` — the in-progress response read off the PTY screen (≤ 16 KB), at most one frame per 700 ms poll and only on change; the chat renders it as a "Streaming from the terminal" draft while the session is `working` and hides it once the folded turn covers it |
 | `artifact_added` | Session | `{ workspace_id, session_id, artifact }` |
 | `history_index_progress` | Workspace | `{ workspace_id, scanned, total, done }` |
 | `tasks_updated` | Session | existing — carries the merged list incl. `source` / `nudge_pending` |
