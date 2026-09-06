@@ -85,8 +85,9 @@ path the moment its capture scan finds it) and for any transcript already under
 
 ### 4.1 The view toggle (Terminal · Chat · Split)
 
-Every agent session header has a segmented control. **Chat** is the default
-whenever the transcript resolves; otherwise **Terminal**. **Split** puts the chat
+Every agent session header has a segmented control. **Terminal** is the default
+for every session; **Chat** is opt-in (greyed-out empty state when no transcript
+resolves). **Split** puts the chat
 on the left and the live terminal on the right behind a draggable splitter
 (three columns when the right panel is open; below 1200 px it degrades to Chat
 with a "Terminal" tab). The choice is remembered per session

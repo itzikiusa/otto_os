@@ -76,6 +76,10 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript((id) => localStorage.setItem('otto_workspace', id as string), wsId);
   await page.goto(`/#/agents/${sessionId}`);
   await expect(page.locator('.pane-head', { hasText: 'ConvFixture' }).first()).toBeVisible({ timeout: 20_000 });
+  // Terminal is the default for every session (§5.1); the chat is opt-in, so
+  // every spec below switches to it explicitly (persisted per session).
+  await expect(page.locator('.pane-body[data-view="terminal"]')).toBeVisible({ timeout: 20_000 });
+  await page.locator('.view-seg button', { hasText: 'Chat' }).click();
 });
 
 test.afterEach(async () => {
@@ -120,8 +124,8 @@ test('sanitizer renders hostile markdown HTML inert (WebFetch output path)', asy
   expect(out.attrs).toContain('a.href=#frag');
 });
 
-test('chat is the default view and renders user + assistant turns from the transcript', async ({ page }) => {
-  // A resolvable transcript → Chat by default (§5.1).
+test('chat renders user + assistant turns from the transcript', async ({ page }) => {
+  // beforeEach asserted the Terminal default and switched to Chat (§5.1).
   await expect(page.locator('.pane-body[data-view="chat"]')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.view-seg button.active', { hasText: 'Chat' })).toBeVisible();
 
