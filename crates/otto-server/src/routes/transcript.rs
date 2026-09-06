@@ -387,14 +387,20 @@ pub async fn get_transcript(
 /// `POST /sessions/{id}/transcript/touch` — keep the live tail armed for a
 /// session whose conversation is open (the tail otherwise stops 5 min after
 /// the last `GET …/transcript`; clients ping this every minute while the view
-/// is mounted). Starts the tail when it is not running. `204`; a session with
-/// no transcript yet → `409` so the client keeps retrying the GET instead.
+/// is mounted), and count the caller as a VIEWER for the idle-suspend sweep
+/// (`VIEW_HOLD`): a chat mounts no terminal, so without this the daemon saw
+/// it as unattached and suspended the session under the user. Starts the tail
+/// when it is not running. `204`; a session with no transcript yet → `409` so
+/// the client keeps retrying the GET instead.
 pub async fn touch_transcript(
     AxPath(id): AxPath<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     let session = session_gate(&ctx, &user, &id, WorkspaceRole::Viewer).await?;
+    // An open chat is a viewer: hold the session against the idle-suspend
+    // sweep (it mounts no terminal, so this ping is its only attachment).
+    ctx.manager.note_view(&id);
     if !ctx.manager.is_live(&id) {
         return Ok(StatusCode::NO_CONTENT);
     }
