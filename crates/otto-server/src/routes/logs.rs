@@ -1,10 +1,14 @@
 //! `GET /api/v1/logs/daemon` — safe read access to Otto daemon logs.
+//! `POST /api/v1/client/errors` — the UI reports a fatal client-side error
+//! (see the handler) so it lands in the daemon log next to what the daemon
+//! was doing at that moment.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -319,4 +323,54 @@ mod tests {
         assert_eq!(logs.offset, 6);
         assert_eq!(logs.next_offset, 13);
     }
+}
+
+/// Body of `POST /client/errors`.
+#[derive(Debug, Deserialize)]
+pub struct ClientErrorReq {
+    /// Short classifier the UI assigns (`effect_loop`, `unhandled_rejection`, …).
+    pub kind: String,
+    pub message: String,
+    #[serde(default)]
+    pub stack: String,
+    /// The hash route that was on screen (`#/agents/<id>`), for correlation.
+    #[serde(default)]
+    pub route: String,
+    /// What the UI did about it (`reloaded`, `reload_suppressed`, `none`).
+    #[serde(default)]
+    pub action: String,
+}
+
+fn clip(s: &str, max: usize) -> String {
+    // Char-boundary safe: a stack from a minified bundle can be one huge line.
+    let mut out: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
+/// `POST /api/v1/client/errors` — 204. The UI's last-resort error hook (see
+/// `ui/src/main.ts`) posts here before it self-heals, so a fatal client-side
+/// failure — e.g. Svelte's `effect_update_depth_exceeded`, which aborts the
+/// reactive flush and leaves the whole shell frozen until a reload — is
+/// recorded in the daemon log with a timestamp, the user, the route and the
+/// (minified) stack, next to whatever the daemon was doing. Without this the
+/// only evidence was a devtools console the user usually did not have open.
+/// Any authenticated user may report; fields are clipped, never interpreted.
+pub async fn client_error(
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<ClientErrorReq>,
+) -> ApiResult<StatusCode> {
+    tracing::error!(
+        target: "otto_client",
+        user = %user.username,
+        kind = %clip(&req.kind, 64),
+        route = %clip(&req.route, 256),
+        action = %clip(&req.action, 32),
+        stack = %clip(&req.stack, 4000),
+        "UI fatal error: {}",
+        clip(&req.message, 2000)
+    );
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -126,6 +126,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     {
         return Exempt;
     }
+    // UI fatal-error report (`POST /client/errors`): any authenticated user's
+    // own client may file it — it only writes a clipped line to the daemon log.
+    if p == "/client/errors" {
+        return Exempt;
+    }
     // Per-user notifications (self-owned).
     if p == "/notifications" || p.starts_with("/notifications/") {
         return Exempt;
@@ -1812,6 +1817,8 @@ mod tests {
             pol(Method::POST, "/api/v1/sessions/{id}/transcript/touch"),
             Require(Agents, View)
         );
+        // The UI's crash report is self-owned: any authed user, no feature gate.
+        assert_eq!(pol(Method::POST, "/api/v1/client/errors"), Exempt);
         assert_eq!(
             pol(Method::GET, "/api/v1/sessions/{id}/slash-commands"),
             Require(Agents, View)

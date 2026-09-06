@@ -1994,6 +1994,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | GET /fs/browse?path= | member | — | directory listing (for path pickers) |
 | GET /fs/read?path= | member | — | file contents |
 | GET /logs/daemon | root | — | recent daemon log lines |
+| POST /client/errors | any authed user | `{kind, message, stack?, route?, action?}` | **204**. The UI's last-resort error hook (`ui/src/main.ts`) files a fatal client-side failure — e.g. Svelte's `effect_update_depth_exceeded`, which freezes the shell until a reload — before it self-heals. Logged (clipped) at ERROR under target `otto_client` with the user and route; nothing is stored or interpreted |
 
 ## PR-review config
 
