@@ -309,3 +309,20 @@ test('typing / opens slash-command completion; images attach as thumbnails', asy
   await thumb.locator('.thumb-x').click();
   await expect(thumb).toHaveCount(0);
 });
+
+test('an unsent chat draft survives leaving and returning; the status row shows the cwd', async ({ page }) => {
+  const view = conv(page);
+  await expect(view).toBeVisible({ timeout: 20_000 });
+  await expect(view.locator('[data-status-line] .cwd')).toHaveText('/tmp');
+  const ta = view.locator('.composer textarea');
+  await ta.fill('half-written thought');
+  // Away (Terminal view unmounts the chat) and back.
+  await page.locator('.view-seg button', { hasText: 'Terminal' }).click();
+  await expect(page.locator('.conv')).toHaveCount(0);
+  await page.locator('.view-seg button', { hasText: 'Chat' }).click();
+  await expect(conv(page).locator('.composer textarea')).toHaveValue('half-written thought', { timeout: 20_000 });
+  // A reload keeps it too (sessionStorage).
+  await page.reload();
+  await expect(conv(page).locator('.composer textarea')).toHaveValue('half-written thought', { timeout: 20_000 });
+  await conv(page).locator('.composer textarea').fill('');
+});

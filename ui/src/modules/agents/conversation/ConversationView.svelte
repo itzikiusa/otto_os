@@ -379,7 +379,16 @@
   {/if}
 
   {#if canCompose && sessionId}
-    <Composer {sessionId} {status} onresume={() => void resume()} />
+    <Composer
+      {sessionId}
+      {status}
+      onresume={() => void resume()}
+      cwd={ws.sessions.find((s) => s.id === sessionId)?.cwd ?? ''}
+      branch={conv.liveBranch}
+      model={t?.model ?? null}
+      termStatus={conv.liveStatus}
+      termInput={conv.liveInput}
+    />
   {/if}
 </div>
 

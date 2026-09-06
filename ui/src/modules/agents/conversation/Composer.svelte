@@ -9,20 +9,38 @@
   // shows the session status and any board tasks still waiting to be nudged in.
   // OS text prediction / autocorrect is off here: the bubble it pops over the
   // box is noise when you are typing paths, flags and slash commands.
+  import { untrack } from 'svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import type { SessionStatus, SlashCommand } from '../../../lib/api/types';
   import { fetchSlashCommands, submitPrompt, uploadInboxImage } from './api';
+
+  import { transcript } from '../../../lib/stores/transcript.svelte';
 
   interface Props {
     sessionId: string;
     status: SessionStatus;
     /** Exited / reconnectable → Resume instead of a textarea. */
     onresume: () => void;
+    /** Status row: where the agent runs, on which branch, which model, and
+     *  whatever its own status line shows (context %, limits, mode …). */
+    cwd?: string;
+    branch?: string | null;
+    model?: string | null;
+    termStatus?: string;
+    /** Unsent text sitting in the terminal's input box — a chat send is
+     *  appended to it by the CLI, so it is shown as the message's prefix. */
+    termInput?: string;
   }
-  let { sessionId, status, onresume }: Props = $props();
+  let { sessionId, status, onresume, cwd = '', branch = null, model = null, termStatus = '', termInput = '' }: Props = $props();
 
-  let text = $state('');
+  // The draft survives leaving the page (store-backed, per session).
+  // eslint-disable-next-line svelte/valid-compile -- intentional: seed once; the effect below keeps the store in sync.
+  let text = $state(untrack(() => transcript.draft(sessionId)));
+  $effect(() => {
+    transcript.setDraft(sessionId, text);
+  });
+  const shortCwd = $derived(cwd.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~'));
   let sending = $state(false);
   let uploading = $state(0);
   let ta = $state<HTMLTextAreaElement | null>(null);
@@ -257,13 +275,22 @@
         </div>
       {/if}
     </div>
-    <div class="status">
+    {#if termInput}
+      <div class="term-input" data-term-input title="Typed in the terminal but not sent. Sending from here appends your text after it — the CLI submits both as one message.">
+        <span class="dim">In terminal:</span> <span class="mono">{termInput}</span>
+      </div>
+    {/if}
+    <div class="status" data-status-line>
       <span class="sdot {status}"></span>
       <span>{statusLabel}</span>
       {#if uploading}<span class="dim">· uploading {uploading} image{uploading > 1 ? 's' : ''}…</span>{/if}
       {#if pendingNudges}
         <span class="dim" title="Board tasks waiting for the agent to go idle">· {pendingNudges} board task{pendingNudges > 1 ? 's' : ''} pending</span>
       {/if}
+      {#if shortCwd}<span class="sep">·</span><span class="mono cwd" title={cwd}>{shortCwd}</span>{/if}
+      {#if branch}<span class="sep">·</span><span class="mono branch" title="Git branch">⎇ {branch}</span>{/if}
+      {#if model}<span class="sep">·</span><span class="mono" title="Model">{model}</span>{/if}
+      {#if termStatus}<span class="sep">·</span><span class="term-status" title="The agent's own status line">{termStatus}</span>{/if}
       <span class="grow"></span>
       <span class="dim hint">Slash commands pass straight to the CLI</span>
     </div>
@@ -426,6 +453,40 @@
     color: var(--text-dim);
     padding: 5px 2px 0;
     min-width: 0;
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .sep {
+    opacity: 0.6;
+  }
+  .cwd,
+  .branch {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 260px;
+  }
+  .branch {
+    color: var(--accent);
+  }
+  .term-status {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 0 1 auto;
+    max-width: 48%;
+  }
+  .term-input {
+    margin-top: 6px;
+    font-size: 11.5px;
+    padding: 4px 10px;
+    border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--status-warn, #e0a000) 12%, var(--surface));
+    border: 1px dashed color-mix(in srgb, var(--status-warn, #e0a000) 50%, var(--border));
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .sdot {
     width: 7px;

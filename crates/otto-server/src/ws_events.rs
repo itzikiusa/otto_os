@@ -635,6 +635,9 @@ mod tests {
                 session_id: "s1".into(),
                 workspace_id: "ws1".into(),
                 text: String::new(),
+                input: String::new(),
+                status: String::new(),
+                branch: None,
             },
             Event::ArtifactAdded {
                 session_id: "s1".into(),
