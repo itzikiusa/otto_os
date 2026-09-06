@@ -218,6 +218,17 @@ export class Conversation {
     }
   }
 
+  /** Catch up after a gap (tab was hidden, socket reconnected): re-arm the
+   *  tail and re-read the newest page so anything missed lands now. */
+  async resync(): Promise<void> {
+    if (this.transcript == null || this.transcript.unavailable_reason) {
+      await this.load();
+    } else {
+      await this.refetchTail();
+    }
+    void this.touch();
+  }
+
   /** Re-read the newest page and merge it over what we hold (keeps earlier pages). */
   private async refetchTail(): Promise<void> {
     try {
@@ -375,6 +386,25 @@ class TranscriptStore {
 
   setSplitFrac(sessionId: string, frac: number): void {
     lsSet(winKey(LS_SPLIT_PREFIX + sessionId), String(Math.min(0.8, Math.max(0.3, frac))));
+  }
+
+  /** Keep every live session's tail in `wid` armed (`POST /workspaces/{wid}/transcript/touch`). */
+  async touchWorkspace(wid: string | null): Promise<void> {
+    if (!wid) return;
+    try {
+      await api.post<{ armed: number }>(`/workspaces/${encodeURIComponent(wid)}/transcript/touch`, {});
+    } catch {
+      /* transient */
+    }
+  }
+
+  /** After a WS reconnect: every open conversation catches up, and the
+   *  current workspace's tails are re-armed. */
+  resyncAll(wid: string | null): void {
+    for (const c of this.convs.values()) {
+      if (c.sessionId) void c.resync();
+    }
+    void this.touchWorkspace(wid);
   }
 
   /** Route the three transcript WS events (called from events.svelte.ts). */

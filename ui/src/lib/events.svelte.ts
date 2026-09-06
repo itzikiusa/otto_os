@@ -333,7 +333,10 @@ class EventsClient {
       this.everConnected = true;
       this.state = 'connected';
       this.backoff = 1000;
-      if (reconnected) void swarm.resync();
+      if (reconnected) {
+        void swarm.resync();
+        transcript.resyncAll(ws.currentId);
+      }
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;
