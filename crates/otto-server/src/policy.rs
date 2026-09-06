@@ -442,6 +442,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // owner-or-admin gate); board tasks + the image inbox are writes into a
     // session (`Agents:Edit`). History is workspace-axis: GET = View, POST
     // (import / rescan) = Edit. Placeholder is `{wid}`, as `routes/activity.rs`.
+    if p == "/sessions/{id}/slash-commands" {
+        // Composer completion list: the same read gate as the transcript.
+        return Require(Agents, View);
+    }
     if p == "/sessions/{id}/transcript/touch" {
         // Keep-alive for an open chat: whoever may read the transcript may
         // keep its tail warm.
@@ -1802,6 +1806,10 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/sessions/{id}/transcript/touch"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/sessions/{id}/slash-commands"),
             Require(Agents, View)
         );
         assert_eq!(

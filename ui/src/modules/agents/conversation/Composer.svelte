@@ -1,14 +1,18 @@
 <script lang="ts">
   // Chat composer (sessionId mode, editor role, session not exited): ⏎ submits
   // exactly the typed text as ONE prompt into the agent's PTY, ⇧⏎ inserts a
-  // newline, `/` passes through untouched (slash commands are the CLI's).
-  // Pasted / dropped images upload to the session inbox and land as an
-  // explicit `[Image: <path>]` line. The status line shows the session status
-  // and any board tasks still waiting to be nudged in.
+  // newline, `/` passes through untouched (slash commands are the CLI's) — with
+  // a completion popup listing the provider's built-ins plus the user's own
+  // commands/skills (`GET …/slash-commands`). Pasted / dropped images upload
+  // to the session inbox and show as thumbnails under the box; on send each
+  // becomes an explicit `[Image: <path>]` line after the text. The status line
+  // shows the session status and any board tasks still waiting to be nudged in.
+  // OS text prediction / autocorrect is off here: the bubble it pops over the
+  // box is noise when you are typing paths, flags and slash commands.
   import { toasts } from '../../../lib/toast.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
-  import type { SessionStatus } from '../../../lib/api/types';
-  import { submitPrompt, uploadInboxImage } from './api';
+  import type { SessionStatus, SlashCommand } from '../../../lib/api/types';
+  import { fetchSlashCommands, submitPrompt, uploadInboxImage } from './api';
 
   interface Props {
     sessionId: string;
@@ -22,6 +26,14 @@
   let sending = $state(false);
   let uploading = $state(0);
   let ta = $state<HTMLTextAreaElement | null>(null);
+
+  interface Attachment {
+    path: string;
+    name: string;
+    /** Object URL of the local file — preview only, never sent. */
+    url: string;
+  }
+  let attachments = $state<Attachment[]>([]);
 
   const exited = $derived(status === 'exited' || status === 'reconnectable');
   const pendingNudges = $derived(activity.tasks(sessionId).filter((t) => t.nudge_pending).length);
@@ -39,13 +51,66 @@
     ta.style.height = `${Math.min(cap, Math.max(ta.scrollHeight, 0))}px`;
   }
 
+  // ---- slash-command completion ------------------------------------------------
+  let cmds = $state<SlashCommand[] | null>(null);
+  let cmdsFor = '';
+  let cmdIdx = $state(0);
+  let cmdDismissed = $state(false);
+  let listEl = $state<HTMLDivElement | null>(null);
+  /** `/pre` on a single line → the prefix being completed, else null. */
+  const cmdPrefix = $derived.by(() => {
+    const m = /^\/([\w:-]*)$/.exec(text);
+    return m ? m[1].toLowerCase() : null;
+  });
+  const suggestions = $derived.by(() => {
+    if (cmdPrefix == null || cmdDismissed || !cmds) return [] as SlashCommand[];
+    const starts = cmds.filter((c) => c.name.toLowerCase().startsWith(cmdPrefix));
+    const within = cmds.filter((c) => !c.name.toLowerCase().startsWith(cmdPrefix) && c.name.toLowerCase().includes(cmdPrefix));
+    return [...starts, ...within].slice(0, 12);
+  });
+  const cmdOpen = $derived(suggestions.length > 0);
+  $effect(() => {
+    // Load once per session, the first time a `/` is typed at the start.
+    if (cmdPrefix == null || cmdsFor === sessionId) return;
+    cmdsFor = sessionId;
+    void fetchSlashCommands(sessionId)
+      .then((list) => (cmds = list))
+      .catch(() => (cmds = []));
+  });
+  $effect(() => {
+    void suggestions.length;
+    cmdIdx = 0;
+  });
+  $effect(() => {
+    // Typing again after Esc re-opens the list.
+    void text;
+    cmdDismissed = false;
+  });
+  $effect(() => {
+    const el = listEl?.children[cmdIdx] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: 'nearest' });
+  });
+  function acceptCmd(c: SlashCommand): void {
+    text = `/${c.name} `;
+    cmdDismissed = true;
+    queueMicrotask(() => {
+      autosize();
+      ta?.focus();
+      ta?.setSelectionRange(text.length, text.length);
+    });
+  }
+
   async function send(): Promise<void> {
-    const body = text.replace(/\s+$/, '');
+    const typed = text.replace(/\s+$/, '');
+    const imgs = attachments.map((a) => `[Image: ${a.path}]`);
+    const body = [typed, ...imgs].filter(Boolean).join('\n');
     if (!body || sending) return;
     sending = true;
     try {
       await submitPrompt(sessionId, body);
       text = '';
+      for (const a of attachments) URL.revokeObjectURL(a.url);
+      attachments = [];
       queueMicrotask(autosize);
     } catch (e) {
       toasts.error('Send failed', e instanceof Error ? e.message : String(e));
@@ -56,28 +121,40 @@
   }
 
   function onKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if (e.isComposing) return;
+    if (cmdOpen) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        cmdIdx = (cmdIdx + 1) % suggestions.length;
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        cmdIdx = (cmdIdx - 1 + suggestions.length) % suggestions.length;
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cmdDismissed = true;
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        const pick = suggestions[cmdIdx];
+        // ⏎ on an exact, fully-typed name sends it; anything else completes.
+        if (e.key === 'Enter' && pick && `/${pick.name}`.toLowerCase() === text.trim().toLowerCase()) {
+          e.preventDefault();
+          void send();
+          return;
+        }
+        e.preventDefault();
+        if (pick) acceptCmd(pick);
+        return;
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       void send();
     }
-  }
-
-  function insertAtCursor(snippet: string): void {
-    const el = ta;
-    const start = el?.selectionStart ?? text.length;
-    const end = el?.selectionEnd ?? text.length;
-    const before = text.slice(0, start);
-    const after = text.slice(end);
-    const sep = before && !before.endsWith('\n') ? '\n' : '';
-    text = `${before}${sep}${snippet}\n${after}`;
-    queueMicrotask(() => {
-      autosize();
-      if (el) {
-        const pos = before.length + sep.length + snippet.length + 1;
-        el.setSelectionRange(pos, pos);
-        el.focus();
-      }
-    });
   }
 
   async function addImages(files: File[]): Promise<void> {
@@ -88,13 +165,19 @@
       try {
         const name = f.name && f.name !== 'image.png' ? f.name : `paste-${Date.now()}.${(f.type.split('/')[1] ?? 'png').replace('jpeg', 'jpg')}`;
         const path = await uploadInboxImage(sessionId, f, name);
-        insertAtCursor(`[Image: ${path}]`);
+        attachments = [...attachments, { path, name, url: URL.createObjectURL(f) }];
       } catch (e) {
         toasts.error('Image upload failed', e instanceof Error ? e.message : String(e));
       } finally {
         uploading -= 1;
       }
     }
+    ta?.focus();
+  }
+
+  function removeAttachment(a: Attachment): void {
+    URL.revokeObjectURL(a.url);
+    attachments = attachments.filter((x) => x !== a);
   }
 
   function onPaste(e: ClipboardEvent): void {
@@ -110,6 +193,8 @@
     e.preventDefault();
     void addImages(files);
   }
+
+  const canSend = $derived(!sending && (text.trim().length > 0 || attachments.length > 0));
 </script>
 
 <div class="composer" data-status={status} ondragover={(e) => e.preventDefault()} ondrop={onDrop} role="group" aria-label="Message composer">
@@ -119,20 +204,58 @@
       <button class="btn small primary" onclick={onresume}>Resume</button>
     </div>
   {:else}
-    <div class="box">
-      <textarea
-        bind:this={ta}
-        bind:value={text}
-        rows="3"
-        placeholder="Message the agent — ⏎ to send, ⇧⏎ for a newline, paste an image to attach"
-        spellcheck="true"
-        dir="auto"
-        disabled={sending}
-        oninput={autosize}
-        onkeydown={onKeydown}
-        onpaste={onPaste}
-      ></textarea>
-      <button class="send icon-btn" onclick={() => void send()} disabled={sending || !text.trim()} title="Send (⏎)" aria-label="Send">➤</button>
+    <div class="box-wrap">
+      {#if cmdOpen}
+        <div class="cmd-pop" bind:this={listEl} role="listbox" aria-label="Slash commands" data-slash-pop>
+          {#each suggestions as c, i (c.name)}
+            <!-- svelte-ignore a11y_click_events_have_key_events a11y_interactive_supports_focus -->
+            <div
+              class="cmd-row"
+              class:active={i === cmdIdx}
+              role="option"
+              tabindex="-1"
+              aria-selected={i === cmdIdx}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => acceptCmd(c)}
+              onmouseenter={() => (cmdIdx = i)}
+            >
+              <span class="cmd-name mono">/{c.name}</span>
+              <span class="cmd-desc dim">{c.description}</span>
+              <span class="cmd-src dim">{c.source === 'builtin' ? '' : c.source}</span>
+            </div>
+          {/each}
+          <div class="cmd-hint dim">↑↓ choose · Tab/⏎ complete · Esc dismiss</div>
+        </div>
+      {/if}
+      <div class="box">
+        <textarea
+          bind:this={ta}
+          bind:value={text}
+          rows="3"
+          placeholder="Message the agent — ⏎ to send, ⇧⏎ for a newline, / for commands, paste an image to attach"
+          spellcheck="false"
+          {...{ autocorrect: 'off' }}
+          autocapitalize="off"
+          autocomplete="off"
+          dir="auto"
+          disabled={sending}
+          oninput={autosize}
+          onkeydown={onKeydown}
+          onpaste={onPaste}
+          aria-autocomplete="list"
+        ></textarea>
+        <button class="send icon-btn" onclick={() => void send()} disabled={!canSend} title="Send (⏎)" aria-label="Send">➤</button>
+      </div>
+      {#if attachments.length}
+        <div class="thumbs" data-attachments={attachments.length}>
+          {#each attachments as a (a.path)}
+            <div class="thumb" title={a.path}>
+              <img src={a.url} alt={a.name} />
+              <button class="thumb-x" onclick={() => removeAttachment(a)} title="Remove" aria-label="Remove {a.name}">×</button>
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
     <div class="status">
       <span class="sdot {status}"></span>
@@ -153,6 +276,12 @@
     background: var(--surface);
     padding: 8px 12px 6px;
     flex-shrink: 0;
+  }
+  .box-wrap {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
   .box {
     display: flex;
@@ -202,6 +331,92 @@
   }
   :global([dir='rtl']) .send {
     transform: scaleX(-1);
+  }
+  /* Completion popup: anchored above the box, clamped to the pane, scrolls. */
+  .cmd-pop {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    inset-inline-start: 0;
+    width: min(100%, 560px);
+    max-height: min(320px, 50vh);
+    overflow-y: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    padding: 4px;
+    z-index: 5;
+  }
+  .cmd-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: baseline;
+    gap: 10px;
+    padding: 5px 8px;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    font-size: 12.5px;
+    min-width: 0;
+  }
+  .cmd-row.active {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .cmd-name {
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  .cmd-desc {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    font-size: 11.5px;
+  }
+  .cmd-src {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .cmd-hint {
+    font-size: 10.5px;
+    padding: 4px 8px 2px;
+    border-top: 1px solid var(--border);
+    margin-top: 2px;
+  }
+  .thumbs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .thumb {
+    position: relative;
+    width: 84px;
+    height: 84px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+    overflow: hidden;
+    background: var(--surface-2);
+  }
+  .thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .thumb-x {
+    position: absolute;
+    top: 3px;
+    inset-inline-end: 3px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 0;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 13px;
+    line-height: 18px;
+    padding: 0;
+    cursor: pointer;
   }
   .status {
     display: flex;

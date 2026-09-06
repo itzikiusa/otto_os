@@ -3436,6 +3436,15 @@ export interface ProviderSkillInfo {
   description: string;
 }
 
+/** One entry of `GET /sessions/{id}/slash-commands` — what the chat composer completes after `/`. */
+export interface SlashCommand {
+  /** Without the leading slash (`compact`, `commit`, `frontend:component`). */
+  name: string;
+  description: string;
+  /** `builtin` = the provider CLI's own; `user` = `~/.claude/{commands,skills}`; `project` = the session cwd's `.claude/…`. */
+  source: 'builtin' | 'user' | 'project';
+}
+
 /** A provider skill's full content (body + file list). */
 export interface ProviderSkillContent {
   provider: string;

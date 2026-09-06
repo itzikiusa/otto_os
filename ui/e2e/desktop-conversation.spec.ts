@@ -272,3 +272,40 @@ test('an edit step shows +/− stats and a colored diff; touch keeps the tail ar
   const r = await ctx.post(`${base}/api/v1/sessions/${sessionId}/transcript/touch`);
   expect(r.status(), await r.text()).toBe(204);
 });
+
+test('typing / opens slash-command completion; images attach as thumbnails', async ({ page }) => {
+  const view = conv(page);
+  await expect(view).toBeVisible({ timeout: 20_000 });
+  const ta = view.locator('.composer textarea');
+  // The composer never lets the OS autocorrect/predict over it.
+  await ta.click();
+  await expect(ta).toHaveAttribute('autocorrect', 'off');
+  await expect(ta).toHaveAttribute('spellcheck', 'false');
+  await ta.fill('/comp');
+  const pop = view.locator('[data-slash-pop]');
+  await expect(pop).toBeVisible();
+  await expect(pop.locator('.cmd-row.active .cmd-name')).toHaveText('/compact');
+  await ta.press('Tab');
+  await expect(ta).toHaveValue('/compact ');
+  await expect(pop).toHaveCount(0);
+  await ta.press('Escape');
+  await ta.fill('');
+
+  // Drop a 1×1 PNG on the composer → uploaded to the inbox, shown as a thumbnail,
+  // and removable; the textarea stays free of `[Image: …]` text.
+  await view.locator('.composer').evaluate((el) => {
+    const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const file = new File([bytes], 'dot.png', { type: 'image/png' });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    el.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  const thumb = view.locator('.composer .thumb');
+  await expect(thumb).toHaveCount(1, { timeout: 15_000 });
+  await expect(thumb.locator('img')).toBeVisible();
+  await expect(ta).toHaveValue('');
+  await expect(view.locator('.composer .send')).toBeEnabled();
+  await thumb.locator('.thumb-x').click();
+  await expect(thumb).toHaveCount(0);
+});

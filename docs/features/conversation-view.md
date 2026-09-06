@@ -219,6 +219,7 @@ All routes are under `/api/v1`. RBAC: `Agents` **View** for every GET,
 | `GET /workspaces/{wid}/history/transcript?path=&before=&limit=&sub=` | — | `Transcript` | The one route that accepts a client path — it must resolve (symlink-aware) under `~/.claude/projects` or `~/.codex/sessions` |
 | `POST /workspaces/{wid}/history/import` | `{ provider, transcript_path }` | `Session` | Creates a `reconnectable` row with `provider_session_id` + `transcript_path` |
 | `POST /workspaces/{wid}/history/rescan` | — | `202` | Background index refresh |
+| `GET /sessions/{id}/slash-commands` | — | `SlashCommand[]` | Composer completion after `/`: provider built-ins + `~/.claude/{commands,skills}` + `<cwd>/.claude/{commands,skills}` (Codex: skills dirs) |
 | `POST /sessions/{id}/transcript/touch` | — | `204` / `409` | Keep-alive from an open chat (every 60 s); the tail stops 2 min after the last touch, so only open conversations are tailed. `409` = live session without a transcript yet (the view retries the GET every 5 s) |
 | `GET /workspaces/{wid}/activity/summary` | — | `SessionActivitySummary[]` | Existing; `done/total` count ALL task rows |
 
