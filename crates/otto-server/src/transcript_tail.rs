@@ -11,7 +11,7 @@
 //! (every 60 s) — is a subscriber "touch"; it stops 60 s after the session
 //! exits or 2 min after the last touch, so only sessions whose chat is
 //! actually open are tailed (never archived / idle-for-days ones, never the
-//! N parallel review sessions nobody is looking at). Cap 32 concurrent tails —
+//! N parallel review sessions nobody is looking at). Cap 64 concurrent tails —
 //! beyond that reads still work, there is just no live push. Each poll also
 //! reads the PTY screen (one grid walk) for the `transcript_live` draft. The registry slot is an RAII
 //! [`Slot`] held by the task: a panic anywhere in the loop frees it, and the
@@ -33,7 +33,7 @@ use otto_transcript::{read_records, Folder, Provider, Tailer};
 use crate::state::ServerCtx;
 
 pub const POLL: Duration = Duration::from_millis(700);
-pub const MAX_TAILS: usize = 32;
+pub const MAX_TAILS: usize = 64;
 /// Keep tailing this long after the session exits (late flushes land).
 pub const EXIT_GRACE: Duration = Duration::from_secs(60);
 /// Stop when nobody touched the transcript for this long. An open chat
@@ -379,10 +379,34 @@ pub fn live_draft(rows: &[String]) -> String {
         let t = r.trim_start();
         (t.starts_with("> ") || t.starts_with("› ")) && !t.starts_with("> >")
     }
+    // Ephemeral rows: spinners, elapsed timers ("Running… (7m 34s · timeout
+    // 10m)"), key hints and tips. They change every second and would make
+    // the draft re-render (and the chat jump) without carrying content.
+    fn has_timer(t: &str) -> bool {
+        let b = t.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'(' {
+                let mut j = i + 1;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 1 && j < b.len() && matches!(b[j], b'h' | b'm' | b's') {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
     fn is_spinner(r: &str) -> bool {
         let t = r.trim_start();
         t.contains("esc to interrupt")
             || t.contains("(esc to")
+            || t.contains("ctrl+b to run in background")
+            || t.starts_with("Tip:")
+            || t.starts_with("※ Tip:")
+            || (t.contains('…') && has_timer(t))
             || t.chars().next().is_some_and(|c| "✻✶✳✢✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)) && t.contains('…')
     }
     // Input box: the LAST input row; content is everything above it (and
@@ -443,6 +467,14 @@ mod tests {
         );
         let d = live_draft(&screen);
         assert_eq!(d, "⏺ Still exploring. Reading the DAO.\n\n⏺ Bash(cd x && grep -n foo)\n  ⎿  3 lines");
+    }
+
+    #[test]
+    fn live_draft_drops_timer_hint_and_tip_rows() {
+        let screen = rows(
+            "> go\n\n⏺ Bash(cargo test)\n  ⎿  Running… (7m 34s · timeout 10m)\n     (ctrl+b to run in background)\n\n  Tip: Use /clear to start fresh\n\n────────────────\n❯ ",
+        );
+        assert_eq!(live_draft(&screen), "⏺ Bash(cargo test)");
     }
 
     #[test]
@@ -515,6 +547,6 @@ mod tests {
         assert!(!should_continue(&id));
         assert_eq!(EVENT_CAP, 65536);
         assert_eq!(POLL, Duration::from_millis(700));
-        assert_eq!(MAX_TAILS, 32);
+        assert_eq!(MAX_TAILS, 64);
     }
 }

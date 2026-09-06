@@ -71,6 +71,7 @@
   .draft {
     margin: 0;
     max-width: 920px;
+    min-height: 3.5em;
     max-height: 50vh;
     overflow: auto;
     white-space: pre-wrap;

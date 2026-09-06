@@ -40,7 +40,7 @@ files, PRs and images a session produced are listed with previews in an
 | Parser crate | `crates/otto-transcript/` | `parse_claude_line` / `parse_codex_line` (moved from `otto-usage`, re-exported there), `fold(records) → Transcript`, the two-era Codex adapter, subagent tree reader, image extraction, the offset `Tailer`; fixtures under `fixtures/{claude,codex-new,codex-old}` |
 | Transcript resolution | `crates/otto-sessions/src/lifecycle.rs` | `transcript_path(session)` — Claude by provider session id, Codex via the persisted `sessions.transcript_path` (migration 0121) |
 | Routes | `crates/otto-server/src/routes/transcript.rs` | Transcript paging, images, artifacts, board tasks, inbox upload, History list/read/import/rescan (§5) |
-| Tail supervisor | `crates/otto-server/src/transcript_tail.rs` | Polls live sessions' transcripts (700 ms), folds, broadcasts `transcript_appended` / `artifact_added`; reads the PTY screen for the `transcript_live` draft. Armed only by an open chat (`GET` + 60 s `touch` pings), ≤ 32 at once, stops 2 min after the view closes |
+| Tail supervisor | `crates/otto-server/src/transcript_tail.rs` | Polls live sessions' transcripts (700 ms), folds, broadcasts `transcript_appended` / `artifact_added`; reads the PTY screen for the `transcript_live` draft. Armed by an open chat (`GET` + 60 s `touch` pings) and by the workspace keep-alive for every live session you may read, ≤ 64 at once, stops 2 min after the last ping |
 | Live draft | `ui/src/modules/agents/conversation/LiveDraft.svelte` | Sub-turn streaming: the screen text under the last folded turn, deduped against it |
 | Tasks merge + nudge | `crates/otto-state` (`ActivityRepo::replace_tasks`, migration 0122), `crates/otto-server/src/agent_tasks_nudge.rs` | Agent rows replaced on sync, user rows merged by title/ext_id; one sweep hands board tasks to the PTY |
 | History index | migration 0123 `transcript_index`, background walker | Head+tail scan of both provider roots; `history_index_progress` |
@@ -220,6 +220,7 @@ All routes are under `/api/v1`. RBAC: `Agents` **View** for every GET,
 | `POST /workspaces/{wid}/history/import` | `{ provider, transcript_path }` | `Session` | Creates a `reconnectable` row with `provider_session_id` + `transcript_path` |
 | `POST /workspaces/{wid}/history/rescan` | — | `202` | Background index refresh |
 | `GET /sessions/{id}/slash-commands` | — | `SlashCommand[]` | Composer completion after `/`: provider built-ins + `~/.claude/{commands,skills}` + `<cwd>/.claude/{commands,skills}` (Codex: skills dirs) |
+| `POST /workspaces/{wid}/transcript/touch` | — | `{armed}` | Workspace-wide keep-alive (every 60 s while visible + on switch/focus): every live session you may read in the current workspace stays tailed; other workspaces lapse after 2 min and are re-armed when you return |
 | `POST /sessions/{id}/transcript/touch` | — | `204` / `409` | Keep-alive from an open chat (every 60 s); the tail stops 2 min after the last touch, so only open conversations are tailed. `409` = live session without a transcript yet (the view retries the GET every 5 s) |
 | `GET /workspaces/{wid}/activity/summary` | — | `SessionActivitySummary[]` | Existing; `done/total` count ALL task rows |
 

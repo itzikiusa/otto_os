@@ -461,6 +461,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/sessions/{id}/tasks" || p == "/sessions/{id}/inbox" {
         return Require(Agents, Edit);
     }
+    if p == "/workspaces/{wid}/transcript/touch" {
+        // Workspace-wide tail keep-alive: any member who can read chats.
+        return Require(Agents, View);
+    }
     if p == "/workspaces/{wid}/history" || p.starts_with("/workspaces/{wid}/history/") {
         return Require(Agents, if get { View } else { Edit });
     }
@@ -1810,6 +1814,10 @@ mod tests {
         );
         assert_eq!(
             pol(Method::GET, "/api/v1/sessions/{id}/slash-commands"),
+            Require(Agents, View)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{wid}/transcript/touch"),
             Require(Agents, View)
         );
         assert_eq!(

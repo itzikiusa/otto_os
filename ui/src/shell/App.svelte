@@ -1,4 +1,30 @@
 <script lang="ts">
+  // Transcript tails: keep EVERY live session of the current workspace armed
+  // while this window is visible (60 s ping; immediately on workspace switch
+  // and when the window regains focus). Switching workspace lets the old one's
+  // tails lapse (2 min); coming back re-arms them all on the first ping.
+  import { transcript as transcriptStore } from '../lib/stores/transcript.svelte';
+  import { ws as wsStore } from '../lib/stores/workspace.svelte';
+  $effect(() => {
+    const wid = wsStore.currentId;
+    if (!wid) return;
+    const ping = (): void => {
+      if (document.hidden) return;
+      void transcriptStore.touchWorkspace(wid);
+    };
+    ping();
+    const id = setInterval(ping, 60_000);
+    const onVis = (): void => {
+      if (!document.hidden) transcriptStore.resyncAll(wid);
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', ping);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', ping);
+    };
+  });
   import { untrack } from 'svelte';
   // Main shell (post-auth): rail/navigator + tab bar + module router +
   // right panel + status bar + palette + global keys.

@@ -405,6 +405,41 @@ pub async fn touch_transcript(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /workspaces/{wid}/transcript/touch` — keep the tails of EVERY live
+/// agent session in the workspace armed (the client pings this every minute
+/// for its current workspace, immediately on switching to it and on regaining
+/// focus), so chats you are not looking at right now still have their history
+/// hot when you open them, and a session you sit on never goes stale. Only
+/// sessions the caller may read (owner / workspace admin / root) are touched;
+/// the cap (`MAX_TAILS`) still applies. Returns how many tails were armed.
+pub async fn touch_workspace_transcripts(
+    AxPath(wid): AxPath<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    let sessions = ctx.manager.list_by_workspace(&wid).await.map_err(ApiError)?;
+    let mut armed = 0usize;
+    for s in sessions {
+        if s.kind != SessionKind::Agent || !ctx.manager.is_live(&s.id) {
+            continue;
+        }
+        if require_session_owner_or_admin(&ctx, &user, &s).await.is_err() {
+            continue;
+        }
+        let provider_name = effective_provider(&s);
+        if !matches!(provider_name.as_str(), "claude" | "codex") {
+            continue;
+        }
+        let Ok(resolved) = resolve_transcript(&ctx, &s).await else {
+            continue;
+        };
+        crate::transcript_tail::touch(&ctx, &s, resolved.provider, &resolved.path);
+        armed += 1;
+    }
+    Ok(Json(serde_json::json!({ "armed": armed })))
+}
+
 /// `GET /sessions/{id}/transcript/images/{img_id}` — an extracted image, by id.
 pub async fn transcript_image(
     AxPath((id, img_id)): AxPath<(Id, String)>,

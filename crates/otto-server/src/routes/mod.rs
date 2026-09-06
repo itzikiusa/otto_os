@@ -456,6 +456,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             post(transcript::history_import),
         )
         .route(
+            "/workspaces/{wid}/transcript/touch",
+            post(transcript::touch_workspace_transcripts),
+        )
+        .route(
             "/workspaces/{wid}/history/rescan",
             post(transcript::history_rescan),
         )

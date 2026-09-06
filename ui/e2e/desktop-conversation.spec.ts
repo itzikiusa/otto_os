@@ -326,3 +326,10 @@ test('an unsent chat draft survives leaving and returning; the status row shows 
   await expect(conv(page).locator('.composer textarea')).toHaveValue('half-written thought', { timeout: 20_000 });
   await conv(page).locator('.composer textarea').fill('');
 });
+
+test('the workspace keep-alive arms the tails of every live session you can read', async () => {
+  const r = await ctx.post(`${base}/api/v1/workspaces/${wsId}/transcript/touch`);
+  expect(r.status(), await r.text()).toBe(200);
+  const body = (await r.json()) as { armed: number };
+  expect(body.armed).toBeGreaterThanOrEqual(1);
+});

@@ -83,7 +83,11 @@
         {:else if b.kind === 'image'}
           <ImageBlock id={b.id} alt={b.alt} mediaType={b.media_type} />
         {:else if b.kind === 'queued' && b.op === 'enqueue' && ctx.queuedLive.includes(b.text) && (showSystem || !b.injected)}
-          <span class="chip queued" title="Queued while the agent was working">Queued: {b.text}</span>
+          <div class="pending" data-pending title="Sent while the agent was busy — the CLI delivers it when the current turn ends">
+            <span class="pending-dot"></span>
+            <span class="pending-label">Waiting to send</span>
+            <span class="pending-text">{b.text}</span>
+          </div>
         {:else if b.kind === 'notice' && showSystem}
           <span class="chip note" title={b.note.body ?? ''}>{b.note.title}</span>
         {/if}
@@ -110,7 +114,11 @@
         {:else if s.block.kind === 'image'}
           <ImageBlock id={s.block.id} alt={s.block.alt} mediaType={s.block.media_type} />
         {:else if s.block.kind === 'queued'}
-          <span class="chip queued">Queued: {s.block.text}</span>
+          <div class="pending" data-pending title="Sent while the agent was busy — the CLI delivers it when the current turn ends">
+            <span class="pending-dot"></span>
+            <span class="pending-label">Waiting to send</span>
+            <span class="pending-text">{s.block.text}</span>
+          </div>
         {:else if s.block.kind === 'artifact'}
           {@const a = s.block.artifact}
           {#if artifactHref(a)}
@@ -308,13 +316,40 @@
     overflow: auto;
     text-align: start;
   }
-  .chip.queued {
-    align-self: flex-start;
-    height: auto;
-    padding: 2px 8px;
-    white-space: normal;
-    color: var(--text-dim);
-    border-style: dashed;
+  .pending {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    align-self: stretch;
+    padding: 6px 10px;
+    border-radius: var(--radius-m);
+    background: color-mix(in srgb, var(--status-warn, #e0a000) 16%, var(--surface));
+    border: 1px dashed color-mix(in srgb, var(--status-warn, #e0a000) 70%, var(--border));
+    font-size: 12.5px;
+    min-width: 0;
+  }
+  .pending-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--status-warn, #e0a000);
+    flex-shrink: 0;
+    align-self: center;
+    animation: pending-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pending-pulse {
+    50% {
+      opacity: 0.3;
+    }
+  }
+  .pending-label {
+    font-weight: 600;
+    color: var(--status-warn, #e0a000);
+    white-space: nowrap;
+  }
+  .pending-text {
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
   .chip.note {
     align-self: flex-start;

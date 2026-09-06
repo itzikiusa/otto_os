@@ -101,8 +101,18 @@
   $effect(() => {
     if (!alive) return;
     const c = conv;
+    void c.touch();
     const id = setInterval(() => void c.touch(), TOUCH_EVERY_MS);
-    return () => clearInterval(id);
+    // Back from a hidden tab / sleep: catch up on what the socket missed and
+    // re-arm — the reader should never have to press Reload.
+    const onVis = (): void => {
+      if (!document.hidden) void c.resync();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
+    };
   });
   // No transcript yet (first prompt not sent, provider id not captured, Codex
   // rollout not matched): nothing will push an event, so retry the read every
@@ -127,10 +137,14 @@
     return '';
   });
   const draft = $derived(sessionId && status === 'working' ? conv.liveDraft : '');
-  // Follow the tail while the draft grows (same rule as appended turns).
+  // Follow the tail only when the draft gains LINES — a same-height text change
+  // must not scroll (it reads as a jump), and neither must it shrink away.
+  let draftLines = 0;
   $effect(() => {
-    void draft.length;
-    if (untrack(() => atBottom)) void tick().then(scrollToBottom);
+    const n = draft ? draft.split('\n').length : 0;
+    const grew = n > draftLines;
+    draftLines = n;
+    if (grew && untrack(() => atBottom)) void tick().then(scrollToBottom);
   });
 
   // ---- search within the loaded conversation ---------------------------------
