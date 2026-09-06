@@ -929,6 +929,15 @@ const STATUS_TICK: Duration = Duration::from_secs(2);
 /// stays resumable, so reopening it auto-resumes via `--resume`.
 pub const SUSPEND_GRACE: Duration = Duration::from_secs(5 * 60);
 
+/// How long a chat keep-alive ping (`POST /sessions/{id}/transcript/touch`,
+/// sent every 60 s while a conversation view is mounted on a live session)
+/// keeps counting as a viewer for the idle-suspend sweep. A chat mounts no
+/// terminal, so it never `attach()`es; without this the sweep saw every
+/// Chat-mode session as unattached and suspended it after [`SUSPEND_GRACE`]
+/// of quiet — the composer went dead until a reload or a terminal attach.
+/// Three missed pings (a frozen tab, a network blip) before the hold lapses.
+pub const VIEW_HOLD: Duration = Duration::from_secs(3 * 60);
+
 /// How long a LIVE but NON-resumable **background** (engine-owned) agent
 /// session must be idle+unattached before the sweep KILLS it. Suspend can
 /// never reclaim these (no provider id to resume — e.g. a codex review agent
@@ -1049,6 +1058,9 @@ pub struct SessionManager {
     attached: Arc<DashMap<Id, usize>>,
     /// Attached WS connection ids per session (see [`Self::may_resize`]).
     attached_conns: Arc<DashMap<Id, Vec<u64>>>,
+    /// Last chat keep-alive ping per session (see [`VIEW_HOLD`]): a mounted
+    /// conversation view is a viewer even though it holds no terminal WS.
+    viewed: Arc<DashMap<Id, std::time::Instant>>,
     /// Size-authority owner per session: the conn that most recently typed.
     size_owner: Arc<DashMap<Id, u64>>,
     /// Session ids whose PTY is being deliberately suspended (RAM release, not
@@ -1154,6 +1166,7 @@ impl SessionManager {
             live: Arc::new(DashMap::new()),
             attached: Arc::new(DashMap::new()),
             attached_conns: Arc::new(DashMap::new()),
+            viewed: Arc::new(DashMap::new()),
             size_owner: Arc::new(DashMap::new()),
             suspending: Arc::new(DashMap::new()),
             suspend_cpu: Arc::new(DashMap::new()),
@@ -2395,6 +2408,28 @@ impl SessionManager {
         self.attached_count(id) > 0
     }
 
+    /// Record a chat keep-alive ping for `id` (the conversation view's
+    /// `POST …/transcript/touch`). Holds the session against the idle-suspend
+    /// sweep for [`VIEW_HOLD`], exactly like a terminal attachment would.
+    pub fn note_view(&self, id: &Id) {
+        self.viewed.insert(id.clone(), std::time::Instant::now());
+    }
+
+    /// True when `id` was chat-pinged within `hold`.
+    pub fn viewed_within(&self, id: &Id, hold: Duration) -> bool {
+        self.viewed
+            .get(id)
+            .map(|at| at.elapsed() <= hold)
+            .unwrap_or(false)
+    }
+
+    /// Somebody is looking at `id` right now: a terminal WS viewer OR a
+    /// conversation view that pinged within [`VIEW_HOLD`]. The idle-suspend
+    /// sweep's "unattached" test.
+    pub fn is_watched(&self, id: &Id) -> bool {
+        self.is_attached(id) || self.viewed_within(id, VIEW_HOLD)
+    }
+
     /// Subscribe to the per-session forced-disconnect signal, lazily creating
     /// the broadcast sender for `id` if it doesn't exist yet (mirrors how the
     /// `attached` map's entry is created on demand). The attached `/ws/term`
@@ -3094,8 +3129,10 @@ impl SessionManager {
             if last_output.elapsed() < grace {
                 continue;
             }
-            // Unattached: nobody is watching the terminal right now.
-            if self.is_attached(&id) {
+            // Unattached: nobody is watching — no terminal WS viewer AND no
+            // chat keep-alive ping within VIEW_HOLD (an open conversation
+            // view mounts no terminal; its 60 s touch is its attachment).
+            if self.is_watched(&id) {
                 continue;
             }
             // Working-but-quiet guard (see the sweep comment above).
@@ -3172,6 +3209,7 @@ impl SessionManager {
                 Ok(()) => {
                     suspended += 1;
                     self.suspend_cpu.remove(&id);
+                    self.viewed.remove(&id);
                     tracing::info!(
                         session = %id,
                         provider = %session.provider,
@@ -4697,6 +4735,24 @@ mod tests {
         assert!(mgr.is_attached(&id));
         // The sweep over live sessions is a no-op (no live PTYs), and the
         // attachment registry it consults is correct.
+        assert_eq!(mgr.suspend_idle_unattached().await, 0);
+    }
+
+    #[tokio::test]
+    async fn idle_suspend_skips_recently_viewed_sessions() {
+        let (mgr, repo, ws, user) = test_manager().await;
+        let id = seed_session(&repo, &ws, &user, Some("sid")).await;
+        // An open CHAT mounts no terminal, so it never `attach()`es — it pings
+        // `POST …/transcript/touch` once a minute instead. That ping must hold
+        // the session exactly like a WS viewer does, or the sweep suspends a
+        // conversation the user is looking at (observed live: both open chats
+        // suspended 5 min after the last output, composer dead until reload).
+        assert!(!mgr.is_watched(&id));
+        mgr.note_view(&id);
+        assert!(mgr.is_watched(&id));
+        assert!(mgr.viewed_within(&id, VIEW_HOLD));
+        // A stale view (older than the hold) no longer counts.
+        assert!(!mgr.viewed_within(&id, Duration::ZERO));
         assert_eq!(mgr.suspend_idle_unattached().await, 0);
     }
 

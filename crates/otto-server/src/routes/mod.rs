@@ -331,6 +331,8 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/fs/browse", get(fs::browse))
         .route("/fs/read", get(fs::read_file))
         .route("/logs/daemon", get(logs::daemon_logs))
+        // UI last-resort error report (self-heal hook in ui/src/main.ts).
+        .route("/client/errors", post(logs::client_error))
         // --- API client ("Postman") -------------------------------------
         .route(
             "/workspaces/{wid}/api-client/collections",

@@ -221,7 +221,7 @@ All routes are under `/api/v1`. RBAC: `Agents` **View** for every GET,
 | `POST /workspaces/{wid}/history/rescan` | — | `202` | Background index refresh |
 | `GET /sessions/{id}/slash-commands` | — | `SlashCommand[]` | Composer completion after `/`: provider built-ins + `~/.claude/{commands,skills}` + `<cwd>/.claude/{commands,skills}` (Codex: skills dirs) |
 | `POST /workspaces/{wid}/transcript/touch` | — | `{armed}` | Workspace-wide keep-alive (every 60 s while visible + on switch/focus): every live session you may read in the current workspace stays tailed; other workspaces lapse after 2 min and are re-armed when you return |
-| `POST /sessions/{id}/transcript/touch` | — | `204` / `409` | Keep-alive from an open chat (every 60 s); the tail stops 2 min after the last touch, so only open conversations are tailed. `409` = live session without a transcript yet (the view retries the GET every 5 s) |
+| `POST /sessions/{id}/transcript/touch` | — | `204` / `409` | Keep-alive from an open chat (every 60 s); the tail stops 2 min after the last touch, so only open conversations are tailed. The same ping holds the session against the idle-suspend sweep for 3 min (`VIEW_HOLD`) — a chat mounts no terminal, so this is its attachment; the workspace-wide touch does NOT hold (it only warms tails). `409` = live session without a transcript yet (the view retries the GET every 5 s) |
 | `GET /workspaces/{wid}/activity/summary` | — | `SessionActivitySummary[]` | Existing; `done/total` count ALL task rows |
 
 ### WebSocket events (`/ws/events`)
@@ -312,6 +312,7 @@ corpus numbers and any route-level deviations are recorded in
 | Board tasks vanish when the agent republishes its list | They shouldn't — only `source:'agent'` rows are replaced. If a title collides with an agent task the user row *adopts* the agent's status (that is the merge, not a loss). |
 | Outputs shows a file but the preview is "Forbidden" | The path fell outside the allow-list (session cwd / data dir / user temp) or matched the deny-list (`.git`, `.env*`, keys). Copy the path and open it locally. |
 | Mission Control strip shows `0/0` though the Activity panel lists tasks | The summary is loaded with the board; press **↻** or wait for the next `tasks_updated`. |
+| A chat that sat idle for ~5 min goes dead (composer shows **Resume**, no new turns; a reload or opening the terminal brings it back) | The idle-suspend sweep judged the session *unattached*: a Chat-mode pane mounts no terminal WS. Fixed by counting the chat's 60 s `POST …/transcript/touch` as a viewer (`VIEW_HOLD`, 3 min); if you still see it, check the daemon log for `suspended idle, unattached session` and that the touch pings are reaching the daemon (they fail with "offline" in WKWebView when every network interface is down, e.g. right after sleep). |
 | `Duplicate identifier` / type errors after pulling | `ui/src/lib/api/types.ts` mirrors `model.rs` — rebuild both sides together (see §8 of the design doc for the current hand-offs). |
 
 ---
