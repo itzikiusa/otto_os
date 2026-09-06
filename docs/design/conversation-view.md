@@ -302,8 +302,9 @@ those roots.
 
 ### 5.1 View toggle in `SessionView.svelte`
 Segmented **Terminal · Chat · Split** in the header; persisted per session via a
-`winKey`-style localStorage key (`otto_session_view:<id>`); default *Chat* when
-the transcript resolves (`unavailable_reason == null`), else *Terminal*.
+`winKey`-style localStorage key (`otto_session_view:<id>`); default *Terminal*
+for every session (Chat was the default when a transcript resolved until
+2026-09-06; it is opt-in per session now).
 *Split* = chat left / terminal right with a splitter copied from
 `RightPanel.svelte:27-44`. With the right panel open, Split shows **three
 columns**; below 1200 px Split degrades to Chat with a "Terminal" tab button.

@@ -135,16 +135,15 @@
 
   // --- Terminal · Chat · Split (docs/design/conversation-view.md §5.1) --------
   // The chat is rebuilt from the provider transcript; probing it once per agent
-  // session (cheap 200, `unavailable_reason` when nothing resolves) also picks
-  // the default view: Chat when a transcript resolves, else Terminal. The
-  // user's choice is persisted per session (`otto_session_view:<id>`, winKey).
+  // session (cheap 200, `unavailable_reason` when nothing resolves) makes the
+  // Chat tab instant when picked. The default view is Terminal for every
+  // session — the chat is opt-in per session, and the user's choice is
+  // persisted (`otto_session_view:<id>`, winKey).
   const conv = $derived(isAgent ? transcript.conversation({ sessionId }) : null);
   $effect(() => {
     if (conv) transcript.ensure(conv.src);
   });
-  const defaultView = $derived<SessionViewMode>(
-    conv?.transcript && conv.unavailable == null ? 'chat' : 'terminal',
-  );
+  const defaultView: SessionViewMode = 'terminal';
   const savedView = $derived(isAgent ? transcript.view(sessionId) : null);
   const view = $derived<SessionViewMode>(isAgent ? (savedView ?? defaultView) : 'terminal');
   // Below 1200px the window can't hold chat + terminal (+ the right panel):
