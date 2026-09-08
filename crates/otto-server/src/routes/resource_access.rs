@@ -290,10 +290,10 @@ async fn page_access(
             .await?;
     }
     if let Some(ws) = ws {
-        if !WorkspacesRepo::new(pool.clone())
+        if WorkspacesRepo::new(pool.clone())
             .role_of(user, &ws)
             .await?
-            .is_some_and(|r| r >= WorkspaceRole::Viewer)
+            .is_none_or(|r| r < WorkspaceRole::Viewer)
         {
             return Err(Error::NotFound("resource".into()));
         }
