@@ -1793,6 +1793,40 @@ export interface SendInputReq {
   submit?: boolean | null;
 }
 
+/** POST /workspaces/{id}/sessions/open — open an agent session for a delegating
+ *  lead and queue its opening prompt once the TUI is up. */
+export interface OpenAgentSessionReq {
+  provider: string;
+  title?: string | null;
+  cwd?: string | null;
+  model?: string | null;
+  /** Submitted as the session's first user message (async; see `prompt_dispatch`). */
+  prompt?: string | null;
+  meta?: Record<string, unknown> | null;
+}
+
+export interface OpenAgentSessionResp {
+  session: Session;
+  /** `"queued"` when an opening prompt is being delivered, `"none"` otherwise. */
+  prompt_dispatch: 'queued' | 'none';
+}
+
+/** POST /sessions/{id}/message — one message to ONE live agent session (typed + Enter). */
+export interface SessionMessageReq {
+  text: string;
+}
+
+export interface SessionMessageResp {
+  session_id: Id;
+  delivered: boolean;
+}
+
+/** GET /sessions/{id}/wait — the session once an awaited status was reached, or at the deadline. */
+export interface WaitSessionResp {
+  session: Session;
+  reached: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------

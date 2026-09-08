@@ -690,6 +690,26 @@ fn tool_catalog() -> Value {
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
+                "name": "otto_get_session",
+                "description": "Read-only: one session's detail by id (status, provider, cwd, provider_session_id, live).",
+                "inputSchema": { "type": "object", "properties": { "session_id": { "type": "string" } }, "required": ["session_id"] }
+            },
+            {
+                "name": "otto_wait_session",
+                "description": "Read-only: block up to 25 s until a session's status is one of the awaited set (default `idle,exited`), then return it with `reached`. Loop it for longer waits — `idle` means the agent's turn ended.",
+                "inputSchema": { "type": "object", "properties": { "session_id": { "type": "string" }, "status": { "type": "string", "description": "comma-separated: running,working,idle,exited,reconnectable" }, "timeout_secs": { "type": "integer", "description": "1..25, default 20" } }, "required": ["session_id"] }
+            },
+            {
+                "name": "otto_open_session",
+                "description": "MUTATING (Agents Edit): open a new agent session (claude | codex) in this workspace and queue `prompt` as its first message once the TUI is up. Returns the session; poll otto_wait_session. For delegating work to visible, resumable worker sessions — never spawn more than the user's budget.",
+                "inputSchema": { "type": "object", "properties": { "provider": { "type": "string" }, "title": { "type": "string" }, "cwd": { "type": "string" }, "model": { "type": "string", "description": "optional; provider default when omitted" }, "prompt": { "type": "string" } }, "required": ["provider"] }
+            },
+            {
+                "name": "otto_send_message",
+                "description": "MUTATING (Agents Edit): send one text message to ONE live agent session by id, as if typed + Enter. Drives a running agent — only your own sessions unless you are an admin.",
+                "inputSchema": { "type": "object", "properties": { "session_id": { "type": "string" }, "text": { "type": "string" } }, "required": ["session_id", "text"] }
+            },
+            {
                 "name": "otto_list_product_stories",
                 "description": "Read-only: list this workspace's product stories.",
                 "inputSchema": { "type": "object", "properties": {} }
@@ -1037,6 +1057,8 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "otto_list_prs",
     "otto_get_pr",
     "otto_list_sessions",
+    "otto_get_session",
+    "otto_wait_session",
     "otto_list_product_stories",
     "otto_list_findings",
     "otto_usage_summary",
@@ -1154,6 +1176,12 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
         }
         "otto_list_repos" => ReadCall::get(format!("/workspaces/{}/repos", seg(ws_req()?))),
         "otto_list_sessions" => ReadCall::get(format!("/workspaces/{}/sessions", seg(ws_req()?))),
+        "otto_get_session" => ReadCall::get(format!("/sessions/{}", seg(&arg_str(args, "session_id")?))),
+        "otto_wait_session" => ReadCall::get(format!(
+            "/sessions/{}/wait?{}",
+            seg(&arg_str(args, "session_id")?),
+            opt_query(args, &[("status", "status"), ("timeout_secs", "timeout_secs")]).trim_start_matches('&')
+        )),
         "otto_list_product_stories" => {
             ReadCall::get(format!("/workspaces/{}/product/stories", seg(ws_req()?)))
         }
@@ -2006,6 +2034,30 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             });
             let raw = ctx
                 .post_json(&format!("/k8s/clusters/{}/actions", seg(&cluster)), &body)
+                .await?;
+            Ok(finalize(raw))
+        }
+        "otto_open_session" => {
+            let ws = ctx
+                .workspace_id
+                .as_deref()
+                .ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+            let mut body = json!({ "provider": arg_str(args, "provider")? });
+            for k in ["title", "cwd", "model", "prompt"] {
+                if let Some(v) = arg_optional_string(args, k)?.filter(|s| !s.is_empty()) {
+                    body[k] = json!(v);
+                }
+            }
+            let raw = ctx
+                .post_json(&format!("/workspaces/{}/sessions/open", seg(ws)), &body)
+                .await?;
+            Ok(finalize(raw))
+        }
+        "otto_send_message" => {
+            let id = arg_str(args, "session_id")?;
+            let body = json!({ "text": arg_str(args, "text")? });
+            let raw = ctx
+                .post_json(&format!("/sessions/{}/message", seg(&id)), &body)
                 .await?;
             Ok(finalize(raw))
         }
@@ -2971,6 +3023,27 @@ mod tests {
         assert_eq!(read_route("swarm_list_projects", &json!({"swarm_id":"s1"}), ws).unwrap().path, "/swarm/swarms/s1/projects");
         assert_eq!(read_route("swarm_list_tasks", &json!({"project_id":"p1"}), ws).unwrap().path, "/swarm/projects/p1/tasks");
         assert_eq!(read_route("swarm_utilization", &json!({"swarm_id":"s1"}), ws).unwrap().path, "/swarm/swarms/s1/utilization");
+        // Delegation reads: explicit session id, no workspace needed.
+        assert_eq!(read_route("otto_get_session", &json!({"session_id":"s9"}), ws).unwrap().path, "/sessions/s9");
+        assert_eq!(
+            read_route("otto_wait_session", &json!({"session_id":"s9","status":"idle","timeout_secs":10}), ws).unwrap().path,
+            "/sessions/s9/wait?status=idle&timeout_secs=10"
+        );
+        assert_eq!(read_route("otto_wait_session", &json!({"session_id":"s9"}), ws).unwrap().path, "/sessions/s9/wait?");
+    }
+
+    #[test]
+    fn catalog_lists_the_delegation_tools() {
+        let tools = tool_catalog();
+        let names: Vec<&str> = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for t in ["otto_get_session", "otto_wait_session", "otto_open_session", "otto_send_message"] {
+            assert!(names.contains(&t), "catalog missing delegation tool {t}");
+        }
     }
 
     #[test]

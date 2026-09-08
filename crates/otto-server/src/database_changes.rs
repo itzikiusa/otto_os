@@ -131,7 +131,7 @@ async fn authorize_targets(
         }
         if let Some(ws) = &conn.workspace_id {
             let role = WorkspacesRepo::new(pool.clone()).role_of(&user, ws).await?;
-            if !role.is_some_and(|r| r >= min_role) {
+            if role.is_none_or(|r| r < min_role) {
                 return Err(Error::NotFound("database change target".into()));
             }
         }

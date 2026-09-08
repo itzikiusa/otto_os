@@ -695,6 +695,7 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         )
         .route("/workspaces/{id}/broadcast", post(workspace_broadcast))
         .route("/workspaces/{id}/relay", post(workspace_relay))
+        .route("/workspaces/{id}/sessions/open", post(open_agent_session))
         .route(
             "/workspaces/{id}/product/stories/{sid}/analyze",
             post(analyze),
@@ -5699,9 +5700,155 @@ async fn update_providers(
 // Session input route  (POST /sessions/{id}/input)
 // ---------------------------------------------------------------------------
 
-/// Routes: POST /sessions/{id}/input
+/// Routes: POST /sessions/{id}/input, POST /sessions/{id}/message,
+/// GET /sessions/{id}/wait
 pub fn session_input_routes() -> Router<ServerCtx> {
-    Router::new().route("/sessions/{id}/input", post(send_input))
+    Router::new()
+        .route("/sessions/{id}/input", post(send_input))
+        .route("/sessions/{id}/message", post(session_message))
+        .route("/sessions/{id}/wait", get(wait_session))
+}
+
+/// Longest a `/sessions/{id}/wait` call may block. Kept under the 30 s the
+/// MCP self-call client allows so a governed `otto.wait_session` never times
+/// out on the transport; callers loop for longer waits.
+const MAX_WAIT_SESSION_SECS: u64 = 25;
+
+/// `POST /workspaces/{id}/sessions/open` — open an agent session for a
+/// delegating lead and queue its opening prompt. The prompt goes through
+/// [`crate::review_session::submit_prompt`] (wait for the TUI, paste, verify
+/// the echo, Enter) on a background task, so the caller gets the session row
+/// back immediately and polls `/sessions/{id}/wait` for the outcome. Editor.
+async fn open_agent_session(
+    Path(ws_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<otto_core::api::OpenAgentSessionReq>,
+) -> ApiResult<Json<otto_core::api::OpenAgentSessionResp>> {
+    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
+    let provider = req.provider.trim().to_string();
+    if provider.is_empty() {
+        return Err(ApiError(Error::Invalid("provider is required".into())));
+    }
+    // Stamp the work origin so usage attribution can tell a delegated worker
+    // from a hand-opened tab; a caller-supplied `work` ref wins.
+    let mut meta = req.meta.unwrap_or_else(|| serde_json::json!({}));
+    if !meta.is_object() {
+        return Err(ApiError(Error::Invalid("meta must be an object".into())));
+    }
+    if meta.get("work").is_none() {
+        meta["work"] = serde_json::json!({ "origin": "delegation" });
+    }
+    let create = otto_core::api::CreateSessionReq {
+        kind: SessionKind::Agent,
+        provider: Some(provider),
+        title: req.title.filter(|t| !t.trim().is_empty()),
+        cwd: req.cwd.filter(|c| !c.trim().is_empty()),
+        connection_id: None,
+        meta: Some(meta),
+        model: req.model,
+    };
+    let ws = WorkspacesRepo::new(ctx.pool.clone()).get(&ws_id).await.map_err(ApiError)?;
+    let session = ctx.manager.create(&ws, &user.id, create, None).await.map_err(ApiError)?;
+
+    let prompt = req.prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let prompt_dispatch = match prompt {
+        Some(prompt) => {
+            let manager = ctx.manager.clone();
+            let sid = session.id.clone();
+            tokio::spawn(async move {
+                if crate::review_session::submit_prompt(&manager, &sid, &prompt).await {
+                    manager.record_user_message(&sid, &prompt).await;
+                } else {
+                    tracing::warn!(session = %sid, "delegation: session ended before its opening prompt was sent");
+                }
+            });
+            "queued"
+        }
+        None => "none",
+    };
+    Ok(Json(otto_core::api::OpenAgentSessionResp {
+        session,
+        prompt_dispatch: prompt_dispatch.into(),
+    }))
+}
+
+/// `POST /sessions/{id}/message` — deliver ONE message to ONE live agent
+/// session as if typed + Enter: the targeted counterpart of
+/// `/workspaces/{id}/broadcast`, for a lead driving a single worker. Same
+/// authorization as `/input` (Editor + owner-or-admin, resource re-check).
+async fn session_message(
+    Path(session_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<otto_core::api::SessionMessageReq>,
+) -> ApiResult<Json<otto_core::api::SessionMessageResp>> {
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(ApiError(Error::Invalid("message text is empty".into())));
+    }
+    let session = input_session(&ctx, &user.id, &session_id).await.map_err(ApiError)?;
+    if session.kind != SessionKind::Agent {
+        return Err(ApiError(Error::Invalid("messages can only be sent to agent sessions".into())));
+    }
+    if !matches!(
+        session.status,
+        otto_core::domain::SessionStatus::Running
+            | otto_core::domain::SessionStatus::Working
+            | otto_core::domain::SessionStatus::Idle
+    ) {
+        return Err(ApiError(Error::Conflict(format!(
+            "session is {}, not live",
+            session.status.as_str()
+        ))));
+    }
+    submit_session_text(&ctx, &user.id, &session_id, text).await.map_err(ApiError)?;
+    Ok(Json(otto_core::api::SessionMessageResp { session_id, delivered: true }))
+}
+
+/// Query of `GET /sessions/{id}/wait`.
+#[derive(Deserialize)]
+struct WaitSessionQuery {
+    /// Comma-separated statuses to wait for (default `idle,exited`).
+    status: Option<String>,
+    /// Seconds to block at most (default 20, capped at [`MAX_WAIT_SESSION_SECS`]).
+    timeout_secs: Option<u64>,
+}
+
+/// `GET /sessions/{id}/wait` — block until the session's status is one of the
+/// awaited set or the deadline passes, then return the session as observed.
+/// `idle` is "the agent's turn ended" for a delegating lead. Owner-or-admin.
+async fn wait_session(
+    Path(session_id): Path<Id>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<WaitSessionQuery>,
+) -> ApiResult<Json<otto_core::api::WaitSessionResp>> {
+    let mut session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
+    crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
+    let wanted: Vec<String> = q
+        .status
+        .as_deref()
+        .unwrap_or("idle,exited")
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if wanted.is_empty() {
+        return Err(ApiError(Error::Invalid("status list is empty".into())));
+    }
+    let timeout = Duration::from_secs(q.timeout_secs.unwrap_or(20).min(MAX_WAIT_SESSION_SECS));
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if wanted.iter().any(|w| w == session.status.as_str()) {
+            return Ok(Json(otto_core::api::WaitSessionResp { session, reached: true }));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(Json(otto_core::api::WaitSessionResp { session, reached: false }));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
+    }
 }
 
 async fn send_input(

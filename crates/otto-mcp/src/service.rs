@@ -70,7 +70,7 @@ impl McpService {
         if policy.mode == AccessMode::Legacy { return Ok(!user.disabled); }
         let feature = otto_state::GrantsRepo::new(self.pool.clone()).capability_of(user,otto_core::domain::Feature::Mcp).await?;
         if feature < otto_core::domain::Capability::View { return Ok(false); }
-        if !otto_state::WorkspacesRepo::new(self.pool.clone()).role_of(user,&server.workspace_id).await?.is_some() { return Ok(false); }
+        if otto_state::WorkspacesRepo::new(self.pool.clone()).role_of(user,&server.workspace_id).await?.is_none() { return Ok(false); }
         let access = otto_rbac::ResourceAccess::new(self.pool.clone());
         let resource = ResourceRef { kind:ResourceKind::McpServer,id:server.id.clone(),child:child.map(str::to_string) };
         if operation != "discover" && !access.evaluate(user,&resource,"discover").await?.allowed { return Ok(false); }

@@ -82,6 +82,7 @@ const DEFAULT_ENABLED: &[&str] = &[
     // Sessions
     "list_sessions",
     "get_session",
+    "wait_session",
     // Code review / product / channels / usage / skills
     "list_findings",
     "get_finding",
@@ -145,6 +146,10 @@ const DANGEROUS: &[&str] = &[
     "post_swarm_board",
     "test_integration",
     "broadcast_message",
+    // Delegation: opening a worker session and driving one session by id are
+    // the same capability as broadcast (they type into a running agent).
+    "open_session",
+    "send_message",
     // Self-improvement (writes — apply/reject/rollback code & skill edits, run a pass)
     "run_self_improvement",
     "approve_improvement_edit",
@@ -425,6 +430,21 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Relay a literal text message to a workspace's live agent sessions. DANGEROUS: drives running agents — approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id","text"],"properties":{
                 "workspace_id":{"type":"string"},"text":{"type":"string"}}}}),
+        json!({"name":"otto.open_session","mutating":true,"category":"Sessions",
+            "description":"Open a new agent session (claude/codex) in a workspace and queue an opening prompt once its TUI is up; returns the session (poll otto.wait_session for status). For a lead delegating work to visible, resumable worker sessions. DANGEROUS: spawns an agent — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","provider"],"properties":{
+                "workspace_id":{"type":"string"},"provider":{"type":"string","description":"claude | codex"},
+                "title":{"type":"string"},"cwd":{"type":"string"},"model":{"type":"string","description":"optional; provider default when omitted"},
+                "prompt":{"type":"string","description":"submitted as the first user message"}}}}),
+        json!({"name":"otto.send_message","mutating":true,"category":"Sessions",
+            "description":"Send one text message to ONE live agent session by id, as if typed + Enter. DANGEROUS: drives a running agent — approval-gated.",
+            "inputSchema":{"type":"object","required":["session_id","text"],"properties":{
+                "session_id":{"type":"string"},"text":{"type":"string"}}}}),
+        json!({"name":"otto.wait_session","mutating":false,"category":"Sessions",
+            "description":"Block (up to 25 s) until a session's status is one of the awaited set (default idle,exited), then return it with `reached`. Loop it for longer waits. Read-only.",
+            "inputSchema":{"type":"object","required":["session_id"],"properties":{
+                "session_id":{"type":"string"},"status":{"type":"string","description":"comma-separated: running,working,idle,exited,reconnectable"},
+                "timeout_secs":{"type":"integer","description":"1..25, default 20"}}}}),
 
         // ================= Code Review / Findings =================
         json!({"name":"otto.list_findings","mutating":false,"category":"Code Review",
@@ -823,6 +843,24 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
                 .take(120)
                 .collect();
             format!("Broadcast a message to live agent sessions: {text}")
+        }
+        "open_session" => format!(
+            "Open a new '{}' agent session in workspace '{}' and hand it an opening prompt",
+            args.get("provider").and_then(Value::as_str).unwrap_or("?"),
+            args.get("workspace_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "send_message" => {
+            let text: String = args
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect();
+            format!(
+                "Send a message to agent session '{}': {text}",
+                args.get("session_id").and_then(Value::as_str).unwrap_or("?")
+            )
         }
         "run_self_improvement" => format!(
             "Run a self-improvement pass on workspace '{}'",
@@ -1792,6 +1830,28 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let ws = arg_str(args, "workspace_id")?;
             let body = json!({ "text": arg_str(args, "text")? });
             SelfCall::post(format!("/api/v1/workspaces/{}/broadcast", seg(&ws)), body)
+        }
+        "open_session" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let mut body = json!({ "provider": arg_str(args, "provider")? });
+            for k in ["title", "cwd", "model", "prompt"] {
+                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()) {
+                    body[k] = json!(v);
+                }
+            }
+            SelfCall::post(format!("/api/v1/workspaces/{}/sessions/open", seg(&ws)), body)
+        }
+        "send_message" => {
+            let id = arg_str(args, "session_id")?;
+            let body = json!({ "text": arg_str(args, "text")? });
+            SelfCall::post(format!("/api/v1/sessions/{}/message", seg(&id)), body)
+        }
+        "wait_session" => {
+            let id = arg_str(args, "session_id")?;
+            let mut path = format!("/api/v1/sessions/{}/wait?", seg(&id));
+            let q = opt_query(args, &[("status", "status"), ("timeout_secs", "timeout_secs")]);
+            path.push_str(&q);
+            SelfCall::get(path)
         }
         // ---- Code review / findings ----
         "list_findings" => {

@@ -456,6 +456,8 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 | POST /sessions/{id}/kill | session owner-or-admin | — | Session (kill the PTY but KEEP the row un-archived; resumable providers can be reopened) |
 | POST /sessions/bulk | per-id session owner-or-admin | `BulkSessionsReq {action: "archive"\|"delete"\|"kill", ids}` (≤200 ids) | `BulkSessionResult[]` — non-owned/missing ids come back `ok:false` instead of failing the batch |
 | POST /sessions/{id}/input | ws editor + **session owner-or-admin** | `SendInputReq{text, submit?}` — `submit` omitted/true: bracketed paste + a real Enter (`SessionManager::submit_text`, the path that actually sends in Claude Code / Codex); `submit: false`: the text verbatim, no newline | 200 |
+| POST /sessions/{id}/message | ws editor + **session owner-or-admin** | `SessionMessageReq{text}` | `SessionMessageResp{session_id, delivered}` — one message to ONE live **agent** session via `submit_text` (paste + Enter), recorded on its trail; 400 for a connection session, 409 when the session is not live. The targeted counterpart of `/workspaces/{id}/broadcast`, for a lead agent driving a worker |
+| GET /sessions/{id}/wait?status=&timeout_secs= | session owner-or-admin | — | `WaitSessionResp{session, reached}` — blocks until the session's status is one of `status` (comma-separated, default `idle,exited`) or `timeout_secs` (default 20, cap 25) passes; `reached:false` at the deadline. `idle` = the agent's turn ended |
 | POST /sessions/{id}/handover | ws editor + **owner-or-admin of the source (and of an existing target)** | — | starts a handover; progress via `SessionMetaUpdated` |
 | POST /sessions/{id}/handover/brief | ws editor + **session owner-or-admin** (the brief digests the session's transcript) | — | generates a handover brief for the session |
 | POST /sessions/{session_id}/attach-product | ws editor | `{story_id}` | attaches a product story to the session |
@@ -962,6 +964,7 @@ occurrence_count, created_at, updated_at`.
 |---|---|---|---|
 | POST /workspaces/{id}/broadcast | ws editor | BroadcastReq `{text, session_ids?}` | BroadcastResp `{session_ids}` |
 | POST /workspaces/{id}/relay | ws editor | RelayReq `{text}` | RelayResp `{session_ids, broadcast, unaddressed, text}` |
+| POST /workspaces/{id}/sessions/open | ws editor | OpenAgentSessionReq `{provider, title?, cwd?, model?, prompt?, meta?}` | OpenAgentSessionResp `{session, prompt_dispatch}` — creates an **agent** session (`meta.work.origin = "delegation"` unless the caller supplied `work`) and, when `prompt` is set, submits it as the first user message on a background task once the TUI has drawn (`prompt_dispatch: "queued"`, else `"none"`); poll `GET /sessions/{id}/wait` |
 
 Relay delivers a **name-addressed** message: the leading token(s) of `text` may
 name session handles (`ronaldo: …`, `ronaldo, messi: …`, bare `ronaldo do X`) or

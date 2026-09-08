@@ -486,6 +486,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/sessions/") && p.contains("/canvas-refs") {
         return Require(Canvas, if get { View } else { Edit });
     }
+    if p == "/sessions/{id}/wait" {
+        // A delegating lead blocking on a worker's status: reading, not driving.
+        return Require(Agents, View);
+    }
     if p.starts_with("/sessions/") {
         // restart / archive / unarchive / input / handover / handover-brief /
         // attach-product — all session-control writes.
@@ -501,6 +505,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
             | "/workspaces/{id}/orchestrate/execute"
             | "/workspaces/{id}/broadcast"
             | "/workspaces/{id}/relay"
+            | "/workspaces/{id}/sessions/open"
             | "/workspaces/{id}/providers/update"
             | "/workspaces/{id}/lsp/install"
     ) {
@@ -1801,6 +1806,18 @@ mod tests {
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{id}/broadcast"),
             Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/workspaces/{id}/sessions/open"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/sessions/{id}/message"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::GET, "/api/v1/sessions/{id}/wait"),
+            Require(Agents, View)
         );
         assert_eq!(
             pol(Method::GET, "/api/v1/workspaces/{wid}/sessions/{sid}/trail"),

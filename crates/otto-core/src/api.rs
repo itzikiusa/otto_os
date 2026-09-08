@@ -487,6 +487,62 @@ pub struct UpdateSessionReq {
 /// Session list/detail responses use `otto_core::domain::Session` directly.
 pub type SessionResp = Session;
 
+/// `POST /api/v1/workspaces/{id}/sessions/open` — open an agent session and,
+/// optionally, hand it an opening prompt once its TUI is up. The programmatic
+/// twin of "new tab + paste the brief": a lead agent (Claude or Codex) uses it
+/// to start workers it then drives with `/sessions/{id}/message`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAgentSessionReq {
+    /// Agent provider ("claude" | "codex" | …) — same registry as `CreateSessionReq`.
+    pub provider: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Model to pin for this session only (see `CreateSessionReq::model`).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Submitted as the session's first user message after the TUI has drawn.
+    /// Delivery is asynchronous: the response returns as soon as the session
+    /// row exists, with `prompt_dispatch: "queued"`.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub meta: Option<Value>,
+}
+
+/// Response of `POST /api/v1/workspaces/{id}/sessions/open`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAgentSessionResp {
+    pub session: Session,
+    /// `"queued"` when an opening prompt is being delivered, `"none"` otherwise.
+    pub prompt_dispatch: String,
+}
+
+/// `POST /api/v1/sessions/{id}/message` — one message to ONE live agent
+/// session, submitted as if typed + Enter (the targeted counterpart of
+/// `/workspaces/{id}/broadcast`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessageReq {
+    pub text: String,
+}
+
+/// Response of `POST /api/v1/sessions/{id}/message`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessageResp {
+    pub session_id: Id,
+    pub delivered: bool,
+}
+
+/// Response of `GET /api/v1/sessions/{id}/wait` — the session as observed when
+/// one of the awaited statuses was reached, or at the deadline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitSessionResp {
+    pub session: Session,
+    /// True when the session's status was in the awaited set before the deadline.
+    pub reached: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
