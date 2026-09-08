@@ -229,7 +229,7 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Issues** | ✅ search_issues / get_issue / search_confluence | ⚠ comment_issue, transition_issue |
 | **Swarm** | ✅ list / get / list_runs / get_board / create_work_item² | ⚠ post_swarm_board |
 | **Vault (docs home)** | ✅ vault_list / vault_dir / vault_read / vault_search / vault_backlinks / vault_tags / vault_graph / vault_okf_validate | ⚠ vault_write, vault_rename, vault_delete (delete = soft move to `.trash/`) — `workspace_id` optional on all vault tools (vaults are global; omitted → token pin, else first accessible workspace) |
-| **Sessions** | ✅ list / get | ⚠ broadcast_message |
+| **Sessions** | ✅ list / get / wait_session | ⚠ broadcast_message, open_session (spawns an agent session + opening prompt), send_message (one session by id) |
 | **Code Review** | ✅ list_findings / get_finding | ⚠ start_pr_review |
 | **Product** | ✅ list_stories / get_story | — |
 | **Channels** | ✅ list_integrations | ⚠ test_integration |
@@ -451,7 +451,7 @@ the Vault v3 doc tools (`otto_vault_list`/`_dir`/`_read`/`_search`/`_backlinks`/
 `_rename`/`_delete` — see [vault](./vault.md)),
 **plus per-feature reads** — `otto_list_workflows`, `otto_get_workflow_run`,
 `otto_list_broker_clusters`/`_topics`, `otto_search_issues`, `otto_list_swarms`,
-`otto_search_memory`, `otto_list_repos`, `otto_list_sessions`,
+`otto_search_memory`, `otto_list_repos`, `otto_list_sessions`, `otto_get_session`, `otto_wait_session`,
 `otto_list_product_stories`, `otto_list_findings`, `otto_usage_summary`,
 `otto_list_improvement_runs`/`_edits` (the pure `read_route` map, unit-tested),
 and the **cloud consoles** — AWS: `aws_list_accounts`, `aws_s3_list_buckets`/
