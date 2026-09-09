@@ -2330,6 +2330,9 @@ async fn run_review_core(
 
     struct AgentRun {
         display_name: String,
+        /// The configured reviewer name — shared by every provider expansion of
+        /// the same `ReviewAgentCfg`, so siblings can find each other.
+        lens: String,
         provider: String,
         model: String,
         prompt_lens: String,
@@ -2364,6 +2367,7 @@ async fn run_review_core(
                 let prompt_lens = compose_review_lens_prompt(&lens, &skill_text, &a.prompt);
                 AgentRun {
                     display_name,
+                    lens: a.name.clone(),
                     provider: p,
                     model: a.model.clone(),
                     prompt_lens,
@@ -2387,6 +2391,7 @@ async fn run_review_core(
             session_id: None,
             findings: Vec::new(),
             fallback: false,
+            lens: r.lens.clone(),
         })
         .collect();
     agent_states.push(ReviewAgentState {
@@ -2399,6 +2404,7 @@ async fn run_review_core(
         session_id: None,
         findings: Vec::new(),
         fallback: false,
+        lens: String::new(),
     });
     ctx.reviews_store
         .set_agents(review_id, &agent_states)

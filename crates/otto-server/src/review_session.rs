@@ -22,7 +22,7 @@ use otto_sessions::SessionManager;
 use otto_state::ReviewsRepo;
 use tokio::sync::Mutex;
 
-use crate::agent_run::{run_with_recovery, watch_for_result, FailReason, RunOutcome, WatchStatus};
+use crate::agent_run::{run_with_recovery_until, watch_for_result, FailReason, RunOutcome, WatchStatus};
 
 // Generous: several CLIs cold-start concurrently for one review, so claude can
 // take >30s to draw its TUI; injecting before it's ready loses the prompt.
@@ -188,20 +188,30 @@ impl RawFinding {
 /// Extract the JSON array of findings from arbitrary agent output (tolerates
 /// ```` ```json ```` fences + surrounding prose). Returns `[]` on any failure.
 pub fn parse_findings(text: &str) -> Vec<ReviewFinding> {
+    parse_findings_array(text).unwrap_or_default()
+}
+
+/// Like [`parse_findings`] but distinguishes "no JSON findings array at all"
+/// (`None`) from a well-formed EMPTY array (`Some(vec![])`). The watch loop
+/// needs the difference: a reviewer whose completed turn is `[]` is DONE with
+/// zero findings, not still working — treating it like garbage left a clean
+/// reviewer idling at its prompt until the stuck trip killed and respawned it,
+/// three times over.
+pub fn parse_findings_array(text: &str) -> Option<Vec<ReviewFinding>> {
     let stripped = text
         .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    let start = stripped.find('[').unwrap_or(0);
-    let end = stripped.rfind(']').map(|i| i + 1).unwrap_or(stripped.len());
+    let start = stripped.find('[')?;
+    let end = stripped.rfind(']').map(|i| i + 1)?;
     if start >= end {
-        return Vec::new();
+        return None;
     }
     serde_json::from_str::<Vec<RawFinding>>(&stripped[start..end])
+        .ok()
         .map(|raw| raw.into_iter().map(RawFinding::into_finding).collect())
-        .unwrap_or_default()
 }
 
 /// Outcome of one review agent run (fed to the summarizer).
@@ -329,7 +339,7 @@ pub async fn run_agent_session(
         timeout,
         WAITING_IDLE,
         STUCK_IDLE,
-        |t| !parse_findings(t).is_empty(),
+        |t| parse_findings_array(t).is_some(),
         |st| async move {
             let (status, note) = match st {
                 WatchStatus::Waiting => {
@@ -374,15 +384,35 @@ async fn persist_agent<F: FnOnce(&mut ReviewAgentState)>(
 /// Map a run failure reason to the human note shown on the review agent row.
 fn review_error_note(reason: Option<FailReason>) -> String {
     match reason {
-        Some(FailReason::Stuck) => "stuck — no output for ~3m",
-        Some(FailReason::Timeout) => "timed out (grace period elapsed)",
+        Some(FailReason::Stuck) => {
+            return format!("stuck — no output for {}m", STUCK_IDLE.as_secs() / 60);
+        }
+        Some(FailReason::Timeout) => "timed out (grace period elapsed and the agent went quiet)",
         Some(FailReason::Exited) => "session exited before writing findings",
         Some(FailReason::SessionGone) => "session is no longer live",
         Some(FailReason::CreateFailed) => "could not start",
         Some(FailReason::Stopped) => "stopped by user",
+        Some(FailReason::Superseded) => "skipped — this lens was already covered by a sibling reviewer",
         None => "unknown error",
     }
     .to_string()
+}
+
+/// A sibling row (same non-empty `lens`, different index) that has finished
+/// successfully — the provider name of the first one found. Used to skip the
+/// remaining retries of a failed reviewer whose lens is already covered: the
+/// second provider is redundancy, not a requirement, so burning another
+/// 3 × 30 min on it only delays the summarizer.
+pub fn lens_covered_by(states: &[ReviewAgentState], agent_index: usize) -> Option<String> {
+    let me = states.get(agent_index)?;
+    if me.lens.is_empty() {
+        return None;
+    }
+    states
+        .iter()
+        .enumerate()
+        .find(|(i, s)| *i != agent_index && s.lens == me.lens && s.status == "done")
+        .map(|(_, s)| s.provider.clone())
 }
 
 /// Run a review agent with bounded auto-recovery: up to `max_attempts`
@@ -414,11 +444,19 @@ pub async fn run_agent_session_with_recovery(
     // Shared retry loop (kills the prior session + backs off between attempts).
     // The `cancel` flag, when set by a Cancel-review request, short-circuits the
     // loop with `Stopped` and is not retried.
-    let outcome = run_with_recovery(
+    // Between attempts, give up (status "skipped", not "error") once a sibling
+    // reviewer — the same lens on another provider — has finished: its findings
+    // already cover the lens, so another fresh session buys nothing.
+    let give_up = || async {
+        let g = states.lock().await;
+        lens_covered_by(&g, agent_index).is_some()
+    };
+    let outcome = run_with_recovery_until(
         manager,
         attempts,
         &[REVIEW_RETRY_BACKOFF],
         cancel,
+        give_up,
         |_attempt| {
             run_agent_session(
                 manager, reviews, states, ws, user, provider, model, cwd, review_id, agent_index,
@@ -441,6 +479,17 @@ pub async fn run_agent_session_with_recovery(
         })
         .await;
         AgentRunResult { findings, errored: false }
+    } else if outcome.reason == Some(FailReason::Superseded) {
+        let by = {
+            let g = states.lock().await;
+            lens_covered_by(&g, agent_index).unwrap_or_default()
+        };
+        persist_agent(states, reviews, review_id, agent_index, move |s| {
+            s.status = "skipped".into();
+            s.note = format!("skipped — {} already covered this lens", by);
+        })
+        .await;
+        AgentRunResult { findings: Vec::new(), errored: true }
     } else {
         let note = review_error_note(outcome.reason);
         persist_agent(states, reviews, review_id, agent_index, move |s| {
@@ -667,6 +716,71 @@ mod tests {
         // recovery loop re-persists via this note when it unwinds — the two
         // must agree or the row flickers between wordings.
         assert_eq!(review_error_note(Some(FailReason::Stopped)), "stopped by user");
+    }
+
+    #[test]
+    fn empty_array_is_a_complete_turn_but_garbage_is_not() {
+        // A clean reviewer ends its turn with `[]` — that is DONE (zero
+        // findings), and the watch loop must accept it instead of waiting for
+        // the stuck trip to kill + respawn it.
+        assert_eq!(parse_findings_array("[]").map(|v| v.len()), Some(0));
+        assert_eq!(parse_findings_array("```json\n[]\n```").map(|v| v.len()), Some(0));
+        assert_eq!(
+            parse_findings_array("[{\"body\":\"n\"}]").map(|v| v.len()),
+            Some(1)
+        );
+        // No array / broken JSON → still not a result.
+        assert!(parse_findings_array("still reading the diff…").is_none());
+        assert!(parse_findings_array("[not json").is_none());
+        assert!(parse_findings_array("").is_none());
+        // parse_findings keeps its lenient shape.
+        assert!(parse_findings("[]").is_empty());
+    }
+
+    fn st(name: &str, lens: &str, provider: &str, status: &str) -> ReviewAgentState {
+        ReviewAgentState {
+            name: name.into(),
+            provider: provider.into(),
+            model: String::new(),
+            status: status.into(),
+            note: String::new(),
+            comment_count: 0,
+            session_id: None,
+            findings: Vec::new(),
+            fallback: false,
+            lens: lens.into(),
+        }
+    }
+
+    #[test]
+    fn lens_covered_only_by_a_finished_sibling_of_the_same_lens() {
+        let states = vec![
+            st("Security · claude", "Security", "claude", "done"),
+            st("Security · codex", "Security", "codex", "error"),
+            st("Perf · claude", "Perf", "claude", "done"),
+            st("Perf · codex", "Perf", "codex", "running"),
+            st("Summarizer", "", "claude", "pending"),
+        ];
+        // codex Security failed; claude Security is done → covered by claude.
+        assert_eq!(lens_covered_by(&states, 1).as_deref(), Some("claude"));
+        // A finished agent asking is still "covered" by its sibling — callers
+        // only consult this between FAILED attempts, so that's moot.
+        // Perf codex is running, not done → Perf claude (index 2) has no cover.
+        assert_eq!(lens_covered_by(&states, 2), None);
+        // Perf codex's sibling IS done → covered.
+        assert_eq!(lens_covered_by(&states, 3).as_deref(), Some("claude"));
+        // Rows without a lens (summarizer, legacy rows) never match anything.
+        assert_eq!(lens_covered_by(&states, 4), None);
+        // A "done" row of a DIFFERENT lens doesn't count.
+        let solo = vec![st("A", "A", "claude", "error"), st("B", "B", "codex", "done")];
+        assert_eq!(lens_covered_by(&solo, 0), None);
+        // Out of range.
+        assert_eq!(lens_covered_by(&solo, 9), None);
+    }
+
+    #[test]
+    fn stuck_note_reports_the_real_window() {
+        assert_eq!(review_error_note(Some(FailReason::Stuck)), "stuck — no output for 15m");
     }
 
     #[test]

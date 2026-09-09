@@ -125,7 +125,7 @@
           >
             {retrying[i] ? 'Retrying…' : 'Retry'}
           </button>
-        {:else if view === 'done' || agent.status === 'done' || agent.status === 'error'}
+        {:else if view === 'done' || agent.status === 'done' || agent.status === 'error' || agent.status === 'skipped'}
           <button
             class="btn small ghost"
             disabled={retryingSummary}
@@ -266,6 +266,10 @@
   .rp-status-waiting {
     background: var(--status-warn-soft);
     color: var(--status-warn);
+  }
+  .rp-status-skipped {
+    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
+    color: var(--text-dim);
   }
 
   .rp-agent-waiting {
