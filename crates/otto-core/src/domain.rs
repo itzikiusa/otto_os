@@ -1038,9 +1038,11 @@ pub struct ReviewAgentState {
     pub name: String,
     pub provider: String,
     pub model: String,
-    /// "pending" | "running" | "waiting" | "done" | "error".
+    /// "pending" | "running" | "waiting" | "done" | "error" | "skipped".
     /// "waiting" means the agent appears blocked on input (e.g. a prompt the
     /// guard couldn't auto-accept) — the user should Open it and respond.
+    /// "skipped" means it failed and was NOT retried because a sibling row
+    /// (same `lens`, another provider) had already finished the lens.
     pub status: String,
     /// Short preview — first ~80 chars of output, "N findings", or error msg.
     pub note: String,
@@ -1059,6 +1061,13 @@ pub struct ReviewAgentState {
     /// old rows deserialize to false and old readers ignore it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fallback: bool,
+    /// The configured reviewer (lens) this row runs — the `ReviewAgentCfg.name`
+    /// it expanded from. Rows sharing a `lens` are the SAME lens on different
+    /// providers; a failed one is not retried once a sibling finished (its
+    /// status becomes "skipped"). Empty on the summarizer row and on rows
+    /// persisted before this field existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lens: String,
 }
 
 // ---------------------------------------------------------------------------

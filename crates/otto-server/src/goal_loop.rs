@@ -1054,6 +1054,7 @@ fn executor_error_note(reason: Option<FailReason>) -> String {
         Some(FailReason::SessionGone) => "session is no longer live",
         Some(FailReason::CreateFailed) => "could not start",
         Some(FailReason::Stopped) => "stopped",
+        Some(FailReason::Superseded) => "skipped — superseded",
         None => "unknown error",
     }
     .to_string()

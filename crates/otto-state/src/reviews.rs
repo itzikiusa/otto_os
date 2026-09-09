@@ -412,6 +412,7 @@ mod tests {
             session_id: None,
             findings: Vec::new(),
             fallback: false,
+            lens: String::new(),
         }
     }
 

@@ -2885,7 +2885,9 @@ export interface CiRefreshReq {
 
 export type ReviewStatus = 'running' | 'done' | 'error' | 'cancelled';
 export type ReviewCommentState = 'draft' | 'approved' | 'declined';
-export type ReviewAgentStatus = 'pending' | 'running' | 'waiting' | 'done' | 'error';
+/** `skipped`: the agent failed and was NOT retried because a sibling row (same
+ *  `lens`, another provider) had already finished the lens. */
+export type ReviewAgentStatus = 'pending' | 'running' | 'waiting' | 'done' | 'error' | 'skipped';
 
 export interface ReviewFinding {
   path: string | null;
@@ -2927,6 +2929,10 @@ export interface ReviewAgentState {
   /** True on the summarizer row when its output came from the deterministic
    *  Rust-side dedupe/rank fallback (claude summarizer unavailable). */
   fallback?: boolean;
+  /** The configured reviewer (lens) this row expanded from; rows sharing a
+   *  lens are the same lens on different providers. Absent on the summarizer
+   *  row and on reviews persisted before the field existed. */
+  lens?: string;
 }
 
 export interface ReviewComment {

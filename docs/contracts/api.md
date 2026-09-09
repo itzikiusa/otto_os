@@ -915,6 +915,19 @@ inline and to update it in place when "Save" is pressed on a tab opened from it
 | POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. |
 | POST /reviews/{review_id}/summarizer/retry | ws editor | — | re-run ONLY the summarize+persist stage from the STORED per-agent findings (no reviewer re-runs). Deletes the review's unposted `draft` comments (approved/declined/posted stay), flips the run back to `running` (live via `review_changed`), re-summarizes with the repo's effective config, and persists the new comments + workflow findings. Falls back to the deterministic Rust-side summary if the summarizer fails OR returns 0 comments while findings exist. `400` if the review is still running or no stored finding has content. Returns the (now `running`) Review. |
 | POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). `409` if the row is not running/waiting or is the trailing summarizer; broadcasts `review_changed`. |
+
+**Review agent rows** (`Review.agents[]`, `ReviewAgentState`): `status` is
+`pending · running · waiting · done · error · skipped`; `lens` (optional, absent
+on the summarizer row and on pre-field reviews) is the configured reviewer name
+the row expanded from, so rows sharing a `lens` are the same lens on different
+providers. Recovery policy for a failed agent: up to `ReviewConfig.max_attempts`
+(default 3) fresh sessions, EXCEPT that once a sibling row with the same `lens`
+is `done` no further retry is spawned — the row ends `skipped` ("skipped — <provider>
+already covered this lens"). The per-agent grace timeout (`timeout_secs` or the
+diff-size heuristic) only fails an agent that has ALSO gone quiet for the waiting
+window (2 min); an agent still producing output past its grace is left to finish
+(the 15-min silence "stuck" trip still applies). A reviewer whose completed turn
+is an empty `[]` array is `done` with 0 findings, not stuck.
 | GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
 | POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |
 | GET /reviews/{review_id}/merge-readiness | ws viewer | — | `MergeReadiness` (open/total findings + approvals + ci_status + mergeable + conflicts + branch freshness) |
