@@ -67,8 +67,8 @@ jobs:
         # whole runs before our code built. We only need Ubuntu's own archive
         # for cmake/libcurl, so drop the extras first.
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/microsoft-edge*.list
-          sudo apt-get update
+          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
           sudo apt-get install -y cmake libcurl4-openssl-dev
 
       # Advisory-only for now: the existing tree predates rustfmt-in-CI and is not
