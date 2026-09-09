@@ -62,7 +62,14 @@ jobs:
       # the build aborts on <curl/curl.h>. Install cmake (explicit — don't rely on
       # the runner image) + the headers (macOS already has both in the SDK).
       - name: Install librdkafka build deps
-        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev
+        # The runner image ships third-party apt sources (Google Chrome, …) that
+        # intermittently fail `apt-get update` with "Hash Sum mismatch" and sank
+        # whole runs before our code built. We only need Ubuntu's own archive
+        # for cmake/libcurl, so drop the extras first.
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/microsoft-edge*.list
+          sudo apt-get update
+          sudo apt-get install -y cmake libcurl4-openssl-dev
 
       # Advisory-only for now: the existing tree predates rustfmt-in-CI and is not
       # yet fully formatted (a one-time repo-wide `cargo fmt --all` belongs in its
