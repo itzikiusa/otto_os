@@ -48,6 +48,19 @@ const IDLE_RECONNECT: Duration = Duration::from_secs(75);
 /// (the send fails / no pong comes back) well before `IDLE_RECONNECT` fires.
 const CLIENT_PING_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Deadline for the Socket Mode WebSocket dial itself (hard-won): unlike the
+/// Web API calls above — which ride a `reqwest` client carrying
+/// `CONNECT_TIMEOUT` — `tokio_tungstenite::connect_async` has NO built-in
+/// timeout, and a TCP/TLS connect that hangs without erroring parks the task
+/// inside that single `.await` forever. Everything that would recover the
+/// listener (the `'outer` retry, the backoff, the `cancel` check, the
+/// `IDLE_RECONNECT` watchdog) lives *after* the dial, so a hung connect is
+/// unrecoverable short of a daemon restart. Seen in the wild when the daemon
+/// starts seconds after boot, before the network is up: every workspace logged
+/// "connecting to socket mode" and then went silent for hours, with no error
+/// and no reconnect. Bound the dial so a stuck connect just retries.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// How long to wait for a TCP/TLS connection to Slack to establish.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Overall per-request deadline for ordinary Web API calls. A hung Slack
@@ -383,12 +396,28 @@ pub async fn run(
 
         // --- Step 2: connect to the WSS URL ---
         info!("slack: connecting to socket mode");
-        let ws_stream = match tokio_tungstenite::connect_async(&wss_url).await {
-            Ok((stream, _)) => stream,
-            Err(e) => {
+        // The dial MUST be bounded — see `WS_CONNECT_TIMEOUT`. A timeout is
+        // just another connect failure: fall through to the same backoff.
+        let dial = tokio::time::timeout(
+            WS_CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async(&wss_url),
+        )
+        .await;
+        let ws_stream = match dial {
+            Ok(Ok((stream, _))) => stream,
+            Ok(Err(e)) => {
                 error!(
                     "slack: websocket connect failed: {}",
                     redact_url(&e, &wss_url)
+                );
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
+                continue 'outer;
+            }
+            Err(_elapsed) => {
+                error!(
+                    "slack: websocket connect timed out after {}s, retrying in {backoff_ms}ms",
+                    WS_CONNECT_TIMEOUT.as_secs()
                 );
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
