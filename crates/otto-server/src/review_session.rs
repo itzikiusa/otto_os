@@ -618,7 +618,20 @@ fn paste_echoed(manager: &Arc<SessionManager>, sid: &otto_core::Id, probe: &str)
     let Some(h) = manager.live_handle(sid) else { return false };
     let raw = String::from_utf8_lossy(&h.scrollback(200)).into_owned();
     let norm: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    norm.contains(probe)
+    screen_shows_paste(&norm, probe)
+}
+
+/// The paste counts as echoed when the screen shows the probe text OR a
+/// large-paste placeholder. Codex collapses any sizeable paste into
+/// `[Pasted Content N chars]` and Claude Code into `[Pasted text #1 +N lines]`,
+/// so a worker prompt never echoes verbatim; treating that as "not echoed"
+/// re-pasted the prompt and the worker received it twice.
+fn screen_shows_paste(norm_screen: &str, probe: &str) -> bool {
+    if norm_screen.contains(probe) {
+        return true;
+    }
+    let lower = norm_screen.to_lowercase();
+    lower.contains("[pasted content ") || lower.contains("[pasted text #")
 }
 
 /// Paste `prompt` into the session and press Enter — the one submit path
@@ -675,6 +688,25 @@ mod tests {
         assert_eq!(p.chars().count(), 40);
         assert!(p.starts_with("You are reviewing the skill package"));
         assert_eq!(paste_probe(""), "");
+    }
+
+    #[test]
+    fn paste_counts_as_echoed_when_the_tui_collapses_it_to_a_placeholder() {
+        let probe = "You are a Codex worker on /repo (branch";
+        // Codex: any sizeable paste is shown as a placeholder, never verbatim.
+        assert!(screen_shows_paste(
+            "› [Pasted Content 2614 chars] gpt-5 high",
+            probe
+        ));
+        // Claude Code's placeholder.
+        assert!(screen_shows_paste("> [Pasted text #1 +38 lines]", probe));
+        // Verbatim echo still counts.
+        assert!(screen_shows_paste(
+            "> You are a Codex worker on /repo (branch main)",
+            probe
+        ));
+        // An empty input box does not.
+        assert!(!screen_shows_paste("› Ask Codex to do anything", probe));
     }
 
     #[test]
