@@ -19,6 +19,7 @@ import { confirmer } from '../confirm.svelte';
 import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
 import { layout, type Axis } from './splitLayout.svelte';
+import { MAX_PANES } from './splitLayout';
 
 // Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
 // window's label so two windows never clobber each other's workspace/tabs/view.
@@ -444,6 +445,11 @@ class WorkspaceStore {
    *  id, or `SCRATCH_WORKSPACE_ID` with no workspace selected). Runs after
    *  {@link refreshSessions} so only ids that still exist survive. */
   private restoreLayout(key: string): void {
+    // Pin the tabs key here, exactly like `layout.restore(key)` pins `wsKey`:
+    // `select()` sets `currentId` and then AWAITS `refreshSessions`, so a
+    // `persistTabs()` in between (a `session_removed` event → `closeTab`) would
+    // otherwise write the OLD workspace's tabs under the NEW id.
+    this.tabsKey = key;
     // restore tabs for this workspace
     const raw = localStorage.getItem(winKey(LS_TABS + key));
     const ids: Id[] = raw ? JSON.parse(raw) : [];
@@ -526,14 +532,14 @@ class WorkspaceStore {
     if (layout.panes.length === 0 && tabs.length > 0) layout.setFocusedSession(tabs[0]);
   }
 
-  /** Storage-key suffix for the layout: the current workspace, or the scratch
-   *  id when none is selected (workspace-less sessions still keep their tabs). */
-  private layoutKey(): string {
-    return this.currentId ?? SCRATCH_WORKSPACE_ID;
-  }
+  /** Storage-key suffix for the open tabs: whatever {@link restoreLayout} last
+   *  restored — the current workspace, or the scratch id when none is selected
+   *  (workspace-less sessions still keep their tabs). NOT derived from
+   *  `currentId`: it must not move until the new workspace's tabs are loaded. */
+  private tabsKey: string = SCRATCH_WORKSPACE_ID;
 
   private persistTabs(): void {
-    localStorage.setItem(winKey(LS_TABS + this.layoutKey()), JSON.stringify(this.openTabs));
+    localStorage.setItem(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
   }
 
   /** Persist the split layout per workspace, so an arrangement of up to
@@ -934,7 +940,13 @@ class WorkspaceStore {
     }
     // Lay them out as side-by-side panes (the grid shows them all in tiled
     // view; panes give a clean split if the user flips back to tabs view).
-    for (const id of ids) if (!layout.panes.includes(id)) layout.addBeside(id, { focus: false });
+    // Stop AT the cap: `addBeside` at MAX_PANES reuses the focused leaf, which
+    // would silently replace the focused session once per surplus id — and
+    // persist it. The tiled grid still shows every id.
+    for (const id of ids) {
+      if (layout.panes.length >= MAX_PANES) break;
+      if (!layout.panes.includes(id)) layout.addBeside(id, { focus: false });
+    }
     this.persistPanes();
     this.maximizedId = null;
     this.setViewMode('tiled');

@@ -4,7 +4,7 @@
   // Pane membership, fractions and focus live in the layout store — this file
   // only mounts the root and keeps the broadcast bar.
   import SplitNode from './SplitNode.svelte';
-  import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
+  import { ws, DB_PANE_ID, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { layout, type Preset, type Rect, type Side } from '../../lib/stores/splitLayout.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { api } from '../../lib/api/client';
@@ -51,7 +51,10 @@
       // Inside a Database pane ⌘⌥←/→ stay with the query editor (tab switch).
       if (document.activeElement?.closest('.db-pane')) return;
       const side = SIDES[e.key];
-      if (!side && e.key.toLowerCase() !== 's') return;
+      // `e.code`, not `e.key`: with ⌥ held macOS delivers the ALTERED character
+      // (⌘⌥S → `e.key === 'ß'`), so a key comparison is dead on the only shipped
+      // platform. QueryEditor's ⌥⌘T/W use `e.code` for the same reason.
+      if (!side && e.code !== 'KeyS') return;
       e.preventDefault();
       e.stopPropagation();
       if (side) move(side);
@@ -104,9 +107,22 @@
     [...new Set(ws.panes.filter((id) => id !== DB_PANE_ID))],
   );
 
-  // Auto-disable broadcast mode when panes collapse to 1 or 0.
+  // `POST /workspaces/{id}/broadcast` is a WORKSPACE route: it needs a current
+  // workspace, and the daemon only relays to sessions that live in it. A
+  // workspace-less (scratch) pane can therefore never be a target, and with no
+  // workspace selected there is no id to post to at all — in both cases the bar
+  // would offer a compose box whose Enter silently does nothing, so hide it.
+  const broadcastable = $derived(
+    ws.currentId !== null &&
+      !broadcastTargets.some(
+        (id) => ws.sessions.find((s) => s.id === id)?.workspace_id === SCRATCH_WORKSPACE_ID,
+      ),
+  );
+
+  // Auto-disable broadcast mode when panes collapse to 1 or 0, or when the
+  // targets stop being broadcastable (a scratch session dropped into a pane).
   $effect(() => {
-    if (ws.panes.length < 2) broadcastMode = false;
+    if (ws.panes.length < 2 || !broadcastable) broadcastMode = false;
   });
 
   async function sendBroadcast(): Promise<void> {
@@ -140,7 +156,7 @@
 </script>
 
 <div class="splits" class:has-broadcast={broadcastMode}>
-  {#if ws.panes.length >= 2 && broadcastTargets.length >= 2}
+  {#if ws.panes.length >= 2 && broadcastTargets.length >= 2 && broadcastable}
     <div class="broadcast-bar-wrap">
       <button
         class="broadcast-toggle"
