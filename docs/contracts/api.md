@@ -733,12 +733,25 @@ for Redis (no plan surface).
 `RunQueryReq` may include an optional client-generated `query_id` (string). When
 present, the server registers the in-flight query under it; `POST …/db/cancel`
 with the same `query_id` then issues **engine-native** cancellation on a
-*separate* connection — MySQL `KILL QUERY <connid>`, ClickHouse `KILL QUERY WHERE
-query_id = '<id>'` — so the database stops the heavy query and frees the cached
-connection, not just the client's HTTP wait. Cancel is gated at the same role as
-`query` (`ws editor`; global connections: `Database:Edit`). Cancelling an unknown /
-already-finished query, a query on a different connection, or one on an engine
-without a native per-query cancel (Redis/MongoDB) is a no-op success (`204`).
+*separate* connection — MySQL `KILL QUERY <connid>`, PostgreSQL
+`pg_cancel_backend(pid)`, ClickHouse `KILL QUERY WHERE query_id = '<id>'` — so the
+database stops the heavy query and frees the cached connection, not just the
+client's HTTP wait. Cancel is gated at the same role as `query` (`ws editor`;
+global connections: `Database:Edit`). Cancelling an unknown / already-finished
+query, a query on a different connection, or one on an engine without a native
+per-query cancel (Redis) is a no-op success (`204`).
+
+**MongoDB cancel.** A tracked run (`query_id` set) stamps its `find` /
+`aggregate` / `countDocuments` with `comment: "otto:<query_id>"` (a cursor's
+`getMore`s inherit it). Cancel runs `[{$currentOp: {allUsers: true, localOps:
+true}}, {$match: {"command.comment": tag}}, {$project: {opid: 1}}]` on `admin`
+and issues `{killOp: 1, op: <opid>}` per match, on a separate pooled connection.
+Best-effort by design: `allUsers: true` needs the `inprog` privilege — when
+refused, the lookup is retried scoped to the current user (no privilege needed;
+it is the user that ran the query); a refused `killOp` (`killop` privilege) is
+logged and answered `204`. Writes, index ops and `mongosh` scripts are never
+tagged (no server-side cancel path). A cancel that lands before the server has
+registered the op matches nothing and is a `204`.
 
 `RunQueryReq` also accepts `offset?` (u64, `#[serde(default)]` — back-compat).
 It paginates an **auto-limited single SELECT** (Mongo: an unconstrained `find`):
@@ -746,6 +759,31 @@ the SQL drivers append `LIMIT n OFFSET m`, Mongo maps it to `skip`. It is applie
 **only** when the server auto-injected the LIMIT — an explicit user `LIMIT`/`OFFSET`,
 a non-paginatable statement, or a multi-statement batch never gets an `offset`,
 so the client's pager and the server's paging can't disagree.
+
+`RunQueryReq.cursor?` / `QueryResult.next_cursor?` — **keyset pagination
+(MongoDB `find` only)**. A find is keyset-eligible when it has no explicit
+`.limit(n)`, no top-level `_id` in its filter, and no sort or exactly `{_id: 1}`.
+For an eligible find the server forces `sort: {_id: 1}` on **every** page of the
+walk — page 1 included — and, when the auto-limit truncated the page (more rows
+exist), returns `next_cursor`: the Extended-JSON `_id` of the last row
+(`{"$oid": …}`, a number, a string…). The client echoes it back verbatim as
+`cursor`; the server then pages with `{$and: [<filter or {}>, {_id: {$gt:
+cursor}}]}` and ignores `skip`, so deep pages no longer re-scan every document
+before them. `cursor` may always be sent alongside `offset`: a non-eligible find
+ignores it and pages by `skip`; a request without a cursor (the pager's **Prev**)
+pages by `offset` on the same forced order, so Prev lands on exactly the page
+Next produced. An undecodable cursor is a `400`. `next_cursor` is omitted from
+the wire when absent (back-compat); every other engine ignores `cursor`.
+
+**BSON type fidelity.** Result cells keep their type as Extended-JSON sentinels:
+`{"$oid"}`, `{"$date"}`, `{"$numberDecimal"}`, and now `{"$numberLong": "<digits>"}`
+(only for an Int64 whose magnitude exceeds 2^53 — smaller longs stay plain
+numbers, exact in JS), `{"$uuid": "<hyphenated>"}` (binary subtypes 3/4),
+`{"$binary": {"base64": "…", "subType": "<2 hex, lowercase>"}}` (other subtypes)
+and `{"$timestamp": {"t": <u32>, "i": <u32>}}`. Every sentinel is decoded back to
+its BSON type on the way in (filters, updates, a "query by value"), so a cell
+round-trips without loss. Note the parser maps every plain JSON integer to
+`Int64`, so an `Int32` field rewritten through the explorer becomes `Int64`.
 
 **Multi-statement batches (`SELECT 1; SELECT 2`).** For MySQL/ClickHouse/MongoDB a
 `;`-separated script now runs **each statement in order** (a string/comment/quote-
@@ -774,10 +812,11 @@ statements, and every batch entry.
 `false` for MySQL and MongoDB (was `true` with no implementation): the explorer
 acquires each `run` from a connection pool, so there is no pinned session to hold
 a `BEGIN…COMMIT` open on. `multi_statement` is now `true` for MongoDB (it already
-ran `;`-separated scripts). Two new flags: `cancel` (server-side per-query cancel
-— `true` for MySQL/ClickHouse, `false` for MongoDB/Redis; the UI labels Stop as
-client-side-only when false) and `explain` (`true` everywhere except Redis, which
-has no plan surface — the UI hides the Explain button there).
+ran `;`-separated scripts). Two new flags: `cancel` (server-side per-query
+cancel — `true` for MySQL/PostgreSQL/ClickHouse and, via the `$currentOp`
+comment tag + `killOp` path above, MongoDB; `false` for Redis; the UI labels
+Stop as client-side-only when false) and `explain` (`true` everywhere except
+Redis, which has no plan surface — the UI hides the Explain button there).
 
 **`DbQueryPlan`** (`POST …/db/query-plan`) = `{ engine, root: PlanNode, raw }` where
 `PlanNode` = `{ op, object?, detail?, est_rows?, warnings[], children[] }`. `raw` is
