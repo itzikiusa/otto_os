@@ -860,9 +860,9 @@ async fn ask_session(
     }
     crate::auth::require_session_owner_or_admin(&ctx, &user, &session).await?;
 
-    // `len()` is already rejected above ASK_MAX_MARKS; the `min` keeps the
-    // bound visible at the allocation itself.
-    let mut marks = Vec::with_capacity(req.annotation_ids.len().min(ASK_MAX_MARKS));
+    // `len()` is already rejected above ASK_MAX_MARKS, so the vector can only
+    // ever grow to that bound — no request-sized pre-allocation.
+    let mut marks = Vec::new();
     for id in &req.annotation_ids {
         let ann = ctx
             .browser_annotations

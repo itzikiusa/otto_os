@@ -121,6 +121,23 @@ impl LocalGit {
         }
     }
 
+    /// Refuse a caller-supplied ref / path / revision that git would read as an
+    /// OPTION. Branch names, commit-ish, worktree paths and pathspecs arrive
+    /// from HTTP handlers; a value such as `--upload-pack=…` or `-c…` spliced
+    /// into an argv changes what git does instead of what it operates on.
+    /// Refs can never legitimately start with `-` (`git check-ref-format`), and
+    /// the few commands here that take a free-form path already pass `--`.
+    fn guard_ref(value: &str) -> Result<()> {
+        let v = value.trim_start();
+        if v.starts_with('-') {
+            return Err(Error::Invalid(format!("refusing option-like git argument '{value}'")));
+        }
+        if value.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
+            return Err(Error::Invalid("git argument contains a control character".into()));
+        }
+        Ok(())
+    }
+
     /// Run git with args; non-zero exit → `Error::Upstream(first stderr line)`.
     /// Returns stdout. Public for callers with plumbing needs the typed API
     /// doesn't cover (e.g. the workflow engine's worktree reaper resolving
@@ -190,6 +207,8 @@ impl LocalGit {
     /// (error, e.g. an unknown ref) — distinguished here so a bad ref surfaces as
     /// an error rather than a silent `false`.
     pub async fn is_ancestor_of(&self, commit: &str, branch: &str) -> Result<bool> {
+        Self::guard_ref(commit)?;
+        Self::guard_ref(branch)?;
         let (ok, _out, stderr, code) = self
             .run_raw(&["merge-base", "--is-ancestor", commit, branch], &[])
             .await?;
@@ -286,6 +305,7 @@ impl LocalGit {
     /// Resolve a ref (branch/sha/`HEAD`) to its full commit SHA. Used by Goal
     /// Loops to capture the launch HEAD as the diff base for the loop's branch.
     pub async fn rev_parse(&self, reference: &str) -> Result<String> {
+        Self::guard_ref(reference)?;
         let out = self.run(&["rev-parse", reference]).await?;
         Ok(out.trim().to_string())
     }
@@ -294,6 +314,7 @@ impl LocalGit {
     /// --name-only base...HEAD`). Used by the swarm to detect when two agents'
     /// branches touch the same shared files. Empty on no changes.
     pub async fn changed_files(&self, base: &str) -> Result<Vec<String>> {
+        Self::guard_ref(base)?;
         let range = format!("{base}...HEAD");
         let out = self.run(&["diff", "--name-only", &range]).await?;
         Ok(out
@@ -307,6 +328,9 @@ impl LocalGit {
     /// True when a local branch already exists. Lets Goal Loops re-attach an
     /// existing loop branch NON-destructively instead of `-B`-resetting it.
     pub async fn branch_exists(&self, branch: &str) -> bool {
+        if Self::guard_ref(branch).is_err() {
+            return false;
+        }
         let refname = format!("refs/heads/{branch}");
         match self
             .run_raw(&["rev-parse", "--verify", "--quiet", &refname], &[])
@@ -452,6 +476,8 @@ impl LocalGit {
     /// safe path for resuming a loop whose worktree was removed but whose branch
     /// (and its work) must survive. `--force` tolerates a stale path registration.
     pub async fn worktree_attach(&self, path: &str, branch: &str) -> Result<()> {
+        Self::guard_ref(path)?;
+        Self::guard_ref(branch)?;
         self.run(&["worktree", "add", "--force", path, branch]).await?;
         Ok(())
     }
@@ -467,6 +493,9 @@ impl LocalGit {
     /// For multi-turn swarm work use [`worktree_add_if_absent`] instead, which
     /// only creates on first use and otherwise reuses the existing tree.
     pub async fn worktree_add(&self, path: &str, branch: &str, base: &str) -> Result<()> {
+        Self::guard_ref(path)?;
+        Self::guard_ref(branch)?;
+        Self::guard_ref(base)?;
         self.run(&["worktree", "add", "--force", "-B", branch, path, base])
             .await?;
         Ok(())
@@ -541,6 +570,7 @@ impl LocalGit {
     /// Remove a linked worktree at `path` (force-removes dirty/locked trees).
     /// Best-effort: a missing worktree is not an error.
     pub async fn worktree_remove(&self, path: &str) -> Result<()> {
+        Self::guard_ref(path)?;
         let _ = self
             .run(&["worktree", "remove", "--force", path])
             .await;
@@ -579,6 +609,7 @@ impl LocalGit {
     /// to remove a dirty/locked tree without `--force`, which is the safety net
     /// the UI relies on. Keeps the branch, like every other removal path.
     pub async fn worktree_remove_checked(&self, path: &str, force: bool) -> Result<()> {
+        Self::guard_ref(path)?;
         let mut args = vec!["worktree", "remove"];
         if force {
             // Twice: a locked worktree needs --force --force to be removed.
@@ -918,6 +949,7 @@ impl LocalGit {
     /// Run `git diff <base>` — diffs the working tree (staged + unstaged)
     /// against `base` and returns the raw unified diff text.
     pub async fn diff_text_against(&self, base: &str) -> Result<String> {
+        Self::guard_ref(base)?;
         self.run(&["diff", base]).await
     }
 
@@ -956,6 +988,7 @@ impl LocalGit {
     // -- mutations ----------------------------------------------------------
 
     pub async fn checkout(&self, branch: &str, create: bool) -> Result<()> {
+        Self::guard_ref(branch)?;
         if create {
             // Creating a branch whose name already exists on origin is almost
             // never meant as "shadow it from my (possibly stale) HEAD" — a bare
@@ -987,6 +1020,7 @@ impl LocalGit {
     /// hits conflicts is reported in the summary — git keeps the stash entry,
     /// nothing is lost.
     pub async fn checkout_update(&self, branch: &str, token: Option<String>) -> Result<String> {
+        Self::guard_ref(branch)?;
         let mut steps: Vec<String> = Vec::new();
         let dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
         if dirty {
@@ -1194,6 +1228,7 @@ impl LocalGit {
         match branch {
             None => self.push(token).await,
             Some(b) => {
+                Self::guard_ref(b)?;
                 let askpass = match &token {
                     Some(t) => Some(AskPass::new(t)?),
                     None => None,
@@ -1475,6 +1510,7 @@ impl LocalGit {
     /// this the request errored *before* the prune ran, so the bad menu entry
     /// persisted and every retry failed.
     pub async fn delete_remote_branch(&self, name: &str, token: Option<String>) -> Result<String> {
+        Self::guard_ref(name)?;
         let (ok, stdout, stderr, code) = self
             .run_remote_raw(&["push", "origin", "--delete", name], token)
             .await?;
@@ -1532,6 +1568,7 @@ impl LocalGit {
     /// Push a single tag to `origin` (`git push origin refs/tags/<name>`).
     /// Returns the combined push output.
     pub async fn push_tag(&self, name: &str, token: Option<String>) -> Result<String> {
+        Self::guard_ref(name)?;
         let refspec = format!("refs/tags/{name}");
         self.run_remote(&["push", "origin", &refspec], token).await
     }
@@ -1545,6 +1582,7 @@ impl LocalGit {
     /// Delete a tag on `origin` (`git push origin --delete refs/tags/<name>`).
     /// Returns the combined push output.
     pub async fn delete_remote_tag(&self, name: &str, token: Option<String>) -> Result<String> {
+        Self::guard_ref(name)?;
         let refspec = format!("refs/tags/{name}");
         self.run_remote(&["push", "origin", "--delete", &refspec], token)
             .await
@@ -1698,6 +1736,8 @@ impl LocalGit {
     /// (writes only to the object DB — the index and working tree are NEVER
     /// touched). Lets callers warn about conflicts BEFORE starting a real merge.
     pub async fn merge_preview(&self, source: &str, target: &str) -> Result<MergePreview> {
+        Self::guard_ref(source)?;
+        Self::guard_ref(target)?;
         // No-op merge: source already contained in target.
         if self.is_ancestor_of(source, target).await.unwrap_or(false) {
             return Ok(MergePreview {
@@ -2450,6 +2490,17 @@ pub async fn clone_repo(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn guard_ref_refuses_option_like_and_control_values() {
+        assert!(super::LocalGit::guard_ref("feature/x").is_ok());
+        assert!(super::LocalGit::guard_ref("v1.2.3").is_ok());
+        assert!(super::LocalGit::guard_ref("HEAD~2").is_ok());
+        assert!(super::LocalGit::guard_ref("--upload-pack=touch /tmp/pwn").is_err());
+        assert!(super::LocalGit::guard_ref("-c").is_err());
+        assert!(super::LocalGit::guard_ref("  --force").is_err());
+        assert!(super::LocalGit::guard_ref("main\nrm").is_err());
+    }
+
     use super::*;
     use otto_core::api::LineOrigin;
 
