@@ -12,7 +12,13 @@
   // connection's query API after a review).
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import { database } from '../../lib/stores/database.svelte';
+  import {
+    database,
+    effectiveViewMode,
+    viewModeReason,
+    type ViewMode,
+  } from '../../lib/stores/database.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { buildFilteredQuery, type FilterMode } from './query-filter';
@@ -49,6 +55,22 @@
     running?: boolean;
     /** Active tab's current row offset (footer pager). */
     offset?: number;
+    /**
+     * The result view to render, resolved by the owner (QueryEditor →
+     * `effectiveViewMode`: tab pick → column threshold → connection memory →
+     * engine default). Without it the component keeps a local grid/vertical/json
+     * state — dashboard mini widgets and the Athena view have no query tab.
+     */
+    viewMode?: ViewMode;
+    /** Why `viewMode` is what it is (the view switch's tooltip). */
+    viewReason?: string;
+    /** The tab's explicit pick, if any — shows the "Auto" chip that clears it. */
+    tabPick?: ViewMode | null;
+    /**
+     * User picked a view (`null` = back to automatic). The store write happens in
+     * the owner — this component is also mounted where there is no tab to write.
+     */
+    onviewmode?: (m: ViewMode | null) => void;
   }
   let {
     result: resultProp,
@@ -58,6 +80,10 @@
     connectionId,
     running = false,
     offset = 0,
+    viewMode,
+    viewReason,
+    tabPick = null,
+    onviewmode,
   }: Props = $props();
 
   // ── Multi-result switcher (multi-statement batches) ──────────────────────────
@@ -143,6 +169,7 @@
       search = '';
       sortCol = null;
       sortDir = null;
+      // WP2: expansion
       prevColKey = colKey;
     }
     // Clear the selection whenever the upstream result changes (incl. the
@@ -158,10 +185,31 @@
   // its rows to a fixed taller height so the virtualization math stays exact).
   let expandJson = $state(false);
 
-  // Result view mode: columnar grid (default), a JSON array, or a vertical
+  // Result view mode: columnar grid, one JSON object per row, or a vertical
   // row-per-record layout (like Postgres `\x` / ClickHouse FORMAT Vertical).
-  type ViewMode = 'grid' | 'json' | 'vertical';
-  let viewMode = $state<ViewMode>('grid');
+  // Controlled by the `viewMode` prop when the owner has a query tab to keep it
+  // on; otherwise (mini widgets, Athena) a local pick that starts at Grid.
+  let localMode = $state<ViewMode>('grid');
+  const mode = $derived<ViewMode>(viewMode ?? localMode);
+  function pickView(m: ViewMode | null): void {
+    if (onviewmode) onviewmode(m);
+    else localMode = m ?? 'grid';
+  }
+  // The "Auto" chip only makes sense where a pick can be cleared back to the
+  // automatic resolution — i.e. a tab-owned grid with an explicit pick on it.
+  const showAutoChip = $derived(!!onviewmode && tabPick !== null);
+  // What clearing the pick would land on (same resolution minus the tab pick).
+  const VIEW_LABEL: Record<ViewMode, string> = { grid: 'Grid', vertical: 'Vertical', json: 'JSON' };
+  const autoTitle = $derived.by(() => {
+    const a = {
+      tabPick: null,
+      connPick: database.connView,
+      columnCount: result?.columns.length ?? 0,
+      autoVerticalCols: ui.dbAutoVerticalCols,
+      engine: database.capabilities?.engine ?? null,
+    };
+    return `Back to automatic: ${VIEW_LABEL[effectiveViewMode(a)]} (${viewModeReason(a)})`;
+  });
   // Non-grid views aren't virtualized, and one document can be enormous on its
   // own (a `lobby_format_history` doc is ~88KB, so 100 rows ≈ 9MB). A flat 500-row
   // cap is therefore no protection at all — rendering is BATCHED instead: draw
@@ -172,7 +220,7 @@
   // otherwise a big window opened on one result silently applies to the next.
   $effect(() => {
     void result;
-    void viewMode;
+    void mode;
     altShown = ALT_BATCH;
   });
 
@@ -340,7 +388,7 @@
     });
   });
   const objRows = $derived.by<{ obj: Record<string, unknown>; idx: number }[]>(() => {
-    if (!result || viewMode === 'grid') return [];
+    if (!result || mode === 'grid') return [];
     const names = uniqueColNames;
     return viewRows.slice(0, altCap).map(({ row, idx }) => {
       const o: Record<string, unknown> = {};
@@ -350,9 +398,9 @@
   });
   /** Records still drawable below the current batch (excludes the hard-capped tail). */
   const altRemaining = $derived(
-    viewMode === 'grid' ? 0 : Math.max(0, Math.min(viewRows.length, VIEW_CAP) - altCap),
+    mode === 'grid' ? 0 : Math.max(0, Math.min(viewRows.length, VIEW_CAP) - altCap),
   );
-  const viewTruncated = $derived(viewMode !== 'grid' && viewRows.length > VIEW_CAP);
+  const viewTruncated = $derived(mode !== 'grid' && viewRows.length > VIEW_CAP);
 
   // ── Edit flow ────────────────────────────────────────────────────────────────
   // Editability, cell drafts, selection, viewer / doc editor and the review
@@ -787,6 +835,7 @@
           {/if}
         </div>
         <span class="grow"></span>
+        <!-- WP2/WP4: toolbar mounts -->
         {#if flow.editable}
           <span
             class="gt-edit-hint"
@@ -795,12 +844,18 @@
             <Icon name="edit" size={10} />double-click to edit
           </span>
         {/if}
-        <div class="view-seg" role="tablist" aria-label="Result view">
-          <button class="vs" class:on={viewMode === 'grid'} role="tab" aria-selected={viewMode === 'grid'} onclick={() => (viewMode = 'grid')} title="Columnar grid">Grid</button>
-          <button class="vs" class:on={viewMode === 'vertical'} role="tab" aria-selected={viewMode === 'vertical'} onclick={() => (viewMode = 'vertical')} title="One record per block (field: value)">Vertical</button>
-          <button class="vs" class:on={viewMode === 'json'} role="tab" aria-selected={viewMode === 'json'} onclick={() => (viewMode = 'json')} title="One JSON object per row">JSON</button>
+        <div class="view-seg" title={viewReason}>
+          <div class="view-tabs" role="tablist" aria-label="Result view">
+            <button class="vs" class:on={mode === 'grid'} role="tab" aria-selected={mode === 'grid'} onclick={() => pickView('grid')} title="Columnar grid">Grid</button>
+            <button class="vs" class:on={mode === 'vertical'} role="tab" aria-selected={mode === 'vertical'} onclick={() => pickView('vertical')} title="One record per block (field: value)">Vertical</button>
+            <button class="vs" class:on={mode === 'json'} role="tab" aria-selected={mode === 'json'} onclick={() => pickView('json')} title="One JSON object per row">JSON</button>
+          </div>
+          {#if showAutoChip}
+            <!-- Not a fourth tab: clears THIS tab's pick only (the connection memory stays). -->
+            <button class="vs auto" onclick={() => pickView(null)} title={autoTitle}>Auto</button>
+          {/if}
         </div>
-        {#if viewMode === 'grid'}
+        {#if mode === 'grid'}
           <button
             class="tb-btn"
             class:on={expandJson}
@@ -907,7 +962,8 @@
       </div>
     {/if}
 
-    {#if viewMode === 'json'}
+    <!-- WP4: filter bar -->
+    {#if mode === 'json'}
       <JsonView
         {result}
         {objRows}
@@ -921,7 +977,7 @@
         totalRows={viewRows.length}
         onshowmore={() => (altShown += ALT_BATCH)}
       />
-    {:else if viewMode === 'vertical'}
+    {:else if mode === 'vertical'}
       <VerticalView
         {result}
         {objRows}
@@ -1452,6 +1508,11 @@
     border-radius: var(--radius-s);
     overflow: hidden;
   }
+  /* The tablist wraps only the three real views (a11y: the Auto chip is a
+     button, not a tab); `contents` keeps the chips in one flex row. */
+  .view-tabs {
+    display: contents;
+  }
   .vs {
     height: 22px;
     padding: 0 9px;
@@ -1467,6 +1528,17 @@
   }
   .vs.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  /* "Auto" is an escape hatch, not a fourth view — dimmed and italic so it
+     reads as "clear my pick" next to the three real modes. */
+  .vs.auto {
+    border-inline-start: 1px solid var(--border);
+    font-style: italic;
+    opacity: 0.7;
+  }
+  .vs.auto:hover {
+    opacity: 1;
     color: var(--accent);
   }
   .tb-btn {
