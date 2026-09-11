@@ -1,7 +1,8 @@
 // Pure SQL text helpers for the query editor: split a multi-statement buffer on
 // top-level `;`, find the statement under the cursor, and detect/substitute
-// query variables (`:name` / `{name}`) — all QUOTE- and COMMENT-aware so a `;`
-// or a `:token` inside a string/comment is never mistaken for code.
+// query variables (`:name` / `{name}` / `{{name}}`) — all QUOTE- and
+// COMMENT-aware so a `;` or a `:token` inside a string/comment is never
+// mistaken for code.
 //
 // These power "run only the selected/current statement" and "query-level
 // variables" without touching the server. Kept dependency-free + pure so they're
@@ -148,16 +149,18 @@ export function stripJavaStringConcat(sql: string): string {
 }
 
 /**
- * Replace query placeholders (`${name}` / `#{name}` / `:name` / `{name}`) with
- * inert identifier tokens so a formatter (sql-formatter) doesn't choke on them
- * (`#{…}` reads as a MySQL line comment; `${…}` / `:name` / `{name}` are parse
- * errors). Restore with [`unmaskQueryPlaceholders`] after formatting. The token
- * carries a trailing `z` delimiter so `ottoph1z` can't match inside `ottoph10z`.
+ * Replace query placeholders (`${name}` / `#{name}` / `:name` / `{{name}}` /
+ * `{name}`) with inert identifier tokens so a formatter (sql-formatter) doesn't
+ * choke on them (`#{…}` reads as a MySQL line comment; `${…}` / `:name` /
+ * `{name}` are parse errors). Restore with [`unmaskQueryPlaceholders`] after
+ * formatting. The token carries a trailing `z` delimiter so `ottoph1z` can't
+ * match inside `ottoph10z`. The `{{name}}` alternative sits BEFORE `{name}` so
+ * a mustache placeholder is masked whole (never as `{` + `{name}` + `}`).
  */
 export function maskQueryPlaceholders(sql: string): { masked: string; tokens: string[] } {
   const tokens: string[] = [];
   const masked = sql.replace(
-    /#\{[^}]*\}|\$\{[^}]*\}|:[A-Za-z_]\w*|\{[A-Za-z_]\w*\}/g,
+    /#\{[^}]*\}|\$\{[^}]*\}|:[A-Za-z_]\w*|\{\{[A-Za-z_]\w*\}\}|\{[A-Za-z_]\w*\}/g,
     (m) => {
       const id = `ottoph${tokens.length}z`;
       tokens.push(m);
@@ -236,10 +239,13 @@ export function statementAtCursor(sql: string, cursor: number, mode: SplitMode =
   return hit.text;
 }
 
-// `:name` and `{name}` at code positions. `:name` skips `::` casts via a
-// preceding-char check (no lookbehind, for older Safari).
+// `:name`, `{name}` and `{{name}}` at code positions. `:name` skips `::` casts
+// via a preceding-char check (no lookbehind, for older Safari). `VAR_BRACE`
+// also matches the INNER `{name}` of a `{{name}}` (one char in), so the
+// mustache form is matched first and those inner hits are skipped.
 const VAR_COLON = /:([A-Za-z_]\w*)/g;
 const VAR_BRACE = /\{([A-Za-z_]\w*)\}/g;
+const VAR_MUSTACHE = /\{\{([A-Za-z_]\w*)\}\}/g;
 
 interface VarMatch {
   name: string;
@@ -260,18 +266,27 @@ function matchVars(sql: string, mode: SplitMode = 'sql'): VarMatch[] {
     if (/[A-Za-z0-9_:}]/.test(prev)) continue;
     if (mask[m.index]) out.push({ name: m[1], start: m.index, end: m.index + m[0].length });
   }
-  // `{name}` variables don't apply to redis (line mode): `{...}` there is a
-  // Cluster hash-tag (`{user}:1`), NOT a variable — never treat it as one.
+  // `{name}` / `{{name}}` variables don't apply to redis (line mode): `{...}`
+  // there is a Cluster hash-tag (`{user}:1`), NOT a variable — never treat it
+  // as one. Mustache first, so each match spans the FULL `{{name}}` (the
+  // right-to-left substitution then removes both brace pairs); a `{name}` hit
+  // whose preceding char is `{` is that same placeholder's inner span — skip it.
   if (mode !== 'line') {
+    VAR_MUSTACHE.lastIndex = 0;
+    while ((m = VAR_MUSTACHE.exec(sql))) {
+      if (mask[m.index]) out.push({ name: m[1], start: m.index, end: m.index + m[0].length });
+    }
     VAR_BRACE.lastIndex = 0;
     while ((m = VAR_BRACE.exec(sql))) {
+      if (m.index > 0 && sql[m.index - 1] === '{') continue;
       if (mask[m.index]) out.push({ name: m[1], start: m.index, end: m.index + m[0].length });
     }
   }
   return out;
 }
 
-/** Unique variable names referenced in `sql` (`:name` / `{name}`), in first-seen order. */
+/** Unique variable names referenced in `sql` (`:name` / `{name}` / `{{name}}`),
+ *  in first-seen order. */
 export function extractVars(sql: string, mode: SplitMode = 'sql'): string[] {
   const seen = new Set<string>();
   for (const v of matchVars(sql, mode).sort((a, b) => a.start - b.start)) seen.add(v.name);
@@ -279,9 +294,10 @@ export function extractVars(sql: string, mode: SplitMode = 'sql'): string[] {
 }
 
 /**
- * Replace `:name` / `{name}` tokens (code positions only) with the supplied
- * values (raw textual substitution — the caller controls quoting). Tokens with
- * no entry in `values` are left as-is. Replaces right-to-left to keep offsets valid.
+ * Replace `:name` / `{name}` / `{{name}}` tokens (code positions only) with the
+ * supplied values (raw textual substitution — the caller controls quoting).
+ * Tokens with no entry in `values` are left as-is. Replaces right-to-left to
+ * keep offsets valid.
  */
 export function substituteVars(
   sql: string,
