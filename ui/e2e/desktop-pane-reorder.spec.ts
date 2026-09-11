@@ -38,6 +38,10 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript((id) => {
     localStorage.setItem('otto_workspace', id as string);
     localStorage.setItem('otto_firstrun_dismissed', '1');
+    // The sidebar lists EVERY workspace's sessions by default, and the suite runs
+    // 4 parallel workers against ONE daemon — pin the list to this workspace so
+    // another worker's sessions can't shift the row counts below.
+    localStorage.setItem('otto_nav_all_ws', '0');
   }, wsId);
   await page.goto('/#/agents');
   await expect(page.getByText(TITLES[0]).first()).toBeVisible({ timeout: 20_000 });
@@ -160,11 +164,18 @@ test('tiled view: drag a tile onto another reorders and a reload keeps it', asyn
 });
 
 test('sidebar: drag a row onto another switches to manual and persists', async ({ page }) => {
-  const rows = page.locator('.nested-row');
+  // Only the flat Agents list: the "No workspace" group renders `.nested-row`s
+  // too, and scratch sessions are global to the daemon every worker shares.
+  const rows = page.getByTestId('agents-list').locator('.nested-row');
   await expect(rows).toHaveCount(3, { timeout: 20_000 });
   const before = await rows.locator('.nested-item .ellipsis').allInnerTexts();
 
-  await dragOnto(page, '.nested-row >> nth=2 >> .nested-item', '.nested-row >> nth=0', { x: 0.5, y: 0.5 });
+  await dragOnto(
+    page,
+    '[data-testid="agents-list"] .nested-row >> nth=2 >> .nested-item',
+    '[data-testid="agents-list"] .nested-row >> nth=0',
+    { x: 0.5, y: 0.5 },
+  );
 
   const expected = [before[2], before[0], before[1]];
   await expect.poll(() => rows.locator('.nested-item .ellipsis').allInnerTexts()).toEqual(expected);
@@ -185,9 +196,10 @@ test('sidebar: drag a row onto another switches to manual and persists', async (
 });
 
 test('sidebar rows are not draggable while searching', async ({ page }) => {
-  await expect(page.locator('.nested-row')).toHaveCount(3, { timeout: 20_000 });
-  await expect(page.locator(".nested-row[draggable='true']")).toHaveCount(3);
+  const rows = page.getByTestId('agents-list').locator('.nested-row');
+  await expect(rows).toHaveCount(3, { timeout: 20_000 });
+  await expect(page.locator("[data-testid='agents-list'] .nested-row[draggable='true']")).toHaveCount(3);
   await page.locator('.nav-search-input').fill('Boban');
-  await expect(page.locator('.nested-row')).toHaveCount(1);
-  await expect(page.locator(".nested-row[draggable='true']")).toHaveCount(0);
+  await expect(rows).toHaveCount(1);
+  await expect(page.locator("[data-testid='agents-list'] .nested-row[draggable='true']")).toHaveCount(0);
 });

@@ -36,6 +36,11 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page.addInitScript((wsId) => {
     localStorage.setItem('otto_workspace', wsId as string);
     localStorage.setItem('otto_firstrun_dismissed', '1');
+    // The sidebar lists EVERY workspace's sessions by default, and the suite runs
+    // 4 parallel workers against ONE daemon — pin it to this workspace. The
+    // "No workspace" group stays global (scratch sessions always are), which is
+    // why every assertion below filters by TITLE and never counts rows.
+    localStorage.setItem('otto_nav_all_ws', '0');
   }, wsA);
 });
 
@@ -118,6 +123,13 @@ test.describe('scratch sessions', () => {
 
     const patch = await ctx.patch(`${base}/api/v1/workspaces/scratch`, { data: { name: 'renamed' } });
     expect(patch.status()).toBe(409);
+
+    // Only the session routes exist under `scratch`: the implicit Editor every
+    // user holds there must not reach another workspace-scoped API.
+    for (const path of ['workflows', 'api-client/environments', 'mcp-servers']) {
+      const r = await ctx.get(`${base}/api/v1/workspaces/scratch/${path}`);
+      expect(r.status(), `/workspaces/scratch/${path}`).toBe(404);
+    }
     const del = await ctx.delete(`${base}/api/v1/workspaces/scratch`);
     expect(del.status()).toBe(409);
     const members = await ctx.put(`${base}/api/v1/workspaces/scratch/members`, { data: { members: [] } });
