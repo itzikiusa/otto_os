@@ -8,20 +8,43 @@ import { sqlAdapter } from './edit-sql';
 import { mongoAdapter } from './edit-mongo';
 import { redisAdapter } from './edit-redis';
 
-/** Typed values for the nested-field editors (Vertical view). Phase 0 declares
- *  the shape only — `pendingEdits` still parks raw cell strings. */
+/** Typed values from the nested-field editor (Vertical view): `raw` is the
+ *  editor text, validated per `kind` (24-hex ObjectId, ISO date, digit-only
+ *  long, …); the Mongo adapter turns it into the matching EJSON sentinel. */
 export type TypedKind = 'string' | 'number' | 'bool' | 'null' | 'objectId' | 'date' | 'long' | 'decimal' | 'json';
 export interface TypedValue {
   kind: TypedKind;
   raw: string;
 }
-/** Everything parked for one row: whole-cell drafts (`cells`, by column index)
- *  plus the path-level ops the Vertical editor adds later. */
+/** Everything parked for one row: whole-cell drafts (`cells`, by column index —
+ *  the grid / cell viewer) plus the Vertical editor's path-level ops on dotted
+ *  paths relative to the row (`set` typed values, `unset`, `rename` old → new).
+ *  For SQL engines only `cells` is ever populated: a nested edit inside a JSON
+ *  column is folded into a whole-column draft (see `EditFlow.parkPath`). */
 export interface RowPatch {
   cells: Map<number, string>;
   set: Map<string, TypedValue>;
   unset: Set<string>;
   rename: Map<string, string>;
+}
+/** What a Vertical-view field row hands to the field context menu. */
+export interface FieldCtx {
+  rowIdx: number;
+  /** Column the path lives in; -1 for a new top-level field (Mongo only). */
+  colIdx: number;
+  /** Dotted path relative to the row; the column name is the first segment. */
+  path: string;
+  /** Last path segment (the key / index shown as the row label). */
+  label: string;
+  /** Live value at the path (undefined for a phantom row of a pending set). */
+  value: unknown;
+  container: boolean;
+  /** The row IS a result column (SQL: can't be removed / renamed). */
+  topLevel: boolean;
+  /** Any numeric segment — Mongo can't `$rename` through arrays. */
+  inArray: boolean;
+  /** Open the row's inline editor (leaves only). */
+  edit: () => void;
 }
 /** One line of the review modal's diff table (`∅` for an absent side). */
 export interface DiffLine {

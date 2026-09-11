@@ -5,7 +5,7 @@
 import type { DbEngine } from '../../lib/api/types';
 import { escapeSqlString } from './sql-util';
 import { cellStr, compactJson, isComplex, SET_EMPTY, SET_NULL } from './results-format';
-import type { DiffLine, EditAdapter, EditCtx } from './edit-types';
+import type { DiffLine, EditAdapter, EditCtx, TypedValue } from './edit-types';
 
 /** Quote a SQL identifier for the active engine — double-quotes for Postgres
  *  (backticks are invalid there), backticks for MySQL/ClickHouse. */
@@ -38,6 +38,22 @@ export function valueLiteral(engine: DbEngine | null, v: unknown): string {
   if (typeof v === 'boolean') return engine === 'postgres' ? (v ? 'TRUE' : 'FALSE') : v ? '1' : '0';
   if (isComplex(v)) return `'${escapeSqlString(compactJson(v), backslashEscapes(engine))}'`;
   return `'${escapeSqlString(String(v), backslashEscapes(engine))}'`;
+}
+/** The cell DRAFT a typed value (Vertical editor) parks for a SQL column — the
+ *  same raw text the grid's inline input would have produced, so it flows
+ *  through `sqlLiteral` unchanged: NULL / '' as the sentinels, booleans as the
+ *  engine's literal form (`valueLiteral`'s), everything else as typed. */
+export function typedCellDraft(engine: DbEngine | null, tv: TypedValue): string {
+  switch (tv.kind) {
+    case 'null':
+      return SET_NULL;
+    case 'bool':
+      return engine === 'postgres' ? (tv.raw === 'true' ? 'TRUE' : 'FALSE') : tv.raw === 'true' ? '1' : '0';
+    case 'number':
+      return String(Number(tv.raw));
+    default:
+      return tv.raw === '' ? SET_EMPTY : tv.raw;
+  }
 }
 /** Qualified `db.table` (db optional), quoted for the active engine. */
 export function tableRef(ctx: EditCtx): string {
@@ -190,6 +206,21 @@ export const sqlAdapter: EditAdapter = {
     });
     const sql = `INSERT INTO ${tableRef(ctx)} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
     return { title: 'Review INSERT (duplicate row)', sql };
+  },
+
+  /** `INSERT INTO … VALUES` from a user-typed JSON object (the "Insert
+   *  document…" editor): only keys that name a result column are used, in
+   *  column order; unknown keys are ignored. Null when nothing matches. */
+  buildInsertDoc(doc, ctx) {
+    const cols: string[] = [];
+    const vals: string[] = [];
+    for (const c of ctx.columns) {
+      if (!(c.name in doc)) continue;
+      cols.push(ctx.qid(c.name));
+      vals.push(valueLiteral(ctx.engine, doc[c.name]));
+    }
+    if (cols.length === 0) return null;
+    return `INSERT INTO ${tableRef(ctx)} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
   },
 
   /** Whole-document save: SET only the columns whose value actually changed.
