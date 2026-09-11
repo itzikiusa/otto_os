@@ -347,7 +347,11 @@ impl SessionsRepo {
 
     /// Non-archived, channel-spawned agent sessions idle longer than `max_idle`
     /// — used to auto-archive stale ticket/chat sessions so they don't pile up
-    /// in the sidebar. Oldest first.
+    /// in the sidebar. Oldest first. A `working` session is never idle, whatever
+    /// its `last_active_at` says: that column only moves on a status transition,
+    /// so a long turn (or a reply that arrived while the agent was already
+    /// working) would otherwise get archived mid-answer — and the thread's next
+    /// message would spawn a stranger.
     pub async fn list_idle_channel_sessions(
         &self,
         max_idle: std::time::Duration,
@@ -358,7 +362,7 @@ impl SessionsRepo {
         let before = cutoff.as_str();
         let rows = sqlx::query(
             "SELECT * FROM sessions \
-             WHERE archived = 0 AND kind = 'agent' AND last_active_at < ? \
+             WHERE archived = 0 AND kind = 'agent' AND status != 'working' AND last_active_at < ? \
                AND json_extract(meta_json, '$.source') = 'channel' \
              ORDER BY last_active_at",
         )
@@ -727,6 +731,14 @@ mod tests {
         insert_session(&pool, &ws, &user, &old, "{}", 0).await;
         // Excluded: old channel session but already archived.
         insert_session(&pool, &ws, &user, &old, r#"{"source":"channel"}"#, 1).await;
+        // Excluded: old timestamp but mid-turn — `last_active_at` only moves on a
+        // status transition, so a working session can look stale while answering.
+        let working = insert_session(&pool, &ws, &user, &old, r#"{"source":"channel","channel":"slack"}"#, 0).await;
+        sqlx::query("UPDATE sessions SET status = 'working' WHERE id = ?")
+            .bind(&working)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let got = repo
             .list_idle_channel_sessions(std::time::Duration::from_secs(12 * 60 * 60))

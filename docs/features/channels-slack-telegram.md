@@ -451,10 +451,16 @@ Either way, **the agent never posts to the chat itself and never touches tokens*
 
 ### Lifecycle & idle auto-archive
 
-- **One agent per `(workspace, chat, thread)`**, reused across follow-ups.
+- **One agent per `(workspace, chat, thread)`**, reused across follow-ups. The
+  bridge keeps an in-memory map as the fast path and, when that misses (a daemon
+  restart, a listener generation that never saw the thread), finds the thread's
+  newest live session by the `channel` / `chat` / `thread` stamped in its
+  `meta` — so a thread keeps its agent for as long as that agent is alive.
 - A new message on a thread whose session has **exited or been archived** starts a
-  **fresh** agent. (Sessions are auto-archived after idle by the session manager —
-  see `./agent-sessions.md` — so a dormant thread cleanly re-spawns later.)
+  **fresh** agent. Channel sessions are auto-archived by the daemon after **1 h
+  with no activity**, swept every 10 min — but never while the session is
+  `working`, and every follow-up the bridge hands to a session counts as
+  activity (a long-running turn that keeps receiving replies is not idle).
 - A **respawn of the listeners** (e.g. after a token edit) does **not** drop live
   thread→session mappings: the `Bridge` and `Mirror` survive across listener
   generations.
