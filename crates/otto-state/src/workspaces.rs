@@ -71,8 +71,9 @@ impl WorkspacesRepo {
     }
 
     /// Make sure the system-owned scratch workspace (`SCRATCH_WORKSPACE_ID`)
-    /// exists and is healthy: insert it when missing, then pin `root_path` to
-    /// `home` and un-archive it (heals a renamed/archived row). Idempotent;
+    /// exists and is healthy: insert it when missing, then pin `name` +
+    /// `root_path` and un-archive it (heals a renamed/moved/archived row —
+    /// `PATCH` is a 409, but the row can still be edited by hand). Idempotent;
     /// called once per daemon boot. Writes no membership rows — every user is
     /// an implicit Editor there (see [`Self::role_of`]).
     pub async fn ensure_scratch(&self, home: &str) -> Result<Workspace> {
@@ -87,7 +88,7 @@ impl WorkspacesRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("ensure scratch workspace"))?;
-        sqlx::query("UPDATE workspaces SET root_path = ?, archived = 0 WHERE id = ?")
+        sqlx::query("UPDATE workspaces SET name = 'Scratch', root_path = ?, archived = 0 WHERE id = ?")
             .bind(home)
             .bind(SCRATCH_WORKSPACE_ID)
             .execute(&self.pool)
@@ -329,12 +330,13 @@ mod tests {
         repo.ensure_scratch("/Users/me").await.unwrap();
         assert_eq!(count_scratch_rows(&pool).await, 1);
 
-        // A tampered row (archived + moved) is healed on the next boot.
-        repo.update(&scratch_id, None, Some("/elsewhere"), None, Some(true))
+        // A tampered row (renamed + archived + moved) is healed on the next boot.
+        repo.update(&scratch_id, Some("Not Scratch"), Some("/elsewhere"), None, Some(true))
             .await
             .unwrap();
         let healed = repo.ensure_scratch("/Users/me").await.unwrap();
         assert!(!healed.archived);
+        assert_eq!(healed.name, "Scratch");
         assert_eq!(healed.root_path, "/Users/me");
         assert_eq!(count_scratch_rows(&pool).await, 1);
     }

@@ -290,7 +290,14 @@ async fn run(cfg: Config) -> Result<(), String> {
     let workspaces = WorkspacesRepo::new(pool.clone());
     // The system-owned scratch workspace (workspace-less sessions) lives at the
     // daemon user's home; created on first boot, healed on every later one.
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    // Never `/`: this root is the default cwd of every workspace-less session
+    // AND the folder they are pre-trusted for ("may write anywhere under"), so
+    // a bare launchd context with no `$HOME` must fall back to the daemon's own
+    // data dir — the same resolution the session manager uses below.
+    let home = dirs::home_dir()
+        .unwrap_or_else(|| cfg.data_dir.clone())
+        .to_string_lossy()
+        .into_owned();
     workspaces
         .ensure_scratch(&home)
         .await
