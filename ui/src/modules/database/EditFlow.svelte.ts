@@ -734,7 +734,8 @@ export class EditFlow {
     this.lastClickedIdx = null;
   }
 
-  /** `{"_id": …}` filter for a row — ObjectId hex → `{"$oid": …}`, else raw. */
+  /** `{"_id": …}` filter for a row — the `_id` exactly as the result carries it
+   *  (a real ObjectId already arrives as `{"$oid": …}`). */
   mongoIdFilter(rowIdx: number): string {
     const idIdx = this.result!.columns.findIndex((c) => c.name === '_id');
     return mongoIdFilterFor(this.liveRows[rowIdx][idIdx]);

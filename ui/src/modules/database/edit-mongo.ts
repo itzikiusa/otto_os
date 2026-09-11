@@ -39,27 +39,24 @@ export function mongoLiteral(raw: string, prev: unknown): string {
   return JSON.stringify(raw);
 }
 
-/** `{"$oid": "hex"}` (or raw JSON) for a row's `_id` — Mongo delete targeting. */
+/** JSON for a row's `_id` — verbatim, whatever type it is. The wire already
+ *  carries a real ObjectId as the `{"$oid": …}` sentinel, so a plain string
+ *  `_id` IS a string: coercing a 24-hex one to an ObjectId would make the
+ *  generated `updateOne` / `deleteMany` / `replaceOne` miss it (or hit the
+ *  ObjectId document of the same hex when both exist). */
 export function mongoIdValueFor(idVal: unknown): string {
-  if (typeof idVal === 'string' && /^[a-f0-9]{24}$/i.test(idVal)) {
-    return `{"$oid": ${JSON.stringify(idVal)}}`;
-  }
   return JSON.stringify(idVal);
 }
-/** `{"_id": …}` filter for a row — ObjectId hex → `{"$oid": …}`, else raw. */
+/** `{"_id": …}` filter for a row — the `_id` exactly as the result carries it. */
 export function mongoIdFilterFor(idVal: unknown): string {
   return `{"_id": ${mongoIdValueFor(idVal)}}`;
 }
 
-/** JSON for a stored Mongo value inside a generated document. An `_id` that
- *  looks like an ObjectId hex is wrapped as `{"$oid": …}` — the same
- *  convention `mongoIdFilter` uses — so the document round-trips as a real
- *  ObjectId instead of degrading into a plain string. */
-export function mongoValueLiteral(name: string, v: unknown): string {
+/** JSON for a stored Mongo value inside a generated document. Typed values
+ *  already arrive as Extended-JSON sentinels (`{"$oid"}`, `{"$date"}`, …), so
+ *  every value — `_id` included — round-trips verbatim. */
+export function mongoValueLiteral(v: unknown): string {
   if (v === undefined || v === null) return 'null';
-  if (name === '_id' && typeof v === 'string' && /^[a-f0-9]{24}$/i.test(v)) {
-    return `{"$oid": ${JSON.stringify(v)}}`;
-  }
   return JSON.stringify(v);
 }
 
@@ -198,7 +195,7 @@ export const mongoAdapter: EditAdapter = {
     if (idxs.length === 0) return null;
     const docs = idxs.map((i) => {
       const fields = ctx.columns.map(
-        (c, ci) => `${JSON.stringify(c.name)}: ${mongoValueLiteral(c.name, ctx.liveRows[i][ci])}`,
+        (c, ci) => `${JSON.stringify(c.name)}: ${mongoValueLiteral(ctx.liveRows[i][ci])}`,
       );
       return `  { ${fields.join(', ')} }`;
     });
@@ -218,11 +215,11 @@ export const mongoAdapter: EditAdapter = {
     };
   },
 
-  /** insertOne of a user-typed document (the "Insert document…" editor). An
-   *  `_id` given as a 24-hex string is wrapped as an ObjectId, like the other
-   *  generated documents. */
+  /** insertOne of a user-typed document (the "Insert document…" editor). Values
+   *  are emitted verbatim — an ObjectId is typed as `{"$oid": …}`, a string
+   *  `_id` stays a string. */
   buildInsertDoc(doc, ctx) {
-    const fields = Object.entries(doc).map(([k, v]) => `${JSON.stringify(k)}: ${mongoValueLiteral(k, v)}`);
+    const fields = Object.entries(doc).map(([k, v]) => `${JSON.stringify(k)}: ${mongoValueLiteral(v)}`);
     return `db.${ctx.target.table}.insertOne({ ${fields.join(', ')} })`;
   },
 
