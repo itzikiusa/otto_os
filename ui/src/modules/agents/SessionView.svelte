@@ -19,6 +19,7 @@
   import { router } from '../../lib/router.svelte';
   import { untrack } from 'svelte';
   import { transcript, type SessionViewMode } from '../../lib/stores/transcript.svelte';
+  import { layout, type Preset } from '../../lib/stores/splitLayout.svelte';
   import ConversationView from './conversation/ConversationView.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
 
@@ -38,8 +39,16 @@
     closeTitle?: string;
     /** Show a maximize/restore (zoom) control (tiled view). */
     showZoom?: boolean;
+    /** Show the header drag grip (C3a). Splits passes `panes > 1`, TiledView
+     *  `tiles > 1`; forced off on phones — HTML5 DnD never fires on iOS Safari. */
+    showGrip?: boolean;
+    /** What the grip drags: the LEAF KEY in the split tree, the session id in
+     *  the tiled grid — the host decides what a drop means. */
+    dragKey?: string;
+    /** Drag lifecycle, so the host can arm its drop targets while one is in flight. */
+    ondragpane?: (phase: 'start' | 'end') => void;
   }
-  let { sessionId, focused, showClose, onfocus, onclosepane, showZoom = false, closeTitle = 'Close pane (keeps running)' }: Props = $props();
+  let { sessionId, focused, showClose, onfocus, onclosepane, showZoom = false, showGrip = false, dragKey, ondragpane, closeTitle = 'Close pane (keeps running)' }: Props = $props();
 
   const maximized = $derived(ws.maximizedId === sessionId);
 
@@ -88,9 +97,45 @@
   // folding the terminal font/copy toolbar into the ⋯ menu once it's too narrow
   // to fit inline. Kept in lockstep with the `@container` breakpoints in the CSS.
   let headW = $state(0);
-  // Matches the `@container (max-width: 300px)` rule that hides `.term-ctl`:
-  // below this the zoom/copy controls live in the ⋯ menu instead.
-  const termCtlFolded = $derived(!viewport.isPhone && ui.termToolbar && headW > 0 && headW <= 300);
+  /** Fold tier, 0 (roomy) → 7 (status dot + ⋯ only). The thresholds are the SAME
+   *  numbers as the `@container` blocks at the bottom of this stylesheet — CSS
+   *  hides instantly, this decides what the ⋯ menu has to carry back. Everything
+   *  a tier drops is reachable as a MenuItem, never clipped (C1). */
+  const tier = $derived(
+    headW <= 0
+      ? 0
+      : headW <= 140
+        ? 7
+        : headW <= 200
+          ? 6
+          : headW <= 260
+            ? 5
+            : headW <= 300
+              ? 4
+              : headW <= 340
+                ? 3
+                : headW <= 380
+                  ? 2
+                  : headW <= 440
+                    ? 1
+                    : 0,
+  );
+  // Tier 4 (≤300px) is where `.term-ctl` goes; its actions move into the ⋯ menu.
+  const termCtlFolded = $derived(tier >= 4 && !viewport.isPhone && ui.termToolbar);
+  /** The drag grip is a mouse affordance — phones keep keyboard/palette moves. */
+  const gripOn = $derived(showGrip && dragKey != null && !viewport.isPhone);
+
+  function onGripDragStart(e: DragEvent): void {
+    if (!dragKey) return;
+    e.dataTransfer?.setData('text/plain', dragKey);
+    // Own MIME so a foreign drag (a file, a tab) never lands on a pane veil.
+    e.dataTransfer?.setData('application/x-otto-pane', dragKey);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    ondragpane?.('start');
+  }
+  function onGripDragEnd(): void {
+    ondragpane?.('end');
+  }
 
   let renaming = $state(false);
   // Bumped after a successful restart so the embedded <Terminal> drops its
@@ -165,6 +210,24 @@
     const order: SessionViewMode[] = wide ? ['terminal', 'chat', 'split'] : ['terminal', 'chat'];
     const i = order.indexOf(effView);
     setView(order[(i + 1) % order.length]);
+  }
+  const VIEW_META: [SessionViewMode, string, string][] = [
+    ['terminal', 'Terminal', 'terminal'],
+    ['chat', 'Chat', 'comment'],
+    ['split', 'Split', 'split'],
+  ];
+  /** The three view choices as menu rows. `prefixed` is the tier-6 form that
+   *  lives INSIDE the ⋯ menu ("View: Chat"); the bare form is the tier-5 icon
+   *  button's own menu. Split is offered on the same rule as the inline tab. */
+  function viewRows(prefixed: boolean): MenuItem[] {
+    return VIEW_META.filter(([m]) => m !== 'split' || wide).map(([m, label, icon]) => ({
+      label: prefixed ? `View: ${label}${effView === m ? ' ✓' : ''}` : `${effView === m ? '✓ ' : ''}${label}`,
+      icon,
+      action: () => setView(m),
+    }));
+  }
+  function openViewMenu(e: MouseEvent | KeyboardEvent): void {
+    ctxMenu.show(e, viewRows(false));
   }
   $effect(() => {
     if (!isAgent) return;
@@ -371,51 +434,129 @@
 
   /** Single source of truth for the session actions menu — served both by the
    *  header ⋯ button and the title's right-click, through the global clamped
-   *  ctxMenu (viewport clamp + max-height come for free). */
+   *  ctxMenu (viewport clamp + max-height come for free).
+   *
+   *  It is also the C1 overflow menu: every control a fold TIER removes from the
+   *  header comes back here as a row, so nothing is ever unreachable — a pane
+   *  140 px wide is a status dot and this menu. */
   function sessionMenuItems(): MenuItem[] {
-    return [
-      { label: 'Rename…', icon: 'edit', action: startRename },
-      ...(isAgent ? [{ label: 'Additional directories…', icon: 'folder', action: openDirs }] : []),
-      ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover }] : []),
-      { separator: true },
-      { label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…', icon: 'ticket', action: openAttachIssue },
-      ...(attachedIssue ? [{ label: 'Detach issue', icon: 'link', action: detachIssue }] : []),
-      { label: 'Attach product story…', icon: 'file', action: openAttachProductStory },
-      { label: 'Canvas…', icon: 'shapes', action: openCanvas },
-      ...(isAgent
+    // Rows the header shed at the current tier (info rows are disabled labels).
+    const folded: MenuItem[] = [
+      ...(tier >= 6 && isAgent ? viewRows(true) : []),
+      ...(tier >= 5 && !readOnly && isAgent
+        ? [{ label: 'Restart session', icon: 'refresh', action: () => void restart() } as MenuItem]
+        : []),
+      ...(tier >= 5 && showZoom
         ? [
-            { separator: true } as MenuItem,
             {
-              label: keepAlive ? 'Unpin (allow auto-suspend)' : 'Pin (keep alive)',
-              icon: 'pin',
-              action: () => void toggleKeepAlive(),
-            },
+              label: maximized ? 'Restore tiled view' : 'Zoom in on this session',
+              icon: maximized ? 'minimize' : 'maximize',
+              action: () => ws.toggleMaximize(sessionId),
+            } as MenuItem,
           ]
         : []),
-      // In-progress agent only: respawn a stuck PTY (provider resume when
-      // possible). Idle/exited/reconnectable sessions have their own paths.
-      ...(isAgent && (status === 'running' || status === 'working')
-        ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restart() } as MenuItem]
+      ...(tier >= 5 && summary && summary.total > 0
+        ? [{ label: `Tasks ${summary.done}/${summary.total}`, disabled: true } as MenuItem]
         : []),
+      ...(tier >= 4 && summary?.in_progress
+        ? [{ label: `Now: ${summary.in_progress}`, disabled: true } as MenuItem]
+        : []),
+      ...(tier >= 4 && idleHint ? [{ label: idleHint, disabled: true } as MenuItem] : []),
+      ...(tier >= 4 && handoverFromId
+        ? [
+            {
+              label: `Open handover source ↰ ${handoverFrom?.title ?? 'source'}`,
+              icon: 'link',
+              action: () => ws.navigateToSession(handoverFromId),
+            } as MenuItem,
+          ]
+        : []),
+      ...(tier >= 4 && handoverPending
+        ? [{ label: 'Preparing handover…', disabled: true } as MenuItem]
+        : []),
+      ...(tier >= 4 && session?.cwd ? [{ label: `cwd: ${session.cwd}`, disabled: true } as MenuItem] : []),
       // In a narrow pane the inline terminal font/copy toolbar is hidden (see the
       // `@container` rule on `.term-ctl`); surface its actions here so nothing is
       // lost when tiling many sessions.
       ...(termCtlFolded
         ? [
-            { separator: true } as MenuItem,
-            { label: `Terminal font smaller (${ui.termFontSize}px)`, action: () => ui.termZoomOut() },
-            { label: 'Terminal font larger', icon: 'plus', action: () => ui.termZoomIn() },
+            { label: `Terminal font smaller (${ui.termFontSize}px)`, action: () => ui.termZoomOut() } as MenuItem,
+            { label: 'Terminal font larger', icon: 'plus', action: () => ui.termZoomIn() } as MenuItem,
             {
               label: ui.termCopyOnSelect ? 'Copy-on-select: on' : 'Copy-on-select: off',
               icon: 'copy',
               action: () => ui.setTermCopyOnSelect(!ui.termCopyOnSelect),
-            },
+            } as MenuItem,
           ]
         : []),
-      { separator: true },
-      { label: 'Archive', icon: 'archive', action: () => void archive() },
-      { label: 'Delete', icon: 'trash', danger: true, action: () => void del() },
     ];
+    // Layout presets — flat rows (the ctxMenu has no submenus), only with a
+    // split to re-arrange. The same five rows hang off the DB pane's ✕.
+    const presets: MenuItem[] = showClose
+      ? (
+          [
+            ['cols', 'Layout: Equal columns'],
+            ['rows', 'Layout: Equal rows'],
+            ['one-two-below', 'Layout: One above two'],
+            ['one-two-beside', 'Layout: One beside two'],
+            ['grid', 'Layout: Grid'],
+          ] as [Preset, string][]
+        ).map(([p, label]) => ({ label, icon: 'split', action: () => layout.applyPreset(p) }))
+      : [];
+    return [
+      // Tier 7 dropped the title from the header — the menu carries it.
+      ...(tier >= 7
+        ? [{ label: session?.title ?? sessionId, disabled: true } as MenuItem, { separator: true } as MenuItem]
+        : []),
+      // Editing rows are hidden from viewers (the ⋯ button itself only appears
+      // for a viewer once a tier has folded something into it).
+      ...(readOnly
+        ? []
+        : [
+            { label: 'Rename…', icon: 'edit', action: startRename } as MenuItem,
+            ...(isAgent ? [{ label: 'Additional directories…', icon: 'folder', action: openDirs } as MenuItem] : []),
+            ...(isAgent ? [{ label: 'Hand over to…', icon: 'send', action: openHandover } as MenuItem] : []),
+            { separator: true } as MenuItem,
+            {
+              label: attachedIssue ? 'Change Jira issue…' : 'Attach Jira issue…',
+              icon: 'ticket',
+              action: openAttachIssue,
+            } as MenuItem,
+            ...(attachedIssue ? [{ label: 'Detach issue', icon: 'link', action: detachIssue } as MenuItem] : []),
+            { label: 'Attach product story…', icon: 'file', action: openAttachProductStory } as MenuItem,
+            { label: 'Canvas…', icon: 'shapes', action: openCanvas } as MenuItem,
+            ...(isAgent
+              ? [
+                  { separator: true } as MenuItem,
+                  {
+                    label: keepAlive ? 'Unpin (allow auto-suspend)' : 'Pin (keep alive)',
+                    icon: 'pin',
+                    action: () => void toggleKeepAlive(),
+                  } as MenuItem,
+                ]
+              : []),
+            // In-progress agent only: respawn a stuck PTY (provider resume when
+            // possible). Idle/exited/reconnectable sessions have their own paths.
+            ...(isAgent && (status === 'running' || status === 'working')
+              ? [{ label: 'Restart agent', icon: 'refresh', action: () => void restart() } as MenuItem]
+              : []),
+          ]),
+      ...(folded.length > 0 ? [{ separator: true } as MenuItem, ...folded] : []),
+      ...(showClose && tier >= 7
+        ? [{ separator: true } as MenuItem, { label: 'Close pane', icon: 'x', action: onclosepane } as MenuItem]
+        : []),
+      ...(presets.length > 0 ? [{ separator: true } as MenuItem, ...presets] : []),
+      ...(readOnly
+        ? []
+        : [
+            { separator: true } as MenuItem,
+            { label: 'Archive', icon: 'archive', action: () => void archive() } as MenuItem,
+            { label: 'Delete', icon: 'trash', danger: true, action: () => void del() } as MenuItem,
+          ]),
+    ];
+  }
+  function openPaneMenu(e: MouseEvent | KeyboardEvent): void {
+    ctxMenu.show(e, sessionMenuItems());
   }
 </script>
 
@@ -444,15 +585,32 @@
         }}
         onmousedown={(e) => e.stopPropagation()}
       />
-    {:else}
+    {:else if tier < 7}
       <span
         class="pane-title"
         role="button"
         tabindex="0"
         title="Double-click to rename; right-click for options"
         ondblclick={startRename}
-        oncontextmenu={!readOnly ? (e) => ctxMenu.show(e, sessionMenuItems()) : undefined}
+        oncontextmenu={(e) => openPaneMenu(e)}
       >{session?.title ?? sessionId}</span>
+    {/if}
+    {#if gripOn}
+      <!-- C3a: drag this pane onto another to swap (centre) or move (edge). -->
+      <button
+        class="icon-btn pane-grip"
+        draggable="true"
+        title="Drag to move or swap this pane"
+        aria-label="Move pane"
+        data-testid="pane-grip"
+        onmousedown={(e) => e.stopPropagation()}
+        ondragstart={onGripDragStart}
+        ondragend={onGripDragEnd}
+        onclick={openPaneMenu}
+        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openPaneMenu(e)}
+      >
+        <Icon name="grip" size={12} />
+      </button>
     {/if}
     {#if nameFull && nameFull !== session?.title}
       <span class="pane-fullname" title="Themed name — address this session by “{session?.meta?.name_handle ?? session?.title}”">({nameFull})</span>
@@ -500,7 +658,7 @@
     {/if}
     {#if session?.cwd}<span class="pane-cwd mono" title={session.cwd}>{session.cwd}</span>{/if}
     <span class="grow"></span>
-    {#if isAgent}
+    {#if isAgent && tier < 5}
       <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()}>
         <button role="tab" class:active={effView === 'terminal'} aria-selected={effView === 'terminal'} onclick={() => setView('terminal')} title="Terminal (⌘⇧C cycles)">Terminal</button>
         <button role="tab" class:active={effView === 'chat'} aria-selected={effView === 'chat'} onclick={() => setView('chat')} title="Chat — the conversation rebuilt from the transcript">Chat</button>
@@ -508,6 +666,19 @@
           <button role="tab" class:active={effView === 'split'} aria-selected={effView === 'split'} onclick={() => setView('split')} title="Chat beside the terminal">Split</button>
         {/if}
       </div>
+    {:else if isAgent && tier < 6}
+      <!-- Tier 5: the three tabs collapse into one icon that opens the choice. -->
+      <button
+        class="icon-btn view-seg-mini"
+        data-view-mini
+        aria-label="Session view: {VIEW_META.find(([m]) => m === effView)?.[1] ?? 'Terminal'}"
+        title="Session view (⌘⇧C cycles)"
+        onmousedown={(e) => e.stopPropagation()}
+        onclick={openViewMenu}
+        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openViewMenu(e)}
+      >
+        <Icon name={VIEW_META.find(([m]) => m === effView)?.[2] ?? 'terminal'} size={13} />
+      </button>
     {/if}
     {#if !viewport.isPhone && ui.termToolbar && effView !== 'chat'}
       <!-- Terminal font zoom + copy-on-select, surfaced in the header bar so the
@@ -527,7 +698,7 @@
         >copy</button>
       </div>
     {/if}
-    {#if showZoom}
+    {#if showZoom && tier < 5}
       <button
         class="icon-btn"
         onmousedown={(e) => e.stopPropagation()}
@@ -537,18 +708,22 @@
         <Icon name={maximized ? 'minimize' : 'maximize'} size={13} />
       </button>
     {/if}
-    {#if !readOnly && isAgent}
+    {#if !readOnly && isAgent && tier < 5}
       <button class="icon-btn" onclick={restart} title="Restart session"><Icon name="refresh" size={13} /></button>
     {/if}
-    {#if !readOnly}
+    {#if !readOnly || tier >= 4}
+      <!-- The overflow menu. `title="More…"` is a pinned selector; the title
+           moves into `aria-label` once tier 7 drops it from the header. -->
       <button
         class="icon-btn"
         onmousedown={(e) => e.stopPropagation()}
-        onclick={(e) => ctxMenu.show(e, sessionMenuItems())}
+        onclick={openPaneMenu}
+        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openPaneMenu(e)}
         title="More…"
+        aria-label={tier >= 7 ? `More… — ${session?.title ?? sessionId}` : 'More…'}
       >⋯</button>
     {/if}
-    {#if showClose}
+    {#if showClose && tier < 7}
       <button class="icon-btn" onclick={onclosepane} title={closeTitle} aria-label={closeTitle}><Icon name="x" size={12} /></button>
     {/if}
   </header>
@@ -652,6 +827,10 @@
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
+    /* Belt and braces only: every tier below is sized so the inline set FITS
+       (sessions-mobile asserts scrollWidth − clientWidth ≤ 2, which `clip` does
+       NOT hide). This just stops a one-frame flash before the tier applies. */
+    overflow: clip;
     /* Establish a query container on the header's inline size so the controls
        below degrade with PANE width, not window width — the tiled view packs
        10+ of these side by side and each shrinks independently. Breakpoints are
@@ -822,6 +1001,23 @@
     font-size: 10.5px;
     padding: 0 8px;
   }
+  /* Tier-5 stand-in for the segmented control: one icon, menu on click. */
+  .view-seg-mini {
+    flex-shrink: 0;
+  }
+  /* C3a drag handle. `grab`/`grabbing` is the only affordance that reads as
+     "pick this up" — the pane itself stays clickable for focus. */
+  .pane-grip {
+    flex-shrink: 0;
+    cursor: grab;
+    color: var(--text-dim);
+  }
+  .pane-grip:active {
+    cursor: grabbing;
+  }
+  .pane-grip:hover {
+    color: var(--text);
+  }
   .pane-title[role='button'] {
     cursor: text;
   }
@@ -948,10 +1144,14 @@
     }
   }
 
-  /* 4. Fold the inline terminal font/copy toolbar away — its actions move into
-        the ⋯ menu (script adds them when `termCtlFolded`). */
+  /* 4. Fold the inline terminal font/copy toolbar away, plus the task/handover/
+        idle chips — all of them come back as ⋯ rows (script, `tier >= 4`). */
   @container (max-width: 300px) {
-    .term-ctl {
+    .term-ctl,
+    .now-task,
+    .idle-hint,
+    .handover-crumb,
+    .handover-pending {
       display: none;
     }
     .view-seg > button {
@@ -960,6 +1160,42 @@
     }
     .pane-title {
       max-width: 96px;
+    }
+  }
+
+  /* 5. The segmented control becomes one view icon (script swaps the markup);
+        zoom + restart and the task/needs-you chips move into ⋯. */
+  @container (max-width: 260px) {
+    .task-chip,
+    .needs-you-badge {
+      display: none;
+    }
+    .pane-title {
+      max-width: 80px;
+    }
+  }
+
+  /* 6. The grip goes — dragging is a mouse gesture and ⌘⌥arrows / the palette
+        still move the pane; the view icon folds into ⋯ (script). */
+  @container (max-width: 200px) {
+    .pane-grip {
+      display: none;
+    }
+    .pane-title {
+      max-width: 60px;
+    }
+  }
+
+  /* 7. Required by the 15-pane cap (15 columns at 1280px ≈ 85px each): the
+        title and ✕ move into ⋯, which is then the whole header beside the dot.
+        The rename input stays — renaming must not need a wider pane. */
+  @container (max-width: 140px) {
+    .pane-title {
+      display: none;
+    }
+    .pane-head {
+      padding: 0 4px;
+      gap: 4px;
     }
   }
 </style>

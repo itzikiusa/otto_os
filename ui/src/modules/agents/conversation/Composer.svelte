@@ -287,9 +287,9 @@
       {#if pendingNudges}
         <span class="dim" title="Board tasks waiting for the agent to go idle">· {pendingNudges} board task{pendingNudges > 1 ? 's' : ''} pending</span>
       {/if}
-      {#if shortCwd}<span class="sep">·</span><span class="mono cwd" title={cwd}>{shortCwd}</span>{/if}
-      {#if branch}<span class="sep">·</span><span class="mono branch" title="Git branch">⎇ {branch}</span>{/if}
-      {#if model}<span class="sep">·</span><span class="mono" title="Model">{model}</span>{/if}
+      {#if shortCwd}<span class="sep sep-cwd">·</span><span class="mono cwd" title={cwd}>{shortCwd}</span>{/if}
+      {#if branch}<span class="sep sep-branch">·</span><span class="mono branch" title="Git branch">⎇ {branch}</span>{/if}
+      {#if model}<span class="sep sep-model">·</span><span class="mono model" title="Model">{model}</span>{/if}
       {#if termStatus}<span class="sep">·</span><span class="term-status" title="The agent's own status line">{termStatus}</span>{/if}
       <span class="grow"></span>
       <span class="dim hint">Slash commands pass straight to the CLI</span>
@@ -303,6 +303,10 @@
     background: var(--surface);
     padding: 8px 12px 6px;
     flex-shrink: 0;
+    /* Shed the status line's secondary spans by the COMPOSER's width — it sits
+       in a split pane as readily as a full-window chat. Same numbers as the
+       `@container` blocks below. */
+    container-type: inline-size;
   }
   .box-wrap {
     position: relative;
@@ -365,6 +369,7 @@
     bottom: calc(100% + 6px);
     inset-inline-start: 0;
     width: min(100%, 560px);
+    max-width: 100%;
     max-height: min(320px, 50vh);
     overflow-y: auto;
     background: var(--surface);
@@ -511,8 +516,23 @@
     padding: 6px 0;
     font-size: 12px;
   }
-  @media (max-width: 640px) {
+  /* ≤420px: the slash-command hint is the first thing to go (it is a one-off
+     tip, not state). Replaces the old window media query — a wide window with a
+     narrow pane used to keep it and push the status line into a second row. */
+  @container (max-width: 420px) {
     .hint {
+      display: none;
+    }
+  }
+  /* ≤320px: cwd, branch and model go too — all three are visible in the pane
+     header or the chat header, so nothing becomes unreachable. */
+  @container (max-width: 320px) {
+    .cwd,
+    .branch,
+    .model,
+    .sep-cwd,
+    .sep-branch,
+    .sep-model {
       display: none;
     }
   }

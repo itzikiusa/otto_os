@@ -20,14 +20,21 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { winKey } from '../../lib/win';
+  import { MAX_PANES, applyTileOrder } from '../../lib/stores/splitLayout';
+  import { layout } from '../../lib/stores/splitLayout.svelte';
 
   // Max number of tiles allowed to hold a live terminal/WS at once. Visible,
   // recently-focused tiles win the budget; everything else stays a placeholder.
-  const MAX_LIVE_TILES = 15;
+  // ONE source of truth with the split view's pane cap.
+  const MAX_LIVE_TILES = MAX_PANES;
+
+  // C3a: the user's drag order on top of the store order (unknown ids append,
+  // dead ids are skipped) — everything below counts/lays out `ordered`.
+  const ordered = $derived(applyTileOrder(ws.mainSessions, layout.tileOrder));
 
   // Column count scales with tile count: 1→1, 2-4→2, 5-9→3, 10+→4.
   const cols = $derived.by(() => {
-    const n = ws.mainSessions.length;
+    const n = ordered.length;
     if (n <= 1) return 1;
     if (n <= 4) return 2;
     if (n <= 9) return 3;
@@ -35,12 +42,45 @@
   });
 
   // Explicit row count so every tile fits the viewport (no clipped bottom row).
-  const rows = $derived(Math.max(1, Math.ceil(ws.mainSessions.length / cols)));
+  const rows = $derived(Math.max(1, Math.ceil(ordered.length / cols)));
 
   // When a tile is maximized, show only it (zoomed in).
   const maxed = $derived(
-    ws.maximizedId ? ws.mainSessions.find((s) => s.id === ws.maximizedId) ?? null : null,
+    ws.maximizedId ? ordered.find((s) => s.id === ws.maximizedId) ?? null : null,
   );
+
+  // ── Drag-to-reorder tiles ────────────────────────────────────────────────
+  // Same HTML5 idiom as the tab bar: the SessionView header grip (or a
+  // placeholder's own header) is the source, the tile slot is the target.
+  let tileDragId = $state<string | null>(null);
+  let tileDragOverId = $state<string | null>(null);
+
+  function onTileDragStart(e: DragEvent, id: string): void {
+    tileDragId = id;
+    e.dataTransfer?.setData('text/plain', id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+  function onTileDragOver(e: DragEvent, id: string): void {
+    if (!tileDragId || id === tileDragId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    tileDragOverId = id;
+  }
+  function onTileDragLeave(id: string): void {
+    if (tileDragOverId === id) tileDragOverId = null;
+  }
+  function onTileDrop(e: DragEvent, id: string): void {
+    e.preventDefault();
+    if (tileDragId && tileDragId !== id) {
+      layout.moveTile(ordered.map((s) => s.id), tileDragId, id);
+    }
+    tileDragId = null;
+    tileDragOverId = null;
+  }
+  function onTileDragEnd(): void {
+    tileDragId = null;
+    tileDragOverId = null;
+  }
 
   // ── Live-tile bookkeeping ─────────────────────────────────────────────────
   // Set of session ids currently scrolled into the viewport (driven by the
@@ -136,14 +176,14 @@
   const liveIds = $derived.by(() => {
     const live = new Set<string>();
     const active = ws.activeSessionId;
-    if (active && ws.mainSessions.some((s) => s.id === active)) live.add(active);
+    if (active && ordered.some((s) => s.id === active)) live.add(active);
     // Explicit attaches next — honor the user's deliberate choice before
     // best-effort visible tiles.
-    for (const s of ws.mainSessions) {
+    for (const s of ordered) {
       if (live.size >= MAX_LIVE_TILES) break;
       if (pinned.has(s.id)) live.add(s.id);
     }
-    for (const s of ws.mainSessions) {
+    for (const s of ordered) {
       if (live.size >= MAX_LIVE_TILES) break;
       if (visible.has(s.id)) live.add(s.id);
     }
@@ -161,7 +201,7 @@
     pinned = new Set(pinned);
     savePinned();
     ws.openSession(id);
-    ws.focusedPane = 0;
+    layout.focusIndex(0);
   }
 
   /** Placeholder subline: only a session with no live PTY is "suspended" — a
@@ -203,18 +243,31 @@
     bind:this={gridEl}
     style="grid-template-columns: repeat({cols}, minmax(0, 1fr)); grid-template-rows: repeat({rows}, minmax(0, 1fr));"
   >
-    {#each ws.mainSessions as s (s.id)}
-      <div class="tile-slot" data-tile-id={s.id} use:observeTile={s.id}>
+    {#each ordered as s (s.id)}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="tile-slot"
+        class:drag-over={tileDragOverId === s.id}
+        data-tile-id={s.id}
+        use:observeTile={s.id}
+        ondragover={(e) => onTileDragOver(e, s.id)}
+        ondragleave={() => onTileDragLeave(s.id)}
+        ondrop={(e) => onTileDrop(e, s.id)}
+        ondragend={onTileDragEnd}
+      >
         {#if liveIds.has(s.id)}
           <SessionView
             sessionId={s.id}
             focused={ws.activeSessionId === s.id}
             showClose={false}
             showZoom={true}
+            showGrip={ordered.length > 1}
+            dragKey={s.id}
+            ondragpane={(phase) => (tileDragId = phase === 'start' ? s.id : null)}
             onfocus={() => {
               ws.openSession(s.id);
               // make this the focused/active target without leaving tiled view
-              ws.focusedPane = 0;
+              layout.focusIndex(0);
             }}
             onclosepane={() => {}}
           />
@@ -225,7 +278,15 @@
             onclick={() => attach(s.id)}
             title="Attach this session (opens its live terminal)"
           >
-            <header class="ph-head">
+            <!-- A placeholder has no SessionView grip — its own header is the
+                 drag source so every tile can be reordered. -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <header
+              class="ph-head"
+              draggable={ordered.length > 1}
+              ondragstart={(e) => onTileDragStart(e, s.id)}
+              ondragend={onTileDragEnd}
+            >
               <StatusDot status={ws.statusMap[s.id] ?? s.status ?? 'idle'} />
               <span class="ph-title">{s.title ?? s.id}</span>
               <span class="chip ph-chip">{s.provider ?? '?'}</span>
@@ -268,6 +329,10 @@
     min-width: 0;
     min-height: 0;
     display: flex;
+    border-radius: var(--radius-m);
+  }
+  .tile-slot.drag-over {
+    box-shadow: inset 0 0 0 2px var(--accent);
   }
   .tile-slot > :global(*) {
     flex: 1;
