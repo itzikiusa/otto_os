@@ -1,8 +1,12 @@
 //! Bridge: routes an inbound channel message to an agent session.
 //!
 //! Reuses an existing live session keyed by `(workspace_id, chat, thread)` or
-//! spawns a new one.  Injects a trusted-context block when `agent_reply` is
-//! set, then forwards the text to the PTY and attaches the mirror.
+//! spawns a new one.  The in-memory map is a fast path; when it misses (daemon
+//! restart, or the mapped session died) the workspace's sessions are searched
+//! by the `channel`/`chat`/`thread` stamped in their `meta`, so a thread keeps
+//! its agent as long as that agent is alive.  Injects a trusted-context block
+//! when `agent_reply` is set, then forwards the text to the PTY and attaches
+//! the mirror.
 //!
 //! Quick commands (`/help`, `/sessions`, `/stop`, `/new`) are intercepted
 //! before routing and handled locally.
@@ -12,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use otto_core::api::CreateSessionReq;
-use otto_core::domain::{Channel, Integration, SessionKind, SessionStatus};
+use otto_core::domain::{Channel, Integration, Session, SessionKind, SessionStatus};
 use otto_core::Id;
 use otto_sessions::SessionManager;
 use otto_state::{SettingsRepo, WorkspacesRepo};
@@ -26,6 +30,24 @@ use crate::swarm_trigger::SwarmTrigger;
 
 /// Composite key that identifies a conversation thread.
 type ConvKey = (String, String, Option<String>);
+
+/// A session that can still take this conversation's next message: not
+/// archived, not exited (idle / working / running / reconnectable all resume).
+fn session_alive(s: &Session) -> bool {
+    s.status != SessionStatus::Exited && !s.archived
+}
+
+/// True when `s` was spawned by the bridge for exactly this conversation —
+/// the `meta` stamped at creation (`source: "channel"`, `channel`, `chat`,
+/// `thread`). `thread` compares as an optional string: a top-level chat
+/// (no thread) only matches a session created without one.
+fn session_matches_conversation(s: &Session, channel: &str, chat: &str, thread: Option<&str>) -> bool {
+    let m = &s.meta;
+    m.get("source").and_then(|v| v.as_str()) == Some("channel")
+        && m.get("channel").and_then(|v| v.as_str()) == Some(channel)
+        && m.get("chat").and_then(|v| v.as_str()) == Some(chat)
+        && m.get("thread").and_then(|v| v.as_str()) == thread
+}
 
 const PASTE_TO_ENTER: Duration = Duration::from_millis(200);
 // Submit the pasted prompt with a plain carriage return. A leading ESC was
@@ -442,16 +464,55 @@ impl Bridge {
 
             // Check if the existing session is still alive. Skip archived ones
             // (e.g. auto-reaped after idle) so a fresh session is spawned.
-            let existing = if let Some(sid) = guard.get(&key) {
+            let mut existing = if let Some(sid) = guard.get(&key) {
                 match self.manager.get(sid).await {
-                    Ok(s) if s.status != SessionStatus::Exited && !s.archived => Some(sid.clone()),
+                    Ok(s) if session_alive(&s) => Some(sid.clone()),
                     _ => None,
                 }
             } else {
                 None
             };
 
+            // Map miss (daemon restarted, or a listener generation that never saw
+            // this thread): the sessions themselves carry the conversation in
+            // their meta, so find the newest live one for it. Without this every
+            // restart turned the next follow-up into a brand-new agent with no
+            // memory of the thread.
+            if existing.is_none() {
+                let channel = adapter.channel().as_str();
+                if let Ok(list) = self.manager.list_by_workspace(&ws_id).await {
+                    if let Some(s) = list
+                        .into_iter()
+                        .filter(|s| {
+                            s.kind == SessionKind::Agent
+                                && session_alive(s)
+                                && session_matches_conversation(s, channel, &msg.chat, msg.thread.as_deref())
+                        })
+                        .max_by_key(|s| s.created_at)
+                    {
+                        info!(
+                            channel = %channel,
+                            workspace = %msg.workspace_id,
+                            chat = %msg.chat,
+                            thread = ?msg.thread,
+                            session = %s.id,
+                            "bridge: recovered the thread's session from its meta (map miss)"
+                        );
+                        guard.insert(key.clone(), s.id.clone());
+                        existing = Some(s.id);
+                    }
+                }
+            }
+
             if let Some(sid) = existing {
+                // A follow-up is activity. `last_active_at` only moves on a
+                // status transition, so without this a thread answered inside
+                // one long turn looked idle to the channel reaper and was
+                // archived mid-conversation (the next reply then spawned a
+                // stranger with no context).
+                if let Err(e) = self.manager.touch_activity(&sid).await {
+                    warn!(session = %sid, "bridge: could not touch session activity: {e}");
+                }
                 info!(
                     channel = %adapter.channel().as_str(),
                     workspace = %msg.workspace_id,
@@ -780,6 +841,54 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session(meta: serde_json::Value, status: SessionStatus, archived: bool) -> Session {
+        Session {
+            id: "s1".into(),
+            workspace_id: "ws".into(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status,
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            meta,
+            archived,
+        }
+    }
+
+    #[test]
+    fn conversation_match_uses_the_meta_stamped_at_creation() {
+        let meta = serde_json::json!({"source": "channel", "channel": "slack", "chat": "D0BK", "thread": "1789.51"});
+        let s = session(meta.clone(), SessionStatus::Idle, false);
+        assert!(session_matches_conversation(&s, "slack", "D0BK", Some("1789.51")));
+        // Any differing coordinate is a different conversation.
+        assert!(!session_matches_conversation(&s, "telegram", "D0BK", Some("1789.51")));
+        assert!(!session_matches_conversation(&s, "slack", "C0AA", Some("1789.51")));
+        assert!(!session_matches_conversation(&s, "slack", "D0BK", Some("other")));
+        assert!(!session_matches_conversation(&s, "slack", "D0BK", None));
+        // A top-level chat session (no thread) only matches a thread-less message.
+        let top = session(serde_json::json!({"source": "channel", "channel": "slack", "chat": "D0BK", "thread": null}), SessionStatus::Idle, false);
+        assert!(session_matches_conversation(&top, "slack", "D0BK", None));
+        assert!(!session_matches_conversation(&top, "slack", "D0BK", Some("1789.51")));
+        // A user-started session is never a channel conversation.
+        let plain = session(serde_json::json!({}), SessionStatus::Idle, false);
+        assert!(!session_matches_conversation(&plain, "slack", "D0BK", None));
+    }
+
+    #[test]
+    fn alive_means_not_exited_and_not_archived() {
+        let meta = serde_json::json!({});
+        assert!(session_alive(&session(meta.clone(), SessionStatus::Idle, false)));
+        assert!(session_alive(&session(meta.clone(), SessionStatus::Working, false)));
+        assert!(session_alive(&session(meta.clone(), SessionStatus::Reconnectable, false)));
+        assert!(!session_alive(&session(meta.clone(), SessionStatus::Exited, false)));
+        assert!(!session_alive(&session(meta, SessionStatus::Idle, true)));
+    }
 
     #[test]
     fn agent_paste_input_uses_bracketed_paste_without_submit_key() {

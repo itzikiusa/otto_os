@@ -2408,6 +2408,15 @@ impl SessionManager {
         self.attached_count(id) > 0
     }
 
+    /// Bump `last_active_at` to now without changing the status. The channel
+    /// bridge calls this when it hands a follow-up message to an existing
+    /// session: the column otherwise only moves on a status transition, so a
+    /// thread that keeps getting replies inside one long turn looked idle to
+    /// the channel reaper and was archived mid-conversation.
+    pub async fn touch_activity(&self, id: &Id) -> Result<()> {
+        self.repo.touch(id).await
+    }
+
     /// Record a chat keep-alive ping for `id` (the conversation view's
     /// `POST …/transcript/touch`). Holds the session against the idle-suspend
     /// sweep for [`VIEW_HOLD`], exactly like a terminal attachment would.
