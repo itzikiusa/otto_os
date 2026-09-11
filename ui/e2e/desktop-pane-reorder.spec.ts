@@ -130,6 +130,20 @@ test('⌘⌥→ moves the focused pane', async ({ page }) => {
   await expect(page.locator('.nav-item.nested-item.active')).toHaveCount(1);
 });
 
+test('⌘⌥S swaps the focused pane with the next', async ({ page }) => {
+  await threePanes(page);
+  const before = await sessionOrderOf(page);
+  const keysBefore = await keyOrderOf(page);
+  await page.locator('[data-pane-key]').first().locator('.pane-head').click();
+  // `Meta+Alt+KeyS`, not `Meta+Alt+s`: with ⌥ held macOS reports `e.key === 'ß'`,
+  // which is exactly the bug this chord had — the handler matches `e.code`.
+  await page.keyboard.press('Meta+Alt+KeyS');
+
+  // A swap moves SESSIONS between slots; the slots themselves stay put.
+  await expect.poll(() => sessionOrderOf(page)).toEqual([before[1], before[0], before[2]]);
+  expect(await keyOrderOf(page)).toEqual(keysBefore);
+});
+
 test('tiled view: drag a tile onto another reorders and a reload keeps it', async ({ page }) => {
   await openSession(page, 'Costacurta');
   await page.locator('button[aria-label="Tiled view"]').click();
