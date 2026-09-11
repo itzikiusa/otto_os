@@ -7,6 +7,7 @@
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import ResultsGrid from './ResultsGrid.svelte';
   import PlanView from './PlanView.svelte';
+  import VarsPrompt from './VarsPrompt.svelte';
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -85,6 +86,21 @@
   // Variables the current tab's statement references (:name / {name}).
   const queryVars = $derived(extractVars(tab.statement, splitMode));
   let varsBarEl = $state<HTMLElement | null>(null);
+  // Run-time prompt for query variables without a value (VarsPrompt): the
+  // base statement is kept so the run resumes once the values are filled in.
+  let varsPrompt = $state<{ names: string[]; base: string } | null>(null);
+  // Opening a saved query that references placeholders pre-opens the prompt
+  // (`openSavedQuery` lives in the store, so this hooks the tab's savedQueryId).
+  let prevSavedId: string | undefined;
+  $effect(() => {
+    const id = tab.savedQueryId;
+    if (id && id !== prevSavedId) {
+      const names = extractVars(tab.statement, splitMode);
+      const missing = names.filter((n) => !(tab.vars[n]?.value ?? '').trim());
+      if (missing.length > 0) varsPrompt = { names: missing, base: tab.statement };
+    }
+    prevSavedId = id;
+  });
 
   // Mongosh SCRIPT notice: when the buffer is real JavaScript (consts,
   // functions, control flow — mirrors the daemon's detection), Run executes it
@@ -330,14 +346,7 @@
     const names = extractVars(base, splitMode);
     const missing = names.filter((n) => !(tab.vars[n]?.value ?? '').trim());
     if (missing.length > 0) {
-      toasts.error(
-        'Missing variable value',
-        `Set a value for ${missing.map((n) => ':' + n).join(', ')}`,
-      );
-      void tick().then(() => {
-        const inputs = varsBarEl ? Array.from(varsBarEl.querySelectorAll('input')) : [];
-        (inputs.find((i) => !i.value.trim()) ?? inputs[0])?.focus();
-      });
+      varsPrompt = { names: missing, base };
       return;
     }
     // Render each variable per its type/escape (string → quoted+escaped, number →
@@ -1106,6 +1115,20 @@
     />
   </div>
 </div>
+
+{#if varsPrompt}
+  <VarsPrompt
+    names={varsPrompt.names}
+    vars={tab.vars}
+    onsubmit={(vals) => {
+      for (const [n, spec] of Object.entries(vals)) database.setVar(n, spec);
+      const base = varsPrompt!.base;
+      varsPrompt = null;
+      execBase(base);
+    }}
+    oncancel={() => (varsPrompt = null)}
+  />
+{/if}
 
 <style>
   .query-editor {

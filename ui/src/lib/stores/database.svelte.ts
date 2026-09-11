@@ -2373,7 +2373,7 @@ class DatabaseStore {
   async runQuery(
     statement?: string,
     node?: string,
-    opts?: { transient?: boolean; keepOffset?: boolean },
+    opts?: { transient?: boolean; keepOffset?: boolean; cursor?: unknown },
   ): Promise<QueryResult | null> {
     const id = this.selectedConnId;
     const t = this.tab;
@@ -2430,6 +2430,11 @@ class DatabaseStore {
             query_id: queryId,
             // Footer pager: server appends OFFSET (Mongo: skip) when auto-limiting.
             ...(t.offset > 0 ? { offset: t.offset } : {}),
+            // Keyset "Next" (Mongo): the previous page's `next_cursor`, echoed back
+            // so the server pages by `_id > cursor` instead of `skip`. Sent next to
+            // `offset` — the server ignores `skip` when the cursor applies and falls
+            // back to it when the find isn't keyset-eligible.
+            ...(opts?.cursor !== undefined ? { cursor: opts.cursor } : {}),
             // Driver-enforced timeout (engine-native, e.g. MySQL MAX_EXECUTION_TIME).
             ...(tabTimeoutMs && tabTimeoutMs > 0 ? { timeout_ms: tabTimeoutMs } : {}),
             // Server-side PII/prod masking: redacts cell values before they leave
@@ -2497,7 +2502,9 @@ class DatabaseStore {
    * Page the active tab's auto-limited result by `delta` pages (±1). The page
    * size is the server's applied LIMIT (`auto_limited`); re-runs the same
    * statement with the new row offset (server appends OFFSET / Mongo skip).
-   * No-op when the current result wasn't auto-paginated.
+   * "Next" on a keyset-eligible Mongo find also echoes the page's `next_cursor`
+   * back as `cursor`, so the server pages by `_id > cursor` instead of `skip`;
+   * "Prev" stays offset-based. No-op when the current result wasn't auto-paginated.
    */
   runPage(delta: number): void {
     const t = this.tab;
@@ -2505,14 +2512,17 @@ class DatabaseStore {
     if (!t || pageSize <= 0) return;
     const next = Math.max(0, t.offset + delta * pageSize);
     if (next === t.offset) return;
+    // The cursor belongs to the page the user is LEAVING — read it before the
+    // re-run replaces `t.result`.
+    const cursor = delta > 0 ? (t.result?.next_cursor ?? undefined) : undefined;
     t.offset = next;
     // Page the statement (and scope node) that PRODUCED the result — the editor
     // buffer / active DB may have been edited since the run. `transient` keeps
     // the buffer untouched.
-    // WP3: keyset cursor
     void this.runQuery(t.ran_statement ?? undefined, t.ran_node ?? undefined, {
       keepOffset: true,
       transient: true,
+      cursor,
     });
   }
 
