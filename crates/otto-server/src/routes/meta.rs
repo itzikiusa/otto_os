@@ -143,12 +143,21 @@ pub struct ResolveWalkthroughResp {
 pub async fn resolve_walkthrough(
     axum::extract::Query(q): axum::extract::Query<ResolveWalkthroughQuery>,
 ) -> ApiResult<Json<ResolveWalkthroughResp>> {
-    if !q.url.starts_with(WALKTHROUGH_ORIGIN) {
-        return Err(ApiError(otto_core::Error::Invalid(
-            "only github.com walkthrough assets can be resolved".into(),
-        )));
-    }
-    let url = resolve_one_hop(&q.url).await.map_err(|e| ApiError(otto_core::Error::Upstream(e)))?;
+    // Parse, then rebuild from the parsed parts: the request only ever
+    // carries an `https://github.com/<path>` URL — never the caller's raw
+    // string, and never another scheme / host / port.
+    let parsed = reqwest::Url::parse(q.url.trim())
+        .ok()
+        .filter(|u| u.scheme() == "https" && u.host_str() == Some("github.com") && u.port().is_none())
+        .ok_or_else(|| {
+            ApiError(otto_core::Error::Invalid(
+                "only github.com walkthrough assets can be resolved".into(),
+            ))
+        })?;
+    let mut safe = reqwest::Url::parse(WALKTHROUGH_ORIGIN).expect("static origin parses");
+    safe.set_path(parsed.path());
+    safe.set_query(parsed.query());
+    let url = resolve_one_hop(safe.as_str()).await.map_err(|e| ApiError(otto_core::Error::Upstream(e)))?;
     Ok(Json(ResolveWalkthroughResp { url }))
 }
 

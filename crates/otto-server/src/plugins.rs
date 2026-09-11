@@ -402,8 +402,29 @@ async fn install(
         let name = otto_core::paths::safe_component(&name)
             .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe repo name '{name}'"))))?;
         let dest = home.join(name);
+        // The URL is caller-supplied: only http(s) reaches git, rebuilt from
+        // its parsed parts (never the raw string, so no `-…` option smuggling
+        // and no `ext::`/`file://` transports), with every other transport
+        // switched off for the clone and `--` closing the option list.
+        let clone_url = reqwest::Url::parse(src)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+            .map(|u| u.to_string())
+            .ok_or_else(|| ApiError(Error::Invalid(format!("unsupported plugin source url '{src}'"))))?;
         let out = Command::new("git")
-            .args(["clone", "--depth", "1", src])
+            .args([
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "protocol.http.allow=always",
+                "-c",
+                "protocol.https.allow=always",
+                "clone",
+                "--depth",
+                "1",
+                "--",
+                clone_url.as_str(),
+            ])
             .arg(&dest)
             .output()
             .await
@@ -780,7 +801,9 @@ async fn run_codex_exec(prompt: &str, cwd: &str, model: Option<&str>) -> otto_co
     if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
         cmd.arg("--model").arg(m);
     }
-    cmd.arg(prompt);
+    // `--` closes the option list: the prompt is free text and may start
+    // with a dash.
+    cmd.arg("--").arg(prompt);
     let child = cmd
         .spawn()
         .map_err(|e| otto_core::Error::Upstream(format!("spawn {bin}: {e}")))?;

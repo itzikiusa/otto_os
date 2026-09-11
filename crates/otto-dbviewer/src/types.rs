@@ -181,8 +181,13 @@ impl ResolvedConfig {
     ///
     /// The composed facet string is folded through SHA-256 rather than kept raw,
     /// so the long-lived cache-key strings the drivers hold as map keys never
-    /// carry the plaintext password / TLS material; the engine prefix stays
-    /// readable for debugging. Equality semantics are unchanged.
+    /// carry the TLS material; the engine prefix stays readable for debugging.
+    /// The password itself is NOT part of the digest (a fast hash over a
+    /// secret is an offline-guessing target): only its length is — two
+    /// profiles that differ solely by a same-length password share a key,
+    /// which is harmless because the key is already scoped by the access
+    /// profile (see `service::current_scope`) and a session is only ever
+    /// handed back to the profile that opened it.
     pub fn cache_key(&self) -> String {
         use sha2::{Digest, Sha256};
         // Read-only is scoped by a rollback-on-drop native transaction, not a
@@ -191,13 +196,13 @@ impl ResolvedConfig {
         let mut cache_params=self.params.clone();
         if let Some(map)=cache_params.as_object_mut(){map.remove("__read_only_execution");}
         let raw = format!(
-            "{engine}|{host}|{port}|{user}|{password}|{database}|\
+            "{engine}|{host}|{port}|{user}|pw{password_len}|{database}|\
              {tls_mode:?}|{verify}|{ca}|{cert}|{key}|{server_name}|{params}",
             engine = self.engine.as_str(),
             host = self.host,
             port = self.port,
             user = self.user.as_deref().unwrap_or(""),
-            password = self.password.as_deref().unwrap_or(""),
+            password_len = self.password.as_deref().map(str::len).unwrap_or(0),
             database = self.database.as_deref().unwrap_or(""),
             tls_mode = self.tls.mode,
             verify = self.tls.verify,

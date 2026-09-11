@@ -1013,7 +1013,7 @@ impl AuthRepo {
         .bind(session_id)
         .bind(role.as_str())
         .bind(recipient_email)
-        .bind(token_hash(&otp))
+        .bind(crate::passwords::hash_password(&otp)?)
         .bind(otp_expires_at)
         .bind(max_expires_at)
         .execute(&self.pool)
@@ -1079,7 +1079,9 @@ impl AuthRepo {
         if otp_expires_at.map(|e| e <= now).unwrap_or(true) {
             return Ok(false); // expired code
         }
-        if token_hash(otp) != stored_hash {
+        // argon2id, not a plain digest: a 6-digit code behind a fast hash is a
+        // one-million-guess offline job for anyone who reads the row.
+        if !crate::passwords::verify_password(otp, &stored_hash).unwrap_or(false) {
             return Ok(false); // wrong code
         }
 
@@ -1176,7 +1178,7 @@ impl AuthRepo {
              WHERE token_hash = ? AND kind = 'share' AND revoked = 0
                    AND recipient_email IS NOT NULL",
         )
-        .bind(token_hash(&otp))
+        .bind(crate::passwords::hash_password(&otp)?)
         .bind(otp_expires_at)
         .bind(max_expires_at)
         .bind(expires_at.to_rfc3339())
@@ -2032,7 +2034,8 @@ mod tests {
                 .await
                 .unwrap()
                 .get("otp_hash");
-        assert_eq!(stored, token_hash(&otp), "otp_hash must be sha256(otp)");
+        assert!(stored.starts_with("$argon2id$"), "otp_hash must be an argon2id PHC string, got {stored}");
+        assert!(crate::passwords::verify_password(&otp, &stored).unwrap(), "otp_hash must verify the raw OTP");
         assert_ne!(stored, otp, "raw OTP must not be stored");
 
         // It authenticates but is OTP-pending (gated).
