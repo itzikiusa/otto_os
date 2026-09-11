@@ -27,6 +27,8 @@ pub struct K8sMonitorConfigRow {
     pub series_cap: i64,
     /// Probe metrics-server every cycle (off = skip the call entirely).
     pub metrics_server: bool,
+    /// Keep per-request `path`/`method` labels on request + latency counters.
+    pub request_labels: bool,
     pub updated_at: String,
 }
 
@@ -45,6 +47,7 @@ impl K8sMonitorConfigRow {
             retention_days: 14,
             series_cap: 1500,
             metrics_server: true,
+            request_labels: false,
             updated_at: fmt(Utc::now()),
         }
     }
@@ -104,6 +107,7 @@ fn row_to_config(r: &sqlx::sqlite::SqliteRow) -> K8sMonitorConfigRow {
         retention_days: r.get("retention_days"),
         series_cap: r.try_get("series_cap").unwrap_or(1500),
         metrics_server: r.try_get::<i64, _>("metrics_server").unwrap_or(1) != 0,
+        request_labels: r.try_get::<i64, _>("request_labels").unwrap_or(0) != 0,
         updated_at: r.get("updated_at"),
     }
 }
@@ -149,15 +153,15 @@ impl K8sMonitorRepo {
         sqlx::query(
             "INSERT INTO k8s_monitor_configs (cluster_id, enabled, interval_secs, namespaces_json,
                                               probes_json, exclusions_json, transport, concurrency,
-                                              retention_days, series_cap, metrics_server, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                              retention_days, series_cap, metrics_server, request_labels, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(cluster_id) DO UPDATE SET
                 enabled = excluded.enabled, interval_secs = excluded.interval_secs,
                 namespaces_json = excluded.namespaces_json, probes_json = excluded.probes_json,
                 exclusions_json = excluded.exclusions_json, transport = excluded.transport,
                 concurrency = excluded.concurrency, retention_days = excluded.retention_days,
                 series_cap = excluded.series_cap, metrics_server = excluded.metrics_server,
-                updated_at = excluded.updated_at",
+                request_labels = excluded.request_labels, updated_at = excluded.updated_at",
         )
         .bind(&row.cluster_id)
         .bind(row.enabled as i64)
@@ -170,6 +174,7 @@ impl K8sMonitorRepo {
         .bind(row.retention_days)
         .bind(row.series_cap)
         .bind(row.metrics_server as i64)
+        .bind(row.request_labels as i64)
         .bind(&now)
         .execute(&self.pool)
         .await
