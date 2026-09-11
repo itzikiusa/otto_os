@@ -109,6 +109,10 @@ jobs:
       - name: npm run check
         run: npm run check
 
+      # Pure-module unit tests (node:test on Node 22's built-in type stripping; no extra dependency).
+      - name: npm run test:unit
+        run: npm run test:unit
+
       # Catches build-only breakage that type-checking alone misses.
       - name: npm run build
         run: npm run build

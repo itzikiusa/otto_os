@@ -112,6 +112,12 @@ modal (`NewSession.svelte`) offers:
 - **Preview context** — for `claude` / `codex`, expands to show exactly what
   Otto would inject (skills/soul/context) before spawning.
 
+- **Sidebar order** — the Agents list keeps the daemon's order (creation order)
+  until you drag a row; dragging switches the list to *Manual* (the sort control
+  in the group header), new sessions appear on top, and *Reset to recent* returns
+  to the default. Telegram/Slack lists and other-workspace groups cannot be
+  reordered, nor can a filtered list. Persisted as `otto_session_order_<ws>`.
+
 Press **Start Session**. A session can also pin a model: when `meta.model` is
 set, the daemon appends `--model <name>` for `claude` / `codex` (silently
 omitted for `agy` / `shell`).
@@ -305,14 +311,32 @@ on `claude`/`codex` repaints.
 
 ### Watching, splitting, tiling
 
-- **Split view** (`Splits.svelte`) — arrange panes side-by-side/stacked; drag
-  the gutter to resize (column/row fraction clamped 0.2–0.8). With ≥2 panes and
-  ≥2 session targets a **broadcast bar** appears: *"↗ broadcast"* sends one line
-  to all visible sessions via `POST /workspaces/{id}/broadcast {text,
-  session_ids}`.
+- **Split view** (`Splits.svelte` + `SplitNode.svelte`) — a nested split **tree**:
+  split any pane left/right/up/down, drag **any** gutter (each split node has its
+  own fraction, 0.1–0.9, and a drag refuses to take either side below 160 px), up
+  to **15** panes. Presets — *Equal columns*, *Equal rows*, *One above two*, *One
+  beside two*, *Grid* — sit in the pane ⋯ menu (and on the Database pane's ✕
+  right-click) and in `⌘K`. The layout persists per workspace in
+  `otto_panes_<ws>` as v2 `{v, tree, focused}`; an old v1 `{panes, axis}` payload
+  still restores, with the old per-window `otto_split_col_frac` /
+  `otto_split_row_frac` as the root fraction. With ≥2 panes and ≥2 session targets
+  a **broadcast bar** appears: *"↗ broadcast"* sends one line to all visible
+  sessions via `POST /workspaces/{id}/broadcast {text, session_ids}`.
+- **Reordering panes** — drag a pane by the **grip** in its header: drop on
+  another pane's **centre** to swap the two sessions, on an **edge quarter** to
+  move the pane into a new split beside it. Without a mouse: `⌘⌥←/→/↑/↓` move the
+  focused pane to its geometric neighbour and `⌘⌥S` swaps it with the next (in a
+  Database pane `⌘⌥←/→` stay with the query editor's tab switch), and the same
+  moves plus every preset are `⌘K` commands.
+- **Pane header at narrow widths** — the header sheds chrome by its own width, in
+  this order: cwd → provider text → themed full name → terminal font/copy toolbar
+  → task / handover / idle chips → the view toggle becomes an icon menu and
+  restart + zoom fold into ⋯ → the drag grip → the title and ✕ fold into ⋯. Every
+  control stays reachable through ⋯ — nothing is ever clipped.
 - **Tiled view** (`TiledView.svelte`) — see every session at once in a grid (1→2
-  →3→4 columns by count). To preserve the idle-suspend memory design, **at most
-  `MAX_LIVE_TILES` = 6 tiles are live** (open a WS + resume): always the focused
+  →3→4 columns by count). Drag a tile onto another to reorder; the order is
+  remembered per workspace (`otto_tile_order_<ws>`). To preserve the idle-suspend
+  memory design, **at most `MAX_LIVE_TILES` = 15 tiles are live** (open a WS + resume): always the focused
   tile, then user-pinned tiles, then visible tiles (tracked by an
   `IntersectionObserver`), up to the cap. Everything else is a lightweight
   **placeholder** — a header + status dot + provider chip + *"Click to attach"* —
@@ -768,8 +792,9 @@ session in place (e.g. live handover-progress flags).
 ## 9. Capabilities & limitations
 
 **Can:**
-- Run claude / codex / agy / shell as real PTYs you can watch, type into, split,
-  and tile; add custom providers via settings without a rebuild.
+- Run claude / codex / agy / shell as real PTYs you can watch, type into, split
+  (up to 15 panes, free-form nested layouts), and tile; add custom providers via
+  settings without a rebuild.
 - Survive daemon restarts and idle-suspend without losing a claude conversation.
 - Multi-attach: several clients watch the same session, output broadcast to all.
 - Persist 10,000 lines of scrollback across reconnects, grep-searchable

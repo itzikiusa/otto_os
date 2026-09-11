@@ -18,13 +18,13 @@ import { toasts } from '../toast.svelte';
 import { confirmer } from '../confirm.svelte';
 import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
+import { layout, type Axis } from './splitLayout.svelte';
 
 // Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
 // window's label so two windows never clobber each other's workspace/tabs/view.
 // The main window keeps the legacy unprefixed keys.
 const LS_CURRENT = 'otto_workspace';
 const LS_TABS = 'otto_tabs_'; // + workspace id
-const LS_PANES = 'otto_panes_'; // + workspace id — split panes + axis
 // App-wide (deliberately NOT winKey-namespaced): whether the sidebar lists
 // sessions from every workspace, grouped by workspace, instead of only the
 // current one. Default ON — a session shouldn't vanish on a workspace switch.
@@ -79,17 +79,7 @@ export function isForeground(s: Session): boolean {
  *  the DB Explorer live as a pane in the Agents split, beside an agent. */
 export const DB_PANE_ID = '__db_explorer__';
 
-export type SplitAxis = 'col' | 'row';
-
-/** Restore a persisted split-gutter fraction (0.2–0.8), else the 50/50 default. */
-function readFrac(key: string): number {
-  try {
-    const v = Number(localStorage.getItem(winKey(key)));
-    return Number.isFinite(v) && v >= 0.2 && v <= 0.8 ? v : 0.5;
-  } catch {
-    return 0.5;
-  }
-}
+export type SplitAxis = Axis;
 
 class WorkspaceStore {
   workspaces: WorkspaceWithRole[] = $state([]);
@@ -122,27 +112,19 @@ class WorkspaceStore {
 
   /** open session tabs (ids), in tab-bar order */
   openTabs: Id[] = $state([]);
-  /** split panes: session ids rendered side by side (1–4) */
-  panes: Id[] = $state([]);
-  focusedPane = $state(0);
-  splitAxis: SplitAxis = $state('col');
-  // Split gutter fractions survive reloads (per window, like the other layout
-  // state); writes go through setSplitFrac so the drag persists what it sets.
-  colFrac = $state(readFrac('otto_split_col_frac'));
-  rowFrac = $state(readFrac('otto_split_row_frac'));
-
-  setSplitFrac(axis: SplitAxis, frac: number): void {
-    const f = Math.min(0.8, Math.max(0.2, frac));
-    if (axis === 'col') this.colFrac = f;
-    else this.rowFrac = f;
-    try {
-      localStorage.setItem(
-        winKey(axis === 'col' ? 'otto_split_col_frac' : 'otto_split_row_frac'),
-        String(f),
-      );
-    } catch {
-      /* private mode */
-    }
+  /** Split panes — projections of the layout tree (leaf order; duplicates legal).
+   *  Mutate via `layout` or the methods below. */
+  get panes(): Id[] {
+    return layout.panes;
+  }
+  get focusedPane(): number {
+    return layout.focusedIndex;
+  }
+  set focusedPane(i: number) {
+    layout.focusIndex(i);
+  }
+  get splitAxis(): SplitAxis {
+    return layout.axis;
   }
 
   /** global session-status map (fed by loads + events WS) */
@@ -468,21 +450,9 @@ class WorkspaceStore {
     // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
     const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
     this.openTabs = valid;
-    // Restore the split layout (pane membership + axis) persisted alongside the
-    // tabs, so a 2–4 pane arrangement survives reloads like colFrac/rowFrac do.
-    let panes: Id[] = [];
-    try {
-      const savedLayout = localStorage.getItem(winKey(LS_PANES + key));
-      if (savedLayout) {
-        const layout = JSON.parse(savedLayout) as { panes?: Id[]; axis?: SplitAxis };
-        panes = (layout.panes ?? []).filter((p) => valid.includes(p)).slice(0, 4);
-        if (layout.axis === 'col' || layout.axis === 'row') this.splitAxis = layout.axis;
-      }
-    } catch {
-      /* corrupt/private mode — fall through to the single-pane default */
-    }
-    this.panes = panes.length > 0 ? panes : valid.length > 0 ? [valid[0]] : [];
-    this.focusedPane = 0;
+    // Restore the split layout persisted alongside the tabs (v2 tree, or a v1
+    // {panes, axis} payload migrated through the old window fractions).
+    layout.restore(key, (sid) => valid.includes(sid), valid[0] ?? null);
   }
 
   /** Whether a session with this workspace id belongs in `sessions`: the
@@ -552,14 +522,8 @@ class WorkspaceStore {
       this.openTabs = tabs;
       this.persistTabs();
     }
-    const panes = this.panes.filter(exists);
-    if (panes.length !== this.panes.length) {
-      this.panes = panes.length > 0 ? panes : tabs.length > 0 ? [tabs[0]] : [];
-      if (this.focusedPane >= this.panes.length) {
-        this.focusedPane = Math.max(0, this.panes.length - 1);
-      }
-      this.persistPanes();
-    }
+    layout.retain(exists);
+    if (layout.panes.length === 0 && tabs.length > 0) layout.setFocusedSession(tabs[0]);
   }
 
   /** Storage-key suffix for the layout: the current workspace, or the scratch
@@ -572,17 +536,10 @@ class WorkspaceStore {
     localStorage.setItem(winKey(LS_TABS + this.layoutKey()), JSON.stringify(this.openTabs));
   }
 
-  /** Persist the split layout (pane membership + axis) per workspace, so a
-   *  2–4 pane arrangement survives reloads (restored in {@link restoreLayout}). */
+  /** Persist the split layout per workspace, so an arrangement of up to
+   *  MAX_PANES (15) panes survives reloads (restored in {@link select}). */
   private persistPanes(): void {
-    try {
-      localStorage.setItem(
-        winKey(LS_PANES + this.layoutKey()),
-        JSON.stringify({ panes: this.panes, axis: this.splitAxis }),
-      );
-    } catch {
-      /* private mode */
-    }
+    layout.persist();
   }
 
   /** Update tab + pane bookkeeping to make `id` the focused session.
@@ -607,13 +564,7 @@ class WorkspaceStore {
       this.openTabs = [...this.openTabs, id];
       this.persistTabs();
     }
-    if (this.panes.length === 0) {
-      this.panes = [id];
-      this.focusedPane = 0;
-    } else {
-      this.panes[this.focusedPane] = id;
-      this.panes = [...this.panes];
-    }
+    layout.setFocusedSession(id);
     this.persistPanes();
     // Activating a tab clears its unread-activity dot.
     if (this.unread[id]) {
@@ -787,10 +738,7 @@ class WorkspaceStore {
       closedIdx >= 0
         ? this.openTabs[Math.min(closedIdx, this.openTabs.length - 1)] ?? null
         : this.openTabs[this.openTabs.length - 1] ?? null;
-    const mapped: (Id | null)[] = this.panes.map((p) => (p === id ? fallback : p));
-    const panes = mapped.filter((p, i, arr): p is Id => p !== null && arr.indexOf(p) === i);
-    this.panes = panes.length > 0 ? panes : fallback ? [fallback] : [];
-    this.focusedPane = Math.min(this.focusedPane, Math.max(0, this.panes.length - 1));
+    layout.replaceSession(id, fallback);
     this.persistPanes();
     // Keep the route in step: if the hash still points at the closed session,
     // the route→store effect would resurrect the tab on the next reload / Back /
@@ -920,23 +868,18 @@ class WorkspaceStore {
   }
 
   split(axis: SplitAxis): void {
-    if (this.panes.length >= 4 || this.panes.length === 0) return;
-    if (this.panes.length === 1) this.splitAxis = axis;
-    const cur = this.panes[this.focusedPane];
-    this.panes = [...this.panes, cur];
-    this.focusedPane = this.panes.length - 1;
-    this.persistPanes();
+    if (layout.splitFocused(axis)) this.persistPanes();
   }
 
   /**
-   * Open a session **beside** the current one(s): append its id to `panes` as a
-   * new split pane (respecting the 1–4 cap) and focus it, so it sits side by side
-   * with the existing panes rather than replacing the active tab. Used to attach
-   * an opened connection terminal next to an agent.
+   * Open a session **beside** the current one(s): insert it as a new leaf next
+   * to the focused pane (respecting the MAX_PANES (15) cap) and focus it, so it
+   * sits side by side with the existing panes rather than replacing the active
+   * tab. Used to attach an opened connection terminal next to an agent.
    *
-   * Returns `true` if it landed in a pane, or `false` when the 1–4 cap is hit
-   * (the caller can surface a toast). Unlike `openSession`, this never replaces
-   * the focused pane — except when at the cap, where the focused pane is reused.
+   * Returns `true` if it landed in a pane, or `false` when the cap is hit (the
+   * caller can surface a toast). Unlike `openSession`, this never replaces the
+   * focused pane — except when at the cap, where the focused pane is reused.
    */
   openInSplit(id: Id): boolean {
     // Keep tab bookkeeping consistent (same as openSession).
@@ -949,41 +892,19 @@ class WorkspaceStore {
     if (this.viewMode !== 'tabs') this.setViewMode('tabs');
     this.maximizedId = null;
 
-    // Already on screen → just focus it.
-    const existing = this.panes.indexOf(id);
-    if (existing >= 0) {
-      this.focusedPane = existing;
-      return true;
-    }
-    // Empty layout → this becomes the sole pane.
-    if (this.panes.length === 0) {
-      this.panes = [id];
-      this.focusedPane = 0;
-      return true;
-    }
-    // At the 1–4 cap → reuse the focused pane and report the cap was hit.
-    if (this.panes.length >= 4) {
-      this.panes[this.focusedPane] = id;
-      this.panes = [...this.panes];
-      return false;
-    }
-    // Append as a new pane beside the current one(s) and focus it.
-    this.panes = [...this.panes, id];
-    this.focusedPane = this.panes.length - 1;
+    const ok = layout.addBeside(id); // existing leaf → focus; at MAX_PANES → focused leaf reused + false
     this.persistPanes();
-    return true;
+    return ok;
   }
 
   closePane(idx: number): void {
-    if (this.panes.length <= 1) return;
-    this.panes = this.panes.filter((_, i) => i !== idx);
-    this.focusedPane = Math.min(this.focusedPane, this.panes.length - 1);
+    layout.removeAt(idx);
     this.persistPanes();
   }
 
   focusPane(idx: number): void {
     if (idx < 0 || idx >= this.panes.length) return;
-    this.focusedPane = idx;
+    layout.focusIndex(idx);
     // Keep the route in sync with the focused pane so the URL + Back/Forward and
     // the navigator highlight track the click. The route→store effect reads
     // activeSessionId untracked, so this never clobbers; router.go dedupes a
@@ -1000,8 +921,8 @@ class WorkspaceStore {
 
   /**
    * Make a set of sessions visible side-by-side: switch to the tiled grid and
-   * register them as open tabs (≤4 ⇒ also lay them out as split panes so they
-   * tile even in tabs view). Used by the Plan tab to surface its live planning
+   * register them as open tabs (also laid out as split panes, up to MAX_PANES
+   * (15), so they tile even in tabs view). Used by the Plan tab to surface its live planning
    * agents the moment they spawn. Unknown ids are tolerated — `reconcileTabs`
    * prunes any that never materialize; `session_created` events fill the rest in.
    */
@@ -1011,14 +932,9 @@ class WorkspaceStore {
       this.openTabs = [...this.openTabs, ...fresh];
       this.persistTabs();
     }
-    // Lay out up to 4 as side-by-side panes (the grid shows them all in tiled
+    // Lay them out as side-by-side panes (the grid shows them all in tiled
     // view; panes give a clean split if the user flips back to tabs view).
-    const paneset = [...this.panes];
-    for (const id of ids) {
-      if (paneset.length >= 4) break;
-      if (!paneset.includes(id)) paneset.push(id);
-    }
-    this.panes = paneset.length > 0 ? paneset : this.panes;
+    for (const id of ids) if (!layout.panes.includes(id)) layout.addBeside(id, { focus: false });
     this.persistPanes();
     this.maximizedId = null;
     this.setViewMode('tiled');

@@ -24,6 +24,8 @@
   import { fuzzyMatch } from '../lib/fuzzy';
   import { ui } from '../lib/stores/ui.svelte';
   import { ws } from '../lib/stores/workspace.svelte';
+  import { applyTileOrder } from '../lib/stores/splitLayout';
+  import { layout } from '../lib/stores/splitLayout.svelte';
   import { toasts } from '../lib/toast.svelte';
   import Icon from '../lib/components/Icon.svelte';
 
@@ -380,7 +382,7 @@
    *  when tiled, else the side-by-side panes. */
   function paneOrder(): string[] {
     return ws.viewMode === 'tiled' && !ws.maximizedId
-      ? ws.mainSessions.map((s) => s.id)
+      ? applyTileOrder(ws.mainSessions, layout.tileOrder).map((s) => s.id)
       : ws.panes.filter((id) => ws.sessions.some((s) => s.id === id));
   }
 

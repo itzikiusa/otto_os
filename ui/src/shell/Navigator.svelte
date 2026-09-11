@@ -13,6 +13,8 @@
   import { proof } from '../lib/stores/proof.svelte';
   import ProofStatusChip from '../lib/components/ProofStatusChip.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { sessionOrder, applyOrder } from '../lib/stores/sessionOrder.svelte';
+  import { viewport } from '../lib/stores/viewport.svelte';
   import { confirmer } from '../lib/confirm.svelte';
   import { toasts } from '../lib/toast.svelte';
   import type { WorkspaceWithRole } from '../lib/api/types';
@@ -132,7 +134,53 @@
     if (ws.needsYouFilter && ws.needsYou[s.id] !== true) return false;
     return q === '' || s.title.toLowerCase().includes(q);
   };
-  const fAgents = $derived(ws.plainAgentSessions.filter(matches));
+  // ── Manual sidebar order (C3b) ───────────────────────────────────────────
+  // "Recent" is the daemon's order, rendered unchanged. "Manual" applies the
+  // persisted id list, with sessions it has never seen on TOP by recency.
+  $effect(() => {
+    sessionOrder.load(ws.currentId ?? 'scratch');
+  });
+  const orderedAgents = $derived(
+    sessionOrder.mode === 'manual' ? applyOrder(ws.plainAgentSessions, sessionOrder.order) : ws.plainAgentSessions,
+  );
+  const fAgents = $derived(orderedAgents.filter(matches));
+  // Rows drag only in the flat Agents list: never while searching, selecting,
+  // needs-you filtering, or on phones (HTML5 DnD is inert on iOS Safari).
+  const rowsDraggable = $derived(q === '' && !agentSelMode && !ws.needsYouFilter && !viewport.isPhone);
+  let rowDragId = $state<string | null>(null);
+  let rowDragOverId = $state<string | null>(null);
+  function onRowDragStart(e: DragEvent, id: string): void {
+    rowDragId = id;
+    e.dataTransfer?.setData('text/plain', id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+  function onRowDragOver(e: DragEvent, id: string): void {
+    if (!rowDragId || id === rowDragId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    rowDragOverId = id;
+  }
+  function onRowDrop(e: DragEvent, id: string): void {
+    e.preventDefault();
+    if (rowDragId && rowDragId !== id) sessionOrder.dragTo(fAgents.map((x) => x.id), rowDragId, id);
+    rowDragId = null;
+    rowDragOverId = null;
+  }
+  function onRowDragEnd(): void {
+    rowDragId = null;
+    rowDragOverId = null;
+  }
+  function openSortMenu(e: MouseEvent | KeyboardEvent): void {
+    ctxMenu.show(e, [
+      { label: `${sessionOrder.mode === 'recent' ? '✓ ' : ''}Sort: Recent`, action: () => sessionOrder.setMode('recent') },
+      {
+        label: `${sessionOrder.mode === 'manual' ? '✓ ' : ''}Sort: Manual (drag rows)`,
+        action: () => sessionOrder.setMode('manual', fAgents.map((x) => x.id)),
+      },
+      { separator: true },
+      { label: 'Reset to recent', icon: 'refresh', disabled: sessionOrder.mode === 'recent', action: () => sessionOrder.reset() },
+    ]);
+  }
   // Workspace-less sessions (the "No workspace" group below the flat list).
   const fScratch = $derived(ws.scratchSessions.filter(matches));
   // Select mode covers the flat list AND the "No workspace" group.
@@ -663,6 +711,19 @@
         <Icon name={agentSelMode ? 'check' : 'square'} size={12} />
       </button>
     {/if}
+    {#if fAgents.length > 1}
+      <button
+        class="icon-btn twisty sort-toggle"
+        class:on={sessionOrder.mode === 'manual'}
+        onclick={openSortMenu}
+        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openSortMenu(e)}
+        title={sessionOrder.mode === 'manual' ? 'Manual order — click to change' : 'Sort sessions'}
+        aria-label="Sort sessions"
+        data-testid="agents-sort-toggle"
+      >
+        <Icon name={sessionOrder.mode === 'manual' ? 'grip' : 'arrowDown'} size={12} />
+      </button>
+    {/if}
     <button
       class="icon-btn twisty all-ws-toggle"
       class:on={ws.allWorkspaces}
@@ -701,7 +762,7 @@
         </div>
       {/if}
       {#each fAgents as s (s.id)}
-        {@render sessionRow(s)}
+        {@render sessionRow(s, undefined, true)}
       {:else}
         <div class="nested-empty">No sessions — ⌘T to start one</div>
       {/each}
@@ -816,13 +877,26 @@
   {/if}
 {/snippet}
 
-{#snippet sessionRow(s: Session, otherWs?: string)}
+{#snippet sessionRow(s: Session, otherWs?: string, reorderable = false)}
   {@const status = ws.statusMap[s.id] ?? s.status}
   {@const resumable = isResumable(s, status)}
   {@const sum = activity.summary(s.id)}
   {@const proofRow = proof.summaryFor('session', s.id)}
   {@const needsYou = ws.needsYou[s.id] === true}
-  <div class="nested-row" class:needs-you={needsYou} class:selected={agentSelMode && agentSel.has(s.id)}>
+  {@const dnd = rowsDraggable && reorderable}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="nested-row"
+    class:needs-you={needsYou}
+    class:selected={agentSelMode && agentSel.has(s.id)}
+    class:drag-over={rowDragOverId === s.id}
+    draggable={dnd}
+    ondragstart={dnd ? (e) => onRowDragStart(e, s.id) : undefined}
+    ondragover={dnd ? (e) => onRowDragOver(e, s.id) : undefined}
+    ondragleave={() => { if (rowDragOverId === s.id) rowDragOverId = null; }}
+    ondrop={dnd ? (e) => onRowDrop(e, s.id) : undefined}
+    ondragend={onRowDragEnd}
+  >
     {#if agentSelMode && !otherWs}
       <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
     {/if}
@@ -847,6 +921,9 @@
         ondblclick={() => startRename(s.id, s.title)}
         oncontextmenu={(e) => ctxMenu.show(e, [
           { label: 'Rename', icon: 'edit', action: () => startRename(s.id, s.title) },
+          ...(reorderable && fAgents.length > 1
+            ? [{ label: 'Move to top', icon: 'arrowUp', action: () => { const ids = fAgents.map((x) => x.id); sessionOrder.dragTo(ids, s.id, ids[0]); } }]
+            : []),
           { separator: true },
           ...(ws.canEditSession(s) ? [
             // In-progress agent only: respawn a stuck PTY (provider resume when
@@ -911,6 +988,12 @@
 {/snippet}
 
 <style>
+  .nested-row.drag-over {
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+  .nested-row[draggable='true'] .nested-item {
+    cursor: grab;
+  }
   .navigator {
     /* width is set inline from ui.railWidth (drag-resizable) */
     height: 100%;
