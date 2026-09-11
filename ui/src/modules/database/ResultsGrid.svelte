@@ -34,6 +34,9 @@
   import DocEditor from './DocEditor.svelte';
   import ReviewModal from './ReviewModal.svelte';
   import ExportDialog from './ExportDialog.svelte';
+  import MongoFilterBar from './MongoFilterBar.svelte';
+  import AggregateBuilder from './AggregateBuilder.svelte';
+  import RecordDiff from './RecordDiff.svelte';
   import { EditFlow, SET_EMPTY, SET_NULL } from './EditFlow.svelte';
   import { qid, valueLiteral } from './edit-sql';
   import { ALT_BATCH, cellStr, copyText, fmtBytes, isComplex } from './results-format';
@@ -41,6 +44,16 @@
   // ── Send-to-agent dialog (B2a: replaces raw injectInput for DB results) ──────
   let sendToAgentOpen = $state(false);
   let sendToAgentPayload = $state<unknown>(null);
+  // ── WP4: aggregate pipeline builder + compare-two-records ───────────────────
+  let pipelineOpen = $state(false);
+  /** liveRows indices of the two records being compared (null = closed). */
+  let compare = $state<[number, number] | null>(null);
+  /** A record exactly as the Vertical/JSON views build it (uniqueColNames-keyed). */
+  function objRowAt(idx: number): Record<string, unknown> {
+    const o: Record<string, unknown> = {};
+    uniqueColNames.forEach((n, i) => (o[n] = liveRows[idx]?.[i]));
+    return o;
+  }
 
   interface Props {
     result: QueryResult | null;
@@ -176,6 +189,7 @@
     // re-query after a delete runs). Pending cell drafts are keyed by liveRows
     // index, so a result change invalidates them too — cleared together.
     flow.resetForResult();
+    compare = null;
   });
 
   // Engine behind this result (drives dialect for inline edits).
@@ -836,6 +850,12 @@
         </div>
         <span class="grow"></span>
         <!-- WP2/WP4: toolbar mounts -->
+        {#if engine === 'mongodb' && connectionId}
+          <button class="tb-btn" onclick={() => (pipelineOpen = true)} title="Build an aggregate pipeline stage by stage — insert into the editor or run it"><Icon name="layers" size={11} />Pipeline…</button>
+        {/if}
+        {#if mode !== 'grid'}
+          <button class="tb-btn" disabled={flow.selected.size !== 2} onclick={() => (compare = [...flow.selected] as [number, number])} title="Compare the two selected records side by side"><Icon name="split" size={11} />Compare…</button>
+        {/if}
         {#if flow.editable}
           <span
             class="gt-edit-hint"
@@ -907,7 +927,7 @@
             <Icon name="file" size={11} />Copy as INSERT
           </button>
         {/if}
-        {#if flow.editable}
+        {#if flow.editable && engine !== 'redis'}
           <button
             class="sel-gen"
             onclick={() => flow.copySelectedWhere()}
@@ -915,6 +935,9 @@
           >
             <Icon name="file" size={11} />WHERE pk IN (…)
           </button>
+        {/if}
+        {#if flow.selected.size === 2}
+          <button class="sel-gen" onclick={() => (compare = [...flow.selected] as [number, number])} title="Compare the two selected records side by side"><Icon name="split" size={11} />Compare</button>
         {/if}
         <button class="sel-del" onclick={() => flow.deleteSelected()} title="Delete selected rows (you review before it runs)">
           <Icon name="trash" size={11} />Delete…
@@ -963,6 +986,13 @@
     {/if}
 
     <!-- WP4: filter bar -->
+    {#if engine === 'mongodb' && !mini && statement}
+      <MongoFilterBar
+        {statement}
+        columns={result.columns.map((c) => c.name)}
+        onrun={(q) => { database.setStatementFromCellFilter(q); void database.runQuery(); }}
+      />
+    {/if}
     {#if mode === 'json'}
       <JsonView
         {result}
@@ -1098,6 +1128,27 @@
 
 {#if showExportDialog && connectionId && statement}
   <ExportDialog {statement} {connectionId} {canExport} onclose={() => (showExportDialog = false)} />
+{/if}
+
+{#if compare && result}
+  <RecordDiff
+    left={objRowAt(compare[0])}
+    right={objRowAt(compare[1])}
+    leftLabel={`#${compare[0] + 1}`}
+    rightLabel={`#${compare[1] + 1}`}
+    onclose={() => (compare = null)}
+  />
+{/if}
+
+{#if connectionId}
+  <AggregateBuilder
+    collection={engine === 'mongodb' ? flow.editTable : null}
+    open={pipelineOpen}
+    connId={connectionId}
+    onclose={() => (pipelineOpen = false)}
+    oninsert={(stmt) => database.setStatement(stmt)}
+    onrun={(stmt) => { database.setStatement(stmt); void database.runQuery(stmt); }}
+  />
 {/if}
 
 {#if flow.reviewSql}
