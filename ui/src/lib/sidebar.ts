@@ -40,6 +40,10 @@ export interface SidebarModule {
  * listed here; they are appended at resolve time (see {@link availableModules}).
  */
 export const SIDEBAR_MODULES: SidebarModuleDef[] = [
+  // Home — the personal dashboard (views of live boxes). Ungated: every box
+  // kind is gated individually by its own feature, so the page itself is safe
+  // for any role.
+  { id: 'home', icon: 'home', label: 'Home' },
   { id: 'agents', icon: 'terminal', label: 'Agents', feature: 'agents', special: true },
   // History — every past Claude/Codex conversation (Otto sessions + transcripts
   // found on disk), read-only, resumable. Lives in the Agents group and shares
