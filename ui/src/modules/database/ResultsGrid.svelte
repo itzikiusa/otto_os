@@ -40,6 +40,7 @@
   import { EditFlow, SET_EMPTY, SET_NULL } from './EditFlow.svelte';
   import { qid, valueLiteral } from './edit-sql';
   import { ALT_BATCH, cellStr, copyText, fmtBytes, isComplex } from './results-format';
+  import { newExpansionState } from './expansion-plan';
 
   // ── Send-to-agent dialog (B2a: replaces raw injectInput for DB results) ──────
   let sendToAgentOpen = $state(false);
@@ -182,7 +183,8 @@
       search = '';
       sortCol = null;
       sortDir = null;
-      // WP2: expansion
+      // A different result shape invalidates every per-path toggle.
+      expansion = newExpansionState();
       prevColKey = colKey;
     }
     // Clear the selection whenever the upstream result changes (incl. the
@@ -198,6 +200,12 @@
   // "Expand JSON" mode pretty-prints complex grid cells inline (GridView grows
   // its rows to a fixed taller height so the virtualization math stays exact).
   let expandJson = $state(false);
+  // ── WP2: nested-document expansion (Vertical + JSON views) ──────────────────
+  // Node budget + sticky per-path toggles + Expand/Collapse all, shared by both
+  // alt views so a branch opened in one is open in the other. The views mutate
+  // it through `expansion-plan.ts`'s helpers (`setOverride`/`setExpansionMode`),
+  // which bump its `version` — that is what their derived plans key on.
+  let expansion = $state(newExpansionState());
 
   // Result view mode: columnar grid, one JSON object per row, or a vertical
   // row-per-record layout (like Postgres `\x` / ClickHouse FORMAT Vertical).
@@ -849,12 +857,14 @@
           {/if}
         </div>
         <span class="grow"></span>
-        <!-- WP2/WP4: toolbar mounts -->
         {#if engine === 'mongodb' && connectionId}
           <button class="tb-btn" onclick={() => (pipelineOpen = true)} title="Build an aggregate pipeline stage by stage — insert into the editor or run it"><Icon name="layers" size={11} />Pipeline…</button>
         {/if}
         {#if mode !== 'grid'}
           <button class="tb-btn" disabled={flow.selected.size !== 2} onclick={() => (compare = [...flow.selected] as [number, number])} title="Compare the two selected records side by side"><Icon name="split" size={11} />Compare…</button>
+        {/if}
+        {#if flow.editable}
+          <button class="tb-btn" onclick={() => flow.openDocEditor(-1)} title="Insert a new {engine === 'mongodb' ? 'document' : 'row'} from JSON — reviewed before it runs"><Icon name="plus" size={11} />Insert from JSON…</button>
         {/if}
         {#if flow.editable}
           <span
@@ -1006,6 +1016,8 @@
         viewCap={VIEW_CAP}
         totalRows={viewRows.length}
         onshowmore={() => (altShown += ALT_BATCH)}
+        {expansion}
+        oncompare={(l, r) => (compare = [l, r])}
       />
     {:else if mode === 'vertical'}
       <VerticalView
@@ -1020,6 +1032,8 @@
         viewCap={VIEW_CAP}
         totalRows={viewRows.length}
         onshowmore={() => (altShown += ALT_BATCH)}
+        {expansion}
+        oncompare={(l, r) => (compare = [l, r])}
       />
     {:else}
       <GridView
