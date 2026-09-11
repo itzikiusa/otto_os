@@ -6,8 +6,10 @@ import { test, expect } from '@playwright/test';
 // the page origin). This covers the WHERE / find-filter splicer branches that
 // power the "Query by value" / "Add to query" cell actions (set/and, tail
 // preservation, OR-precedence incl. no-space `OR(`, escaping, IS NULL,
-// multi-statement decline, Mongo merge/$oid/regex), so the integrated UI spec
-// (desktop-db-context-actions) can stay focused on wiring.
+// multi-statement decline, Mongo merge/$oid/regex), the whole-object rewrite
+// behind the Mongo filter bar (`applyMongoFilterObject`), and — same pattern,
+// module `sql-util.ts` — the `{{name}}` query-variable form, so the integrated
+// UI spec (desktop-db-context-actions) can stay focused on wiring.
 //
 // The SQL path reuses the store's `splitStatement`/`rewriteWhere` (the same
 // parser the quick-filter chips use), so its output is the house multi-line
@@ -27,6 +29,7 @@ type FilterEngine = 'mysql' | 'clickhouse' | 'mongodb';
 interface QF {
   applySqlFilter(sql: string, column: string, value: unknown, mode: FilterMode): string | null;
   applyMongoFilter(sql: string, col: string, value: unknown, mode: FilterMode): string | null;
+  applyMongoFilterObject(sql: string, filterSrc: string, mode: FilterMode): string | null;
   buildFilteredQuery(
     engine: FilterEngine,
     sql: string,
@@ -36,6 +39,26 @@ interface QF {
   ): string | null;
 }
 const MOD = '/src/modules/database/query-filter.ts';
+// The query-variable helpers (dependency-free; the same dynamic-import pattern).
+interface SU {
+  extractVars(sql: string, mode?: 'sql' | 'line'): string[];
+  substituteVars(sql: string, values: Record<string, string>, mode?: 'sql' | 'line'): string;
+  maskQueryPlaceholders(sql: string): { masked: string; tokens: string[] };
+}
+const SQL_UTIL = '/src/modules/database/sql-util.ts';
+// The record-diff helpers exported from RecordDiff.svelte's `<script module>`
+// (Vite compiles the component; the module exports come back as named exports).
+interface DiffRow {
+  path: string;
+  kind: 'same' | 'changed' | 'only-left' | 'only-right';
+  l: unknown;
+  r: unknown;
+}
+interface RD {
+  diffRecords(left: unknown, right: unknown): DiffRow[];
+  recordPatch(rows: DiffRow[]): ({ op: 'set'; path: string; value: unknown } | { op: 'unset'; path: string })[];
+}
+const RECORD_DIFF = '/src/modules/database/RecordDiff.svelte';
 
 test.describe('query-filter (pure)', () => {
   test.beforeEach(async ({ page }, testInfo) => {
@@ -159,6 +182,86 @@ test.describe('query-filter (pure)', () => {
     expect(out.oid).toBe('db.coll.find({ "_id": {"$oid": "507f1f77bcf86cd799439011"} })');
     expect(out.regex).toBe('db.coll.find({ a: /}/, "b": "c" })');
     expect(out.notFind).toBeNull();
+  });
+
+  test('applyMongoFilterObject: set / and / chain kept / aggregate + unbalanced decline', async ({ page }) => {
+    const out = await page.evaluate(async (src) => {
+      const m = (await import(/* @vite-ignore */ src)) as QF;
+      return {
+        setEmpty: m.applyMongoFilterObject('db.c.find({})', '{ a: 1 }', 'set'),
+        setChain: m.applyMongoFilterObject('db.c.find({a:1}).limit(5)', '{ b: 2 }', 'set'),
+        and: m.applyMongoFilterObject('db.c.find({a:1})', '{b:2}', 'and'),
+        andOntoEmpty: m.applyMongoFilterObject('db.c.find()', '{a:1}', 'and'),
+        projectionKept: m.applyMongoFilterObject('db.c.find({}, {x:1})', '{a:1}', 'set'),
+        aggregate: m.applyMongoFilterObject('db.c.aggregate([])', '{a:1}', 'set'),
+        unbalanced: m.applyMongoFilterObject('db.c.find({})', '{a:1', 'set'),
+        notObject: m.applyMongoFilterObject('db.c.find({})', 'a: 1', 'set'),
+        batch: m.applyMongoFilterObject('db.c.find({}); db.d.find({})', '{}', 'set'),
+        // The bar's visibility probe: an empty object on a plain find is fine.
+        probe: m.applyMongoFilterObject('db.c.find({a:1})', '{}', 'set'),
+      };
+    }, MOD);
+    expect(out.setEmpty).toBe('db.c.find({ a: 1 })');
+    expect(out.setChain).toBe('db.c.find({ b: 2 }).limit(5)');
+    expect(out.and).toBe('db.c.find({ a:1, b:2 })');
+    expect(out.andOntoEmpty).toBe('db.c.find({a:1})');
+    expect(out.projectionKept).toBe('db.c.find({a:1}, {x:1})');
+    expect(out.aggregate).toBeNull();
+    expect(out.unbalanced).toBeNull();
+    expect(out.notObject).toBeNull();
+    expect(out.batch).toBeNull();
+    expect(out.probe).toBe('db.c.find({})');
+  });
+
+  test('sql-util: {{name}} variables extract once, substitute cleanly, mask whole; not in redis line mode', async ({ page }) => {
+    const out = await page.evaluate(async (src) => {
+      const m = (await import(/* @vite-ignore */ src)) as SU;
+      return {
+        names: m.extractVars('select {{a}}, :b, {c}'),
+        subst: m.substituteVars('x = {{a}}', { a: '1' }),
+        both: m.substituteVars('x = {{a}} and y = {a}', { a: '1' }),
+        mask: m.maskQueryPlaceholders('{{a}} {b}'),
+        line: m.extractVars('GET {{k}}', 'line'),
+      };
+    }, SQL_UTIL);
+    // `{{a}}` must not ALSO match as the inner `{a}` (no duplicate, no stray braces).
+    expect(out.names).toEqual(['a', 'b', 'c']);
+    expect(out.subst).toBe('x = 1');
+    expect(out.both).toBe('x = 1 and y = 1');
+    expect(out.mask.tokens).toEqual(['{{a}}', '{b}']);
+    expect(out.mask.masked).toBe('ottoph0z ottoph1z');
+    // Redis hash-tags (`{user}:1`) are never variables — the mustache form neither.
+    expect(out.line).toEqual([]);
+  });
+
+  test('RecordDiff: leaf-path diff (nested, arrays, BSON scalars, type changes) + JSON patch', async ({ page }) => {
+    const out = await page.evaluate(async (src) => {
+      const m = (await import(/* @vite-ignore */ src)) as RD;
+      const left = { _id: { $oid: '507f1f77bcf86cd799439011' }, a: 1, items: [{ qty: 1 }, { qty: 2 }], gone: 'x', n: null };
+      const right = { _id: { $oid: '507f1f77bcf86cd799439011' }, a: '1', items: [{ qty: 1 }, { qty: 3 }], added: true, n: null };
+      const rows = m.diffRecords(left, right);
+      return {
+        kinds: rows.map((r) => [r.path, r.kind]),
+        patch: m.recordPatch(rows),
+        identical: m.diffRecords({ x: [1, { y: 2 }] }, { x: [1, { y: 2 }] }).map((r) => r.kind),
+      };
+    }, RECORD_DIFF);
+    expect(out.kinds).toEqual([
+      ['_id', 'same'], // a BSON sentinel is one leaf, not `_id.$oid`
+      ['a', 'changed'], // 1 vs "1": same text, different type → changed
+      ['items.0.qty', 'same'],
+      ['items.1.qty', 'changed'],
+      ['gone', 'only-left'],
+      ['n', 'same'],
+      ['added', 'only-right'], // right-only paths come last
+    ]);
+    expect(out.patch).toEqual([
+      { op: 'set', path: 'a', value: '1' },
+      { op: 'set', path: 'items.1.qty', value: 3 },
+      { op: 'unset', path: 'gone' },
+      { op: 'set', path: 'added', value: true },
+    ]);
+    expect(out.identical).toEqual(['same', 'same']);
   });
 
   test('buildFilteredQuery: dispatches per engine; declines on empty / non-find', async ({ page }) => {
