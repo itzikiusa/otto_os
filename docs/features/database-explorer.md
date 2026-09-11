@@ -484,8 +484,8 @@ has:
 - **Variables** — a statement may reference `:name`, `{name}` or `{{name}}`
   placeholders; the bar under the editor holds a value + type (`string` quoted /
   `number` raw / `raw` verbatim) per variable, per tab. **Running with a missing
-  value prompts for it** (a small "Parameters" dialog, one row per unfilled
-  name, Enter runs) instead of failing; opening a **saved query** that contains
+  value prompts for it** (a small **Query variables** dialog, one row per
+  unfilled name, Enter runs) instead of failing; opening a **saved query** that contains
   placeholders opens the same prompt straight away. Values are persisted with
   the tab.
 - **Active database** selector — scope queries to a DB (or a Redis keyspace) so
@@ -648,8 +648,9 @@ rows** (indented under its parent), **expanded by default** — you read
 documents stay responsive through a **node budget** (default 400 nodes per
 record, breadth-first, arrays in 50-item chunks) rather than the old
 "collapse past depth 2 or 20 keys" cutoff: branches that don't fit the budget
-render as a one-line summary you can open; **Expand all** (warns first when a
-record is estimated past 20,000 nodes), **Collapse all** and **Reset** sit in
+render as a one-line summary you can open; **Expand all** (warns first when the
+records currently DRAWN are estimated past 20,000 nodes in total — the estimate
+is summed over the batch, not per record), **Collapse all** and **Reset** sit in
 the view's header. Expansion is **sticky by path across records**: opening
 `items.0.meta` in record 1 keeps `items.*.meta` open in every other record on
 screen (array indices are normalised, so a pick on the first element applies to
@@ -682,9 +683,11 @@ operation) above the editable statement for every change, including
 
 ### Compare two records
 
-Select **exactly two rows** (checkboxes in the grid, or **Compare** from two
-record menus in Vertical/JSON) and press **Compare** in the selection bar (or
-**Compare…** in the toolbar) to open a side-by-side **diff modal**: one row per
+Select **exactly two rows** (checkboxes in the grid, or **Compare with…** from
+two record ⋯ menus in Vertical/JSON) and press **Compare** in the **selection bar**
+— the grid's path, it appears as soon as rows are selected. The toolbar's
+**Compare…** button is the Vertical/JSON path: it is rendered only outside Grid
+and enabled at exactly two. Either opens a side-by-side **diff modal**: one row per
 leaf path, classed *same / changed / only-left / only-right*, an "only
 differences" toggle (on by default), and **Copy as JSON patch** (`set`/`unset`
 operations that turn the left record into the right one). Read-only — it is a
@@ -790,12 +793,16 @@ A result is editable only when Otto can target a row unambiguously:
   `deleteMany`. Typed values round-trip as EJSON (`{"$oid"}`, `{"$date"}`,
   `{"$numberDecimal"}`, `{"$numberLong"}` …).
 - **Redis** — the result of a single `GET`, `HGETALL`, `HGET`, `LRANGE`,
-  `SMEMBERS` or `ZRANGE` is editable: a value edit reviews as `SET k v`,
-  `HSET k field v`, `LSET k i v` or `ZADD k score member`; a row delete as
-  `DEL` / `HDEL` / `SREM` / `ZREM`; a hash's **Add field** as `HSET`. Set
-  members can be removed but not edited in place. Key / field / index columns
-  are read-only. Anything else Redis returns (`SCAN`, `KEYS`, `INFO`, multi-line
-  scripts) stays read-only.
+  `SMEMBERS` or `ZRANGE` is editable: a value edit reviews as
+  `SET k "v" KEEPTTL` (the key's TTL is preserved), `HSET k field v`,
+  `LSET k i v` or `ZADD k score member`; a row delete as `DEL` / `HDEL` /
+  `SREM` / `ZREM`; a hash's **Add field** as `HSET`. Set members can be removed
+  but not edited in place, and the list **index** column is read-only. Editing a
+  **hash field** or a **zset member** name is a **rename**, so it reviews as two
+  commands — `HDEL` + `HSET` (the value is carried over) / `ZREM` + `ZADD` (the
+  score is) — and is skipped with a note when the row cap cut the reply between
+  the name and its value. Anything else Redis returns (`SCAN`, `KEYS`, `INFO`,
+  multi-line scripts) stays read-only.
 
 The review modal is titled for the operation ("Review UPDATE", "Review DELETE",
 "Review INSERT (duplicate row)", "Review updateOne", "Review ALTER … UPDATE
@@ -1134,7 +1141,8 @@ without loss. The UI renders them as `ObjectId("…")`, `ISODate("…")`,
 - **Inline editing** needs an unambiguously addressable row (single-table SELECT
   with PK / single-collection find with `_id`). **Redis editing** covers the
   result of one `GET` / `HGETALL` / `HGET` / `LRANGE` / `SMEMBERS` / `ZRANGE`
-  only (set members: delete, not edit); everything else Redis returns stays
+  only (set members: delete, not edit; a hash field / zset member name edit is a
+  rename — `HDEL`+`HSET` / `ZREM`+`ZADD`); everything else Redis returns stays
   read-only. A nested edit inside a **SQL JSON column** rewrites the **whole
   column value** in the `UPDATE` (SQL has no dotted `$set`), so concurrent
   edits to other keys of that same column are overwritten — Mongo's dotted

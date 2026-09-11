@@ -112,12 +112,6 @@ modal (`NewSession.svelte`) offers:
 - **Preview context** — for `claude` / `codex`, expands to show exactly what
   Otto would inject (skills/soul/context) before spawning.
 
-- **Sidebar order** — the Agents list keeps the daemon's order (creation order)
-  until you drag a row; dragging switches the list to *Manual* (the sort control
-  in the group header), new sessions appear on top, and *Reset to recent* returns
-  to the default. Telegram/Slack lists and other-workspace groups cannot be
-  reordered, nor can a filtered list. Persisted as `otto_session_order_<ws>`.
-
 Press **Start Session**. A session can also pin a model: when `meta.model` is
 set, the daemon appends `--model <name>` for `claude` / `codex` (silently
 omitted for `agy` / `shell`).
@@ -328,6 +322,14 @@ on `claude`/`codex` repaints.
   focused pane to its geometric neighbour and `⌘⌥S` swaps it with the next (in a
   Database pane `⌘⌥←/→` stay with the query editor's tab switch), and the same
   moves plus every preset are `⌘K` commands.
+- **Sidebar order** — the flat Agents list is rendered in the order the daemon
+  returns (`GET /workspaces/{id}/sessions` is `ORDER BY created_at` — creation
+  order, oldest first; the control still calls it *Recent*) until you drag a row.
+  Dragging switches the list to *Manual* (the sort control in the group header);
+  there, sessions the manual order has never seen go on TOP by `last_active_at`,
+  newest first, and *Reset to recent* returns to the daemon's order.
+  Telegram/Slack lists and other-workspace groups cannot be reordered, nor can a
+  filtered list. Persisted as `otto_session_order_<ws>`.
 - **Pane header at narrow widths** — the header sheds chrome by its own width, in
   this order: cwd → provider text → themed full name → terminal font/copy toolbar
   → task / handover / idle chips → the view toggle becomes an icon menu and
@@ -865,7 +867,11 @@ pane's *"Hand over to…"* menu item (`Handover.svelte`).
   non-admins to their own sessions. The scratch workspace grants every
   authenticated user **Editor** (implicitly, never Admin), so its sessions are
   owner-scoped like any other: you list, attach to and control only the
-  workspace-less sessions you created; root sees all.
+  workspace-less sessions you created; root sees all. **Only the session routes
+  exist under `scratch`** — `/workspaces/scratch/sessions…`, plus
+  `…/broadcast` and `…/activity/summary`. Every other `/workspaces/scratch/…`
+  family (api-client, workflows, mcp-servers, connections, vault, …) answers
+  **404**, so that implicit Editor is a session grant and nothing more.
 - **Viewer = read-only terminal.** A workspace viewer may attach and watch but
   cannot send input/resize (frames dropped server-side). Editor+ may drive it.
 - **Share-link throttle.** WS token validation is rate-limited per IP: **10**
