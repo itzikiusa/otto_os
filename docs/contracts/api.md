@@ -38,6 +38,7 @@ connection library unusable for every non-root account.)
 | 14 | DELETE /api/v1/workspaces/{id} | ws admin | — | 204 (archives) |
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` |
+| 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. |
 | 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=` (all narrowing; `source=none` = sessions with no `meta.source`) | `Session[]` — each row carries transient `live: bool` + `viewers: number` |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
 | 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers`) |
@@ -448,6 +449,10 @@ bearer token. `TrailAppended` / `TasksUpdated` events mirror writes over `/ws/ev
 | GET /workspaces/{wid}/activity/summary | ws viewer | — | per-session activity summary for the workspace |
 
 ## Sessions (extras beyond #17–#22)
+
+Sessions in the scratch workspace behave exactly like any other session
+(archive / unarchive / restart / handover / shares / transcript); handover stays
+same-workspace, so a scratch session hands over only to another scratch session.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|

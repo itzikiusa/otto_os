@@ -162,6 +162,10 @@ Session lifecycle (session-family — owner/admin/root, viewer-gated):
   (`meta.title_source = "provider"`).
 - `session_removed` — a session row was removed (PTY killed).
 
+Sessions of the hidden scratch workspace (workspace-less sessions, see api.md
+#16a) carry `workspace_id: "scratch"`; delivery rules are unchanged (owner ∨
+Admin ∨ root).
+
 Notices & notifications:
 
 ```json
