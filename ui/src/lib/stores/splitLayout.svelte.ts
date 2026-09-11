@@ -63,6 +63,15 @@ class SplitLayoutStore {
   /** Root axis ('col' for a bare leaf/empty) — what ws.splitAxis reports. */
   axis: Axis = $derived(this.tree?.kind === 'split' ? this.tree.axis : 'col');
 
+  /** Pin the persistence key WITHOUT loading anything. `select()` calls this
+   *  synchronously before it awaits the session refresh: the route→store
+   *  effect can `openSession` during that await, and its persist must land
+   *  under the workspace being selected — not under the previous key — or the
+   *  `restore()` that follows reads an empty payload and drops the pane. */
+  bindKey(wsKey: string): void {
+    this.wsKey = wsKey;
+  }
+
   /** Load the workspace's layout: v2 as-is, a v1 `{panes, axis}` payload through
    *  fromLegacy with the old window fractions at the root (then re-persisted as
    *  v2 — a one-way migration), nothing → a bare leaf of `fallback`. */

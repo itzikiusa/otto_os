@@ -421,6 +421,11 @@ class WorkspaceStore {
     if (this.currentId === id && this.sessions.length > 0) return;
     this.currentId = id;
     localStorage.setItem(winKey(LS_CURRENT), id);
+    // Pin both persistence keys NOW, before the await below: the route→store
+    // effect may `openSession` while sessions are still loading, and that
+    // persist must land under this workspace so `restoreLayout` sees it.
+    this.tabsKey = id;
+    layout.bindKey(id);
     // No phantom-tab reconcile on a switch: it would prune the OLD workspace's
     // tabs against the NEW session list and persist that under the new key,
     // clobbering this workspace's saved layout before `restoreLayout` reads it.
@@ -437,6 +442,8 @@ class WorkspaceStore {
     this.currentId = null;
     this.activeWorkflowRuns = [];
     this.otherWsSessions = [];
+    this.tabsKey = SCRATCH_WORKSPACE_ID;
+    layout.bindKey(SCRATCH_WORKSPACE_ID);
     await this.refreshSessions({ reconcile: false });
     this.restoreLayout(SCRATCH_WORKSPACE_ID);
   }
