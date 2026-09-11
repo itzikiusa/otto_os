@@ -595,6 +595,15 @@ pub struct QueryRequest {
     /// `#[serde(default)]` so a client that omits it still deserializes.
     #[serde(default)]
     pub offset: Option<u64>,
+    /// Keyset-pagination cursor: the Extended-JSON `_id` of the LAST row of the
+    /// previous page (a [`QueryResult::next_cursor`] echoed back). Applied only
+    /// to a keyset-eligible MongoDB `find` — no explicit `.limit(n)`, no `_id`
+    /// in the filter, sort absent or `{_id: 1}` — where it replaces `skip` with
+    /// `{_id: {$gt: cursor}}` so deep pages don't re-scan everything before
+    /// them. Ignored (offset paging applies) everywhere else, so a client may
+    /// always send it alongside `offset`.
+    #[serde(default)]
+    pub cursor: Option<Value>,
 }
 
 /// An engine-native handle the driver captured for an executing query, so the
@@ -610,6 +619,10 @@ pub enum QueryHandle {
     ClickhouseQueryId(String),
     /// PostgreSQL backend PID (from `pg_backend_pid()`) → `pg_cancel_backend(pid)`.
     PostgresBackendPid(i32),
+    /// MongoDB `comment` tag (`otto:<query_id>`) stamped on the running
+    /// find/aggregate/count → `$currentOp` matched on `command.comment`, then
+    /// `killOp` per opid.
+    MongoComment(String),
 }
 
 /// A slot a driver fills with the [`QueryHandle`] for an in-flight query as soon
@@ -733,6 +746,13 @@ pub struct QueryResult {
     /// paginatable, or it was part of a multi-statement batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_limited: Option<u64>,
+    /// Keyset-pagination cursor for the NEXT page: the Extended-JSON `_id` of
+    /// the last row returned. Present only when the page was keyset-eligible
+    /// (MongoDB `find`, see [`QueryRequest::cursor`]) AND the auto-limit
+    /// truncated it (more rows exist); the client echoes it back as `cursor`
+    /// on "Next". Absent everywhere else (and then omitted from the wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<Value>,
 }
 
 impl QueryResult {
@@ -749,6 +769,7 @@ impl QueryResult {
             statement: None,
             errored: false,
             auto_limited: None,
+            next_cursor: None,
         }
     }
 
@@ -917,8 +938,11 @@ pub struct Capabilities {
     pub transactions: bool,
     pub multi_statement: bool,
     /// Whether an in-flight query can be cancelled **server-side** (not just the
-    /// client's HTTP wait). MySQL (`KILL QUERY`) and ClickHouse (`KILL QUERY WHERE
-    /// query_id=…`, HTTP transport) can; MongoDB/Redis cannot, so the UI labels
+    /// client's HTTP wait). MySQL (`KILL QUERY`), ClickHouse (`KILL QUERY WHERE
+    /// query_id=…`, HTTP transport), PostgreSQL (`pg_cancel_backend`) and MongoDB
+    /// (the run is stamped with a `comment: "otto:<query_id>"` tag, cancel finds
+    /// it via `$currentOp` and issues `killOp`; a server that denies `inprog`/
+    /// `killop` degrades to a logged no-op) can; Redis cannot, so the UI labels
     /// Stop as client-side-only there.
     pub cancel: bool,
     /// Whether the engine can produce a query plan (drives the Explain button —
@@ -1610,6 +1634,55 @@ mod tests {
         let req: QueryRequest =
             serde_json::from_str(r#"{"statement":"SELECT 1","query_id":"abc"}"#).unwrap();
         assert_eq!(req.query_id.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn cursor_deserializes_default_none() {
+        // Offset-only clients (and every non-Mongo caller) omit `cursor`.
+        let req: QueryRequest = serde_json::from_str(r#"{"statement":"db.c.find({})"}"#).unwrap();
+        assert!(req.cursor.is_none());
+
+        // An echoed-back `next_cursor` arrives as an arbitrary EJSON value.
+        let req: QueryRequest = serde_json::from_str(
+            r#"{"statement":"db.c.find({})","offset":1000,"cursor":{"$oid":"5f1d7f3e2c4b1a0001234567"}}"#,
+        )
+        .unwrap();
+        assert_eq!(req.offset, Some(1000));
+        assert_eq!(
+            req.cursor,
+            Some(serde_json::json!({ "$oid": "5f1d7f3e2c4b1a0001234567" }))
+        );
+    }
+
+    #[test]
+    fn next_cursor_is_omitted_from_json_when_none() {
+        // Back-compat: a non-keyset result serializes exactly as before.
+        let wire = serde_json::to_value(QueryResult::empty()).unwrap();
+        assert!(wire.get("next_cursor").is_none(), "wire: {wire}");
+
+        let paged = QueryResult {
+            next_cursor: Some(serde_json::json!({ "$oid": "5f1d7f3e2c4b1a0001234567" })),
+            ..QueryResult::empty()
+        };
+        let wire = serde_json::to_value(&paged).unwrap();
+        assert_eq!(wire["next_cursor"]["$oid"], "5f1d7f3e2c4b1a0001234567");
+        // …and round-trips through deserialization (defaults to None when absent).
+        let back: QueryResult = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.next_cursor, paged.next_cursor);
+        let plain: QueryResult =
+            serde_json::from_str(r#"{"columns":[],"rows":[],"stats":{"duration_ms":0,"row_count":0},"truncated":false}"#)
+                .unwrap();
+        assert!(plain.next_cursor.is_none());
+    }
+
+    #[test]
+    fn cancel_token_carries_a_mongo_comment_tag() {
+        let token = CancelToken::new();
+        token.set(QueryHandle::MongoComment("otto:q-1".into()));
+        match token.handle() {
+            Some(QueryHandle::MongoComment(tag)) => assert_eq!(tag, "otto:q-1"),
+            other => panic!("expected MongoComment, got {other:?}"),
+        }
     }
 
     #[test]

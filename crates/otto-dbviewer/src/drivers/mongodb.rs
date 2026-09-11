@@ -13,7 +13,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use mongodb::bson::{
-    doc, Bson, DateTime as BsonDateTime, Decimal128, Document, Regex as BsonRegex, Uuid as BsonUuid,
+    doc, spec::BinarySubtype, Binary as BsonBinary, Bson, DateTime as BsonDateTime, Decimal128,
+    Document, Regex as BsonRegex, Timestamp as BsonTimestamp, Uuid as BsonUuid,
 };
 use mongodb::options::{
     ClientOptions, Compressor, Credential, ServerAddress, Socks5Proxy, Tls, TlsOptions,
@@ -28,10 +29,10 @@ use crate::drivers::{mongo_parse, mongo_sql};
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, compact_count, Capabilities, Column, CompletionContext, CompletionResponse, DbQueryPlan,
-    Engine, IndexDef, NodeKind, NodePath, ObjectDetail, ObjectHit, ObjectSearchReq,
-    ObjectSearchResult, QueryRequest, QueryResult, QueryStats, ResolvedConfig, SchemaNode,
-    TestResult,
+    self, compact_count, Capabilities, CancelToken, Column, CompletionContext, CompletionResponse,
+    DbQueryPlan, Engine, IndexDef, NodeKind, NodePath, ObjectDetail, ObjectHit, ObjectSearchReq,
+    ObjectSearchResult, QueryHandle, QueryRequest, QueryResult, QueryStats, ResolvedConfig,
+    SchemaNode, TestResult,
 };
 
 /// How many documents to sample when inferring fields/types.
@@ -40,6 +41,11 @@ const SAMPLE_SIZE: i64 = 100;
 const DEFAULT_MAX_ROWS: usize = 50;
 /// System databases sorted to the bottom of the tree.
 const SYSTEM_DBS: &[&str] = &["admin", "local", "config"];
+/// Largest magnitude a JSON number carries exactly through a JS `number`
+/// (2^53). An `Int64` beyond it is emitted as the `{"$numberLong": "…"}`
+/// sentinel so the digits survive the webview; below it a plain number is
+/// both exact and far more readable.
+const JSON_SAFE_INT: u64 = 1 << 53;
 
 /// MongoDB driver. Caches one `mongodb::Client` per [`ResolvedConfig::cache_key`].
 /// A `mongodb::Client` is internally connection-pooled and self-healing, and
@@ -71,9 +77,13 @@ impl Driver for MongoDriver {
             // `run_many` executes a `;`-separated script sequentially (already
             // supported — the flag now tells the truth).
             multi_statement: true,
-            // No per-query server cancel is wired (killOp isn't exposed) — Stop is
-            // client-side only.
-            cancel: false,
+            // Server-side cancel: every tracked find/aggregate/count is stamped
+            // with `comment: "otto:<query_id>"`, and `cancel` resolves it through
+            // `$currentOp` → `killOp` on a separate connection. A server that
+            // denies `inprog`/`killop` degrades to a logged no-op (the client's
+            // HTTP wait still ends), so advertising `true` never over-promises
+            // more than "best effort" — the same contract as ClickHouse.
+            cancel: true,
             // `.explain()` / the explain flag returns a query plan.
             explain: true,
             default_port: 27017,
@@ -426,6 +436,33 @@ impl Driver for MongoDriver {
     }
 
     async fn run(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
+        // Untracked run (widgets, export fallback, agents): same path with a
+        // throwaway token — the MySQL/ClickHouse idiom.
+        self.run_tracked(cfg, req, &CancelToken::new()).await
+    }
+
+    /// Tracked run: when the request carries a `query_id`, stamp every read
+    /// (find/aggregate/count) with `comment: "otto:<query_id>"` and publish that
+    /// tag through `token`, so a concurrent [`Driver::cancel`] can find the op in
+    /// `$currentOp` and `killOp` it. Writes, index ops and `mongosh` scripts run
+    /// untagged: the write option types carry no `comment`, a script is a
+    /// separate process (its `timeout_ms` bound is client-side), and none of
+    /// them is a long-running read the Stop button targets.
+    async fn run_tracked(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &QueryRequest,
+        token: &CancelToken,
+    ) -> Result<QueryResult> {
+        let tag = req
+            .query_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(mongo_comment_tag);
+        if let Some(t) = &tag {
+            token.set(QueryHandle::MongoComment(t.clone()));
+        }
+        let comment = tag.as_deref();
         // A mongosh SCRIPT (variables, functions, control flow, getSiblingDB —
         // e.g. a seed/bootstrap file) is beyond the command parser: run it
         // through the real `mongosh` CLI instead of failing line one. The
@@ -445,9 +482,52 @@ impl Driver for MongoDriver {
                 statement: stmt,
                 ..req.clone()
             };
-            return self.run_one(cfg, &single).await;
+            return self.run_one(cfg, &single, comment).await;
         }
-        self.run_many(cfg, req, statements).await
+        self.run_many(cfg, req, statements, comment).await
+    }
+
+    /// Server-side cancel for a tracked run: look the tagged op up in
+    /// `$currentOp` (matched on `command.comment`, which a cursor's `getMore`s
+    /// inherit) and `killOp` each opid, on a separate pooled connection. All
+    /// best-effort: an op that already finished matches nothing (a successful
+    /// no-op); a server that denies `inprog`/`killop` logs a warning and
+    /// returns `Ok` so the client's Stop still resolves — only a genuine
+    /// transport/server error propagates. `$currentOp` is first asked for
+    /// `allUsers: true` (finds the op even when the pool authenticated it
+    /// differently); when THAT is refused it is retried scoped to the current
+    /// user, which needs no privilege and is what ran the query here.
+    async fn cancel(&self, cfg: &ResolvedConfig, handle: &QueryHandle) -> Result<()> {
+        let QueryHandle::MongoComment(tag) = handle else {
+            return Ok(());
+        };
+        let client = self.connect(cfg).await?;
+        let admin = client.database("admin");
+        let ops = match current_ops(&admin, current_op_pipeline(tag)).await {
+            Ok(docs) => docs,
+            Err(e) if is_unauthorized(&e) => {
+                match current_ops(&admin, current_op_pipeline_scoped(tag, false)).await {
+                    Ok(docs) => docs,
+                    Err(e) if is_unauthorized(&e) => {
+                        tracing::warn!(tag, error = %e, "mongodb cancel: $currentOp denied — no-op");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(types::upstream(e)),
+                }
+            }
+            Err(e) => return Err(types::upstream(e)),
+        };
+        for opid in opids_from_current_op(&ops) {
+            match admin.run_command(doc! { "killOp": 1, "op": opid.clone() }).await {
+                Ok(_) => tracing::debug!(tag, ?opid, "mongodb cancel: killOp issued"),
+                Err(e) if is_unauthorized(&e) => {
+                    tracing::warn!(tag, ?opid, error = %e, "mongodb cancel: killOp denied — no-op");
+                    return Ok(());
+                }
+                Err(e) => return Err(types::upstream(e)),
+            }
+        }
+        Ok(())
     }
 
     async fn completion(
@@ -668,6 +748,7 @@ impl MongoDriver {
         cfg: &ResolvedConfig,
         req: &QueryRequest,
         statements: Vec<String>,
+        comment: Option<&str>,
     ) -> Result<QueryResult> {
         let mut results: Vec<QueryResult> = Vec::with_capacity(statements.len());
         for stmt in statements {
@@ -676,7 +757,7 @@ impl MongoDriver {
                 statement: stmt,
                 ..req.clone()
             };
-            match self.run_one(cfg, &single).await {
+            match self.run_one(cfg, &single, comment).await {
                 Ok(mut r) => {
                     r.statement = Some(preview);
                     results.push(r);
@@ -691,8 +772,14 @@ impl MongoDriver {
     }
 
     /// Run one already-split statement: optional SQL→Mongo translation, command
-    /// parse, then execute against the active database.
-    async fn run_one(&self, cfg: &ResolvedConfig, req: &QueryRequest) -> Result<QueryResult> {
+    /// parse, then execute against the active database. `comment` is the cancel
+    /// tag a tracked run stamps on its reads (`None` for untracked runs).
+    async fn run_one(
+        &self,
+        cfg: &ResolvedConfig,
+        req: &QueryRequest,
+        comment: Option<&str>,
+    ) -> Result<QueryResult> {
         let translated = if mongo_sql::looks_like_sql(&req.statement) {
             Some(mongo_sql::translate(&req.statement)?)
         } else {
@@ -736,6 +823,10 @@ impl MongoDriver {
             return explain_plan(&db, &parsed, started).await;
         }
 
+        // The cancel tag rides on every read as the command `comment` (server
+        // 4.4+; older servers ignore it), which is what `$currentOp` matches on.
+        let comment_bson = comment.map(|c| Bson::String(c.to_string()));
+
         let mut result = match parsed.op {
             MongoOp::Count => {
                 let filter = parsed.filter.unwrap_or_default();
@@ -743,6 +834,7 @@ impl MongoDriver {
                 if let Some(ms) = max_time_ms {
                     count_opts.max_time = Some(std::time::Duration::from_millis(ms as u64));
                 }
+                count_opts.comment = comment_bson;
                 let n = coll
                     .count_documents(filter)
                     .with_options(count_opts)
@@ -759,11 +851,30 @@ impl MongoDriver {
                 Ok(result)
             }
             MongoOp::Find => {
-                let mut action = coll.find(parsed.filter.unwrap_or_default());
+                // Keyset pagination: an unconstrained find walking in `_id` order
+                // pages with `{_id: {$gt: <last _id>}}` instead of `skip` (which
+                // re-scans every skipped document). Eligibility is decided once
+                // per page from the statement alone, and `{_id: 1}` is forced on
+                // EVERY page of an eligible walk — page 1 included — so an
+                // offset-paged "Prev" and a cursor-paged "Next" walk the same
+                // order. Not eligible ⇒ the offset/`skip` path, cursor ignored.
+                let keyset = keyset_filter(
+                    parsed.filter.as_ref(),
+                    parsed.sort.as_ref(),
+                    parsed.limit.is_some(),
+                    req.cursor.as_ref(),
+                )?;
+                let keyset_eligible = keyset.is_some();
+                let cursor_applied = keyset_eligible && req.cursor.is_some();
+                let (filter, sort) = match keyset {
+                    Some((f, s)) => (f, Some(s)),
+                    None => (parsed.filter.unwrap_or_default(), parsed.sort),
+                };
+                let mut action = coll.find(filter);
                 if let Some(p) = parsed.projection {
                     action = action.projection(p);
                 }
-                if let Some(s) = parsed.sort {
+                if let Some(s) = sort {
                     action = action.sort(s);
                 }
                 let limit = parsed.limit.unwrap_or(max_rows as i64).min(max_rows as i64);
@@ -771,9 +882,10 @@ impl MongoDriver {
                 // Server-side pagination: the pager's `offset` maps to Mongo `skip`
                 // (SQL engines map it to `OFFSET`). Applied only when there's no
                 // explicit user `.limit(n)` — same rule as the SQL auto-limiter, so
-                // the pager and the server never disagree.
+                // the pager and the server never disagree — and not when the
+                // keyset cursor already positioned the page.
                 if let Some(off) = req.offset.filter(|&o| o > 0) {
-                    if parsed.limit.is_none() {
+                    if parsed.limit.is_none() && !cursor_applied {
                         action = action.skip(off);
                     }
                 }
@@ -782,6 +894,9 @@ impl MongoDriver {
                     // when the time budget is exceeded.
                     action = action.max_time(std::time::Duration::from_millis(ms as u64));
                 }
+                if let Some(c) = comment_bson {
+                    action = action.comment(c);
+                }
                 let cursor = action.await.map_err(types::upstream)?;
                 // Cap collection at the effective limit (not just max_rows) so an
                 // explicit `.limit(n)` is honored; the extra fetched row flags truncation.
@@ -789,6 +904,12 @@ impl MongoDriver {
                 // Flag the auto-limit ⇒ the UI shows its pager — but only when WE
                 // capped it (no explicit user `.limit(n)`), mirroring the SQL path.
                 r.auto_limited = parsed.limit.is_none().then_some(max_rows as u64);
+                // Hand the client the keyset cursor for the next page: the last
+                // `_id` of this one, only when more rows exist (the +1 probe was
+                // fetched) — a full page walked to its end offers nothing.
+                if keyset_eligible && r.truncated {
+                    r.next_cursor = last_row_id(&r);
+                }
                 Ok(r)
             }
             MongoOp::Aggregate => {
@@ -797,6 +918,7 @@ impl MongoDriver {
                 if let Some(ms) = max_time_ms {
                     agg_opts.max_time = Some(std::time::Duration::from_millis(ms as u64));
                 }
+                agg_opts.comment = comment_bson;
                 let cursor = coll
                     .aggregate(pipeline)
                     .with_options(agg_opts)
@@ -2044,6 +2166,123 @@ fn op_from_str(op: &str) -> Result<MongoOp> {
     }
 }
 
+// --- server-side cancel (comment tag → $currentOp → killOp) ------------------
+
+/// The `comment` a tracked run stamps on its reads, keyed by the client's
+/// `query_id`: `otto:<query_id>`. Namespaced so a `$currentOp` match can never
+/// pick up a comment some other tool set to the same bare id.
+fn mongo_comment_tag(query_id: &str) -> String {
+    format!("otto:{query_id}")
+}
+
+/// `$currentOp` pipeline that resolves a comment tag to opids:
+/// `[{$currentOp: {allUsers: true, localOps: true}}, {$match: {"command.comment":
+/// tag}}, {$project: {opid: 1}}]`. `allUsers` needs the `inprog` privilege;
+/// `localOps` reports the ops on the node we're connected to (a mongos's own
+/// ops rather than the shards'), where `killOp` must also be issued. Runs on
+/// the `admin` database.
+fn current_op_pipeline(tag: &str) -> Vec<Document> {
+    current_op_pipeline_scoped(tag, true)
+}
+
+/// [`current_op_pipeline`] with `allUsers` as given — `false` lists only the
+/// current user's ops, which needs no privilege and still finds a run this
+/// same client issued.
+fn current_op_pipeline_scoped(tag: &str, all_users: bool) -> Vec<Document> {
+    vec![
+        doc! { "$currentOp": { "allUsers": all_users, "localOps": true } },
+        doc! { "$match": { "command.comment": tag } },
+        doc! { "$project": { "opid": 1 } },
+    ]
+}
+
+/// The `opid` of every `$currentOp` row, kept as raw BSON: a mongod reports a
+/// number, a mongos a `"shard:<n>"` string, and `killOp` wants it back verbatim.
+fn opids_from_current_op(docs: &[Document]) -> Vec<Bson> {
+    docs.iter().filter_map(|d| d.get("opid").cloned()).collect()
+}
+
+/// Run a `$currentOp` pipeline on `admin` and collect its rows.
+async fn current_ops(
+    admin: &mongodb::Database,
+    pipeline: Vec<Document>,
+) -> std::result::Result<Vec<Document>, mongodb::error::Error> {
+    let mut cursor = admin.aggregate(pipeline).await?;
+    let mut docs = Vec::new();
+    while let Some(next) = cursor.next().await {
+        docs.push(next?);
+    }
+    Ok(docs)
+}
+
+/// A privilege refusal (`Unauthorized` / `not authorized on admin to execute
+/// command …`) — the one cancel failure that is a server policy rather than a
+/// fault, so it degrades to a logged no-op instead of an error.
+fn is_unauthorized(e: &impl std::fmt::Display) -> bool {
+    let msg = e.to_string();
+    msg.contains("Unauthorized") || msg.contains("not authorized")
+}
+
+// --- keyset pagination -------------------------------------------------------
+
+/// Decide whether a `find` can page by keyset, and if so build the page's
+/// `(filter, sort)`. Eligible ⇔ no explicit `.limit(n)` (the auto-limiter's own
+/// rule — an explicit limit is never paged), the sort is absent or exactly
+/// `{_id: 1}`, and the filter carries no top-level `_id` (a user already pinning
+/// `_id` gets the natural order they asked for). When eligible the sort is
+/// `{_id: 1}` ALWAYS — page 1 included — so every page of the walk shares one
+/// order; with a `cursor` (the previous page's last `_id`, Extended JSON) the
+/// filter becomes `{$and: [<filter or {}>, {_id: {$gt: cursor}}]}` — `$and`
+/// rather than a merged key, so a filter using `$or`/`$and` at the top stays
+/// intact. `Ok(None)` ⇒ not eligible, use offset/`skip`. An undecodable cursor
+/// is the caller's error (a 400), never a silent fall-back to `skip`.
+fn keyset_filter(
+    filter: Option<&Document>,
+    sort: Option<&Document>,
+    explicit_limit: bool,
+    cursor: Option<&Value>,
+) -> Result<Option<(Document, Document)>> {
+    if explicit_limit || !sort.is_none_or(sort_is_id_asc) {
+        return Ok(None);
+    }
+    if filter.is_some_and(|f| f.contains_key("_id")) {
+        return Ok(None);
+    }
+    let base = filter.cloned().unwrap_or_default();
+    let filter = match cursor {
+        Some(c) => {
+            let last = json_to_bson(c)
+                .map_err(|e| types::invalid(format!("invalid keyset cursor: {e}")))?;
+            doc! { "$and": [base, { "_id": { "$gt": last } }] }
+        }
+        None => base,
+    };
+    Ok(Some((filter, doc! { "_id": 1 })))
+}
+
+/// `{_id: 1}` exactly — one key, ascending — with the direction compared
+/// numerically (the parser yields `Int64(1)`, a pasted EJSON sort may say
+/// `Int32`/`Double`).
+fn sort_is_id_asc(sort: &Document) -> bool {
+    sort.len() == 1
+        && sort.get("_id").is_some_and(|dir| match dir {
+            Bson::Int32(n) => *n == 1,
+            Bson::Int64(n) => *n == 1,
+            Bson::Double(f) => *f == 1.0,
+            _ => false,
+        })
+}
+
+/// The `_id` cell of the LAST row (already the typed Extended-JSON projection
+/// the wire carries, so it round-trips through [`json_to_bson`] unchanged) —
+/// the keyset cursor for the next page. `None` when the result has no `_id`
+/// column (a projection dropped it) or no rows, in which case the client keeps
+/// paging by offset.
+fn last_row_id(r: &QueryResult) -> Option<Value> {
+    let idx = r.columns.iter().position(|c| c.name == "_id")?;
+    r.rows.last()?.get(idx).filter(|v| !v.is_null()).cloned()
+}
+
 // --- bson / json helpers ----------------------------------------------------
 
 /// Convert a JSON value into a BSON `Document` (the value must be an object).
@@ -2109,9 +2348,49 @@ fn decode_ejson(map: &Map<String, Value>) -> Option<Result<Bson>> {
                 .map_err(|e| types::invalid(format!("invalid $uuid: {e}")))
         }),
         "$regularExpression" => decode_regex(val),
+        "$binary" => decode_binary(val),
+        "$timestamp" => decode_timestamp(val),
         _ => return None,
     };
     Some(decoded)
+}
+
+/// `{"$binary": {"base64": "…", "subType": "<2 hex>"}}` (canonical Extended
+/// JSON) → `Bson::Binary`; the subtype defaults to generic (`00`) when absent.
+fn decode_binary(v: &Value) -> Result<Bson> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| types::invalid("$binary expects an object"))?;
+    let b64 = obj
+        .get("base64")
+        .and_then(Value::as_str)
+        .ok_or_else(|| types::invalid("$binary expects a base64 string"))?;
+    let subtype = match obj.get("subType").and_then(Value::as_str) {
+        None => BinarySubtype::Generic,
+        Some(hex) => u8::from_str_radix(hex, 16)
+            .map(BinarySubtype::from)
+            .map_err(|_| types::invalid(format!("invalid $binary subType '{hex}'")))?,
+    };
+    BsonBinary::from_base64(b64, subtype)
+        .map(Bson::Binary)
+        .map_err(|e| types::invalid(format!("invalid $binary: {e}")))
+}
+
+/// `{"$timestamp": {"t": <u32>, "i": <u32>}}` → `Bson::Timestamp`.
+fn decode_timestamp(v: &Value) -> Result<Bson> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| types::invalid("$timestamp expects an object"))?;
+    let field = |k: &str| -> Result<u32> {
+        obj.get(k)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| types::invalid(format!("$timestamp.{k} must be a u32")))
+    };
+    Ok(Bson::Timestamp(BsonTimestamp {
+        time: field("t")?,
+        increment: field("i")?,
+    }))
 }
 
 fn ejson_str(v: &Value, what: &str) -> Result<String> {
@@ -2214,13 +2493,18 @@ fn bson_to_json(b: &Bson) -> Value {
 }
 
 /// Like [`bson_to_json`] but PRESERVES the type of values whose plain JSON
-/// projection is an indistinguishable string — ObjectId, DateTime, Decimal128 —
-/// by emitting their MongoDB Extended JSON sentinel (`{"$oid": …}`, `{"$date":
-/// …}`, `{"$numberDecimal": …}`). The query-RESULTS path uses this so the UI can
-/// render `ObjectId("…")` / `ISODate("…")` (a real type hint the user can act on)
-/// and a cell "query by value" round-trips correctly — the runner's own parser
-/// (`mongo_parse` / `decode_ejson`) decodes these sentinels back to their BSON
-/// type. Recurses through documents/arrays so nested ids/dates are typed too.
+/// projection is lossy or indistinguishable — ObjectId, DateTime, Decimal128,
+/// a Long beyond 2^53, Binary (UUID or raw), Timestamp — by emitting their
+/// MongoDB Extended JSON sentinel (`{"$oid": …}`, `{"$date": …}`,
+/// `{"$numberDecimal": …}`, `{"$numberLong": "…"}`, `{"$uuid": …}`, `{"$binary":
+/// {base64, subType}}`, `{"$timestamp": {t, i}}`). The query-RESULTS path uses
+/// this so the UI can render `ObjectId("…")` / `ISODate("…")` (a real type hint
+/// the user can act on) and a cell "query by value" round-trips correctly — the
+/// runner's own parser (`mongo_parse` / `decode_ejson`) decodes every one of
+/// these sentinels back to its BSON type. An `Int64` within ±2^53 stays a plain
+/// number: it is exact in a JS `number` and far more readable (on the way back
+/// in a plain integer parses as `Int64` anyway). Recurses through
+/// documents/arrays so nested values are typed too.
 fn bson_to_json_typed(b: &Bson) -> Value {
     match b {
         Bson::ObjectId(oid) => json!({ "$oid": oid.to_hex() }),
@@ -2228,6 +2512,11 @@ fn bson_to_json_typed(b: &Bson) -> Value {
             json!({ "$date": dt.try_to_rfc3339_string().unwrap_or_else(|_| dt.to_string()) })
         }
         Bson::Decimal128(d) => json!({ "$numberDecimal": d.to_string() }),
+        Bson::Int64(n) if n.unsigned_abs() > JSON_SAFE_INT => {
+            json!({ "$numberLong": n.to_string() })
+        }
+        Bson::Binary(bin) => binary_to_json_typed(bin),
+        Bson::Timestamp(ts) => json!({ "$timestamp": { "t": ts.time, "i": ts.increment } }),
         Bson::Array(arr) => Value::Array(arr.iter().map(bson_to_json_typed).collect()),
         Bson::Document(doc) => Value::Object(
             doc.iter()
@@ -2242,6 +2531,24 @@ fn bson_to_json_typed(b: &Bson) -> Value {
 fn base64_encode(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Typed projection of a BSON binary: UUID subtypes (4 = standard, 3 = legacy)
+/// as `{"$uuid": "<hyphenated>"}` — the id the user can read and query — and
+/// every other subtype as the canonical `{"$binary": {"base64": "…", "subType":
+/// "<2 hex, lowercase>"}}`, which [`decode_binary`] takes back verbatim.
+fn binary_to_json_typed(bin: &BsonBinary) -> Value {
+    if matches!(bin.subtype, BinarySubtype::Uuid | BinarySubtype::UuidOld) {
+        if let Ok(bytes) = <[u8; 16]>::try_from(bin.bytes.as_slice()) {
+            return json!({ "$uuid": BsonUuid::from_bytes(bytes).to_string() });
+        }
+    }
+    json!({
+        "$binary": {
+            "base64": base64_encode(&bin.bytes),
+            "subType": format!("{:02x}", u8::from(bin.subtype)),
+        }
+    })
 }
 
 /// Render a BSON binary value: UUID subtypes (4 = standard, 3 = legacy) show as
@@ -3165,11 +3472,227 @@ mod tests {
         // Plain scalars are unchanged.
         assert_eq!(obj.get("name").unwrap(), "x");
     }
+
+    // ---- server-side cancel helpers -----------------------------------------
+
+    #[test]
+    fn mongo_comment_tag_is_namespaced_by_query_id() {
+        assert_eq!(mongo_comment_tag("q-42"), "otto:q-42");
+        assert_eq!(mongo_comment_tag(""), "otto:");
+    }
+
+    #[test]
+    fn current_op_pipeline_matches_comment_and_projects_opid() {
+        let p = current_op_pipeline("otto:q-42");
+        assert_eq!(
+            p,
+            vec![
+                doc! { "$currentOp": { "allUsers": true, "localOps": true } },
+                doc! { "$match": { "command.comment": "otto:q-42" } },
+                doc! { "$project": { "opid": 1 } },
+            ]
+        );
+        // The unprivileged retry differs ONLY in `allUsers`.
+        let scoped = current_op_pipeline_scoped("otto:q-42", false);
+        assert_eq!(scoped[0], doc! { "$currentOp": { "allUsers": false, "localOps": true } });
+        assert_eq!(scoped[1..], p[1..]);
+    }
+
+    #[test]
+    fn opids_from_current_op_keeps_raw_bson_and_skips_rows_without_one() {
+        // mongod reports a number, mongos a "shard:n" string — both go back to
+        // killOp verbatim; a row without `opid` is ignored.
+        let docs = vec![
+            doc! { "opid": 1234 },
+            doc! { "opid": "shard01:987" },
+            doc! { "desc": "conn12" },
+        ];
+        assert_eq!(
+            opids_from_current_op(&docs),
+            vec![Bson::Int32(1234), Bson::String("shard01:987".into())]
+        );
+        assert!(opids_from_current_op(&[]).is_empty());
+    }
+
+    #[test]
+    fn is_unauthorized_matches_privilege_refusals_only() {
+        assert!(is_unauthorized(&"Command failed: Unauthorized"));
+        assert!(is_unauthorized(
+            &"not authorized on admin to execute command { aggregate: 1, pipeline: [ { $currentOp: … } ] }"
+        ));
+        assert!(!is_unauthorized(&"connection reset by peer"));
+    }
+
+    // ---- keyset pagination --------------------------------------------------
+
+    #[test]
+    fn keyset_filter_rejects_explicit_limit_other_sort_and_id_filter() {
+        // An explicit `.limit(n)` is never paged (neither by offset nor keyset).
+        assert!(keyset_filter(None, None, true, None).unwrap().is_none());
+        // A sort on another field (or descending `_id`) needs the offset path.
+        assert!(keyset_filter(None, Some(&doc! { "age": -1 }), false, None).unwrap().is_none());
+        assert!(keyset_filter(None, Some(&doc! { "_id": -1 }), false, None).unwrap().is_none());
+        assert!(keyset_filter(None, Some(&doc! { "_id": 1, "age": 1 }), false, None)
+            .unwrap()
+            .is_none());
+        // A filter already pinning `_id` keeps the order the user asked for.
+        let f = doc! { "_id": { "$in": [1, 2] } };
+        assert!(keyset_filter(Some(&f), None, false, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn keyset_filter_forces_id_sort_on_page_one() {
+        // Eligible without a cursor: the filter is untouched, the sort becomes
+        // `{_id: 1}` — page 1 included, so every page shares one order.
+        let f = doc! { "country": "US" };
+        let (filter, sort) = keyset_filter(Some(&f), None, false, None).unwrap().unwrap();
+        assert_eq!(filter, f);
+        assert_eq!(sort, doc! { "_id": 1 });
+        // No filter at all ⇒ an empty filter document.
+        let (filter, sort) = keyset_filter(None, None, false, None).unwrap().unwrap();
+        assert_eq!(filter, doc! {});
+        assert_eq!(sort, doc! { "_id": 1 });
+        // An explicit `{_id: 1}` sort is eligible too (any numeric 1).
+        assert!(keyset_filter(None, Some(&doc! { "_id": 1_i64 }), false, None).unwrap().is_some());
+        assert!(keyset_filter(None, Some(&doc! { "_id": 1.0 }), false, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn keyset_filter_with_cursor_ands_a_typed_gt_on_id() {
+        let oid = mongodb::bson::oid::ObjectId::new();
+        let f = doc! { "$or": [{ "a": 1 }, { "b": 2 }] };
+        let cursor = json!({ "$oid": oid.to_hex() });
+        let (filter, sort) =
+            keyset_filter(Some(&f), None, false, Some(&cursor)).unwrap().unwrap();
+        // `$and` keeps a top-level `$or` intact, and the cursor is decoded to a
+        // real ObjectId (not compared as a string / sub-document).
+        assert_eq!(filter, doc! { "$and": [f, { "_id": { "$gt": oid } }] });
+        assert_eq!(sort, doc! { "_id": 1 });
+        // No filter + cursor ⇒ `$and: [{}, …]` (harmless, and keeps one shape).
+        let cursor = json!(41);
+        let (filter, _) = keyset_filter(None, None, false, Some(&cursor)).unwrap().unwrap();
+        assert_eq!(filter, doc! { "$and": [{}, { "_id": { "$gt": 41_i64 } }] });
+        // A cursor that cannot be decoded is the caller's error, not a silent skip.
+        let bad = json!({ "$oid": "nope" });
+        assert!(keyset_filter(None, None, false, Some(&bad)).is_err());
+    }
+
+    #[test]
+    fn last_row_id_reads_the_id_column_of_the_last_row() {
+        let started = Instant::now();
+        let a = mongodb::bson::oid::ObjectId::new();
+        let b = mongodb::bson::oid::ObjectId::new();
+        let r = docs_to_result(vec![doc! { "_id": a, "n": 1 }, doc! { "n": 2, "_id": b }], true, started);
+        // `_id` is pinned to column 0 whatever the document order was.
+        assert_eq!(last_row_id(&r), Some(json!({ "$oid": b.to_hex() })));
+        // No `_id` column (projected away) / no rows ⇒ no cursor.
+        let r = docs_to_result(vec![doc! { "n": 1 }], true, started);
+        assert!(last_row_id(&r).is_none());
+        assert!(last_row_id(&QueryResult::empty()).is_none());
+    }
+
+    // ---- type fidelity ------------------------------------------------------
+
+    #[test]
+    fn bson_to_json_typed_gates_int64_at_2_pow_53() {
+        // Within ±2^53 a Long is exact in a JS number — keep it plain.
+        assert_eq!(bson_to_json_typed(&Bson::Int64(42)), json!(42));
+        assert_eq!(bson_to_json_typed(&Bson::Int64(1 << 53)), json!(9007199254740992_i64));
+        assert_eq!(bson_to_json_typed(&Bson::Int64(-(1 << 53))), json!(-9007199254740992_i64));
+        // Beyond it the digits would round in the webview — sentinel, both signs.
+        assert_eq!(
+            bson_to_json_typed(&Bson::Int64((1 << 53) + 1)),
+            json!({ "$numberLong": "9007199254740993" })
+        );
+        assert_eq!(
+            bson_to_json_typed(&Bson::Int64(i64::MIN)),
+            json!({ "$numberLong": "-9223372036854775808" })
+        );
+        // …and it decodes back to the same Int64.
+        let back = json_to_bson(&json!({ "$numberLong": "9007199254740993" })).unwrap();
+        assert_eq!(back, Bson::Int64(9007199254740993));
+        // Int32 is never a sentinel.
+        assert_eq!(bson_to_json_typed(&Bson::Int32(7)), json!(7));
+    }
+
+    #[test]
+    fn bson_to_json_typed_binary_uuid_vs_generic() {
+        let uuid = BsonUuid::new();
+        let v = bson_to_json_typed(&Bson::Binary(BsonBinary::from(uuid)));
+        assert_eq!(v, json!({ "$uuid": uuid.to_string() }));
+        // Legacy UUID subtype (3) renders the same way.
+        let legacy = BsonBinary { subtype: BinarySubtype::UuidOld, bytes: uuid.bytes().to_vec() };
+        assert_eq!(bson_to_json_typed(&Bson::Binary(legacy)), json!({ "$uuid": uuid.to_string() }));
+        // Generic bytes → canonical `$binary` with a 2-hex lowercase subtype.
+        let raw = BsonBinary { subtype: BinarySubtype::Generic, bytes: b"hello".to_vec() };
+        assert_eq!(
+            bson_to_json_typed(&Bson::Binary(raw)),
+            json!({ "$binary": { "base64": "aGVsbG8=", "subType": "00" } })
+        );
+        let user = BsonBinary { subtype: BinarySubtype::UserDefined(0x80), bytes: vec![1, 2] };
+        assert_eq!(
+            bson_to_json_typed(&Bson::Binary(user))["$binary"]["subType"],
+            json!("80")
+        );
+    }
+
+    #[test]
+    fn binary_and_uuid_round_trip_through_typed_json() {
+        let raw = Bson::Binary(BsonBinary { subtype: BinarySubtype::Md5, bytes: vec![0, 255, 16] });
+        assert_eq!(json_to_bson(&bson_to_json_typed(&raw)).unwrap(), raw);
+        let uuid = Bson::Binary(BsonBinary::from(BsonUuid::new()));
+        assert_eq!(json_to_bson(&bson_to_json_typed(&uuid)).unwrap(), uuid);
+        // A missing subType defaults to generic; a bad one is an error.
+        assert_eq!(
+            json_to_bson(&json!({ "$binary": { "base64": "AQI=" } })).unwrap(),
+            Bson::Binary(BsonBinary { subtype: BinarySubtype::Generic, bytes: vec![1, 2] })
+        );
+        assert!(json_to_bson(&json!({ "$binary": { "base64": "AQI=", "subType": "zz" } })).is_err());
+        assert!(json_to_bson(&json!({ "$binary": { "base64": "not base64!" } })).is_err());
+    }
+
+    #[test]
+    fn timestamp_round_trips_through_typed_json() {
+        let ts = Bson::Timestamp(BsonTimestamp { time: 1_700_000_000, increment: 7 });
+        let v = bson_to_json_typed(&ts);
+        assert_eq!(v, json!({ "$timestamp": { "t": 1_700_000_000_u32, "i": 7 } }));
+        assert_eq!(json_to_bson(&v).unwrap(), ts);
+        // Nested inside a document/array it is typed and decoded the same way.
+        let doc = doc! { "ops": [ts.clone()] };
+        let back = json_to_bson(&bson_to_json_typed(&Bson::Document(doc.clone()))).unwrap();
+        assert_eq!(back, Bson::Document(doc));
+        // Out-of-range / missing fields are errors.
+        assert!(json_to_bson(&json!({ "$timestamp": { "t": 1 } })).is_err());
+        assert!(json_to_bson(&json!({ "$timestamp": { "t": 1, "i": 4294967296_u64 } })).is_err());
+    }
+
+    #[test]
+    fn parses_update_one_with_set_unset_rename_and_typed_sentinels() {
+        let p = parse_command(
+            r#"db.c.updateOne({_id:{"$oid":"5f1d7f3e2c4b1a0001234567"}}, {"$set":{"a.b":1,"big":{"$numberLong":"9007199254740993"},"at":{"$date":"2024-01-02T03:04:05Z"}},"$unset":{"x":""},"$rename":{"o":"n"}})"#,
+        )
+        .unwrap();
+        assert_eq!(p.collection, "c");
+        assert_eq!(p.op, MongoOp::UpdateOne);
+        // The `_id` filter decodes to a real ObjectId.
+        let filter = p.filter.unwrap();
+        assert!(matches!(filter.get("_id"), Some(Bson::ObjectId(_))));
+        // All three operators survive as separate top-level keys…
+        let update = p.update.unwrap();
+        let set = update.get_document("$set").unwrap();
+        assert_eq!(set.get("a.b"), Some(&Bson::Int64(1)));
+        assert_eq!(set.get("big"), Some(&Bson::Int64(9007199254740993)));
+        assert!(matches!(set.get("at"), Some(Bson::DateTime(_))));
+        assert_eq!(update.get_document("$unset").unwrap().get_str("x").unwrap(), "");
+        assert_eq!(update.get_document("$rename").unwrap().get_str("o").unwrap(), "n");
+    }
 }
 
-/// End-to-end SQL → Mongo over a real MongoDB Docker container. Ignored by
-/// default (needs Docker). Run with:
+/// End-to-end SQL → Mongo (plus server-side cancel and keyset paging) over a
+/// real MongoDB Docker container. Ignored by default (needs Docker). Run with:
 ///   cargo test -p otto-dbviewer --lib -- --ignored --nocapture sql_to_mongo_e2e
+///   cargo test -p otto-dbviewer --lib -- --ignored --nocapture mongo_cancel_kills_tagged_find_e2e
+///   cargo test -p otto-dbviewer --lib -- --ignored --nocapture mongo_keyset_walk_e2e
 #[cfg(test)]
 mod sql_e2e {
     use super::*;
@@ -3193,16 +3716,187 @@ mod sql_e2e {
     }
 
     fn cfg() -> ResolvedConfig {
+        cfg_on(PORT)
+    }
+
+    fn cfg_on(port: u16) -> ResolvedConfig {
         ResolvedConfig {
             engine: Engine::Mongodb,
             host: "127.0.0.1".into(),
-            port: PORT,
+            port,
             user: None,
             password: None,
             database: Some("shop".into()),
             tls: TlsConfig::default(),
             params: serde_json::json!({}),
         }
+    }
+
+    /// Start a throwaway `mongo` container named `name` on `port` and wait for
+    /// it. The returned guard removes it on drop (the tests below each use
+    /// their own so `--ignored` can run them in parallel).
+    struct Container(&'static str);
+    impl Drop for Container {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", self.0]).output();
+        }
+    }
+    async fn start_container(name: &'static str, port: u16) -> (Container, Client) {
+        let _ = Command::new("docker").args(["rm", "-f", name]).output();
+        let out = Command::new("docker")
+            .args(["run", "-d", "--name", name, "-p", &format!("{port}:27017"), IMAGE])
+            .output()
+            .expect("docker run");
+        assert!(
+            out.status.success(),
+            "docker run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let guard = Container(name);
+        let client = wait_for_mongo(&format!("mongodb://127.0.0.1:{port}")).await;
+        (guard, client)
+    }
+
+    fn id_cells(r: &QueryResult) -> Vec<Value> {
+        let idx = r.columns.iter().position(|c| c.name == "_id").expect("_id column");
+        r.rows.iter().map(|row| row[idx].clone()).collect()
+    }
+
+    /// A tracked `find` blocked in a server-side `$where: sleep(5000)` (5 docs
+    /// ⇒ ≥25 s untouched) is stamped `comment: "otto:<query_id>"`, shows up in
+    /// `$currentOp` under that tag, and `cancel` kills it: the run ends with an
+    /// error well inside 5 s.
+    #[tokio::test]
+    #[ignore = "requires docker"]
+    async fn mongo_cancel_kills_tagged_find_e2e() {
+        const CANCEL_PORT: u16 = 47020;
+        let (_c, client) = start_container("otto-mongo-cancel-e2e", CANCEL_PORT).await;
+        seed(&client).await;
+        let d = std::sync::Arc::new(MongoDriver::default());
+        let token = CancelToken::new();
+        let req = QueryRequest {
+            statement: r#"db.players.find({"$where": "sleep(5000) || true"})"#.into(),
+            query_id: Some("e2e-cancel".into()),
+            max_rows: Some(10),
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let run = {
+            let (d, token) = (std::sync::Arc::clone(&d), token.clone());
+            tokio::spawn(async move { d.run_tracked(&cfg_on(CANCEL_PORT), &req, &token).await })
+        };
+        // The tag is published before the find is issued…
+        let handle = loop {
+            if let Some(h) = token.handle() {
+                break h;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let QueryHandle::MongoComment(tag) = &handle else {
+            panic!("expected a MongoComment handle, got {handle:?}")
+        };
+        assert_eq!(tag, "otto:e2e-cancel");
+        // …and the op is visible in `$currentOp` under it once the server
+        // starts evaluating the `$where`.
+        let admin = client.database("admin");
+        let mut seen = Vec::new();
+        for _ in 0..100 {
+            seen = current_ops(&admin, current_op_pipeline(tag)).await.unwrap();
+            if !seen.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!seen.is_empty(), "tagged op never appeared in $currentOp");
+
+        d.cancel(&cfg_on(CANCEL_PORT), &handle).await.unwrap();
+        let outcome = run.await.unwrap();
+        assert!(outcome.is_err(), "a killed find must surface the interruption, got {outcome:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cancel took {:?} — the sleep ran to completion",
+            started.elapsed()
+        );
+        // Cancelling an already-finished op is a successful no-op.
+        d.cancel(&cfg_on(CANCEL_PORT), &handle).await.unwrap();
+    }
+
+    /// Keyset walk over 2,500 documents at 1,000 rows/page: `next_cursor` on the
+    /// truncated pages only, no duplicate `_id` across the walk, "Prev" by offset
+    /// lands on exactly the page "Next" by cursor produced (same forced order),
+    /// and a non-eligible find ignores the cursor.
+    #[tokio::test]
+    #[ignore = "requires docker"]
+    async fn mongo_keyset_walk_e2e() {
+        const KEYSET_PORT: u16 = 47021;
+        let (_c, client) = start_container("otto-mongo-keyset-e2e", KEYSET_PORT).await;
+        let coll = client.database("shop").collection::<Document>("keyset");
+        let docs: Vec<Document> = (0..2500).map(|n| doc! { "n": n, "even": n % 2 == 0 }).collect();
+        coll.insert_many(docs).await.unwrap();
+        let d = MongoDriver::default();
+        let cfg = cfg_on(KEYSET_PORT);
+        let page = |cursor: Option<Value>, offset: Option<u64>, stmt: &str| QueryRequest {
+            statement: stmt.into(),
+            max_rows: Some(1000),
+            offset,
+            cursor,
+            ..Default::default()
+        };
+
+        let p1 = d.run(&cfg, &page(None, None, "db.keyset.find({})")).await.unwrap();
+        assert_eq!(p1.rows.len(), 1000);
+        assert!(p1.truncated);
+        assert_eq!(p1.auto_limited, Some(1000));
+        let c1 = p1.next_cursor.clone().expect("page 1 offers a cursor");
+        assert_eq!(&c1, id_cells(&p1).last().unwrap());
+
+        let p2 = d.run(&cfg, &page(Some(c1), Some(1000), "db.keyset.find({})")).await.unwrap();
+        assert_eq!(p2.rows.len(), 1000);
+        let c2 = p2.next_cursor.clone().expect("page 2 offers a cursor");
+
+        let p3 = d.run(&cfg, &page(Some(c2), Some(2000), "db.keyset.find({})")).await.unwrap();
+        assert_eq!(p3.rows.len(), 500);
+        assert!(!p3.truncated);
+        assert!(p3.next_cursor.is_none(), "the last page offers no cursor");
+
+        // No duplicates, and the walk is in ascending `n` (= insertion = `_id`) order.
+        let mut all = id_cells(&p1);
+        all.extend(id_cells(&p2));
+        all.extend(id_cells(&p3));
+        let unique: std::collections::BTreeSet<String> =
+            all.iter().map(|v| v.to_string()).collect();
+        assert_eq!(unique.len(), 2500);
+        let n_idx = p2.columns.iter().position(|c| c.name == "n").unwrap();
+        assert_eq!(p2.rows[0][n_idx], json!(1000));
+        assert_eq!(p3.rows[499][n_idx], json!(2499));
+
+        // "Prev" from page 3 is offset-based (no cursor) and must reproduce page 2
+        // exactly — the forced `{_id: 1}` makes both paths walk one order.
+        let prev = d.run(&cfg, &page(None, Some(1000), "db.keyset.find({})")).await.unwrap();
+        assert_eq!(id_cells(&prev), id_cells(&p2));
+        assert_eq!(prev.next_cursor, p2.next_cursor);
+
+        // A filter + cursor keeps the filter (`$and`) — the even half only.
+        let e1 = d.run(&cfg, &page(None, None, "db.keyset.find({even: true})")).await.unwrap();
+        let e2 = d
+            .run(&cfg, &page(e1.next_cursor.clone(), Some(1000), "db.keyset.find({even: true})"))
+            .await
+            .unwrap();
+        assert_eq!(e2.rows.len(), 250);
+        assert!(e2.next_cursor.is_none());
+        assert!(e2.rows.iter().all(|r| r[n_idx].as_i64().unwrap() % 2 == 0));
+
+        // Not eligible (sort on another field): the cursor is ignored, `skip`
+        // pages, and no cursor is offered.
+        let s1 = d.run(&cfg, &page(None, None, "db.keyset.find({}).sort({n: -1})")).await.unwrap();
+        assert!(s1.next_cursor.is_none());
+        let bogus = id_cells(&s1)[0].clone();
+        let s2 = d
+            .run(&cfg, &page(Some(bogus), Some(2000), "db.keyset.find({}).sort({n: -1})"))
+            .await
+            .unwrap();
+        assert_eq!(s2.rows.len(), 500);
+        assert_eq!(s2.rows[0][n_idx], json!(499));
     }
 
     async fn run_sql(d: &MongoDriver, sql: &str) -> QueryResult {

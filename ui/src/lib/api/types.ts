@@ -4793,6 +4793,13 @@ export interface QueryResult {
    *  so the UI shows its pager exactly then; absent for explicit user
    *  LIMIT/OFFSET, non-paginatable statements, and batches. */
   auto_limited?: number | null;
+  /** Keyset-pagination cursor for the NEXT page (MongoDB only): the Extended-JSON
+   *  `_id` of the last row returned (`{"$oid": …}`, a number, a string…).
+   *  Present only when the page was keyset-eligible — an unconstrained `find`
+   *  with no `_id` in the filter and no sort or `{_id: 1}` — AND the auto-limit
+   *  truncated it. Echo it back verbatim as `cursor` on the next-page request;
+   *  absent ⇒ page by `offset` as before. */
+  next_cursor?: unknown;
 }
 
 /** One node in a normalized query plan (`POST …/db/query-plan`). `warnings`
@@ -5041,8 +5048,10 @@ export interface DbCapabilities {
    *  pooled engines — each run acquires an independent connection. */
   transactions: boolean;
   multi_statement: boolean;
-  /** Server-side cancel of an in-flight query (MySQL/ClickHouse). When false
-   *  (MongoDB/Redis) the Stop button is client-side only. */
+  /** Server-side cancel of an in-flight query: MySQL/ClickHouse/Postgres/MongoDB
+   *  (Mongo: the run is tagged `comment: "otto:<query_id>"`, cancel resolves it
+   *  via `$currentOp` + `killOp`; silently a no-op on a server that denies
+   *  `inprog`/`killop`). When false (Redis) the Stop button is client-side only. */
   cancel?: boolean;
   /** The engine can produce a query plan (drives the Explain button; false for
    *  Redis, which has no plan surface). */
