@@ -52,6 +52,7 @@
   import NotificationBell from './NotificationBell.svelte';
   import { serviceHealth } from '../lib/stores/serviceHealth.svelte';
   import AgentsPage from '../modules/agents/AgentsPage.svelte';
+  import HomePage from '../modules/home/HomePage.svelte';
   import { HistoryPage } from '../modules/agents/history';
   import NewSession from '../modules/agents/NewSession.svelte';
   import NewWorkspace from '../modules/settings/NewWorkspace.svelte';
@@ -449,6 +450,7 @@
       { id: 'core.new-workspace', title: 'Add Workspace', group: 'Workspaces', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
       { id: 'core.update-clis', title: 'Update all CLIs', group: 'Sessions', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
       { id: 'core.snip', title: 'Take screenshot (snip)', group: 'Sessions', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
+      { id: 'core.go-home', title: 'Go to Home', group: 'Navigate', keywords: 'module home dashboard overview boxes views', run: () => router.go('home') },
       { id: 'core.go-agents', title: 'Go to Agents', group: 'Navigate', keywords: 'module terminal', run: () => router.go('agents') },
       { id: 'core.go-connections', title: 'Go to Connections', group: 'Navigate', keywords: 'module ssh mysql redis', run: () => router.go('connections') },
       { id: 'core.go-git', title: 'Go to Git', group: 'Navigate', keywords: 'module repos prs pull requests', run: () => router.go('git') },
@@ -644,6 +646,8 @@
   <div class="content" class:bell-gutter={moduleName !== 'agents' && !wfDocked}>
     {#if moduleName === 'agents'}
       <AgentsPage />
+    {:else if moduleName === 'home'}
+      <HomePage />
     {:else if moduleName === 'history'}
       <!-- Past agent sessions (Otto rows + transcripts found on disk) with a
            read-only conversation view. `#/history`, not `#/agents/…`, whose
