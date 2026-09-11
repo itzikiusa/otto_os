@@ -235,13 +235,19 @@ class SplitLayoutStore {
     this.persist();
   }
 
-  /** reconcileTabs: drop leaves failing `keep`. True when something changed. */
+  /** reconcileTabs: drop leaves failing `keep`. True when something changed.
+   *
+   *  Deliberately does NOT persist. A workspace switch reconciles the OLD tree
+   *  against the NEW workspace's sessions BEFORE restore() learns the new key,
+   *  so a write here would land on the workspace we are leaving and wipe the
+   *  layout we are about to come back to. Nothing is lost by skipping it:
+   *  restore() re-filters every persisted leaf through `valid` (the tab list,
+   *  persisted separately), so a stale leaf can never come back. */
   retain(keep: (id: Id) => boolean): boolean {
     const next = retainIn(this.tree, keep);
     if (next === this.tree) return false;
     this.tree = next;
     this.fixFocus();
-    this.persist();
     return true;
   }
 
