@@ -19,7 +19,7 @@
   import { router } from '../../lib/router.svelte';
   import { untrack } from 'svelte';
   import { transcript, type SessionViewMode } from '../../lib/stores/transcript.svelte';
-  import { layout, type Preset } from '../../lib/stores/splitLayout.svelte';
+  import { presetItems } from './SplitNode.svelte';
   import ConversationView from './conversation/ConversationView.svelte';
   import type { AttachedIssue, SessionStatus } from '../../lib/api/types';
 
@@ -491,18 +491,9 @@
         : []),
     ];
     // Layout presets — flat rows (the ctxMenu has no submenus), only with a
-    // split to re-arrange. The same five rows hang off the DB pane's ✕.
-    const presets: MenuItem[] = showClose
-      ? (
-          [
-            ['cols', 'Layout: Equal columns'],
-            ['rows', 'Layout: Equal rows'],
-            ['one-two-below', 'Layout: One above two'],
-            ['one-two-beside', 'Layout: One beside two'],
-            ['grid', 'Layout: Grid'],
-          ] as [Preset, string][]
-        ).map(([p, label]) => ({ label, icon: 'split', action: () => layout.applyPreset(p) }))
-      : [];
+    // split to re-arrange. The same list the DB pane's ✕ shows, shared so the
+    // two can't drift apart.
+    const presets: MenuItem[] = showClose ? presetItems() : [];
     return [
       // Tier 7 dropped the title from the header — the menu carries it.
       ...(tier >= 7

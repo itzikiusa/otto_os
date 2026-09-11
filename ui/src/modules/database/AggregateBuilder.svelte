@@ -9,6 +9,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { database } from '../../lib/stores/database.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { formatMongo } from './mongo-format';
   import { isBalancedObject } from './query-filter';
 
@@ -59,7 +60,14 @@
   };
   const OPS = Object.keys(TEMPLATES) as StageOp[];
 
-  const LS_KEY = $derived(`otto_db_pipeline:${connId}`);
+  // Per-USER, per-connection — same shape as the store's `otto_db_tabs` /
+  // `otto_db_view` keys, so two accounts sharing a device never inherit each
+  // other's draft pipeline (root keeps the unnamespaced key).
+  const LS_KEY = $derived(
+    auth.isRoot
+      ? `otto_db_pipeline:${connId}`
+      : `otto_db_pipeline:user:${auth.me?.id ?? 'anonymous'}:${connId}`,
+  );
 
   /** Last path segment of the selected schema node when it is a collection
    *  (`db:x/coll:orders` → `orders`); empty otherwise. */

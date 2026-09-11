@@ -6,7 +6,7 @@
   import ProviderIcon, { hasProviderIcon } from '../lib/components/ProviderIcon.svelte';
   import { router } from '../lib/router.svelte';
   import { ui } from '../lib/stores/ui.svelte';
-  import { ws } from '../lib/stores/workspace.svelte';
+  import { ws, SCRATCH_WORKSPACE_ID } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { activity } from '../lib/stores/activity.svelte';
@@ -138,7 +138,7 @@
   // "Recent" is the daemon's order, rendered unchanged. "Manual" applies the
   // persisted id list, with sessions it has never seen on TOP by recency.
   $effect(() => {
-    sessionOrder.load(ws.currentId ?? 'scratch');
+    sessionOrder.load(ws.currentId ?? SCRATCH_WORKSPACE_ID);
   });
   const orderedAgents = $derived(
     sessionOrder.mode === 'manual' ? applyOrder(ws.plainAgentSessions, sessionOrder.order) : ws.plainAgentSessions,
@@ -698,7 +698,7 @@
         <span class="count-chip working">{ws.workingCount}</span>
       {/if}
     </button>
-    {#if ws.myRole !== 'viewer' && selectable.length > 0}
+    {#if selectable.some((s) => ws.canEditSession(s))}
       <button
         class="icon-btn twisty sel-toggle"
         class:on={agentSelMode}
@@ -746,7 +746,7 @@
   </div>
 
   {#if q ? fAgents.length > 0 : agentsOpen}
-    <div class="nested">
+    <div class="nested" data-testid="agents-list">
       {#if agentSelMode}
         <div class="arch-tools" data-testid="agents-select-tools">
           <label class="arch-all" title="Select all sessions">

@@ -184,7 +184,7 @@
   </label>
   <p class="hint-line">
     0 = never. Applies unless you picked a view for that tab (the Grid / Vertical / JSON switch
-    or ⇧⌘V); MongoDB results open in Vertical regardless. Saved per device.
+    or ⇧⌘V); MongoDB results open in Vertical by default. Saved per device.
   </p>
 
   <div class="section-title">Sidebar</div>

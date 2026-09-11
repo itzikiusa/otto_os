@@ -1,3 +1,22 @@
+<script lang="ts" module>
+  // Shared by the pane ⋯ menu (SessionView) and the Database pane's ✕
+  // right-click (below) — one list, so the five rows can't drift apart.
+  import { layout as layoutStore, type Preset as PresetOp } from '../../lib/stores/splitLayout.svelte';
+  import type { MenuItem as PresetMenuItem } from '../../lib/contextmenu.svelte';
+
+  /** The five layout presets as flat ctxMenu rows (the menu has no submenus). */
+  export function presetItems(): PresetMenuItem[] {
+    const rows: [PresetOp, string][] = [
+      ['cols', 'Layout: Equal columns'],
+      ['rows', 'Layout: Equal rows'],
+      ['one-two-below', 'Layout: One above two'],
+      ['one-two-beside', 'Layout: One beside two'],
+      ['grid', 'Layout: Grid'],
+    ];
+    return rows.map(([p, label]) => ({ label, icon: 'split', action: () => layoutStore.applyPreset(p) }));
+  }
+</script>
+
 <script lang="ts">
   // One node of the split TREE (C2). A `split` lays its two children out with an
   // 8px draggable gutter between them; a `leaf` renders the pane itself plus the
@@ -11,12 +30,11 @@
   import SessionView from './SessionView.svelte';
   import DatabasePage from '../database/DatabasePage.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import {
     layout,
     MIN_PANE_PX,
     type LayoutNode,
-    type Preset,
     type Side,
   } from '../../lib/stores/splitLayout.svelte';
 
@@ -123,18 +141,6 @@
     ws.focusPane(layout.focusedIndex);
   }
 
-  /** The five layout presets, flat rows (the ctxMenu has no submenus). Offered
-   *  from the DB pane's ✕ too, so a Database leaf can re-arrange the tree. */
-  function presetItems(): MenuItem[] {
-    const rows: [Preset, string][] = [
-      ['cols', 'Layout: Equal columns'],
-      ['rows', 'Layout: Equal rows'],
-      ['one-two-below', 'Layout: One above two'],
-      ['one-two-beside', 'Layout: One beside two'],
-      ['grid', 'Layout: Grid'],
-    ];
-    return rows.map(([p, label]) => ({ label, icon: 'split', action: () => layout.applyPreset(p) }));
-  }
 </script>
 
 {#if node.kind === 'split'}
