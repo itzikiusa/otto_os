@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { ensureGridView } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — file→table import dialog (Task 5.1 / Task 9 backend), against the
@@ -163,6 +164,8 @@ async function runStatement(page: Page, sql: string): Promise<void> {
     timeout: 20_000,
   });
   await ensureResultsOpen(page);
+  // Mongo results open in Vertical view; the assertions below read the grid.
+  await ensureGridView(page);
   await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({ timeout: 20_000 });
 }
 

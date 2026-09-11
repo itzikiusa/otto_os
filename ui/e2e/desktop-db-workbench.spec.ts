@@ -91,4 +91,51 @@ test('workbench restores open tabs + selection + per-connection view on reload',
   await expect(page.locator('.conn-tab .conn-tab-name').nth(1)).toHaveText('e2e-redis-docker');
 
   expect(pageErrors, `uncaught page errors during restore: ${pageErrors.join(' | ')}`).toEqual([]);
+
+  // ── Result view memory (A1) ────────────────────────────────────────────────
+  // Switch to MySQL, run a query and pick JSON. The pick is stored on the query
+  // tab (`otto_db_tabs`) AND remembered for the connection (`otto_db_view`); a
+  // reload + re-run must come back in JSON without touching the switch again.
+  await page.locator('.conn-tab .conn-tab-main', { hasText: 'e2e-mysql' }).click();
+  await expect(page.locator('.conn-tab.active .conn-tab-name')).toHaveText('e2e-mysql');
+  await page.locator('.main-tabs .mt', { hasText: 'Query' }).first().click();
+  await runStatement(page, 'SELECT 1 AS a');
+  await expect(page.locator('.view-seg .vs.on')).toHaveText('Grid');
+  await page.locator('.view-seg .vs', { hasText: 'JSON' }).click();
+  await expect(page.locator('.view-seg .vs.on')).toHaveText('JSON');
+  // Let the debounced tab persist + the per-connection view write settle.
+  await page.waitForTimeout(500);
+  const viewEntries = await page.evaluate(
+    (connId) =>
+      Object.keys(localStorage)
+        .filter((k) => k.startsWith('otto_db_view') && k.endsWith(`:${connId}`))
+        .map((k) => localStorage.getItem(k) ?? ''),
+    conn.mysql,
+  );
+  expect(viewEntries.length, 'a per-connection view entry exists for mysql').toBeGreaterThan(0);
+  expect(viewEntries[0]).toContain('"view":"json"');
+
+  await page.reload();
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('.conn-tab.active .conn-tab-name')).toHaveText('e2e-mysql', {
+    timeout: 25_000,
+  });
+  await expect(page.locator('.query-editor')).toBeVisible({ timeout: 15_000 });
+  // Results are never persisted — re-run the (restored) statement.
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  await expect(page.locator('.view-seg .vs.on')).toHaveText('JSON', { timeout: 20_000 });
+  await expect(page.locator('.jrec').first()).toBeVisible();
 });
+
+/** Put a statement into the editor and run it (insertText: one input event, so
+ *  the server-backed autocomplete can't corrupt it; the settle lets the value
+ *  reach the store before Run reads it). */
+async function runStatement(page: Page, sql: string): Promise<void> {
+  const content = page.locator('.qe-edit .cm-content');
+  await content.click();
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.insertText(sql);
+  await page.waitForTimeout(300);
+  await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  await expect(page.locator('.view-seg')).toBeVisible({ timeout: 20_000 });
+}
