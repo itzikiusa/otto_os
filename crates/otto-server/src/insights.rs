@@ -488,9 +488,11 @@ pub async fn run_insights(ctx: &ServerCtx, kind: Kind, offset: i64) -> otto_core
 }
 
 /// First non-archived workspace + a member user id to attribute the run to.
-/// Prefers a root member; falls back to any member.
+/// Prefers a root member; falls back to any member. User-facing list: the
+/// scratch workspace is created at boot (so it would sort first) and has no
+/// members, which would leave insights with no host on a fresh install.
 async fn pick_host(ctx: &ServerCtx) -> Option<(otto_core::domain::Workspace, otto_core::Id)> {
-    let workspaces = ctx.workspaces.list_all().await.ok()?;
+    let workspaces = ctx.workspaces.list_user_all().await.ok()?;
     let ws = workspaces.into_iter().find(|w| !w.archived)?;
     let members = ctx.workspaces.members(&ws.id).await.ok()?;
     // Prefer the workspace admin/first member as the actor.

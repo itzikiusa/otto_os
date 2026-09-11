@@ -55,6 +55,14 @@ pub struct User {
     pub created_at: DateTime<Utc>,
 }
 
+/// Fixed id of the daemon's system-owned **scratch** workspace — the home of
+/// workspace-less sessions. A well-known constant rather than a `kind` column:
+/// `new_id()` ULIDs can never collide with it, so the id alone is the
+/// discriminator. The row is created (and healed) at boot by
+/// `WorkspacesRepo::ensure_scratch`, hidden from user-facing workspace lists,
+/// and every authenticated user is implicitly an Editor there.
+pub const SCRATCH_WORKSPACE_ID: &str = "scratch";
+
 /// A workspace: a project directory plus its sessions, connections and repos.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
@@ -64,6 +72,13 @@ pub struct Workspace {
     pub settings: Value,
     pub archived: bool,
     pub created_at: DateTime<Utc>,
+}
+
+impl Workspace {
+    /// Whether this is the daemon-owned scratch workspace (never user-editable).
+    pub fn is_system(&self) -> bool {
+        self.id == SCRATCH_WORKSPACE_ID
+    }
 }
 
 /// What kind of process a session hosts.
