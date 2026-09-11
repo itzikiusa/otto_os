@@ -70,7 +70,7 @@
     agentSel = next;
   }
   function agentSelectAll(): void {
-    agentSel = agentSelIds.length === fAgents.length ? new Set() : new Set(fAgents.map((s) => s.id));
+    agentSel = agentSelIds.length === selectable.length ? new Set() : new Set(selectable.map((s) => s.id));
   }
   function setAgentSelMode(on: boolean): void {
     agentSelMode = on;
@@ -133,7 +133,11 @@
     return q === '' || s.title.toLowerCase().includes(q);
   };
   const fAgents = $derived(ws.plainAgentSessions.filter(matches));
-  const agentSelIds = $derived(fAgents.filter((s) => agentSel.has(s.id)).map((s) => s.id));
+  // Workspace-less sessions (the "No workspace" group below the flat list).
+  const fScratch = $derived(ws.scratchSessions.filter(matches));
+  // Select mode covers the flat list AND the "No workspace" group.
+  const selectable = $derived([...fAgents, ...fScratch]);
+  const agentSelIds = $derived(selectable.filter((s) => agentSel.has(s.id)).map((s) => s.id));
   const fTelegram = $derived(ws.telegramSessions.filter(matches));
   const fSlack = $derived(ws.slackSessions.filter(matches));
   // Capped views (full list when searching or "show all" toggled).
@@ -239,9 +243,20 @@
   }
 
   function startRename(id: string, current: string): void {
-    if (ws.myRole === 'viewer') return;
+    const s = ws.sessions.find((x) => x.id === id);
+    if (!s || !ws.canEditSession(s)) return;
     renamingId = id;
     draft = current;
+  }
+
+  // `newSessionScratch` is a field of the ui store; typed view of it here
+  // (this worktree predates the store change, which lands with its own branch).
+  const uiScratch = ui as typeof ui & { newSessionScratch: boolean };
+
+  /** Open the New Session sheet pre-set to "No workspace". */
+  function newScratchSession(): void {
+    uiScratch.newSessionScratch = true;
+    ui.newSessionOpen = true;
   }
 
   async function commitRename(): Promise<void> {
@@ -437,7 +452,7 @@
             {/if}
             {#each ws.archivedSessions as s (s.id)}
               <div class="nested-row" class:selected={archSel.has(s.id)}>
-                {#if ws.myRole !== 'viewer'}
+                {#if ws.canEditSession(s)}
                   <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
                 {/if}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -445,12 +460,13 @@
                   class="nav-item nested-item archived"
                   title={s.title}
                   oncontextmenu={(e) => ctxMenu.show(e, [
-                    ...(ws.myRole !== 'viewer' ? [
+                    ...(ws.canEditSession(s) ? [
                       { label: 'Unarchive', icon: 'refresh', action: () => ws.unarchiveSession(s.id) },
                       { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
                     ] : []),
                     { separator: true },
                     { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+                    { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
                   ])}
                 >
                   <StatusDot status="exited" />
@@ -461,7 +477,7 @@
                     <span class="provider">{s.provider}</span>
                   {/if}
                 </div>
-                {#if ws.myRole !== 'viewer'}
+                {#if ws.canEditSession(s)}
                   <button class="row-action" title="Restore" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
                     <Icon name="refresh" size={11} />
                   </button>
@@ -628,6 +644,7 @@
       onclick={() => router.go('agents')}
       oncontextmenu={(e) => ctxMenu.show(e, [
         { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+        { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         { label: 'Add workspace…', icon: 'folder', action: () => (ui.newWorkspaceOpen = true) },
       ])}
     >
@@ -637,7 +654,7 @@
         <span class="count-chip working">{ws.workingCount}</span>
       {/if}
     </button>
-    {#if ws.myRole !== 'viewer' && fAgents.length > 0}
+    {#if ws.myRole !== 'viewer' && selectable.length > 0}
       <button
         class="icon-btn twisty sel-toggle"
         class:on={agentSelMode}
@@ -676,7 +693,7 @@
       {#if agentSelMode}
         <div class="arch-tools" data-testid="agents-select-tools">
           <label class="arch-all" title="Select all sessions">
-            <input type="checkbox" aria-label="Select all sessions" checked={agentSelIds.length > 0 && agentSelIds.length === fAgents.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < fAgents.length} onchange={agentSelectAll} />
+            <input type="checkbox" aria-label="Select all sessions" checked={agentSelIds.length > 0 && agentSelIds.length === selectable.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < selectable.length} onchange={agentSelectAll} />
             <span>{agentSelIds.length > 0 ? `${agentSelIds.length} selected` : 'Select all'}</span>
           </label>
           <button class="row-action arch-del-sel" disabled={agentSelIds.length === 0} title="Archive selected sessions" aria-label="Archive selected sessions" data-testid="agents-archive-selected" onclick={() => void archiveSelectedAgents()}>
@@ -691,6 +708,31 @@
         {@render sessionRow(s)}
       {:else}
         <div class="nested-empty">No sessions — ⌘T to start one</div>
+      {/each}
+    </div>
+  {/if}
+
+  <!-- Workspace-less sessions (the daemon's hidden scratch workspace): one
+       group in every workspace and with none. Plain `sessionRow`s — they are
+       already in `ws.sessions`, so open / rename / archive work as above. -->
+  {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="ws-group-label"
+      title="Sessions not tied to any workspace"
+      data-testid="scratch-group"
+      oncontextmenu={(e) => ctxMenu.show(e, [
+        { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
+      ])}
+    >
+      <Icon name="home" size={11} />
+      <span class="ellipsis">No workspace</span>
+    </div>
+    <div class="nested">
+      {#each fScratch as s (s.id)}
+        {@render sessionRow(s)}
+      {:else}
+        <div class="nested-empty">No sessions — ⌘T, then “No workspace”</div>
       {/each}
     </div>
   {/if}
@@ -810,7 +852,7 @@
         oncontextmenu={(e) => ctxMenu.show(e, [
           { label: 'Rename', icon: 'edit', action: () => startRename(s.id, s.title) },
           { separator: true },
-          ...(ws.myRole !== 'viewer' ? [
+          ...(ws.canEditSession(s) ? [
             // In-progress agent only: respawn a stuck PTY (provider resume when
             // possible). Idle/exited/reconnectable sessions have their own paths.
             ...(s.kind === 'agent' && (status === 'running' || status === 'working')
@@ -821,6 +863,7 @@
           ] : []),
           { separator: true },
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+          { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         ])}
         title={resumable ? `${s.title} — ${SUSPENDED_TIP}` : `${s.title} — double-click to rename`}
       >
@@ -857,7 +900,7 @@
           <span class="provider">{s.provider}</span>
         {/if}
       </button>
-      {#if ws.myRole !== 'viewer'}
+      {#if ws.canEditSession(s)}
         <button
           class="row-action"
           title="Close session (archive or delete)"

@@ -7,7 +7,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { usage } from '../../lib/api/usage.svelte';
   import type { UsageBudgetConfig } from '../../lib/api/usage.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { budgetBus } from '../../lib/events.svelte';
   // Work-graph attribution drilldown + cost forecast (B1).
@@ -133,9 +133,13 @@
     budgetsDirty = false;
   }
 
-  // Workspace name for a budget row's id (falls back to the id).
+  // Workspace name for a budget row's id (falls back to the id). The hidden
+  // scratch workspace is not in `ws.workspaces`, so name it explicitly.
   function wsName(id: string): string {
-    return ws.workspaces.find((w) => w.id === id)?.name ?? id;
+    return (
+      ws.workspaces.find((w) => w.id === id)?.name ??
+      (id === SCRATCH_WORKSPACE_ID ? (ws.scratch?.name ?? 'Scratch') : id)
+    );
   }
   // Provider choices for the budget editor (installed CLIs + any already used).
   const providerChoices = $derived.by(() => {

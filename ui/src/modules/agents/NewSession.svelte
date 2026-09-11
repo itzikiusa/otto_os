@@ -1,10 +1,11 @@
 <script lang="ts">
-  // ⌘T sheet: provider (from /meta.providers), title, cwd.
+  // ⌘T sheet: workspace (current / none), provider (from /meta.providers),
+  // title, cwd.
   import Modal from '../../lib/components/Modal.svelte';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import ContextPreview from './ContextPreview.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { allProviders } from '../../lib/providers';
@@ -15,13 +16,41 @@
 
   interface Props {
     onclose: () => void;
+    /** Pre-select "No workspace" (the palette / sidebar "New session (no
+     *  workspace)" entry points). */
+    initialScratch?: boolean;
   }
-  let { onclose }: Props = $props();
+  let { onclose, initialScratch = false }: Props = $props();
+
+  // Workspace-less ("scratch") session: lives in the daemon's hidden scratch
+  // workspace instead of the current one, so it needs no workspace at all.
+  // Forced on when the user has no workspace to put the session in. The prop
+  // is an initial value only — the segmented control owns it from then on.
+  // svelte-ignore state_referenced_locally
+  let scratch = $state(initialScratch);
+  const scratchMode = $derived(scratch || ws.current === null);
+  /** Default cwd of a workspace-less session: the daemon user's home. */
+  const scratchHome = $derived(ws.scratch?.root_path ?? '~');
+  /** Whether a typed cwd is the home folder itself (trust + sandbox then cover
+   *  everything under it — see the notice under the field). */
+  const isHome = (p: string): boolean => {
+    const t = p.trim().replace(/\/+$/, '');
+    return t === '~' || (ws.scratch !== null && t === ws.scratch.root_path);
+  };
+  /** Switch between the current workspace and no workspace, carrying the cwd
+   *  along when it still sits on the previous mode's default. */
+  function setScratch(on: boolean): void {
+    const prev = on ? (ws.current?.root_path ?? '') : scratchHome;
+    const next = on ? scratchHome : (ws.current?.root_path ?? '');
+    if (cwd.trim() === '' || cwd === prev) cwd = next;
+    scratch = on;
+  }
 
   const providers = $derived(allProviders());
-  // Effective default agent: this workspace's override, else the global default.
+  // Effective default agent: this workspace's override, else the global default
+  // (a workspace-less session has no workspace setting to consult).
   const wsDefault = $derived(
-    typeof ws.current?.settings?.default_provider === 'string'
+    !scratchMode && typeof ws.current?.settings?.default_provider === 'string'
       ? (ws.current.settings.default_provider as string)
       : '',
   );
@@ -81,15 +110,18 @@
   }
 
   // Recently used working directories, newest first: every distinct cwd across
-  // this workspace's sessions, with the workspace root first. Offered as a
-  // datalist on the cwd field so the common case is one keystroke.
+  // this workspace's sessions, with the workspace root first — or, for a
+  // workspace-less session, the home folder then the scratch sessions' cwds.
+  // Offered as a datalist on the cwd field so the common case is one keystroke.
   const recentDirs = $derived.by((): string[] => {
     const seen: string[] = [];
     const push = (d: string | null | undefined): void => {
       if (d && !seen.includes(d)) seen.push(d);
     };
-    push(ws.current?.root_path);
-    for (const s of [...ws.sessions].reverse()) push(s.cwd);
+    const inScope = (s: { workspace_id: string }): boolean =>
+      (s.workspace_id === SCRATCH_WORKSPACE_ID) === scratchMode;
+    push(scratchMode ? scratchHome : ws.current?.root_path);
+    for (const s of [...ws.sessions].reverse()) if (inScope(s)) push(s.cwd);
     return seen.slice(0, 12);
   });
 
@@ -217,7 +249,10 @@
       const def = defaultProvider && providers.includes(defaultProvider) ? defaultProvider : null;
       selectProvider(def ?? (providers.includes('claude') ? 'claude' : providers[0]));
     }
-    if (cwd === '' && ws.current) cwd = ws.current.root_path;
+    if (cwd === '') {
+      if (scratchMode) cwd = scratchHome;
+      else if (ws.current) cwd = ws.current.root_path;
+    }
   });
 
   async function create(): Promise<void> {
@@ -229,7 +264,11 @@
       const pending = dirDraft.trim();
       if (pending !== '' && !dirs.includes(pending)) dirs.push(pending);
       const base = title.trim();
-      const dir = cwd.trim();
+      // The daemon takes the cwd verbatim, so expand a leading `~` here (the
+      // scratch default advertises it) when the daemon's home is known.
+      let dir = cwd.trim();
+      const home = ws.scratch?.root_path;
+      if (home && (dir === '~' || dir.startsWith('~/'))) dir = home + dir.slice(1);
 
       // Flatten the batch into one spawn per session, provider by provider in
       // grid order, so "3 claude, 2 codex" starts in a predictable order.
@@ -243,17 +282,20 @@
         try {
           // Quiet creates throughout: routing to each session as it appears
           // would yank the user through the whole batch. We open them below.
-          const s = await ws.createSessionQuiet({
-            kind: 'agent',
-            provider: p,
-            // A typed title is a BASE name for a batch — numbered so the
-            // sessions stay tellable apart; alone it is used verbatim.
-            title: base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base,
-            cwd: dir === '' ? null : dir,
-            meta: Object.keys(meta).length > 0 ? meta : null,
-            // The pinned model only applies to a single-provider batch.
-            model: supportsModel && model.trim() !== '' ? model.trim() : null,
-          });
+          const s = await ws.createSessionQuiet(
+            {
+              kind: 'agent',
+              provider: p,
+              // A typed title is a BASE name for a batch — numbered so the
+              // sessions stay tellable apart; alone it is used verbatim.
+              title: base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base,
+              cwd: dir === '' ? null : dir,
+              meta: Object.keys(meta).length > 0 ? meta : null,
+              // The pinned model only applies to a single-provider batch.
+              model: supportsModel && model.trim() !== '' ? model.trim() : null,
+            },
+            { scratch: scratchMode },
+          );
           created.push(s.id);
         } catch (e) {
           failures.push(`${p}: ${e instanceof Error ? e.message : String(e)}`);
@@ -286,6 +328,44 @@
 <svelte:window onkeydown={onGlobalKeydown} />
 
 <Modal title="New Session" {onclose}>
+  <!-- Workspace: the current one, or none (a workspace-less session in the
+       daemon's hidden scratch workspace). With no workspace at all only "No
+       workspace" exists, pre-selected. -->
+  <div class="field">
+    <div id="ns-ws-label" class="provider-label">Workspace</div>
+    <div class="seg" role="radiogroup" aria-labelledby="ns-ws-label">
+      {#if ws.current}
+        <button
+          type="button"
+          class="seg-btn"
+          class:active={!scratchMode}
+          role="radio"
+          aria-checked={!scratchMode}
+          title={ws.current.root_path}
+          onclick={() => setScratch(false)}
+        >
+          {ws.current.name}
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="seg-btn"
+        class:active={scratchMode}
+        role="radio"
+        aria-checked={scratchMode}
+        title="Not tied to any workspace — starts in your home folder by default"
+        onclick={() => setScratch(true)}
+      >
+        No workspace
+      </button>
+    </div>
+    {#if scratchMode}
+      <span class="hint">
+        Listed under “No workspace” in the sidebar; archive, resume and hand over like any other session.
+      </span>
+    {/if}
+  </div>
+
   <div class="field">
     <div id="ns-provider-label" class="provider-label">
       Provider <span class="dim">(← → to switch, ± for more than one)</span>
@@ -375,8 +455,15 @@
     </datalist>
     <span class="hint">
       Any folder on this machine — it does not have to be inside a workspace.
-      Defaults to the workspace root.
+      {scratchMode ? 'Defaults to your home folder.' : 'Defaults to the workspace root.'}
     </span>
+    {#if isHome(cwd)}
+      <!-- Trust and the sandbox follow the session cwd (not the workspace):
+           a home-rooted session is trusted for, and may write under, all of ~. -->
+      <span class="hint home-notice">
+        Home folder: the agent is trusted for, and may write anywhere under, ~
+      </span>
+    {/if}
   </div>
 
   <div class="field">
@@ -421,7 +508,9 @@
     </label>
   {/if}
 
-  {#if supportsContext && ws.currentId}
+  <!-- The context preview is workspace-scoped (skills/soul/context of a
+       workspace), so a workspace-less session has nothing to preview. -->
+  {#if supportsContext && ws.currentId && !scratchMode}
     <div class="field">
       <button
         type="button"
@@ -456,7 +545,9 @@
 {#if browsing}
   <FolderPicker
     title={browsing === 'cwd' ? 'Choose working directory' : 'Choose an additional directory'}
-    start={(browsing === 'cwd' ? cwd : dirDraft) || ws.current?.root_path || '~'}
+    start={(browsing === 'cwd' ? cwd : dirDraft) ||
+      (scratchMode ? scratchHome : ws.current?.root_path) ||
+      '~'}
     onpick={(path: string) => {
       if (browsing === 'cwd') cwd = path;
       else dirDraft = path;
@@ -472,6 +563,46 @@
     font-weight: 500;
     color: var(--text-dim);
     margin-bottom: 4px;
+  }
+  /* Segmented control: current workspace vs no workspace (same look as the
+     handover sheet's target switch). */
+  .seg {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-m);
+  }
+  .seg-btn {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 10px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .seg-btn.active {
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: var(--shadow);
+  }
+  .seg + .hint {
+    display: block;
+    margin-top: 6px;
+  }
+  .home-notice {
+    display: block;
+    margin-top: 4px;
+    color: var(--status-idle, var(--text-dim));
   }
   .provider-grid {
     display: grid;

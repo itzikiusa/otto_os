@@ -5,7 +5,7 @@
   // handover brief into the target. Optionally review/edit the brief first.
   import Modal from '../../lib/components/Modal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
-  import { ws } from '../../lib/stores/workspace.svelte';
+  import { ws, isForeground } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { api } from '../../lib/api/client';
@@ -27,8 +27,20 @@
   // A handover target must be able to reason — shell is not a valid target, so
   // the list is registry-sourced AGENT providers only (never plain shell).
   const providers = $derived(agentProviders());
-  // Other agent sessions in this workspace, eligible as existing targets.
-  const otherAgents = $derived(ws.plainAgentSessions.filter((s) => s.id !== sessionId));
+  // Other agent sessions in the SOURCE's workspace, eligible as existing
+  // targets (the daemon rejects cross-workspace handovers). Drawn from
+  // `ws.sessions`, which holds the current workspace's AND the scratch
+  // workspace's sessions — so a workspace-less source lists only scratch peers.
+  const otherAgents = $derived(
+    ws.sessions.filter(
+      (s) =>
+        s.id !== sessionId &&
+        !s.archived &&
+        s.kind === 'agent' &&
+        isForeground(s) &&
+        s.workspace_id === source?.workspace_id,
+    ),
+  );
 
   type Mode = 'new' | 'existing';
   let mode = $state<Mode>('new');

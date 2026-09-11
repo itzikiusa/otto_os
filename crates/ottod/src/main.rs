@@ -288,6 +288,13 @@ async fn run(cfg: Config) -> Result<(), String> {
     // now that the Arc exists.
     prompt_guard.set_manager(Arc::downgrade(&manager));
     let workspaces = WorkspacesRepo::new(pool.clone());
+    // The system-owned scratch workspace (workspace-less sessions) lives at the
+    // daemon user's home; created on first boot, healed on every later one.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    workspaces
+        .ensure_scratch(&home)
+        .await
+        .map_err(|e| format!("ensure scratch workspace: {e}"))?;
     let secrets_arc = secrets.clone();
     let connections = Arc::new(ConnectionsService::new(
         ConnectionsRepo::new(pool.clone()),

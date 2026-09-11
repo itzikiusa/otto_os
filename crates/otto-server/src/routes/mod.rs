@@ -211,6 +211,11 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/workspaces",
             get(workspaces::list).post(workspaces::create),
         )
+        // The system-owned scratch workspace (workspace-less sessions). A
+        // static segment, so it ranks above `/workspaces/{id}` regardless of
+        // order; kept adjacent for readability. Read-only — the `{id}` PATCH /
+        // DELETE / members handlers answer 409 for it.
+        .route("/workspaces/scratch", get(workspaces::get_scratch))
         .route(
             "/workspaces/{id}",
             patch(workspaces::update).delete(workspaces::archive),

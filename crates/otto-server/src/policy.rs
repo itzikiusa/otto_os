@@ -177,6 +177,13 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // handlers). They are not in the §3.1 feature set, so the feature axis is a
     // no-op for them. (Workspace creation is open to any authed user; the creator
     // becomes owner — preserved.)
+    // The system-owned scratch workspace has no members to role-check (every
+    // authed user is an implicit Editor), so its one read route rides the
+    // Agents feature like the session lists it exists for. Must precede the
+    // exempt arm below and is mandatory: the default is `Deny`.
+    if p == "/workspaces/scratch" {
+        return Require(Agents, View);
+    }
     if p == "/workspaces" || p == "/workspaces/{id}" {
         return Exempt;
     }
@@ -1201,6 +1208,19 @@ mod tests {
             pol(Method::PUT, "/api/v1/workspaces/{ws}/vault/vaults/{id}/file"),
             Require(Product, Edit),
         );
+    }
+
+    // ---- Scratch workspace (workspace-less sessions) --------------------------
+
+    #[test]
+    fn scratch_workspace_is_agents_view() {
+        assert_eq!(
+            pol(Method::GET, "/api/v1/workspaces/scratch"),
+            Require(Agents, View)
+        );
+        // The `{id}` CRUD routes stay handler-gated (409 for scratch there).
+        assert_eq!(pol(Method::PATCH, "/api/v1/workspaces/{id}"), Exempt);
+        assert_eq!(pol(Method::DELETE, "/api/v1/workspaces/{id}"), Exempt);
     }
 
     #[test]

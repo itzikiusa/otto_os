@@ -30,6 +30,13 @@ const LS_PANES = 'otto_panes_'; // + workspace id — split panes + axis
 // current one. Default ON — a session shouldn't vanish on a workspace switch.
 const LS_ALL_WS = 'otto_nav_all_ws';
 
+/** Id of the daemon's hidden, system-owned **scratch** workspace — the home of
+ *  workspace-less sessions. Mirrors `SCRATCH_WORKSPACE_ID` in
+ *  `crates/otto-core/src/domain.rs`. Never in `workspaces` (hidden from
+ *  `GET /workspaces`); read via `GET /workspaces/scratch`. Also the tabs/panes
+ *  persistence key when no workspace is selected. */
+export const SCRATCH_WORKSPACE_ID = 'scratch';
+
 /** Background-spawned session sources that never surface in the sidebar's flat
  *  session lists (they live in their own panels/views). MUST stay byte-identical
  *  to the Rust source of truth: `BACKGROUND_SESSION_SOURCES` in
@@ -63,7 +70,7 @@ const BACKGROUND_SOURCES = new Set([
 ]);
 
 /** A user-facing foreground session (sidebar-listable). */
-function isForeground(s: Session): boolean {
+export function isForeground(s: Session): boolean {
   const src = (s.meta as { source?: string } | null)?.source;
   return src == null || !BACKGROUND_SOURCES.has(src);
 }
@@ -87,6 +94,12 @@ function readFrac(key: string): number {
 class WorkspaceStore {
   workspaces: WorkspaceWithRole[] = $state([]);
   currentId: Id | null = $state(null);
+  /** The hidden scratch workspace (`GET /workspaces/scratch`) — null on a
+   *  daemon without it. Its `root_path` is the daemon `$HOME`, the default cwd
+   *  of a workspace-less session. */
+  scratch: Workspace | null = $state(null);
+  /** Sessions of the current workspace PLUS the scratch workspace's (always
+   *  loaded, so workspace-less sessions work with zero workspaces). */
   sessions: Session[] = $state([]);
   /** Programmatic PTY input keyed by session id, with a bump counter so the
    *  Terminal applies each injection exactly once (e.g. DB rows → running agent). */
@@ -160,7 +173,21 @@ class WorkspaceStore {
     this.workspaces.find((w) => w.id === this.currentId) ?? null,
   );
 
-  myRole: 'viewer' | 'editor' | 'admin' = $derived(this.current?.my_role ?? 'viewer');
+  /** The caller's role in the current workspace. With NO workspace at all the
+   *  only sessions are the scratch ones, where every user is an implicit
+   *  Editor — so `editor`, not the `viewer` default, or a fresh account could
+   *  not drive the workspace-less session it just started. Per-session gates
+   *  use {@link canEditSession}. */
+  myRole: 'viewer' | 'editor' | 'admin' = $derived(
+    this.current?.my_role ?? (this.currentId === null ? 'editor' : 'viewer'),
+  );
+
+  /** Whether the caller may act on session `s` (rename / archive / delete):
+   *  Editor+ in the current workspace — always true for a workspace-less
+   *  session, since the scratch workspace grants every user Editor. */
+  canEditSession(s: Session): boolean {
+    return s.workspace_id === SCRATCH_WORKSPACE_ID || this.myRole !== 'viewer';
+  }
 
   activeSessionId: Id | null = $derived(this.panes[this.focusedPane] ?? null);
 
@@ -182,9 +209,25 @@ class WorkspaceStore {
     this.activeSessions.filter((s) => isForeground(s) || this.openTabs.includes(s.id)),
   );
 
-  /** Active agent sessions (claude/codex/shell) — sidebar "Agents" group. */
+  /** Active agent sessions (claude/codex/shell) of the current workspace —
+   *  sidebar "Agents" group. Scratch sessions have their own group
+   *  ({@link scratchSessions}). */
   agentSessions: Session[] = $derived(
-    this.sessions.filter((s) => !s.archived && s.kind === 'agent'),
+    this.sessions.filter(
+      (s) => !s.archived && s.kind === 'agent' && s.workspace_id !== SCRATCH_WORKSPACE_ID,
+    ),
+  );
+
+  /** Foreground agent sessions of the hidden scratch workspace — the sidebar
+   *  "No workspace" group. Present in every workspace and with none. */
+  scratchSessions: Session[] = $derived(
+    this.sessions.filter(
+      (s) =>
+        !s.archived &&
+        s.kind === 'agent' &&
+        s.workspace_id === SCRATCH_WORKSPACE_ID &&
+        isForeground(s),
+    ),
   );
 
   /** Active connection sessions (ssh/db/custom) — sidebar "Connections" group. */
@@ -377,21 +420,50 @@ class WorkspaceStore {
 
   async load(): Promise<void> {
     this.workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
+    // The hidden scratch workspace — best-effort: a daemon without it leaves
+    // `scratch` null and the sheet falls back to `~`.
+    try {
+      this.scratch = await api.get<Workspace>(`/workspaces/${SCRATCH_WORKSPACE_ID}`);
+    } catch {
+      this.scratch = null;
+    }
     const saved = localStorage.getItem(winKey(LS_CURRENT));
     const found = this.workspaces.find((w) => w.id === saved);
     const target = found ?? this.workspaces[0] ?? null;
     if (target) await this.select(target.id);
+    else await this.selectNone();
   }
 
   async select(id: Id): Promise<void> {
     if (this.currentId === id && this.sessions.length > 0) return;
     this.currentId = id;
     localStorage.setItem(winKey(LS_CURRENT), id);
-    await this.refreshSessions();
+    // No phantom-tab reconcile on a switch: it would prune the OLD workspace's
+    // tabs against the NEW session list and persist that under the new key,
+    // clobbering this workspace's saved layout before `restoreLayout` reads it.
+    await this.refreshSessions({ reconcile: false });
     void this.refreshActiveWorkflowRuns();
     void this.refreshOtherSessions();
+    this.restoreLayout(id);
+  }
+
+  /** Zero-workspace mode (a fresh account, or the last workspace archived):
+   *  no current workspace, only scratch sessions, layout keyed on
+   *  `SCRATCH_WORKSPACE_ID` so tabs/panes still survive reloads. */
+  private async selectNone(): Promise<void> {
+    this.currentId = null;
+    this.activeWorkflowRuns = [];
+    this.otherWsSessions = [];
+    await this.refreshSessions({ reconcile: false });
+    this.restoreLayout(SCRATCH_WORKSPACE_ID);
+  }
+
+  /** Restore the open tabs + split layout persisted under `key` (a workspace
+   *  id, or `SCRATCH_WORKSPACE_ID` with no workspace selected). Runs after
+   *  {@link refreshSessions} so only ids that still exist survive. */
+  private restoreLayout(key: string): void {
     // restore tabs for this workspace
-    const raw = localStorage.getItem(winKey(LS_TABS + id));
+    const raw = localStorage.getItem(winKey(LS_TABS + key));
     const ids: Id[] = raw ? JSON.parse(raw) : [];
     // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
     const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
@@ -400,7 +472,7 @@ class WorkspaceStore {
     // tabs, so a 2–4 pane arrangement survives reloads like colFrac/rowFrac do.
     let panes: Id[] = [];
     try {
-      const savedLayout = localStorage.getItem(winKey(LS_PANES + id));
+      const savedLayout = localStorage.getItem(winKey(LS_PANES + key));
       if (savedLayout) {
         const layout = JSON.parse(savedLayout) as { panes?: Id[]; axis?: SplitAxis };
         panes = (layout.panes ?? []).filter((p) => valid.includes(p)).slice(0, 4);
@@ -413,11 +485,36 @@ class WorkspaceStore {
     this.focusedPane = 0;
   }
 
-  async refreshSessions(): Promise<void> {
-    if (!this.currentId) return;
+  /** Whether a session with this workspace id belongs in `sessions`: the
+   *  current workspace's, plus the scratch workspace's (always loaded). */
+  private belongsHere(wsId: Id): boolean {
+    return wsId === this.currentId || wsId === SCRATCH_WORKSPACE_ID;
+  }
+
+  /** Reload `sessions` for the current workspace (+ scratch). `reconcile`
+   *  (default on) prunes phantom tabs afterwards; a workspace switch turns it
+   *  off because {@link restoreLayout} replaces the layout wholesale. */
+  async refreshSessions(opts: { reconcile?: boolean } = {}): Promise<void> {
     this.sessionsLoading = true;
     try {
-      const all = await api.get<Session[]>(`/workspaces/${this.currentId}/sessions`);
+      const wsId = this.currentId;
+      // The current workspace's sessions (when one is selected) plus the
+      // scratch workspace's — always, best-effort (a daemon without the
+      // scratch row answers 403, which leaves workspace-less sessions empty
+      // and everything else unchanged). Deduped by id defensively.
+      const [own, scratch] = await Promise.all([
+        wsId ? api.get<Session[]>(`/workspaces/${wsId}/sessions`) : Promise.resolve([]),
+        api
+          .get<Session[]>(`/workspaces/${SCRATCH_WORKSPACE_ID}/sessions`)
+          .catch(() => [] as Session[]),
+      ]);
+      const seen = new Set<Id>();
+      const all: Session[] = [];
+      for (const s of [...own, ...scratch]) {
+        if (seen.has(s.id)) continue;
+        seen.add(s.id);
+        all.push(s);
+      }
       // Background engine sessions (insights, canvas/db assist, workflow steps,
       // review agents, PR drafts, …) are NOT stripped here: they stay in
       // `this.sessions` so their owning panels can look them up / open them,
@@ -437,7 +534,7 @@ class WorkspaceStore {
       }
       this.sessions = kept;
       for (const s of this.sessions) this.statusMap[s.id] = s.status;
-      this.reconcileTabs();
+      if (opts.reconcile !== false) this.reconcileTabs();
     } finally {
       this.sessionsLoading = false;
     }
@@ -465,19 +562,22 @@ class WorkspaceStore {
     }
   }
 
+  /** Storage-key suffix for the layout: the current workspace, or the scratch
+   *  id when none is selected (workspace-less sessions still keep their tabs). */
+  private layoutKey(): string {
+    return this.currentId ?? SCRATCH_WORKSPACE_ID;
+  }
+
   private persistTabs(): void {
-    if (this.currentId) {
-      localStorage.setItem(winKey(LS_TABS + this.currentId), JSON.stringify(this.openTabs));
-    }
+    localStorage.setItem(winKey(LS_TABS + this.layoutKey()), JSON.stringify(this.openTabs));
   }
 
   /** Persist the split layout (pane membership + axis) per workspace, so a
-   *  2–4 pane arrangement survives reloads (restored in {@link select}). */
+   *  2–4 pane arrangement survives reloads (restored in {@link restoreLayout}). */
   private persistPanes(): void {
-    if (!this.currentId) return;
     try {
       localStorage.setItem(
-        winKey(LS_PANES + this.currentId),
+        winKey(LS_PANES + this.layoutKey()),
         JSON.stringify({ panes: this.panes, axis: this.splitAxis }),
       );
     } catch {
@@ -568,11 +668,11 @@ class WorkspaceStore {
 
   /** Add a freshly created session object and navigate to it. */
   addSession(s: Session): void {
-    if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
+    if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
-    if (s.workspace_id === this.currentId) this.navigateToSession(s.id);
+    if (this.belongsHere(s.workspace_id)) this.navigateToSession(s.id);
   }
 
   /**
@@ -583,35 +683,45 @@ class WorkspaceStore {
    * the 1–4 pane cap was hit (caller can toast).
    */
   addSessionInSplit(s: Session): boolean {
-    if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
+    if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
-    if (s.workspace_id !== this.currentId) return false;
+    if (!this.belongsHere(s.workspace_id)) return false;
     return this.openInSplit(s.id);
+  }
+
+  /** Where a new session goes: the hidden scratch workspace when asked for a
+   *  workspace-less session, else the current workspace. Throws only when
+   *  neither exists. */
+  private createTarget(opts?: { scratch?: boolean }): Id {
+    const target = opts?.scratch ? SCRATCH_WORKSPACE_ID : this.currentId;
+    if (!target) throw new Error('no workspace selected');
+    return target;
   }
 
   /**
    * Like {@link createSession} but does NOT route to the new session — for
    * hosts that embed the session where they are (the Browser page's agent
    * dock) and must stay put. Same device stamp + list/status bookkeeping.
+   * `opts.scratch` starts a workspace-less session (scratch workspace).
    */
-  async createSessionQuiet(req: CreateSessionReq): Promise<Session> {
-    if (!this.currentId) throw new Error('no workspace selected');
+  async createSessionQuiet(req: CreateSessionReq, opts?: { scratch?: boolean }): Promise<Session> {
+    const target = this.createTarget(opts);
     const stamped: CreateSessionReq = {
       ...req,
       meta: { ...(req.meta ?? {}), client_id: clientId() },
     };
-    const s = await api.post<Session>(`/workspaces/${this.currentId}/sessions`, stamped);
-    if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
+    const s = await api.post<Session>(`/workspaces/${target}/sessions`, stamped);
+    if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
     return s;
   }
 
-  async createSession(req: CreateSessionReq): Promise<Session> {
-    if (!this.currentId) throw new Error('no workspace selected');
+  async createSession(req: CreateSessionReq, opts?: { scratch?: boolean }): Promise<Session> {
+    const target = this.createTarget(opts);
     // Stamp the device that started this session (preserving any caller meta,
     // e.g. {origin:'manual'}) so the opt-in per-device isolation filter can
     // recognize its own sessions.
@@ -619,7 +729,7 @@ class WorkspaceStore {
       ...req,
       meta: { ...(req.meta ?? {}), client_id: clientId() },
     };
-    const s = await api.post<Session>(`/workspaces/${this.currentId}/sessions`, stamped);
+    const s = await api.post<Session>(`/workspaces/${target}/sessions`, stamped);
     this.addSession(s);
     return s;
   }
@@ -657,12 +767,7 @@ class WorkspaceStore {
     if (this.currentId === id) {
       const next = this.workspaces[0];
       if (next) await this.select(next.id);
-      else {
-        this.currentId = null;
-        this.sessions = [];
-        this.openTabs = [];
-        this.panes = [];
-      }
+      else await this.selectNone();
     }
   }
 
@@ -1055,13 +1160,9 @@ class WorkspaceStore {
       case 'session_created': {
         const s = ev.session;
         this.statusMap[s.id] = s.status;
-        if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
-          this.sessions = [...this.sessions, s];
-        } else if (
-          s.workspace_id !== this.currentId &&
-          this.allWorkspaces &&
-          !this.otherWsSessions.some((x) => x.id === s.id)
-        ) {
+        if (this.belongsHere(s.workspace_id)) {
+          if (!this.sessions.some((x) => x.id === s.id)) this.sessions = [...this.sessions, s];
+        } else if (this.allWorkspaces && !this.otherWsSessions.some((x) => x.id === s.id)) {
           this.otherWsSessions = [...this.otherWsSessions, s];
         }
         break;
@@ -1099,7 +1200,7 @@ class WorkspaceStore {
           delete next[ev.session_id];
           this.unread = next;
         }
-        if (ev.workspace_id === this.currentId) {
+        if (this.belongsHere(ev.workspace_id)) {
           this.sessions = this.sessions.filter((s) => s.id !== ev.session_id);
           if (this.openTabs.includes(ev.session_id)) this.closeTab(ev.session_id);
         } else {

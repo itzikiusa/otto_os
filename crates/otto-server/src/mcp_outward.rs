@@ -1225,14 +1225,17 @@ async fn fill_vault_workspace(
         return Ok(Some(filled));
     }
     let repo = otto_state::WorkspacesRepo::new(ctx.pool.clone());
+    // User-facing variants: the system-owned scratch workspace must never be
+    // picked here — for root it is the oldest row, and a vault rooted at
+    // `$HOME` is not what an omitted `workspace_id` means.
     let rows: Vec<(otto_core::domain::Workspace, WorkspaceRole)> = if user.is_root {
-        repo.list_all()
+        repo.list_user_all()
             .await?
             .into_iter()
             .map(|w| (w, WorkspaceRole::Admin))
             .collect()
     } else {
-        repo.list_for_user(&user.id).await?
+        repo.list_user_for_user(&user.id).await?
     };
     let ws = pick_vault_workspace(&rows, tool_is_mutating(tool)).ok_or_else(|| {
         Error::Invalid("no accessible workspace to scope this vault call — pass 'workspace_id'".into())
