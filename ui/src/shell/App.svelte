@@ -108,10 +108,6 @@
 
   const moduleName = $derived(router.module === '' ? 'agents' : router.module);
 
-  // `newSessionScratch` (the New Session sheet's "No workspace" pre-selection)
-  // is a field of the ui store; typed view of it here.
-  const uiScratch = ui as typeof ui & { newSessionScratch: boolean };
-
   // The right activity panel (Git/Files/Notes/Activity/Info/Browser/API) is only
   // meaningful for coding-agent sessions. Connection terminals (SSH / DB / custom,
   // kind === 'connection') are opened from the Connections page but run in the
@@ -443,7 +439,7 @@
   $effect(() => {
     const unreg = registry.register('core', [
       { id: 'core.new-session', title: 'New Session', group: 'Sessions', shortcut: '⌘T', keywords: 'spawn agent terminal claude codex shell', run: () => (ui.newSessionOpen = true) },
-      { id: 'core.new-session-scratch', title: 'New Session (no workspace)', group: 'Sessions', keywords: 'scratch home adhoc workspace-less', run: () => { uiScratch.newSessionScratch = true; ui.newSessionOpen = true; } },
+      { id: 'core.new-session-scratch', title: 'New Session (no workspace)', group: 'Sessions', keywords: 'scratch home adhoc workspace-less', run: () => { ui.newSessionScratch = true; ui.newSessionOpen = true; } },
       { id: 'core.ask-otto', title: 'Ask Otto (plain English)', group: 'Sessions', shortcut: '⌘I', keywords: 'orchestrate natural language command free text', run: () => ui.openPalette('english') },
       { id: 'core.broadcast', title: 'Broadcast message to sessions', group: 'Sessions', shortcut: '⌘⇧B', keywords: 'send message every agent tell all selected', run: () => ui.openBroadcast() },
       { id: 'core.close-tab', title: 'Close Tab', group: 'Sessions', shortcut: '⌘W', run: () => ws.closeActiveTab() },
@@ -875,10 +871,10 @@
 
 {#if ui.newSessionOpen}
   <NewSession
-    initialScratch={uiScratch.newSessionScratch}
+    initialScratch={ui.newSessionScratch}
     onclose={() => {
       ui.newSessionOpen = false;
-      uiScratch.newSessionScratch = false;
+      ui.newSessionScratch = false;
     }}
   />
 {/if}

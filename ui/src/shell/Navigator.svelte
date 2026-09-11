@@ -249,13 +249,9 @@
     draft = current;
   }
 
-  // `newSessionScratch` is a field of the ui store; typed view of it here
-  // (this worktree predates the store change, which lands with its own branch).
-  const uiScratch = ui as typeof ui & { newSessionScratch: boolean };
-
   /** Open the New Session sheet pre-set to "No workspace". */
   function newScratchSession(): void {
-    uiScratch.newSessionScratch = true;
+    ui.newSessionScratch = true;
     ui.newSessionOpen = true;
   }
 
