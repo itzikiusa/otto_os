@@ -11,10 +11,18 @@
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import { database, ROW_LIMIT_ALL, type QueryTab } from '../../lib/stores/database.svelte';
+  import {
+    database,
+    effectiveViewMode,
+    viewModeReason,
+    ROW_LIMIT_ALL,
+    type QueryTab,
+  } from '../../lib/stores/database.svelte';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { DbCompletionKind } from '../../lib/api/types';
   import {
     statementAtCursor,
@@ -31,6 +39,19 @@
   import type { MongoshInfo } from '../../lib/api/types';
 
   const tab = $derived(database.tab);
+
+  // The result view the grid renders, resolved here (not in ResultsGrid, which
+  // is also mounted without a tab): the tab's own pick → the auto-Vertical
+  // column threshold → the connection's remembered pick → the engine default.
+  const viewInputs = $derived({
+    tabPick: tab.viewMode ?? null,
+    connPick: database.connView,
+    columnCount: tab.result?.columns.length ?? 0,
+    autoVerticalCols: ui.dbAutoVerticalCols,
+    engine: database.capabilities?.engine ?? null,
+  });
+  const viewMode = $derived(effectiveViewMode(viewInputs));
+  const viewReason = $derived(viewModeReason(viewInputs));
 
   // Default row-cap options (applied when a statement has no explicit LIMIT).
   const ROW_LIMIT_OPTS: { label: string; value: number }[] = [
@@ -143,26 +164,40 @@
     timeout_ms: number | null;
     mask: boolean;
     savedQueryId?: string;
+    viewMode: QueryTab['viewMode'];
   }
   const MAX_CLOSED = 10;
   let closedTabs = $state<ClosedTabPayload[]>([]);
+  /** Push the non-empty buffers among `tabs` onto the reopen stack (oldest out). */
+  function rememberClosed(tabs: QueryTab[]): void {
+    const worth = tabs
+      .filter((t) => t.statement.trim())
+      .map((t) => ({
+        name: t.name,
+        statement: t.statement,
+        vars: { ...t.vars },
+        timeout_ms: t.timeout_ms ?? null,
+        mask: !!t.mask,
+        savedQueryId: t.savedQueryId,
+        viewMode: t.viewMode ?? null,
+      }));
+    if (worth.length) closedTabs = [...closedTabs, ...worth].slice(-MAX_CLOSED);
+  }
   function closeTabAt(i: number): void {
     const t = database.tabs[i];
-    // Only a non-empty buffer is worth remembering.
-    if (t && t.statement.trim()) {
-      closedTabs = [
-        ...closedTabs.slice(-(MAX_CLOSED - 1)),
-        {
-          name: t.name,
-          statement: t.statement,
-          vars: { ...t.vars },
-          timeout_ms: t.timeout_ms ?? null,
-          mask: !!t.mask,
-          savedQueryId: t.savedQueryId,
-        },
-      ];
-    }
+    // A pinned tab doesn't close (the store toasts "Unpin to close") — so it
+    // must not land on the reopen stack as if it had.
+    if (t && !t.pinned) rememberClosed([t]);
     database.closeTab(i);
+  }
+  // Bulk closes from the tab strip menu: pinned tabs always survive.
+  function closeOthersAt(i: number): void {
+    rememberClosed(database.tabs.filter((x, idx) => idx !== i && !x.pinned));
+    database.closeOtherTabs(i);
+  }
+  function closeAll(): void {
+    rememberClosed(database.tabs.filter((x) => !x.pinned));
+    database.closeAllTabs();
   }
   function reopenClosedTab(): void {
     const payload = closedTabs[closedTabs.length - 1];
@@ -175,7 +210,27 @@
     nt.timeout_ms = payload.timeout_ms;
     nt.mask = payload.mask;
     nt.savedQueryId = payload.savedQueryId;
+    nt.viewMode = payload.viewMode;
     database.switchTab(database.activeTab); // same-index no-op → persists tabs
+  }
+
+  // Tab strip right-click: pin/unpin, rename, close others / close all. Pinned
+  // tabs survive the bulk closes, and the labels say so whenever a pin exists.
+  function tabMenu(e: MouseEvent, i: number, t: QueryTab): void {
+    const anyPinned = database.tabs.some((x) => x.pinned);
+    const keeps = anyPinned ? ' (keeps pinned tabs)' : '';
+    const others = database.tabs.filter((x, idx) => idx !== i && !x.pinned).length;
+    ctxMenu.show(e, [
+      {
+        label: t.pinned ? 'Unpin tab' : 'Pin tab',
+        icon: 'pin',
+        action: () => database.togglePinTab(i),
+      },
+      { label: 'Rename', icon: 'edit', action: () => startRename(i, t) },
+      { separator: true },
+      { label: `Close others${keeps}`, disabled: others === 0, action: () => closeOthersAt(i) },
+      { label: `Close all${keeps}`, action: () => closeAll() },
+    ]);
   }
 
   // Map server completion kinds → CodeMirror completion "type" (drives the icon).
@@ -496,6 +551,7 @@
     { keys: '⇧⌘↵', label: 'Run all statements' },
     { keys: '⌘S', label: 'Save query' },
     { keys: '⇧⌘F', label: 'Format' },
+    { keys: '⇧⌘V', label: 'Cycle results view (Grid → Vertical → JSON)' },
     { keys: 'Esc', label: 'Cancel running query' },
     { keys: '⌥⌘→ / ⌥⌘←', label: 'Next / previous query tab' },
     { keys: '⌥⌘T', label: 'New query tab' },
@@ -561,6 +617,15 @@
     if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyE') {
       e.preventDefault();
       toggleMaxEditor();
+      return;
+    }
+    // ⇧⌘V — cycle the results view Grid → Vertical → JSON (stored as the tab's
+    // explicit pick). Inside the SQL editor the chord stays the browser's
+    // paste-and-match-style, so it's left alone there.
+    if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyV') {
+      if ((e.target as HTMLElement)?.closest?.('.cm-editor')) return;
+      e.preventDefault();
+      database.cycleViewMode(viewMode);
       return;
     }
     // ⌥⌘T new query tab / ⌥⌘W close query tab (⌘T/⌘W stay session actions).
@@ -646,6 +711,7 @@
         aria-selected={i === database.activeTab}
         onclick={() => database.switchTab(i)}
         ondblclick={() => startRename(i, t)}
+        oncontextmenu={(e) => tabMenu(e, i, t)}
         onkeydown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
@@ -653,6 +719,9 @@
           }
         }}
       >
+        {#if t.pinned}
+          <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={10} /></span>
+        {/if}
         {#if renaming === i}
           <!-- svelte-ignore a11y_autofocus -->
           <input
@@ -671,7 +740,7 @@
           <span class="qe-tab-label">{tabLabel(t, i)}</span>
           {#if t.running}<span class="qe-tab-dot running" title="Running"></span>
           {:else if t.error}<span class="qe-tab-dot error" title="Error"></span>{/if}
-          {#if database.tabs.length > 1}
+          {#if database.tabs.length > 1 && !t.pinned}
             <button
               class="qe-tab-close"
               title="Close tab"
@@ -1030,6 +1099,10 @@
       connectionId={database.selectedConnId}
       running={tab.running}
       offset={tab.offset}
+      {viewMode}
+      {viewReason}
+      tabPick={tab.viewMode ?? null}
+      onviewmode={(m) => database.setViewMode(m)}
     />
   </div>
 </div>
@@ -1100,6 +1173,12 @@
     border-radius: var(--radius-s);
     background: var(--surface);
     color: var(--text);
+  }
+  .qe-tab-pin {
+    display: inline-flex;
+    color: var(--accent);
+    flex: 0 0 auto;
+    margin-inline-end: -2px;
   }
   .qe-tab-dot {
     width: 6px;

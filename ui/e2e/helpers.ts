@@ -91,6 +91,27 @@ export async function expectFullyInViewport(
 }
 
 /**
+ * The DB explorer opens Mongo results in Vertical view by default (and any
+ * engine's result past the auto-Vertical column threshold); grid-shaped
+ * assertions opt back in with this. Waits for the results toolbar (the view
+ * switch only exists once a result with columns is on screen), so it is safe to
+ * call straight after Run; a no-op when the switch never appears (an error /
+ * empty result — the caller's own assertion reports that) or already shows Grid.
+ * Picking Grid is remembered on the tab, so later runs in the same tab stay Grid.
+ */
+export async function ensureGridView(page: Page, timeout = 20_000): Promise<void> {
+  const seg = page.locator('.view-seg');
+  const shown = await seg.waitFor({ state: 'visible', timeout }).then(
+    () => true,
+    () => false,
+  );
+  if (!shown) return;
+  const on = await seg.locator('.vs.on').textContent();
+  if ((on ?? '').trim() !== 'Grid') await seg.locator('.vs', { hasText: 'Grid' }).click();
+  await expect(seg.locator('.vs.on')).toHaveText('Grid');
+}
+
+/**
  * Run an axe-core accessibility scan. Fails on any `critical` violation; returns
  * the full violation list so callers can additionally inspect `serious` ones.
  */

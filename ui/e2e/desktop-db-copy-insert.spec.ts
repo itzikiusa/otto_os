@@ -1,5 +1,6 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { ensureGridView } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — "Copy as INSERT" across engines, against the seeded Docker stack.
@@ -64,6 +65,9 @@ async function runQuery(page: Page, sql: string): Promise<void> {
   await content.pressSequentially(sql, { delay: 6 });
   await page.keyboard.press('Escape'); // dismiss autocomplete
   await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  // Mongo results open in Vertical view; the row menu below is the grid's (a
+  // no-op for ClickHouse, which starts in Grid).
+  await ensureGridView(page);
   await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({
     timeout: 20_000,
   });

@@ -1,5 +1,6 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { ensureGridView } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — cell "Query by value" / "Add to query" + per-row JSON view.
@@ -68,6 +69,9 @@ async function setEditor(page: Page, sql: string): Promise<void> {
 
 async function clickRun(page: Page): Promise<void> {
   await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  // Mongo results open in Vertical view; the cell actions below live in the grid
+  // (a no-op for MySQL / ClickHouse, which start in Grid).
+  await ensureGridView(page);
   await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({ timeout: 20_000 });
 }
 
