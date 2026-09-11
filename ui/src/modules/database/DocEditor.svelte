@@ -1,8 +1,9 @@
 <script lang="ts">
   // Whole-document editor (JSON / Vertical views): the full row as one JSON
   // object; Save builds a Mongo replaceOne (or a per-changed-column SQL UPDATE)
-  // and opens the normal review modal. Mounted by ResultsGrid while
-  // `flow.docEditor` is set.
+  // and opens the normal review modal. With `rowIdx === -1` it is the INSERT
+  // editor (insertOne / INSERT from the typed JSON). Mounted by ResultsGrid
+  // while `flow.docEditor` is set.
   import type { EditFlow } from './EditFlow.svelte';
   import { dialogKeys } from './dialog-keys';
 
@@ -10,6 +11,7 @@
     flow: EditFlow;
   }
   let { flow }: Props = $props();
+  const inserting = $derived((flow.docEditor?.rowIdx ?? 0) < 0);
 </script>
 
 {#if flow.docEditor}
@@ -24,11 +26,15 @@
       class="cell-viewer"
       role="dialog"
       aria-modal="true"
-      aria-label="Edit document"
+      aria-label={inserting ? 'Insert document' : 'Edit document'}
       use:dialogKeys={() => (flow.docEditor = null)}
     >
       <div class="cv-head">
-        <span>Edit document <span class="dim">— row is replaced/updated after review</span></span>
+        {#if inserting}
+          <span>Insert document <span class="dim">— {flow.engine === 'mongodb' ? 'insertOne' : 'INSERT'} is reviewed before it runs</span></span>
+        {:else}
+          <span>Edit document <span class="dim">— row is replaced/updated after review</span></span>
+        {/if}
         <span class="grow"></span>
         <button class="icon-btn" onclick={() => (flow.docEditor = null)} aria-label="Close">✕</button>
       </div>

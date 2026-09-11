@@ -377,7 +377,8 @@
               />
             {/if}
             <span class="rownum-n">{idx + 1}</span>
-            {#if flow.editable}
+            <!-- Redis has no insert builder (a "row" is a key), so no duplicate. -->
+            {#if flow.editable && flow.engine !== 'redis'}
               <button
                 class="row-dup"
                 title="Duplicate row (review INSERT before running)"
@@ -414,6 +415,20 @@
                 ondblclick={() => flow.beginEdit(idx, ci)}
                 oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
               >{#if pv === '' || pv === SET_NULL}<span class="null-glyph">∅</span>{:else if pv === SET_EMPTY}<span class="null-glyph">''</span>{:else}{pv}{/if}</td>
+            {:else if flow.hasPendingUnder(idx, _c.name)}
+              <!-- A path-level change (Vertical view: $set/$unset/$rename inside
+                   this document field) — the cell keeps showing the stored value
+                   but wears the dirty marker so it isn't edited over blindly. -->
+              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+              <td
+                class="cell dirty"
+                class:kbd-focus={focusCell?.r === vpos && focusCell?.c === ci}
+                title="Nested change pending — Review & apply (bar below) writes it; see the Vertical view"
+                style="width:{w}ch; max-width:{w}ch;"
+                onclick={() => (focusCell = { r: vpos, c: ci })}
+                ondblclick={() => flow.openCell(v, idx, ci)}
+                oncontextmenu={(e) => oncellmenu(e, ci, v, idx)}
+              >{v === null || v === undefined ? '' : clip(cellStr(v))}</td>
             {:else if v === null || v === undefined}
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <td

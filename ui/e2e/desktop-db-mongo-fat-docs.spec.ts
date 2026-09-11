@@ -18,6 +18,9 @@ import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 //   2. One click from that table seeds the index builder with the nested path.
 //   3. JSON + Vertical views stay BOUNDED on fat documents: batched records,
 //      collapsed branches, and a DOM that stays small enough to stay responsive.
+//   4. Vertical renders sub-documents as nested rows under a node budget (the
+//      small `meta` opens, the 300-element `structure` stays one summary), and
+//      a toggle is sticky by path across every record; Expand/Collapse all.
 //
 // Desktop-browser project only. Skips cleanly when the Mongo container is down.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,6 +124,10 @@ async function runQuery(page: Page, stmt: string): Promise<void> {
   await page.keyboard.insertText(stmt);
   await page.waitForTimeout(300);
   await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  // Mongo opens in Vertical by default; these specs start from the grid.
+  await expect(page.locator('.view-seg .vs', { hasText: 'Grid' })).toBeVisible({ timeout: 45_000 });
+  await page.locator('.view-seg .vs', { hasText: 'Grid' }).click();
+  await expect(page.locator('.view-seg .vs.on')).toHaveText('Grid');
   await expect(page.locator('.grid tbody tr').first()).toBeVisible({ timeout: 45_000 });
 }
 
@@ -247,9 +254,53 @@ test('Vertical view stays bounded on fat documents', async ({ page }) => {
   expect(await domNodes(page)).toBeLessThan(MAX_DOM_NODES);
 });
 
+test('nested fields render vertically by default and expansion is sticky', async ({ page }) => {
+  await openMongo(page);
+  await runQuery(page, `db.${COLL}.find({})`);
+  await page.locator('.vs', { hasText: 'Vertical' }).click();
+
+  const recs = page.locator('.vrec');
+  await expect(recs.first()).toBeVisible({ timeout: 20_000 });
+  const first = recs.first();
+  const second = recs.nth(1);
+
+  // `meta` is small, so it opens by default: its fields are ROWS (a `.vk`
+  // label of `brand_id` under the `meta` row), readable without a click…
+  await expect(first.getByText('brand_id', { exact: true })).toBeVisible();
+  // …while the 300-element `structure` under `blob` stays ONE closed summary.
+  const structure = first.locator('.vrow', { has: page.locator('.vk', { hasText: /^structure$/ }) });
+  await expect(structure.locator('.vsum')).toContainText('300 items');
+  await expect(first.getByText('cat-0', { exact: true })).toHaveCount(0);
+
+  // Opening it in record 1 opens it in record 2 too (sticky by path) — the
+  // elements appear as rows under a `.vnest`, chunked, still collapsed.
+  await structure.locator('.vsum').click();
+  await expect(second.locator('.vnest .vnest .vrow').first()).toBeVisible();
+  await expect(second.locator('.vrow', { has: page.locator('.vk', { hasText: /^0$/ }) })).toBeVisible();
+  await expect(second.locator('.vmore').first()).toContainText(/show 50 more · 250 hidden/);
+  await expect(second.getByText('cat-0', { exact: true })).toHaveCount(0);
+  // Sticky ≠ cascading: 25 drawn records × one CHUNK of closed element rows,
+  // never the 300 × 5 leaves underneath them.
+  expect(await page.locator('.vrow').count()).toBeLessThan(2_500);
+
+  // Collapse all → not a single nested block on screen.
+  await page.locator('.vv-tool', { hasText: 'Collapse all' }).click();
+  await expect(page.locator('.vnest')).toHaveCount(0);
+  await expect(first.getByText('brand_id', { exact: true })).toHaveCount(0);
+
+  // Expand all on a small document shows every leaf.
+  await runQuery(page, `db.${COLL}.find({}, { meta: 1 })`);
+  await page.locator('.vs', { hasText: 'Vertical' }).click();
+  await page.locator('.vv-tool', { hasText: 'Expand all' }).click();
+  await expect(page.locator('.vrec').first().getByText('whenUpdated', { exact: true })).toBeVisible();
+  await expect(page.locator('.vrec').first().locator('.vsum[aria-expanded="false"]')).toHaveCount(0);
+});
+
 test('grid cells clip blob text instead of shipping it whole', async ({ page }) => {
   await openMongo(page);
   await runQuery(page, `db.${COLL}.find({})`);
+  await page.locator('.view-seg .vs', { hasText: 'Grid' }).click();
+  await expect(page.locator('.view-seg .vs.on')).toHaveText('Grid');
   // The BLOB cell specifically (`td.cell.json` is the complex-value cell) — a
   // ~50KB embedded document must not land in the DOM verbatim. Targeting
   // `td.cell` generally would match the short `_id` and prove nothing.

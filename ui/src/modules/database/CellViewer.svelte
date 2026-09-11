@@ -12,6 +12,13 @@
     flow: EditFlow;
   }
   let { flow }: Props = $props();
+  // A path-level change parked on this column (Vertical view): saving a
+  // whole-cell draft from here replaces it (EditFlow's conflict rule).
+  const nestedPending = $derived.by(() => {
+    const e = flow.viewer?.edit;
+    const name = e ? flow.result?.columns[e.colIdx]?.name : undefined;
+    return !!e && !!name && flow.pendingValue(e.rowIdx, e.colIdx) === undefined && flow.hasPendingUnder(e.rowIdx, name);
+  });
 </script>
 
 {#if flow.viewer}
@@ -50,6 +57,9 @@
         <button class="tb-btn" onclick={() => copyText(flow.viewerText, ['Copied', 'Full cell value copied'])} title="Copy full value"><Icon name="file" size={11} />Copy</button>
         <button class="icon-btn" onclick={() => (flow.viewer = null)} aria-label="Close">✕</button>
       </div>
+      {#if nestedPending}
+        <div class="cv-pending">Nested change pending on this field — saving a whole value here replaces it.</div>
+      {/if}
       {#if flow.viewerEditing}
         <!-- svelte-ignore a11y_autofocus -->
         <textarea
@@ -166,5 +176,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .cv-pending {
+    margin: 8px 14px 0;
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--status-warn);
+    background: color-mix(in srgb, var(--status-warn) 12%, transparent);
+    border-radius: var(--radius-s);
   }
 </style>
