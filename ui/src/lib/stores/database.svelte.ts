@@ -34,6 +34,7 @@ import type {
   ObjectHit,
   ObjectSearchResult,
   QueryResult,
+  RunQueryReq,
   SchemaNode,
   Session,
 } from '../api/types';
@@ -2417,32 +2418,30 @@ class DatabaseStore {
       const tabTimeoutMs = this.tab?.timeout_ms ?? null;
 
       const tabMask = this.tab?.mask ?? false;
-      const post = (confirmWrite: boolean): Promise<QueryResult> =>
-        api.post<QueryResult>(
-          `${this.connBase(id)}/query`,
-          {
-            statement: sql,
-            max_rows: explicit ?? this.rowLimit,
-            node: scopeNode,
-            confirm_write: confirmWrite,
-            // Per-run id so the cancel endpoint can issue engine-native
-            // cancellation (KILL QUERY / etc.) for this in-flight query.
-            query_id: queryId,
-            // Footer pager: server appends OFFSET (Mongo: skip) when auto-limiting.
-            ...(t.offset > 0 ? { offset: t.offset } : {}),
-            // Keyset "Next" (Mongo): the previous page's `next_cursor`, echoed back
-            // so the server pages by `_id > cursor` instead of `skip`. Sent next to
-            // `offset` — the server ignores `skip` when the cursor applies and falls
-            // back to it when the find isn't keyset-eligible.
-            ...(opts?.cursor !== undefined ? { cursor: opts.cursor } : {}),
-            // Driver-enforced timeout (engine-native, e.g. MySQL MAX_EXECUTION_TIME).
-            ...(tabTimeoutMs && tabTimeoutMs > 0 ? { timeout_ms: tabTimeoutMs } : {}),
-            // Server-side PII/prod masking: redacts cell values before they leave
-            // the server. Only sent when the toggle is explicitly on.
-            ...(tabMask ? { mask: true } : {}),
-          },
-          controller.signal,
-        );
+      const post = (confirmWrite: boolean): Promise<QueryResult> => {
+        const body: RunQueryReq = {
+          statement: sql,
+          max_rows: explicit ?? this.rowLimit,
+          node: scopeNode,
+          confirm_write: confirmWrite,
+          // Per-run id so the cancel endpoint can issue engine-native
+          // cancellation (KILL QUERY / etc.) for this in-flight query.
+          query_id: queryId,
+          // Footer pager: server appends OFFSET (Mongo: skip) when auto-limiting.
+          ...(t.offset > 0 ? { offset: t.offset } : {}),
+          // Keyset "Next" (Mongo): the previous page's `next_cursor`, echoed back
+          // so the server pages by `_id > cursor` instead of `skip`. Sent next to
+          // `offset` — the server ignores `skip` when the cursor applies and falls
+          // back to it when the find isn't keyset-eligible.
+          ...(opts?.cursor !== undefined ? { cursor: opts.cursor } : {}),
+          // Driver-enforced timeout (engine-native, e.g. MySQL MAX_EXECUTION_TIME).
+          ...(tabTimeoutMs && tabTimeoutMs > 0 ? { timeout_ms: tabTimeoutMs } : {}),
+          // Server-side PII/prod masking: redacts cell values before they leave
+          // the server. Only sent when the toggle is explicitly on.
+          ...(tabMask ? { mask: true } : {}),
+        };
+        return api.post<QueryResult>(`${this.connBase(id)}/query`, body, controller.signal);
+      };
 
       let result: QueryResult;
       try {

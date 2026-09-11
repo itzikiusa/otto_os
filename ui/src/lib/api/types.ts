@@ -4762,6 +4762,38 @@ export interface QueryStats {
   bytes_read?: number | null;
 }
 
+/** Body of `POST /connections/{id}/db/query` — mirrors `QueryRequest` in
+ *  `crates/otto-dbviewer/src/types.rs` (contract §"Database Explorer"). Every
+ *  field but `statement` is `#[serde(default)]` on the wire, so the client only
+ *  sends the ones that apply to the run. */
+export interface RunQueryReq {
+  statement: string;
+  /** Soft cap on returned rows (the auto-limiter's `n`). */
+  max_rows?: number | null;
+  /** Node context to scope execution — the active database / Redis keyspace. */
+  node?: string | null;
+  /** Explicit acknowledgement of a write/DDL on a guarded (production /
+   *  read-only) connection; set only after the typed confirmation. */
+  confirm_write?: boolean;
+  /** Client-supplied id so `…/db/cancel` can issue engine-native cancellation. */
+  query_id?: string | null;
+  /** Per-statement wall-clock timeout in ms (0 / absent = no limit). */
+  timeout_ms?: number | null;
+  /** Redact cell values server-side before they leave the daemon. */
+  mask?: boolean | null;
+  /** Zero-based row offset — applied only to an auto-limited single statement. */
+  offset?: number | null;
+  /** Keyset cursor: the previous page's {@link QueryResult.next_cursor} echoed
+   *  back verbatim. Applied only to a keyset-eligible MongoDB `find` (where it
+   *  replaces `skip`); ignored everywhere else, so it may always ride along
+   *  with `offset`. Opaque Extended-JSON — never inspected client-side. */
+  cursor?: unknown;
+  /** Return the query plan instead of running it (Mongo: server `explain`). */
+  explain?: boolean;
+  /** Engine-specific positional/named params (unused by the Explorer UI). */
+  params?: unknown;
+}
+
 /** Result of running a statement: tabular rows + stats.
  *
  *  For a **multi-statement batch** the top-level fields describe the FIRST
