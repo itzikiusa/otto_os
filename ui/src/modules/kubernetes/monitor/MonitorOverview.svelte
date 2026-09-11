@@ -93,6 +93,7 @@
           <button class="seg-btn" class:on={window === w} role="radio" aria-checked={window === w} onclick={() => (window = w)}>{w}</button>
         {/each}
       </div>
+      <button class="btn small" onclick={() => router.go('kubernetes/monitor/fleet')} title="One dashboard over every cluster — restarts, memory, req/s, latency — read from ClickHouse only" data-testid="k8s-monitor-fleet-link"><Icon name="chart" size={12} /> Fleet dashboard</button>
       <button class="btn ghost" onclick={() => void load()} title="Refresh" aria-label="Refresh overview"><Icon name="refresh" size={14} /></button>
     </div>
   </div>

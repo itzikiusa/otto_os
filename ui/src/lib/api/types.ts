@@ -7669,6 +7669,9 @@ export interface K8sMonitorConfig {
   series_cap: number;
   /** Probe metrics-server every cycle; off = the call is skipped and status reports `disabled`. */
   metrics_server: boolean;
+  /** Keep per-request `path` + `method` labels on the request / latency counters (never on
+   *  histogram buckets) so the fleet dashboard can drill down to a route. Default false. */
+  request_labels?: boolean;
 }
 
 export interface K8sMonitorStatus {
@@ -7833,6 +7836,109 @@ export interface K8sMonitorEvent {
   exit_code: number;
   detail: Record<string, unknown> | null;
   actor: string;
+}
+
+// --- Fleet dashboard (`GET /k8s/monitor/fleet/*`) — ClickHouse-only, cross-cluster ---
+
+/** A cluster as the fleet routes label it: the registry row when it exists,
+ *  else the bare id (history for a removed cluster still shows). */
+export interface K8sFleetCluster {
+  id: string;
+  name: string;
+  environment: Environment;
+  color?: string | null;
+}
+
+export interface K8sFleetFilters {
+  window: string;
+  /** Every registered cluster plus any id with rows; `rows` = sample + event rows in the window. */
+  clusters: (K8sFleetCluster & { rows: number })[];
+  namespaces: { cluster_id: string; namespace: string }[];
+  workloads: { cluster_id: string; namespace: string; workload: string }[];
+  /** Only for a narrowed selection (a workload / pod, or one cluster + namespace); ≤ 2000. */
+  pods: { cluster_id: string; namespace: string; workload: string; pod: string }[];
+}
+
+export type K8sFleetGroup = 'workload' | 'pod';
+export type K8sFleetSortKey =
+  | 'cluster' | 'namespace' | 'workload' | 'pod' | 'pods' | 'restarts' | 'oom' | 'crash' | 'probe' | 'churn'
+  | 'mem_last' | 'mem_avg' | 'mem_max' | 'rps' | 'err_pct' | 'latency_ms';
+
+export interface K8sFleetRow {
+  cluster: K8sFleetCluster;
+  cluster_id: string;
+  namespace: string;
+  workload: string;
+  /** Empty in workload grouping. */
+  pod: string;
+  /** Distinct pods seen in the window (1 in pod grouping). */
+  pods: number;
+  restarts: K8sRestartCounts;
+  /** Planned pod replacements. */
+  churn: number;
+  /** Bytes: latest sample summed over pods / sum of per-pod averages / hungriest pod. */
+  mem_last: number;
+  mem_avg: number;
+  mem_max: number;
+  rps: number;
+  err_pct: number;
+  latency_kind: 'p95' | 'avg' | '';
+  latency_ms: number;
+}
+
+export interface K8sFleetTable {
+  window: string;
+  group: K8sFleetGroup;
+  sort: K8sFleetSortKey;
+  dir: 'asc' | 'desc';
+  total: number;
+  offset: number;
+  rows: K8sFleetRow[];
+}
+
+export type K8sFleetMetric = 'restarts' | 'mem' | 'rps' | 'err' | 'latency';
+export type K8sFleetSeriesBy = 'cluster' | 'namespace' | 'workload' | 'pod';
+
+export interface K8sFleetSeries {
+  window: string;
+  metric: K8sFleetMetric;
+  unit: 'count' | 'bytes' | 'rate' | 'percent' | 'ms';
+  /** `class` for restarts (always per class), else the requested `by`. */
+  by: K8sFleetSeriesBy | 'class';
+  step_secs: number;
+  series: { key: string; label: string; points: { t: string; v: number }[] }[];
+}
+
+export type K8sFleetEventSort = 'ts' | 'cluster' | 'namespace' | 'workload' | 'pod' | 'kind' | 'class' | 'reason';
+
+export interface K8sFleetEvent extends K8sMonitorEvent {
+  cluster_id: string;
+  cluster: K8sFleetCluster;
+}
+
+export interface K8sFleetEvents {
+  window: string;
+  sort: K8sFleetEventSort;
+  dir: 'asc' | 'desc';
+  total: number;
+  offset: number;
+  rows: K8sFleetEvent[];
+}
+
+export interface K8sFleetRequestRow {
+  path: string;
+  method: string;
+  rps: number;
+  err_pct: number;
+  avg_ms: number;
+}
+
+export interface K8sFleetRequests {
+  window: string;
+  /** Clusters whose monitor config keeps request labels (the only ones that can have rows). */
+  enabled_on: { id: string; name: string }[];
+  disabled_on: { id: string; name: string }[];
+  rows: K8sFleetRequestRow[];
 }
 
 /** The `k8s_health` digest (`GET /k8s/clusters/{id}/monitor/health`). */

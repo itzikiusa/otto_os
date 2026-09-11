@@ -257,18 +257,34 @@ pub fn parse_json(body: &str, mappings: &[Mapping]) -> Parsed {
 /// workloads query take seconds. Sums of monotonic counters stay monotonic,
 /// so the `max − min` rate math is unchanged.
 pub const KEEP_LABELS: [&str; 4] = ["code", "status", "status_code", "le"];
+/// Route-identifying labels, normalised to `path` when `request_labels` is on
+/// (Go exporters say `path`/`handler`, Spring says `uri`, others `route`).
+pub const PATH_LABELS: [&str; 4] = ["path", "handler", "route", "uri"];
 
 /// Collapse samples onto [`KEEP_LABELS`], summing values that land on the
 /// same (metric, labels) key. Order of first appearance is preserved.
 pub fn collapse_labels(samples: Vec<Sample>) -> Vec<Sample> {
+    collapse_labels_with(samples, false)
+}
+
+/// [`collapse_labels`], optionally keeping `path` + `method` on the request
+/// counters and latency sum/count series (see
+/// [`super::fleet::keeps_request_labels`]) — histogram buckets are always
+/// collapsed, they are the bulk of any per-route exporter.
+pub fn collapse_labels_with(samples: Vec<Sample>, request_labels: bool) -> Vec<Sample> {
     let mut index: BTreeMap<(String, Vec<(String, String)>), usize> = BTreeMap::new();
     let mut out: Vec<Sample> = Vec::new();
     for s in samples {
-        let kept: BTreeMap<String, String> = s
-            .labels
-            .into_iter()
-            .filter(|(k, _)| KEEP_LABELS.contains(&k.as_str()))
-            .collect();
+        let keep_req = request_labels && super::fleet::keeps_request_labels(&s.metric);
+        let mut kept: BTreeMap<String, String> = BTreeMap::new();
+        for (k, v) in s.labels {
+            if KEEP_LABELS.contains(&k.as_str()) || (keep_req && k == "method") {
+                kept.insert(k, v);
+            } else if keep_req && PATH_LABELS.contains(&k.as_str()) {
+                // First path-like label wins (an exporter rarely sets two).
+                kept.entry("path".to_string()).or_insert(v);
+            }
+        }
         let key = (s.metric.clone(), kept.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
         match index.get(&key) {
             Some(&i) => out[i].value += s.value,
@@ -567,6 +583,36 @@ nan_metric NaN
         assert_eq!(out[2].labels["le"], "0.1");
         assert_eq!(out[2].value, 7.0);
         assert_eq!(out[3].metric, "up");
+    }
+
+    #[test]
+    fn collapse_keeps_path_and_method_only_when_asked_and_never_on_buckets() {
+        let mk = |m: &str, l: &[(&str, &str)], v: f64| Sample {
+            metric: m.into(),
+            labels: l.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            value: v,
+        };
+        let out = collapse_labels_with(
+            vec![
+                mk("http_requests_total", &[("path", "/a"), ("method", "GET"), ("code", "200")], 5.0),
+                mk("http_requests_total", &[("path", "/a"), ("method", "GET"), ("code", "200")], 2.0),
+                mk("http_server_requests_seconds_count", &[("uri", "/b"), ("method", "POST"), ("status", "200")], 7.0),
+                mk("http_request_duration_seconds_bucket", &[("path", "/a"), ("le", "0.1")], 3.0),
+                mk("http_request_duration_seconds_bucket", &[("path", "/b"), ("le", "0.1")], 4.0),
+                mk("mem_sys_bytes", &[("path", "/x")], 1.0),
+            ],
+            true,
+        );
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].labels["path"], "/a");
+        assert_eq!(out[0].labels["method"], "GET");
+        assert_eq!(out[0].value, 7.0, "same route sums");
+        assert_eq!(out[1].labels["path"], "/b", "uri is normalised to path");
+        assert_eq!(out[1].labels["status"], "200");
+        assert_eq!(out[2].metric, "http_request_duration_seconds_bucket");
+        assert_eq!(out[2].labels.len(), 1, "buckets stay collapsed to le");
+        assert_eq!(out[2].value, 7.0);
+        assert!(out[3].labels.is_empty(), "gauges never keep a path");
     }
 
     #[test]

@@ -1232,6 +1232,161 @@ async fn monitor_events_parse_detail_and_filter() {
 }
 
 #[tokio::test]
+async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
+    let (ctx, user) = TestCtx::new().await;
+    let c = create_cluster(&ctx, &user).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    // Identifier / allow-list validation happens before ClickHouse is consulted.
+    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/table?ns=a%20b", None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/table?sort=detail", None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/series?metric=cpu", None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/events?sort=x;drop", None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/filters?window=1y", None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // Canned ClickHouse answers, keyed by SQL substrings unique to each builder.
+    {
+        let mut canned = ctx.sink.canned.lock().unwrap();
+        canned.push((
+            "UNION ALL".into(),
+            vec![
+                serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "n": 40}),
+                serde_json::json!({"cluster_id": "gone", "namespace": "ops", "workload": "cron", "n": 2}),
+            ],
+        ));
+        canned.push((
+            "AS rank, argMax(value, ts) AS mem_last".into(),
+            vec![
+                serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "pod": "web-1", "metric": "mem_sys_bytes", "rank": 1, "mem_last": 900.0, "mem_avg": 800.0, "mem_max": 950.0}),
+                serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "pod": "web-1", "metric": "mem_working_set_bytes", "rank": 0, "mem_last": 500.0, "mem_avg": 400.0, "mem_max": 600.0}),
+                serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "pod": "web-2", "metric": "mem_working_set_bytes", "rank": 0, "mem_last": 100.0, "mem_avg": 100.0, "mem_max": 100.0}),
+            ],
+        ));
+        canned.push((
+            "kind IN ('restart', 'churn') AND ts >=".into(),
+            vec![
+                serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "pod": "web-1", "kind": "restart", "class": "oom", "n": 3}),
+                serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "pod": "web-2", "kind": "churn", "class": "planned", "n": 2}),
+                serde_json::json!({"cluster_id": "gone", "namespace": "ops", "workload": "cron", "pod": "cron-1", "kind": "restart", "class": "crash", "n": 1}),
+            ],
+        ));
+        canned.push((
+            "AS rps, sumIf(delta, is5xx)".into(),
+            vec![serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "rps": 10.0, "err_rps": 1.0})],
+        ));
+        canned.push((
+            "labels['le'] AS le".into(),
+            vec![
+                serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "le": "0.1", "delta": 90.0}),
+                serde_json::json!({"cluster_id": id, "namespace": "shop", "workload": "web", "le": "+Inf", "delta": 100.0}),
+            ],
+        ));
+        canned.push((
+            "class AS g".into(),
+            vec![
+                serde_json::json!({"g": "oom", "t": "2026-09-11T08:00:00Z", "v": 2}),
+                serde_json::json!({"g": "oom", "t": "2026-09-11T09:00:00Z", "v": 1}),
+                serde_json::json!({"g": "crash", "t": "2026-09-11T08:00:00Z", "v": 1}),
+            ],
+        ));
+        canned.push(("SELECT count() AS n FROM k8s_events".into(), vec![serde_json::json!({"n": 7})]));
+        canned.push((
+            "OFFSET".into(),
+            vec![serde_json::json!({
+                "ts": "2026-09-11T08:00:00Z", "cluster_id": id, "namespace": "shop", "workload": "web", "pod": "web-1", "container": "web",
+                "kind": "restart", "class": "oom", "reason": "OOMKilled", "exit_code": 137, "detail": "{\"prev_restarts\":0}", "actor": ""
+            })],
+        ));
+        canned.push((
+            "labels['path'] AS path".into(),
+            vec![serde_json::json!({"path": "/api/x", "method": "GET", "rps": 4.0, "err_rps": 1.0, "avg_ms": 12.5})],
+        ));
+    }
+
+    // filters: registered cluster is named, an unregistered id survives under its id, rows are counted.
+    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/filters?window=6h", None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let clusters = body["clusters"].as_array().unwrap();
+    assert_eq!(clusters.len(), 2);
+    let mine = clusters.iter().find(|c| c["id"] == id).unwrap();
+    assert_eq!(mine["name"], c["name"]);
+    assert_eq!(mine["rows"], 40);
+    let gone = clusters.iter().find(|c| c["id"] == "gone").unwrap();
+    assert_eq!(gone["name"], "gone");
+    assert_eq!(body["workloads"].as_array().unwrap().len(), 2);
+    assert!(body["pods"].as_array().unwrap().is_empty(), "pods are only listed for a narrowed selection");
+
+    // table: best memory gauge per pod, pods summed, restarts by class, err % and p95 derived.
+    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/table?window=1h&sort=restarts", None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["total"], 2);
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows[0]["workload"], "web", "most restarts first");
+    assert_eq!(rows[0]["cluster"]["name"], c["name"]);
+    assert_eq!(rows[0]["pods"], 2);
+    assert_eq!(rows[0]["restarts"]["oom"], 3);
+    assert_eq!(rows[0]["churn"], 2);
+    assert_eq!(rows[0]["mem_last"], 600.0, "working-set wins over sys for web-1, plus web-2");
+    assert_eq!(rows[0]["mem_max"], 600.0);
+    assert_eq!(rows[0]["err_pct"], 10.0);
+    assert_eq!(rows[0]["latency_kind"], "p95");
+    assert_eq!(rows[0]["latency_ms"], 100.0, "p95 lands in the +Inf bucket → previous bound");
+    assert_eq!(rows[1]["cluster_id"], "gone");
+    assert_eq!(rows[1]["restarts"]["crash"], 1);
+    // Ascending textual sort + paging.
+    let (st, body, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/table?sort=workload&dir=asc&limit=1&offset=1", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(body["rows"][0]["workload"], "web");
+
+    // series: restarts come back per class, labelled as the class.
+    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/series?metric=restarts&window=24h", None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["by"], "class");
+    assert_eq!(body["unit"], "count");
+    let series = body["series"].as_array().unwrap();
+    assert_eq!(series.len(), 2);
+    assert_eq!(series[0]["key"], "crash");
+    assert_eq!(series[1]["points"].as_array().unwrap().len(), 2);
+
+    // events: detail parsed, cluster resolved, total from the count query.
+    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/events?window=24h&class=oom&sort=class&dir=asc", None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["total"], 7);
+    assert_eq!(body["sort"], "class");
+    assert_eq!(body["rows"][0]["cluster"]["name"], c["name"]);
+    assert_eq!(body["rows"][0]["detail"]["prev_restarts"], 0);
+
+    // requests: rows plus which clusters keep request labels (none yet).
+    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/requests?window=1h", None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["rows"][0]["path"], "/api/x");
+    assert_eq!(body["rows"][0]["err_pct"], 25.0);
+    assert_eq!(body["enabled_on"].as_array().unwrap().len(), 0);
+    assert_eq!(body["disabled_on"][0]["id"], id);
+    // Turning request_labels on round-trips through the config and shows up here.
+    let mut cfg = monitor_cfg(false, 60);
+    cfg["request_labels"] = serde_json::json!(true);
+    let (st, body, text) = call(&ctx, &user, "PUT", &format!("/k8s/clusters/{id}/monitor"), Some(cfg)).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["config"]["request_labels"], true);
+    let (_, body, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/requests?window=1h", None).await;
+    assert_eq!(body["enabled_on"][0]["id"], id);
+}
+
+#[tokio::test]
+async fn fleet_routes_need_clickhouse() {
+    let (ctx, user) = TestCtx::with_sink(false).await;
+    let (st, body, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/table", None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "conflict");
+}
+
+#[tokio::test]
 async fn monitor_health_digest_reports_disabled_then_stats() {
     let (ctx, user) = TestCtx::new().await;
     let c = create_cluster(&ctx, &user).await;

@@ -154,6 +154,12 @@ pub struct MonitorConfig {
     /// allow it anyway — saves a call per namespace per cycle.
     #[serde(default = "default_true")]
     pub metrics_server: bool,
+    /// Keep the per-request `path` + `method` labels on the request counters
+    /// and latency sum/count series (never on histogram buckets) so the fleet
+    /// dashboard can drill down to a route. Off by default: it multiplies the
+    /// request rows per pod by the number of distinct routes.
+    #[serde(default)]
+    pub request_labels: bool,
 }
 
 impl Default for MonitorConfig {
@@ -169,6 +175,7 @@ impl Default for MonitorConfig {
             retention_days: 14,
             series_cap: DEFAULT_SERIES_CAP,
             metrics_server: true,
+            request_labels: false,
         }
     }
 }
@@ -441,6 +448,7 @@ pub fn from_row(row: &K8sMonitorConfigRow) -> MonitorConfig {
         retention_days: row.retention_days.clamp(0, i64::from(u32::MAX)) as u32,
         series_cap: row.series_cap.clamp(0, i64::from(u32::MAX)) as u32,
         metrics_server: row.metrics_server,
+        request_labels: row.request_labels,
     }
 }
 
@@ -457,6 +465,7 @@ pub fn to_row(cluster_id: &str, c: &MonitorConfig) -> K8sMonitorConfigRow {
         retention_days: i64::from(c.retention_days),
         series_cap: i64::from(c.series_cap),
         metrics_server: c.metrics_server,
+        request_labels: c.request_labels,
         updated_at: String::new(),
     }
 }

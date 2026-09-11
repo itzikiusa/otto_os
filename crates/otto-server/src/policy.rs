@@ -1121,7 +1121,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     // Monitoring dashboard: the cross-cluster overview is a read; the per-cluster
     // `/monitor*` routes fall under the `{id}/` rule above (GET View, else Edit).
-    if matches!(p, "/k8s/status" | "/k8s/monitor/overview") {
+    if matches!(p, "/k8s/status" | "/k8s/monitor/overview") || p.starts_with("/k8s/monitor/fleet/") {
         return Require(Kubernetes, View);
     }
     if matches!(p, "/k8s/install" | "/k8s/discover") {

@@ -120,7 +120,40 @@ workloads table run concurrently.
   `Raw cluster events` shows the kept Kubernetes events.
 - **Insights**: the latest report of the workspace's **Kubernetes watchdog**
   agent (below) with run history, Run now, and the verdict badge.
-- **Settings**: everything in Setup.
+- **Settings**: everything in Setup, plus **Keep request path labels** (off by
+  default) — retains per-route `path` + `method` on the request / latency
+  counters (never on histogram buckets) so the Fleet dashboard's Requests tab
+  can drill down to a route. It multiplies request rows per pod by the number
+  of routes, so enable it per cluster where you need it.
+
+### Fleet dashboard (`#/kubernetes/monitor/fleet`)
+
+One dashboard over **every** cluster, read from **ClickHouse only** — it never
+calls a cluster and ignores the collector's live pod snapshot, so it answers
+"what happened over the window" even for a cluster that is unreachable right
+now. Filters are **cluster** (toggle pills; none = all), **namespace**,
+**workload** and **pod** (the pod list appears once the selection is narrow),
+plus the window; every choice, the table grouping / sort and the events sort
+are **persisted per device** and survive a reload.
+
+- **Overview**: KPI tiles (unplanned restarts with the OOM / crash split,
+  planned churn, latest memory, req/s + 5xx %) and five charts — restarts by
+  class (stacked per class), memory, req/s, 5xx %, avg latency — one line per
+  cluster / namespace / workload / pod (your pick).
+- **Table**: one row per workload or per pod — pods, restarts (with the class
+  breakdown), OOM, churn, memory (latest / peak), req/s, 5xx %, p95-or-avg
+  latency — **sortable by every column**, sorted server-side, paged. Clicking a
+  workload row narrows the filters to it and switches to its pods; clicking a
+  pod row opens its events.
+- **Events**: the cross-cluster restart / churn / version timeline, class
+  filter, sortable by time, cluster, namespace, workload, pod, class or
+  reason, paged.
+- **Requests**: per-route req/s, 5xx % and avg latency — needs *Keep request
+  path labels* on at least one cluster; the tab links to each cluster's
+  settings until then.
+
+Routes: `GET /k8s/monitor/fleet/{filters,table,series,events,requests}` — see
+the contract for the exact shapes and the identifier / sort-key allow-lists.
 
 Health badge: `incident` when a pod is in CrashLoopBackOff / Failed, or an
 OOM/crash coincides with an error-rate spike; `degraded` on any unplanned
@@ -147,8 +180,9 @@ thresholds used — every list capped at 20 entries.
 
 `GET/PUT /k8s/clusters/{id}/monitor`, `POST …/monitor/test`, `POST …/monitor/run`,
 `GET /k8s/monitor/overview`, `GET …/monitor/workloads`, `GET …/monitor/series`,
-`GET …/monitor/events`, `GET …/monitor/health`, WS `k8s_monitor_cycle`. Full
-shapes in `docs/contracts/api.md`.
+`GET …/monitor/events`, `GET …/monitor/health`, the ClickHouse-only fleet
+routes `GET /k8s/monitor/fleet/{filters,table,series,events,requests}`, WS
+`k8s_monitor_cycle`. Full shapes in `docs/contracts/api.md`.
 
 ## Limits and known gaps
 

@@ -3500,6 +3500,39 @@ is View on GET, Edit on PUT/POST. Enabling requires the usage engine
 `window` accepts `<n>m|h|d` (max `90d`). `metric`, `workload`, `pod`, `ns`
 and `class` must match `^[A-Za-z0-9_.:/-]{1,128}$` (400 otherwise).
 
+#### Fleet dashboard (`/k8s/monitor/fleet/*`, `kubernetes:View`)
+
+One view over **every** cluster, read from **ClickHouse only** (`k8s_samples` +
+`k8s_events`) — never the cluster, never the collector's pod snapshot — so it
+answers "what happened over the window" (restarts / OOMs, memory, req/s, 5xx,
+latency) even for a cluster that is currently unreachable. Every route takes
+the same selection: `window` (default `24h`), `cluster` (comma-separated ids;
+empty = all), `ns`, `workload`, `pod` (each a single value; identifier rule
+above, 400 otherwise). Cluster ids are labelled from the registry; an id with
+rows but no registry row (a removed cluster) still appears under its id.
+`409 conflict` when the usage engine (ClickHouse) is off.
+
+| Method & path | Request | Response |
+|---|---|---|
+| GET /k8s/monitor/fleet/filters | selection | `{ window, clusters: [{ id, name, environment, color, rows }] /* every registered cluster + any id with rows; rows = sample+event rows in the window */, namespaces: [{ cluster_id, namespace }], workloads: [{ cluster_id, namespace, workload }], pods: [{ cluster_id, namespace, workload, pod }] /* only for a narrowed selection (workload / pod, or one cluster + ns); ≤ 2000, newest first */ }` |
+| GET /k8s/monitor/fleet/table?group=workload\|pod&sort=restarts&dir=desc&limit=200&offset=0 | selection + grouping/order | `{ window, group, sort, dir, total, offset, rows: FleetRow[] }` — sorted server-side; `sort` ∈ `cluster\|namespace\|workload\|pod\|pods\|restarts\|oom\|crash\|probe\|churn\|mem_last\|mem_avg\|mem_max\|rps\|err_pct\|latency_ms` (400 otherwise); `limit` ≤ 2000 |
+| GET /k8s/monitor/fleet/series?metric=restarts&by=cluster&step= | selection + `metric` ∈ `restarts\|mem\|rps\|err\|latency`, `by` ∈ `cluster\|namespace\|workload\|pod` | `{ window, metric, unit: 'count'\|'bytes'\|'rate'\|'percent'\|'ms', by, step_secs, series: [{ key, label, points: [{ t, v }] }] }` — `restarts` is always one series per class (`by: "class"`); `step` defaults to ~60 buckets, floor 60 s |
+| GET /k8s/monitor/fleet/events?class=&sort=ts&dir=desc&limit=200&offset=0 | selection + `class` (as the per-cluster events route, plus `churn` = churn only) | `{ window, sort, dir, total, offset, rows: (MonitorEvent & { cluster_id, cluster })[] }`; `sort` ∈ `ts\|cluster\|namespace\|workload\|pod\|kind\|class\|reason` |
+| GET /k8s/monitor/fleet/requests | selection | `{ window, enabled_on: [{ id, name }], disabled_on: [{ id, name }], rows: [{ path, method, rps, err_pct, avg_ms }] }` (≤ 500, by rps) — rows exist only for clusters with `request_labels` on |
+
+```ts
+FleetRow { cluster: { id, name, environment, color }; cluster_id; namespace; workload; pod /* '' in workload grouping */;
+           pods /* distinct pods seen in the window */;
+           restarts: { oom, crash, probe, unknown }; churn /* planned replacements */;
+           mem_last /* latest sample summed over pods */; mem_avg /* sum of per-pod averages */; mem_max /* hungriest pod sample */;
+           rps; err_pct; latency_kind: 'p95'|'avg'|''; latency_ms }
+```
+
+Memory picks the most authoritative gauge per pod (`mem_working_set_bytes` >
+`mem_sys_bytes` > `jvm_memory_used_bytes`); rates are `greatest(0, max − min) /
+seconds` per (pod, label-set), summed; p95 is interpolated from histogram
+bucket deltas, else `avg` from `_sum/_count`.
+
 ```ts
 MonitorConfig {
   enabled: boolean; interval_secs: number /* 15..3600 */;
@@ -3509,6 +3542,8 @@ MonitorConfig {
   retention_days: number /* 1..90 */;
   series_cap: number /* 100..10000, default 1500 — prometheus series kept per pod per cycle, `_bucket` dropped first */;
   metrics_server: boolean /* default true; false = never call metrics.k8s.io (status.metrics_server = 'disabled') */;
+  request_labels: boolean /* default false; keep per-request `path` (normalised from path|handler|route|uri) + `method`
+                             on the request counters and latency _sum/_count — never on _bucket — for the fleet Requests tab */;
 }
 Probe { name; port?: number /* default: container's first port */; path /* starts with '/' */;
         format: 'prometheus' | 'json' | 'health';

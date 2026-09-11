@@ -16,12 +16,17 @@
   import ClusterWorkspace from './ClusterWorkspace.svelte';
   import MonitorOverview from './monitor/MonitorOverview.svelte';
   import MonitorCluster from './monitor/MonitorCluster.svelte';
+  import MonitorFleet from './monitor/MonitorFleet.svelte';
   import { isKind } from './k8s-util';
 
   // `#/kubernetes/monitor[/<clusterId>[/<tab>]]` is the Monitor dashboard; it
   // never selects a cluster in the console store.
   const isMonitor = $derived(router.parts[1] === 'monitor');
-  const monitorClusterId = $derived(isMonitor ? (router.parts[2] ?? null) : null);
+  // `#/kubernetes/monitor/fleet[/<tab>]` is the cross-cluster ClickHouse
+  // dashboard — `fleet` is a reserved segment, never a cluster id.
+  const isFleet = $derived(isMonitor && router.parts[2] === 'fleet');
+  const fleetTab = $derived(router.parts[3] ?? 'overview');
+  const monitorClusterId = $derived(isMonitor && !isFleet ? (router.parts[2] ?? null) : null);
   const monitorTab = $derived(router.parts[3] ?? 'workloads');
   const routeClusterId = $derived(isMonitor ? null : (router.parts[1] ?? null));
   const routeKind = $derived(router.parts[2] ?? '');
@@ -83,6 +88,8 @@
     <div class="k8s-boot"><Skeleton rows={4} height={48} /></div>
   {:else if needsInstall}
     <InstallPanel tool="kubectl" oncontinue={() => (skipInstall = true)} />
+  {:else if isFleet}
+    <MonitorFleet tab={fleetTab} />
   {:else if isMonitor && monitorClusterId}
     {#if monitorCluster}
       <MonitorCluster cluster={monitorCluster} tab={monitorTab} />

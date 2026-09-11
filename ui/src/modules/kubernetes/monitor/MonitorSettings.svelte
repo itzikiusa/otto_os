@@ -304,6 +304,10 @@
         <input type="checkbox" bind:checked={cfg.metrics_server} disabled={!canEdit} data-testid="k8s-monitor-metrics-server" />
         <span>Probe metrics-server every cycle <span class="dim">(CPU + working-set memory; turn off when RBAC denies it — saves one call per namespace per cycle)</span></span>
       </label>
+      <label class="toggle small">
+        <input type="checkbox" bind:checked={cfg.request_labels} disabled={!canEdit} data-testid="k8s-monitor-request-labels" />
+        <span>Keep request path labels <span class="dim">(per-route <code>path</code> + <code>method</code> on the request / latency counters — never on histogram buckets — so the Fleet dashboard's Requests tab can drill down to a route; multiplies request rows per pod by the number of routes)</span></span>
+      </label>
     </section>
 
     <section class="card block">

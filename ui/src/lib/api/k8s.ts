@@ -13,6 +13,11 @@ import type {
   K8sContainersResp,
   K8sDiscoverResp,
   K8sExecReq,
+  K8sFleetEvents,
+  K8sFleetFilters,
+  K8sFleetRequests,
+  K8sFleetSeries,
+  K8sFleetTable,
   K8sHealthDigest,
   K8sInstallJob,
   K8sK9sReq,
@@ -119,6 +124,25 @@ export const k8sApi = {
     api.get<K8sMonitorEvent[]>(`/k8s/clusters/${enc(id)}/monitor/events${qs(p)}`),
   monitorHealth: (id: string, window = '1h') =>
     api.get<K8sHealthDigest>(`/k8s/clusters/${enc(id)}/monitor/health${qs({ window })}`),
+
+  // --- fleet dashboard (ClickHouse-only, cross-cluster; contract "Fleet dashboard") ---
+  // `cluster` is a comma-separated id list (empty = all); ns / workload / pod narrow it.
+  fleetFilters: (p: { window: string; cluster?: string; ns?: string; workload?: string; pod?: string }, signal?: AbortSignal) =>
+    api.get<K8sFleetFilters>(`/k8s/monitor/fleet/filters${qs(p)}`, signal),
+  fleetTable: (
+    p: { window: string; cluster?: string; ns?: string; workload?: string; pod?: string; group?: string; sort?: string; dir?: string; limit?: number; offset?: number },
+    signal?: AbortSignal,
+  ) => api.get<K8sFleetTable>(`/k8s/monitor/fleet/table${qs(p)}`, signal),
+  fleetSeries: (
+    p: { window: string; metric: string; by?: string; step?: number; cluster?: string; ns?: string; workload?: string; pod?: string },
+    signal?: AbortSignal,
+  ) => api.get<K8sFleetSeries>(`/k8s/monitor/fleet/series${qs(p)}`, signal),
+  fleetEvents: (
+    p: { window: string; cluster?: string; ns?: string; workload?: string; pod?: string; class?: string; sort?: string; dir?: string; limit?: number; offset?: number },
+    signal?: AbortSignal,
+  ) => api.get<K8sFleetEvents>(`/k8s/monitor/fleet/events${qs(p)}`, signal),
+  fleetRequests: (p: { window: string; cluster?: string; ns?: string; workload?: string; pod?: string }, signal?: AbortSignal) =>
+    api.get<K8sFleetRequests>(`/k8s/monitor/fleet/requests${qs(p)}`, signal),
 
   // --- writes (Edit) ----------------------------------------------------------
   exec: (id: string, body: K8sExecReq) => api.post<Session>(`/k8s/clusters/${enc(id)}/exec`, body),

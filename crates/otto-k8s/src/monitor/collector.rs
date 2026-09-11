@@ -292,7 +292,7 @@ async fn scrape_pod(
                         ProbeFormat::Prometheus => {
                             if (200..300).contains(&r.status) {
                                 let mut parsed = parse::parse_prometheus(&r.body, &probe.include, &probe.exclude, cfg.series_cap as usize);
-                                parsed.samples = parse::collapse_labels(std::mem::take(&mut parsed.samples));
+                                parsed.samples = parse::collapse_labels_with(std::mem::take(&mut parsed.samples), cfg.request_labels);
                                 parsed
                             } else {
                                 Parsed {
