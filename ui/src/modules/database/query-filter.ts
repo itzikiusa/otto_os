@@ -11,11 +11,15 @@
 //
 // Mongo: merge/replace the first argument (the filter object) of
 // `db.<coll>.find(<filter>[, …])` — there is no existing Mongo splicer to reuse.
+// The same splicer takes a whole `{…}` object from the filter bar
+// (`applyMongoFilterObject`) instead of one column/value pair.
 //
 // Nothing here runs a query; the caller writes the result into the editor +
-// clipboard and lets the user press Run.
+// clipboard and lets the user press Run (the filter bar runs its rewrite
+// itself — that is its whole point).
 
 import { splitStatement, rewriteWhere, condToSql, toFilterVal } from '../../lib/stores/database.svelte';
+import { looksLikeMongoshScript } from './sql-util';
 
 export type FilterMode = 'set' | 'and';
 
@@ -281,6 +285,63 @@ export function applyMongoFilter(
     return sql.slice(0, k) + merged + sql.slice(objEnd + 1);
   }
   return null;
+}
+
+/** True when `src` (trimmed) is exactly one balanced `{ … }` object literal —
+ *  string / comment / regex aware, like the splicer. `{}` counts. */
+export function isBalancedObject(src: string): boolean {
+  const t = src.trim();
+  if (t[0] !== '{') return false;
+  return matchBracket(t, 0) === t.length - 1;
+}
+
+/** Strip the outer braces of a `{ … }` literal and any trailing comma, for
+ *  merging two object bodies: `{ a: 1, }` → `a: 1`. */
+function objectBody(src: string): string {
+  return src.trim().slice(1, -1).trim().replace(/,\s*$/, '');
+}
+
+/** The filter bar's rewrite: replace (`set`) or merge (`and`) a whole
+ *  `{ … }` object into the first argument of the statement's `find(...)`.
+ *  `and` yields `{ <existing body>, <new body> }` (an empty existing filter
+ *  becomes just the new object; an empty new object leaves the existing one).
+ *  Returns null — and the caller hides the bar — unless the statement is ONE
+ *  `db.<coll>.find(...)` (no aggregate, no `;`-batch, no mongosh script)
+ *  whose first argument is empty or an object literal, and `filterSrc` is a
+ *  balanced `{ … }`. The chain after the call (`.sort(…).limit(…)`) and a
+ *  projection second argument are kept as-is. */
+export function applyMongoFilterObject(
+  sql: string,
+  filterSrc: string,
+  mode: FilterMode,
+): string | null {
+  const t = sql.trim();
+  if (/;\s*\S/.test(t.replace(/;\s*$/, ''))) return null; // a batch
+  if (looksLikeMongoshScript(t)) return null;
+  const m = t.match(/^db\.[A-Za-z0-9_$.-]+\.find\s*\(/i);
+  if (!m) return null;
+  const filter = filterSrc.trim();
+  if (!isBalancedObject(filter)) return null;
+  const open = m[0].length - 1; // index of '('
+  const closeParen = matchBracket(t, open);
+  if (closeParen < 0) return null;
+  const argStart = open + 1;
+  if (t.slice(argStart, closeParen).trim().length === 0) {
+    return t.slice(0, argStart) + filter + t.slice(closeParen);
+  }
+  let k = argStart;
+  while (k < closeParen && /\s/.test(t[k])) k++;
+  if (t[k] !== '{') return null; // first arg isn't an object literal
+  const objEnd = matchBracket(t, k);
+  if (objEnd < 0) return null;
+  let next = filter;
+  if (mode === 'and') {
+    const existing = objectBody(t.slice(k, objEnd + 1));
+    const added = objectBody(filter);
+    if (existing && added) next = `{ ${existing}, ${added} }`;
+    else if (existing) next = t.slice(k, objEnd + 1);
+  }
+  return t.slice(0, k) + next + t.slice(objEnd + 1);
 }
 
 // ── Dispatcher ───────────────────────────────────────────────────────────────

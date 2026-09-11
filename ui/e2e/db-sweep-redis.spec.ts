@@ -250,6 +250,52 @@ test.describe('DB Explorer — Redis (mobile sweep)', () => {
     }
   });
 
+  test('EDIT: HGETALL value → review shows HSET → applied', async ({ page }, testInfo) => {
+    expect(redisConnId, 'docker-redis must be reachable').not.toBeNull();
+
+    // Per-project hash so parallel projects never collide. Seeded straight
+    // against Docker Redis; the editor step is the HGETALL that the grid edits.
+    const proj = testInfo.project.name.replace(/[^a-z0-9]/gi, '');
+    const key = `e2e:h:${proj}`;
+    redisCli(['HSET', key, 'f1', 'v1']);
+    try {
+      await openConnection(page);
+      await runForRows(page, `HGETALL ${key}`);
+
+      // RESP2 returns a flat field,value list — row 1 is `f1`, row 2 is `v1`.
+      // Double-click the VALUE cell: the Redis edit adapter maps it to its
+      // field (the row above) and parks the draft as a pending change.
+      await page.locator('.grid tbody').getByText('v1', { exact: true }).first().dblclick();
+      const input = page.locator('.grid .cell-input');
+      await expect(input).toBeVisible();
+      await input.fill('v2');
+      await input.press('Enter');
+      const pendingBar = page.locator('[data-testid="pending-edits-bar"]');
+      await expect(pendingBar).toBeVisible();
+      await expect(page.locator('.cell.dirty').first()).toBeVisible();
+
+      // Review: the statement is the HSET the driver will run (value quoted).
+      await pendingBar.locator('.btn.primary', { hasText: 'Review & apply' }).click();
+      const modal = page.locator('.review-modal');
+      await expect(modal).toBeVisible();
+      expect(await modal.locator('.review-sql').inputValue()).toContain(`HSET ${key} f1 "v2"`);
+      await modal.locator('.tb-btn.primary', { hasText: 'Run' }).click();
+      await expect(modal).toBeHidden({ timeout: 20_000 });
+
+      // The grid re-runs the HGETALL after the write → the new value renders,
+      // and Redis itself agrees.
+      await ensureResultsOpen(page);
+      await expectInGrid(page, 'v2');
+      expect(redisCli(['HGET', key, 'f1']).trim()).toBe('v2');
+    } finally {
+      try {
+        redisCli(['DEL', key]);
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  });
+
   test('no horizontal overflow with a wide value (HGETALL stress)', async ({ page }) => {
     expect(redisConnId, 'docker-redis must be reachable').not.toBeNull();
     await openConnection(page);
