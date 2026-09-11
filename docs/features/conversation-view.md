@@ -94,6 +94,10 @@ with a "Terminal" tab). The choice is remembered per session
 (`otto_session_view:<id>` in localStorage — the same key Mission Control and
 History set to `chat` before opening a session). `⌘⇧C` cycles the three.
 
+In a narrow pane (≤ 260 px) the segmented control collapses to a single view
+icon that opens a menu (≤ 200 px: the rows live in the pane's ⋯ menu); `⌘⇧C`
+still cycles.
+
 ### 4.2 The conversation
 
 - **Turns**: your prompts as right-aligned bubbles, the agent's prose full-width
@@ -118,6 +122,9 @@ History set to `chat` before opening a session). `⌘⇧C` cycles the three.
   image and it is uploaded to the session inbox and referenced as
   `[Image: <path>]`. The status line shows the session status and how many
   board tasks are waiting to be nudged in. An exited session shows **Resume**.
+  The chat header and composer shed their secondary chrome by PANE width, not
+  window width: stats and model first, then the search box and *Show system*
+  fold into a ⋯ menu; the send button never hides.
 
 ### 4.3 History (`#/history`)
 
