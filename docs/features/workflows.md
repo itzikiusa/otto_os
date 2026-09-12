@@ -1137,7 +1137,7 @@ build on.
 | `GET /workflows/{id}` | ws viewer | one workflow |
 | `PATCH /workflows/{id}` | ws editor | update (e.g. `{graph}` and/or `{instructions}` — either bumps `version`) |
 | `DELETE /workflows/{id}` | ws editor | 204 |
-| `POST /workflows/{id}/run` | ws editor | `RunWorkflowReq?` `{start_node?, only_node?}` → `WorkflowRun` |
+| `POST /workflows/{id}/run` | ws editor | `RunWorkflowReq?` `{input?, start_node?, only_node?, review_mode?}` → `WorkflowRun`. `review_mode` (`fan_out`/`orchestrator`) is seeded into `input.review_mode` and overrides every `review_run` node of the run (§4 *Execution mode*); any other value, or a non-object `input` alongside it, is a **400** |
 | `GET /workflows/{id}/runs` | ws viewer | `WorkflowRun[]` |
 | `GET /workflow-runs/{id}` | ws viewer | one run (poll/refresh target) |
 | `POST /workflow-runs/{id}/cancel` | ws editor | cancel a run |
