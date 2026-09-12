@@ -3,7 +3,7 @@
   // threads, general comments, approve/merge/decline, "open as session".
   // Three tabs: Summary | Files | Review (AI agents).
   import { api } from '../../lib/api/client';
-  import type { DiffResp, MergeStrategy, PrComment, PrCommit, PrDetail } from '../../lib/api/types';
+  import type { DiffResp, PrComment, PrCommit, PrDetail } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -12,6 +12,7 @@
   import DiffViewer from './DiffViewer.svelte';
   import CommentThread from './CommentThread.svelte';
   import ReviewPanel from './ReviewPanel.svelte';
+  import PrMergeModal from './PrMergeModal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -49,7 +50,9 @@
   let editDesc = $state('');
   let busy = $state('');
   let newComment = $state('');
-  let mergeStrategy: MergeStrategy = $state('merge');
+  // Merge runs through PrMergeModal — it owns the strategy, the readiness
+  // rows and the delete-source-branch choice.
+  let mergeOpen = $state(false);
   let showRequestChanges = $state(false);
   let requestChangesBody = $state('');
   // Provider to spawn the "open as session" review agent on (registry-sourced,
@@ -209,14 +212,10 @@
     }
   }
 
-  async function action(kind: 'approve' | 'merge' | 'decline'): Promise<void> {
+  async function action(kind: 'approve' | 'decline'): Promise<void> {
     busy = kind;
     try {
-      if (kind === 'merge') {
-        await api.post(`/repos/${repoId}/prs/${number}/merge`, { strategy: mergeStrategy });
-      } else {
-        await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
-      }
+      await api.post(`/repos/${repoId}/prs/${number}/${kind}`);
       toasts.success(`PR ${kind === 'approve' ? 'approved' : kind + 'd'}`, `#${number}`);
       await load(repoId, number);
     } catch (e) {
@@ -400,14 +399,9 @@
             Request changes
           </button>
           <div class="row merge-group">
-            <select class="input" bind:value={mergeStrategy} style="width: 100px">
-              <option value="merge">merge</option>
-              <option value="squash">squash</option>
-              <option value="rebase">rebase</option>
-            </select>
-            <button class="btn primary" disabled={busy !== ''} onclick={() => action('merge')}>
+            <button class="btn primary" disabled={busy !== ''} onclick={() => (mergeOpen = true)}>
               <Icon name="merge" size={12} />
-              {busy === 'merge' ? 'Merging…' : 'Merge'}
+              Merge
             </button>
           </div>
           <span class="grow"></span>
@@ -523,6 +517,25 @@
     {/if}
   {/if}
 </div>
+
+{#if mergeOpen && pr}
+  <PrMergeModal
+    {repoId}
+    {number}
+    {pr}
+    onclose={() => {
+      mergeOpen = false;
+      // The modal's "Open review" link persists the tab and routes here — we
+      // are already on this route, so honour the stored choice on close.
+      const saved = localStorage.getItem(`otto_pr_tab_${repoId}_${number}`);
+      if (saved && TABS.includes(saved as Tab)) activeTab = saved as Tab;
+    }}
+    onmerged={() => {
+      mergeOpen = false;
+      void load(repoId, number);
+    }}
+  />
+{/if}
 
 <style>
   .prd {
@@ -796,7 +809,6 @@
     .prd-actions .btn { height: 38px; }
     .prd-actions .grow { display: none; }
     .merge-group { flex: 1; gap: 8px; }
-    .merge-group select.input { height: 38px; }
     .merge-group .btn { flex: 1; }
 
     /* Commit rows: drop the rigid 4-col grid for a wrapping two-line layout. */

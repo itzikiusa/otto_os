@@ -476,6 +476,8 @@ distinction from the **"Draft message with agent"** button, which drafts the
 |---|---|---|
 | `GET /repos/{id}/prs?state=open\|merged\|declined\|all` | ws viewer | `PrSummary[]` |
 | `POST /repos/{id}/prs` | ws editor | `CreatePrReq` → `PrSummary` |
+| `GET /repos/{id}/prs/{number}/checks` | ws viewer | `PrChecksResp` — the aggregate plus one row per check-run / pipeline job / commit status |
+| `GET /repos/{id}/prs/{number}/readiness` | ws viewer | `PrReadiness` — CI, approvals, mergeability, open blocker findings, and the local checkout's unpushed-commit count / branch freshness |
 | `GET /repos/{id}/prs/{number}` | ws viewer | `PrDetail` (comments, reviewers, CI, mergeable) |
 | `GET /repos/{id}/prs/{number}/diff` | ws viewer | `DiffResp` |
 | `PATCH /repos/{id}/prs/{number}` | ws editor | `UpdatePrReq` (title/description) |
@@ -507,8 +509,10 @@ in **[code-review.md](./code-review.md)**.
   member list).
 - **Test a git account's credentials** from Settings → Git Accounts (row button
   for the stored token, form button for a not-yet-saved one).
-- List/read/comment/approve/request-changes/merge/decline PRs across all three
-  forges, with CI status and mergeability shown.
+- List/read/comment/approve/request-changes/merge (with a confirmation modal:
+  per-check CI, approvals, mergeability, open blockers, unpushed commits;
+  optional delete-source-branch)/decline PRs across all three forges, with CI
+  status and mergeability shown.
 - Push/pull over HTTPS using a Keychain-stored token, or over SSH via your agent.
 
 **You cannot (by design / current behavior):**
