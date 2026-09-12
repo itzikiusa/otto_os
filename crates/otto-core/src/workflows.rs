@@ -430,6 +430,11 @@ pub struct RunWorkflowReq {
     /// Run only `start_node` itself, not its descendants.
     #[serde(default)]
     pub only_node: bool,
+    /// Per-run review-mode override (`"fan_out"` | `"orchestrator"`): seeded into
+    /// `input.review_mode`, wins over every `review_run` node's `params.mode`.
+    /// Validated by the route (400 on any other value).
+    #[serde(default)]
+    pub review_mode: Option<String>,
 }
 
 /// A ready-made example workflow the user can instantiate (e.g. game pipelines

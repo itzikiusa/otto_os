@@ -984,7 +984,12 @@ already covered this lens"). The per-agent grace timeout (`timeout_secs` or the
 diff-size heuristic) only fails an agent that has ALSO gone quiet for the waiting
 window (2 min); an agent still producing output past its grace is left to finish
 (the 15-min silence "stuck" trip still applies). A reviewer whose completed turn
-is an empty `[]` array is `done` with 0 findings, not stuck.
+is an empty `[]` array is `done` with 0 findings, not stuck. Each entry of a row's
+per-agent `findings` (`ReviewFinding`, persisted in `agents_json`) additionally
+carries `lens?` — the lens slug that produced it: orchestrator-mode rows run every
+lens as sub-agents and keep the label through the merge, so one row's findings span
+several lenses. Such a row's own `lens` is empty (it is not one lens's row), which
+also means it is never superseded by the same-lens "already covered" rule above.
 | GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
 | POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |
 | GET /reviews/{review_id}/merge-readiness | ws viewer | — | `MergeReadiness` (open/total findings + approvals + ci_status + mergeable + conflicts + branch freshness) |
@@ -1580,7 +1585,7 @@ workspace from the workflow/run row.
 | GET /workflows/{id} | ws viewer | — | Workflow |
 | PATCH /workflows/{id} | ws editor | UpdateWorkflowReq | Workflow |
 | DELETE /workflows/{id} | ws editor | — | 204 |
-| POST /workflows/{id}/run | ws editor | RunWorkflowReq? | WorkflowRun — created immediately; may start **queued** (see Run queue) |
+| POST /workflows/{id}/run | ws editor | `RunWorkflowReq? {input?, start_node?, only_node?, review_mode?}` | WorkflowRun — created immediately; may start **queued** (see Run queue) — `review_mode` ("fan_out"\|"orchestrator") seeds `input.review_mode` (400 on an unknown value or a non-object `input`); the engine reads it from the run input and it takes precedence over every `review_run` node's `params.mode`, regardless of graph position (order: run input → node `mode` → stored `ReviewConfig.mode` → `fan_out`) |
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
 | GET /workspaces/{wid}/workflow-runs/active | ws viewer | — | `ActiveWorkflowRun[]` — in-flight runs (pending\|running) across the workspace, newest first; backs the "Running" sidebar list |
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
@@ -1629,6 +1634,19 @@ rows report 0. The approval columns now ride the run too:
 run-view approval banner unreachable. Each `NodeRunState` gains `started_at`
 (set on the pending→running transition; drives the live elapsed timer on a
 running step).
+
+**Run fields (workflows batch).** Each `NodeRunState` gains `activity?` =
+`{ phase: string, updated_at: string, last_progress_at?: string, pending_tasks:
+number, subagents: [{ id, description, status: "running"|"done"|"failed",
+started_at?, finished_at? }], hold_reason?: string }` — the live state of an
+agent-backed step: the phase its turn is in, how many tasks it launched that have
+not reported back, and the sub-agents it spawned. Present **only while the node
+runs** (cleared on finish), written at most every 5 s, and bounded (≤ 40
+sub-agent entries, `description` ≤ 80 chars, ids ≤ 64 chars); `phase` carries the
+phase text without its prefix glyph. A node's `logs` are capped at **200**
+entries; the phase lines (`⏳ ✉ ⚙ 🧩 ⏸ 📄`) are kept after a successful step and
+are the only lines the cap evicts (oldest first), so a long step's other output
+survives.
 
 **Run queue.** At most **2** workflow runs execute at once, daemon-wide
 (override: `OTTO_WF_MAX_PARALLEL_RUNS`, ≥ 1) — a single run can fan out dozens
@@ -1679,19 +1697,26 @@ count refresh on each `workflow_run_updated` WS event without per-run fetches.
 
 **Node kinds (catalog).** `GET /workflows/node-types` returns each kind's
 `NodeTypeSpec`, now including `output_schema` (declared output shape; drives UI
-expression hints + warn-only runtime validation) and `params_schema`. The control
-flow / wired kinds added in this wave: `condition`, `loop`, `product_analyze`,
-`product_rewrite`, `product_plan`, `product_publish`, `review_run`, `canvas`,
-`git_pr`, `prepare_context` (see the Workflows feature doc for each kind's params/output).
+expression hints + warn-only runtime validation) and `params_schema` (which now
+declares `review_run`'s `mode`). The control flow / wired kinds added in this
+wave: `condition`, `loop`, `product_analyze`, `product_rewrite`, `product_plan`,
+`product_publish`, `review_run`, `canvas`, `git_pr`, `prepare_context` (see the
+Workflows feature doc for each kind's params/output).
 `WorkflowEdge` carries an optional `condition` (an `otto_core::expr` expression
 over `{output, input, node, run}`; the edge is active only when truthy) and
 `WorkflowNode` an optional `retry` `{max_attempts(≤5), backoff_ms(≤60000), factor}`.
 
 **New node params (this wave).** Agent-backed steps (`agent_prompt`) accept
 `skill`/`skills` (string / string[]) — each named skill's body is inlined ahead of
-the prompt. `review_run` runs the multi-agent PR-review engine per step: `providers`
-(string[]), `lenses` (string[]; `skills` is an alias), `threshold` (0–100, default
-80), `require_pass` (bool — errors the step below threshold); its output adds
+the prompt — and `keep_session` (bool, default `false`: on success the step's own
+session is suspended (resumable providers) or killed, so a finished run holds no
+live PTYs; `true` leaves it running). `review_run` runs the multi-agent PR-review
+engine per step: `providers` (string[]), `lenses` (string[]; `skills` is an
+alias), `threshold` (0–100, default 80), `require_pass` (bool — errors the step
+below threshold), `mode` (`"fan_out"`|`"orchestrator"` — absent = follow the run
+override / the stored `ReviewConfig.mode` / `fan_out`; any other string is
+ignored; a run started with `RunWorkflowReq.review_mode` overrides it); its
+output adds
 `score`/`passed`/`blocking`/`advisory`/`findings`/`providers`/`lenses` (empty
 `providers`+`lenses` ⇒ the stored/default review config). `git_pr` accepts
 `open` (bool, default `false`) — `true` opens the PR on the remote (gate it on the
@@ -2080,6 +2105,8 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | GET /repos/{id}/review-config | ws viewer | — | RepoReviewConfigResp |
 | PUT /repos/{id}/review-config | ws editor | RepoReviewBinding | RepoReviewConfigResp |
 | DELETE /repos/{id}/review-config | ws editor | — | RepoReviewConfigResp (reverted to global) |
+
+**`ReviewConfig` `+mode?`** (`"fan_out"`|`"orchestrator"`; absent ⇒ fan-out): how the engine runs its lenses. `orchestrator` runs ONE reviewer session per provider that executes every lens as its own sub-agents (its agent rows read `<provider> · orchestrator (N lenses)`), then the same single summarizer; `fan_out` (the default) keeps one reviewer session per lens × provider. A `review_run` node's `params.mode` and a run's `RunWorkflowReq.review_mode` both override it.
 
 **Named presets + per-repo binding.** A `ReviewConfigPreset` is `{ id, name, config: ReviewConfig }` — a reusable full review configuration. A repo may bind one of them (`RepoReviewBinding { preset_id }`) or carry a fully custom inline config (`RepoReviewBinding { config }`; inline wins if both are set). Review runs resolve the effective config as **repo inline > repo preset > global `pr_review`**; a dangling `preset_id` (preset deleted) falls back to global rather than failing the run. `RepoReviewConfigResp` is `{ scope: "global"|"preset"|"custom", preset_id?, preset_name?, config }` where `config` is the EFFECTIVE post-resolution config (`preset_name` is null for a dangling reference). Bindings are stored in the settings table under `pr_review_repo:<repo_id>`; presets under `pr_review_presets`. A per-call `cfg_override` (workflow `review_run` steps) still wins over everything.
 
@@ -2595,8 +2622,10 @@ AWS / Kubernetes console tools that wrap `/aws/*` and `/k8s/*` — reads `aws_li
 `aws_ec2_list_instances`, `aws_athena_list_tables` / `aws_athena_get_query`, `aws_eks_list_clusters`,
 `k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text tail), `k8s_top`; and the
 three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action` (same set, `otto.`-prefixed,
-on the outward server with the writers in `DANGEROUS`). Tool calls are logged to `mcp_tool_calls`
-(migration 0060).
+on the outward server with the writers in `DANGEROUS`). The outward `otto.run_workflow` tool takes
+`workflow_id` plus the optional `input`, `start_node` and `review_mode` (`"fan_out"`|`"orchestrator"`,
+forwarded verbatim to `POST /workflows/{id}/run`, which validates it). Tool calls are logged to
+`mcp_tool_calls` (migration 0060).
 
 ## Must-have wave (Wave 4) — additional routes
 

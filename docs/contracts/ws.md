@@ -466,6 +466,12 @@ non-terminal so the view converges even with no WS connection.
 - `rev` — the run revision this event reflects (0 = unknown → refetch path).
   Clients drop events/snapshots whose rev is behind what they already show, and
   apply a node payload in place only when `rev` is exactly contiguous.
+- `node` — the changed node's full `NodeRunState`. It may carry `activity`
+  (`NodeActivity`: phase, pending task count, sub-agent rows), present only while
+  a running agent-backed step is working and cleared when it finishes. The 32 KiB
+  size rule above is unchanged: `logs` ≤ 200 lines and `activity.subagents` ≤ 40
+  (descriptions ≤ 80 chars) keep the payload bounded, so the `activity` addition
+  does not push normal steps onto the refetch path.
 - `nodes_done`/`nodes_total` — step progress for the "Running" sidebar, updated
   in place without a second GET (`nodes_total` 0 = unknown, keep last counts).
 - `waiting_approval` — true on the pause event; the approve/reject decision
@@ -476,7 +482,8 @@ non-terminal so the view converges even with no WS connection.
 - TypeScript type: the `OttoEvent` union in `ui/src/lib/api/types.ts` —
   `{ type: 'workflow_run_updated'; workspace_id: Id; run_id: Id; status:
   string; node_id?: Id | null; rev?: number; node?: NodeRunState | null;
-  nodes_done?: number; nodes_total?: number; waiting_approval?: boolean }`.
+  nodes_done?: number; nodes_total?: number; waiting_approval?: boolean }` —
+  `NodeRunState.activity?: NodeActivity` rides along inside `node`.
 
 ## Skill-eval completion (A11)
 
