@@ -44,13 +44,14 @@
   // Explicit row count so every tile fits the viewport (no clipped bottom row).
   const rows = $derived(Math.max(1, Math.ceil(ordered.length / cols)));
 
-  // ── Resizable columns / rows ─────────────────────────────────────────────
-  // The grid's tracks are `fr` weights the user can drag (a divider sits
-  // between every two columns and every two rows, spanning the whole grid), so
-  // a tile can be made wide or tall without leaving the tiled view. Weights are
-  // kept per grid SHAPE (`cols×rows`) and per workspace — a 2×2 arrangement
-  // remembers its own sizes when a third row appears and disappears.
-  type Tracks = { cols: number[]; rows: number[] };
+  // ── Resizable tiles ──────────────────────────────────────────────────────
+  // Every ROW of the grid is its own track list, so dragging the edge between
+  // two tiles moves ONLY those two (the tile above / below keeps its width),
+  // and the edge between two rows moves only those rows. Each tile also has a
+  // corner grip that drags its width and height at once, like a window.
+  // Weights are kept per grid SHAPE (`cols×rows`) and per workspace, so a 2×2
+  // arrangement remembers its sizes when a third row comes and goes.
+  type Tracks = { rows: number[]; cols: number[][] };
   const MIN_TRACK_PX = 120;
   const tracksKey = (): string => winKey(`otto_tile_tracks_${ws.currentId ?? 'scratch'}`);
   function loadTracks(): Record<string, Tracks> {
@@ -67,17 +68,21 @@
     tracks = loadTracks();
   });
   const shapeKey = $derived(`${cols}x${rows}`);
+  /** Tiles grouped into rows of `cols` (the last row may be shorter). */
+  const tileRows = $derived.by(() => {
+    const out: (typeof ordered)[] = [];
+    for (let r = 0; r < rows; r++) out.push(ordered.slice(r * cols, (r + 1) * cols));
+    return out;
+  });
   /** Positive finite weights of exactly `n` entries, else all-equal. */
   function normalize(fr: number[] | undefined, n: number): number[] {
-    if (!fr || fr.length !== n || fr.some((f) => !Number.isFinite(f) || f <= 0)) return Array(n).fill(1);
+    if (!Array.isArray(fr) || fr.length !== n || fr.some((f) => !Number.isFinite(f) || f <= 0)) return Array(n).fill(1);
     return fr;
   }
-  const colFr = $derived(normalize(tracks[shapeKey]?.cols, cols));
   const rowFr = $derived(normalize(tracks[shapeKey]?.rows, rows));
-  const gridStyle = $derived(
-    `grid-template-columns: ${colFr.map((f) => `minmax(0, ${f}fr)`).join(' 8px ')};` +
-      ` grid-template-rows: ${rowFr.map((f) => `minmax(220px, ${f}fr)`).join(' 8px ')};`,
-  );
+  const colFr = $derived(tileRows.map((tiles, r) => normalize(tracks[shapeKey]?.cols?.[r], tiles.length)));
+  const gridStyle = $derived(`grid-template-rows: ${rowFr.map((f) => `minmax(220px, ${f}fr)`).join(' 8px ')};`);
+  const rowStyle = (r: number): string => `grid-template-columns: ${colFr[r].map((f) => `minmax(0, ${f}fr)`).join(' 8px ')};`;
   function saveTracks(): void {
     try {
       localStorage.setItem(tracksKey(), JSON.stringify(tracks));
@@ -85,38 +90,74 @@
       /* private mode */
     }
   }
+  function currentTracks(): Tracks {
+    return { rows: [...rowFr], cols: colFr.map((c) => [...c]) };
+  }
   let resizing = $state(false);
-  /** Drag the divider between track `k-1` and `k` on `axis`. The cursor is
-   *  measured against the two neighbouring tiles' rects, so the weights follow
-   *  the pointer exactly and neither side can drop below MIN_TRACK_PX. */
-  function startTrackDrag(e: PointerEvent, axis: 'cols' | 'rows', k: number): void {
+  /** One pair of neighbouring tracks measured for a drag: the pointer offset
+   *  inside `span` (the two neighbours together) becomes their weight split. */
+  interface PairDrag {
+    start: number;
+    span: number;
+    total: number;
+    apply: (t: Tracks, first: number) => void;
+  }
+  function colPair(r: number, k: number): PairDrag | null {
     const grid = gridEl;
-    if (!grid || e.button !== 0) return;
+    if (!grid || k < 1 || k >= (colFr[r]?.length ?? 0)) return null;
+    const a = grid.querySelector<HTMLElement>(`.tile-slot[data-row="${r}"][data-col="${k - 1}"]`);
+    const b = grid.querySelector<HTMLElement>(`.tile-slot[data-row="${r}"][data-col="${k}"]`);
+    if (!a || !b) return null;
+    const ra = a.getBoundingClientRect();
+    const rb = b.getBoundingClientRect();
+    const total = colFr[r][k - 1] + colFr[r][k];
+    return {
+      start: ra.left,
+      span: rb.right - ra.left,
+      total,
+      apply: (t, first) => {
+        t.cols[r][k - 1] = first;
+        t.cols[r][k] = total - first;
+      },
+    };
+  }
+  function rowPair(k: number): PairDrag | null {
+    const grid = gridEl;
+    if (!grid || k < 1 || k >= rowFr.length) return null;
+    const a = grid.querySelector<HTMLElement>(`.trow[data-row="${k - 1}"]`);
+    const b = grid.querySelector<HTMLElement>(`.trow[data-row="${k}"]`);
+    if (!a || !b) return null;
+    const ra = a.getBoundingClientRect();
+    const rb = b.getBoundingClientRect();
+    const total = rowFr[k - 1] + rowFr[k];
+    return {
+      start: ra.top,
+      span: rb.bottom - ra.top,
+      total,
+      apply: (t, first) => {
+        t.rows[k - 1] = first;
+        t.rows[k] = total - first;
+      },
+    };
+  }
+  function splitOf(p: PairDrag, pos: number): number {
+    const lo = Math.min(MIN_TRACK_PX, p.span / 2);
+    const clamped = Math.min(p.span - lo, Math.max(lo, pos));
+    return (clamped / p.span) * p.total;
+  }
+  /** Drag `col` (the divider after column k-1 in row r) and/or `row` (the
+   *  divider after row k-1) — both at once from a tile's corner grip. */
+  function startDrag(e: PointerEvent, col: PairDrag | null, row: PairDrag | null): void {
+    if (e.button !== 0 || (!col && !row)) return;
     e.preventDefault();
-    const attr = axis === 'cols' ? 'data-col' : 'data-row';
-    const slots = [...grid.querySelectorAll<HTMLElement>('.tile-slot')];
-    const before = slots.find((el) => el.getAttribute(attr) === String(k - 1));
-    const after = slots.find((el) => el.getAttribute(attr) === String(k));
-    if (!before || !after) return;
-    const a = before.getBoundingClientRect();
-    const b = after.getBoundingClientRect();
-    const start = axis === 'cols' ? a.left : a.top;
-    const end = axis === 'cols' ? b.right : b.bottom;
-    const span = end - start;
-    if (span <= 0) return;
-    const base = axis === 'cols' ? [...colFr] : [...rowFr];
-    const total = base[k - 1] + base[k];
+    e.stopPropagation();
     const shape = shapeKey;
     resizing = true;
     const move = (ev: PointerEvent): void => {
-      const pos = axis === 'cols' ? ev.clientX - start : ev.clientY - start;
-      const lo = Math.min(MIN_TRACK_PX, span / 2);
-      const clamped = Math.min(span - lo, Math.max(lo, pos));
-      const next = [...base];
-      next[k - 1] = (clamped / span) * total;
-      next[k] = total - next[k - 1];
-      const cur = tracks[shape] ?? { cols: [...colFr], rows: [...rowFr] };
-      tracks = { ...tracks, [shape]: { ...cur, [axis]: next } };
+      const t = tracks[shape] ? { rows: [...tracks[shape].rows], cols: tracks[shape].cols.map((c) => [...c]) } : currentTracks();
+      if (col) col.apply(t, splitOf(col, ev.clientX - col.start));
+      if (row) row.apply(t, splitOf(row, ev.clientY - row.start));
+      tracks = { ...tracks, [shape]: t };
     };
     const up = (): void => {
       window.removeEventListener('pointermove', move);
@@ -129,27 +170,37 @@
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', up);
   }
-  /** Double-click a divider: every column and row back to equal shares. */
+  /** Double-click any divider or grip: every tile back to equal shares. */
   function resetTracks(): void {
     const { [shapeKey]: _gone, ...rest } = tracks;
     tracks = rest;
     saveTracks();
   }
   /** Keyboard resize on a focused divider: arrows nudge 5 % of the pair. */
-  function trackKeydown(e: KeyboardEvent, axis: 'cols' | 'rows', k: number): void {
-    const dec = axis === 'cols' ? e.key === 'ArrowLeft' : e.key === 'ArrowUp';
-    const inc = axis === 'cols' ? e.key === 'ArrowRight' : e.key === 'ArrowDown';
+  function trackKeydown(e: KeyboardEvent, col: PairDrag | null, row: PairDrag | null): void {
+    const p = col ?? row;
+    if (!p) return;
+    const dec = col ? e.key === 'ArrowLeft' : e.key === 'ArrowUp';
+    const inc = col ? e.key === 'ArrowRight' : e.key === 'ArrowDown';
     if (!dec && !inc) return;
     e.preventDefault();
-    const base = axis === 'cols' ? [...colFr] : [...rowFr];
-    const total = base[k - 1] + base[k];
-    const step = total * 0.05 * (inc ? 1 : -1);
-    const next = [...base];
-    next[k - 1] = Math.min(total * 0.9, Math.max(total * 0.1, base[k - 1] + step));
-    next[k] = total - next[k - 1];
-    const cur = tracks[shapeKey] ?? { cols: [...colFr], rows: [...rowFr] };
-    tracks = { ...tracks, [shapeKey]: { ...cur, [axis]: next } };
+    const t = tracks[shapeKey] ? { rows: [...tracks[shapeKey].rows], cols: tracks[shapeKey].cols.map((c) => [...c]) } : currentTracks();
+    // Current first-track share, nudged and clamped to 10..90 % of the pair.
+    const first = Math.min(p.total * 0.9, Math.max(p.total * 0.1, firstOf(t, col, row) + p.total * 0.05 * (inc ? 1 : -1)));
+    p.apply(t, first);
+    tracks = { ...tracks, [shapeKey]: t };
     saveTracks();
+  }
+  function firstOf(t: Tracks, col: PairDrag | null, row: PairDrag | null): number {
+    // Recover the pair's current first weight by applying a probe: apply(first)
+    // writes first + (total - first), so read it back from a scratch copy.
+    const probe: Tracks = { rows: [...t.rows], cols: t.cols.map((c) => [...c]) };
+    const p = (col ?? row)!;
+    p.apply(probe, -1);
+    // The slot written with -1 is the first track; its current value lives in t.
+    for (let r = 0; r < probe.cols.length; r++) for (let k = 0; k < probe.cols[r].length; k++) if (probe.cols[r][k] === -1) return t.cols[r][k];
+    for (let k = 0; k < probe.rows.length; k++) if (probe.rows[k] === -1) return t.rows[k];
+    return p.total / 2;
   }
 
   // When a tile is maximized, show only it (zoomed in).
@@ -362,50 +413,52 @@
     ><Icon name="split" size={11} /> Free layout</button>
   {/if}
   <div class="tiled" class:resizing bind:this={gridEl} style={gridStyle}>
-    <!-- Dividers: one per gap, spanning the whole grid, so dragging between
-         any two tiles resizes the whole column / row (a 20px grab zone reaches
-         into both neighbours' edges; the drawn line stays 2px). -->
-    {#each Array.from({ length: cols - 1 }, (_, i) => i + 1) as k (`c${k}`)}
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-      <div
-        class="tgut col"
-        role="separator"
-        tabindex="0"
-        aria-orientation="vertical"
-        aria-label="Resize columns (drag, arrow keys; double-click to equalise)"
-        title="Drag to resize · double-click to equalise"
-        style="grid-column: {2 * k}; grid-row: 1 / -1;"
-        data-testid="tile-divider-col"
-        onpointerdown={(e) => startTrackDrag(e, 'cols', k)}
-        ondblclick={resetTracks}
-        onkeydown={(e) => trackKeydown(e, 'cols', k)}
-      ></div>
-    {/each}
-    {#each Array.from({ length: rows - 1 }, (_, i) => i + 1) as k (`r${k}`)}
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-      <div
-        class="tgut row"
-        role="separator"
-        tabindex="0"
-        aria-orientation="horizontal"
-        aria-label="Resize rows (drag, arrow keys; double-click to equalise)"
-        title="Drag to resize · double-click to equalise"
-        style="grid-row: {2 * k}; grid-column: 1 / -1;"
-        data-testid="tile-divider-row"
-        onpointerdown={(e) => startTrackDrag(e, 'rows', k)}
-        ondblclick={resetTracks}
-        onkeydown={(e) => trackKeydown(e, 'rows', k)}
-      ></div>
-    {/each}
-    {#each ordered as s, i (s.id)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="tile-slot"
-        class:drag-over={tileDragOverId === s.id}
-        data-tile-id={s.id}
-        data-col={i % cols}
-        data-row={Math.floor(i / cols)}
-        style="grid-column: {2 * (i % cols) + 1}; grid-row: {2 * Math.floor(i / cols) + 1};"
+    {#each tileRows as tiles, r (r)}
+      {#if r > 0}
+        <!-- Row divider: only these two rows move. 20px grab zone (6px into
+             each neighbour), 2px line at rest. -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <div
+          class="tgut row"
+          role="separator"
+          tabindex="0"
+          aria-orientation="horizontal"
+          aria-label="Resize rows (drag, arrow keys; double-click to equalise)"
+          title="Drag to resize · double-click to equalise"
+          style="grid-row: {2 * r};"
+          data-testid="tile-divider-row"
+          onpointerdown={(e) => startDrag(e, null, rowPair(r))}
+          ondblclick={resetTracks}
+          onkeydown={(e) => trackKeydown(e, null, rowPair(r))}
+        ></div>
+      {/if}
+      <div class="trow" data-row={r} style="grid-row: {2 * r + 1}; {rowStyle(r)}">
+        {#each tiles as s, c (s.id)}
+          {#if c > 0}
+            <!-- Column divider INSIDE the row: only these two tiles move. -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+            <div
+              class="tgut col"
+              role="separator"
+              tabindex="0"
+              aria-orientation="vertical"
+              aria-label="Resize tiles (drag, arrow keys; double-click to equalise)"
+              title="Drag to resize · double-click to equalise"
+              style="grid-column: {2 * c};"
+              data-testid="tile-divider-col"
+              onpointerdown={(e) => startDrag(e, colPair(r, c), null)}
+              ondblclick={resetTracks}
+              onkeydown={(e) => trackKeydown(e, colPair(r, c), null)}
+            ></div>
+          {/if}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="tile-slot"
+            class:drag-over={tileDragOverId === s.id}
+            data-tile-id={s.id}
+            data-col={c}
+            data-row={r}
+            style="grid-column: {2 * c + 1};"
         use:observeTile={s.id}
         ondragover={(e) => onTileDragOver(e, s.id)}
         ondragleave={() => onTileDragLeave(s.id)}
@@ -459,6 +512,22 @@
             </div>
           </button>
         {/if}
+            <!-- Corner grip: drags this tile's width (vs the tile to its right)
+                 and height (vs the row below) in one gesture, like a window. -->
+            {#if c < tiles.length - 1 || r < tileRows.length - 1}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="tile-corner"
+                class:w={c < tiles.length - 1}
+                class:h={r < tileRows.length - 1}
+                title="Drag to resize this tile · double-click to equalise"
+                data-testid="tile-corner"
+                onpointerdown={(e) => startDrag(e, c < tiles.length - 1 ? colPair(r, c + 1) : null, r < tileRows.length - 1 ? rowPair(r + 1) : null)}
+                ondblclick={resetTracks}
+              ></div>
+            {/if}
+          </div>
+        {/each}
       </div>
     {/each}
   </div>
@@ -481,30 +550,39 @@
   }
   .tiled {
     display: grid;
-    /* No `gap`: the 8px dividers are their own tracks (see gridStyle). */
+    /* Rows only; each row lays out its own tiles (see .trow). No `gap`: the
+       8px dividers are their own tracks. */
+    grid-template-columns: minmax(0, 1fr);
     height: 100%;
     padding: 8px;
     overflow: auto;
     grid-auto-rows: minmax(220px, 1fr);
   }
+  .trow {
+    display: grid;
+    min-width: 0;
+    min-height: 0;
+  }
+  .trow > :global(*) {
+    min-width: 0;
+    min-height: 0;
+  }
   .tiled.resizing {
     user-select: none;
   }
-  .tiled.resizing > :global(*) {
+  .tiled.resizing :global(.pane),
+  .tiled.resizing :global(.tile-placeholder) {
     pointer-events: none;
   }
-  /* Column / row dividers: an 8px track with a 2px line drawn at rest so the
-     handle is discoverable, brighter on hover / focus; the hit area (::before)
-     reaches 6px into both neighbouring tiles like a window frame. */
+  /* Dividers: an 8px track with a 2px line drawn at rest so the handle is
+     discoverable, brighter on hover / focus; the hit area (::before) reaches
+     6px into both neighbouring tiles like a window frame. */
   .tgut {
     position: relative;
     /* Above the panes' own stacking contexts (header chrome, drop veils). */
     z-index: 20;
     min-width: 0;
     min-height: 0;
-  }
-  .tiled.resizing > .tgut {
-    pointer-events: auto;
   }
   .tgut.col {
     cursor: col-resize;
@@ -545,6 +623,40 @@
   .tgut:focus-visible {
     outline: none;
   }
+  /* Corner grip: a window-style resize handle at the tile's bottom-right. */
+  .tile-corner {
+    position: absolute;
+    inset-inline-end: 0;
+    bottom: 0;
+    width: 18px;
+    height: 18px;
+    z-index: 21;
+    cursor: nwse-resize;
+    touch-action: none;
+  }
+  .tile-corner.w:not(.h) {
+    cursor: ew-resize;
+  }
+  .tile-corner.h:not(.w) {
+    cursor: ns-resize;
+  }
+  .tile-corner::after {
+    content: '';
+    position: absolute;
+    inset-inline-end: 4px;
+    bottom: 4px;
+    width: 9px;
+    height: 9px;
+    border-inline-end: 2px solid var(--text-dim);
+    border-bottom: 2px solid var(--text-dim);
+    border-end-end-radius: 2px;
+    opacity: 0.45;
+  }
+  .tile-slot:hover .tile-corner::after,
+  .tile-corner:hover::after {
+    opacity: 1;
+    border-color: var(--accent);
+  }
   .tiled.single {
     display: block;
     overflow: hidden;
@@ -555,6 +667,7 @@
   /* Each grid cell wraps either a live SessionView or a placeholder; it is the
      element the IntersectionObserver watches. */
   .tile-slot {
+    position: relative;
     min-width: 0;
     min-height: 0;
     display: flex;
