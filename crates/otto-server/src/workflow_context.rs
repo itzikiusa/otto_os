@@ -400,7 +400,8 @@ pub(crate) fn agent_preamble(
         "- Prior step summaries: {prior}\n\
          Read the files you need before starting.\n\n\
          [your handoff — required]\n\
-         When finished, write a complete summary of what you did/found/changed (files touched, decisions, anything the next step needs) to: {dir}/{own_md}\n\n"
+         When finished, write a complete summary of what you did/found/changed (files touched, decisions, anything the next step needs) to: {dir}/{own_md}\n\
+         (the engine treats this file as your done signal — write it once, at the very end, after every sub-agent or background task you started has reported back)\n\n"
     ));
     md
 }
