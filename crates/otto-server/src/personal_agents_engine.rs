@@ -506,12 +506,17 @@ async fn run_one_session(
     // `personal_agent` in meta is the session→agent identity the room MCP tools
     // resolve; `browser` makes the manager reconcile the otto-browser MCP into
     // this cwd; `model` is the per-session model pin (same plumbing as
-    // scheduled tasks).
+    // scheduled tasks). `work.origin` marks the run as ENGINE-owned: `source:
+    // "personal_agent"` is deliberately outside `BACKGROUND_SESSION_SOURCES`
+    // (these sessions stay listed in the Agents tab), so without the explicit
+    // origin the idle sweep would read them as the user's own and never
+    // reclaim them (`otto_sessions::manager::is_user_started`).
     let mut meta = json!({
         "source": "personal_agent",
         "personal_agent": agent.id,
         "run_id": run_id,
         "browser": agent.browser,
+        "work": { "origin": "personal_agent" },
     });
     if !agent.model.trim().is_empty() {
         meta["model"] = json!(agent.model.trim());
