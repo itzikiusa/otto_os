@@ -439,6 +439,7 @@
   $effect(() => {
     const unreg = registry.register('core', [
       { id: 'core.new-session', title: 'New Session', group: 'Sessions', shortcut: '⌘T', keywords: 'spawn agent terminal claude codex shell', run: () => (ui.newSessionOpen = true) },
+      { id: 'core.new-session-scratch', title: 'New Session (no workspace)', group: 'Sessions', keywords: 'scratch home adhoc workspace-less', run: () => { ui.newSessionScratch = true; ui.newSessionOpen = true; } },
       { id: 'core.ask-otto', title: 'Ask Otto (plain English)', group: 'Sessions', shortcut: '⌘I', keywords: 'orchestrate natural language command free text', run: () => ui.openPalette('english') },
       { id: 'core.broadcast', title: 'Broadcast message to sessions', group: 'Sessions', shortcut: '⌘⇧B', keywords: 'send message every agent tell all selected', run: () => ui.openBroadcast() },
       { id: 'core.close-tab', title: 'Close Tab', group: 'Sessions', shortcut: '⌘W', run: () => ws.closeActiveTab() },
@@ -869,7 +870,13 @@
 {/if}
 
 {#if ui.newSessionOpen}
-  <NewSession onclose={() => (ui.newSessionOpen = false)} />
+  <NewSession
+    initialScratch={ui.newSessionScratch}
+    onclose={() => {
+      ui.newSessionOpen = false;
+      ui.newSessionScratch = false;
+    }}
+  />
 {/if}
 
 {#if ui.newWorkspaceOpen}

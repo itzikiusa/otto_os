@@ -603,8 +603,14 @@ export async function seedDockerConnection(
     return null;
   }
   // Confirm the engine is actually reachable before any spec depends on it.
+  // Bounded: with the Docker stack down some drivers (Mongo's server selection)
+  // sit on their own retry budget for ~30 s EACH, which blows the caller's
+  // `beforeAll` budget and turns "skip, the engine is down" into a hook timeout.
   try {
-    const r = await ctx.post(`${base}/api/v1/connections/${connId}/test`, { data: {} });
+    const r = await ctx.post(`${base}/api/v1/connections/${connId}/test`, {
+      data: {},
+      timeout: 20_000,
+    });
     if (!r.ok()) return null;
     const body = (await r.json()) as { ok?: boolean };
     if (body.ok === false) return null;

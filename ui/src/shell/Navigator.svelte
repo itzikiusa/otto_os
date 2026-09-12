@@ -6,13 +6,15 @@
   import ProviderIcon, { hasProviderIcon } from '../lib/components/ProviderIcon.svelte';
   import { router } from '../lib/router.svelte';
   import { ui } from '../lib/stores/ui.svelte';
-  import { ws } from '../lib/stores/workspace.svelte';
+  import { ws, SCRATCH_WORKSPACE_ID } from '../lib/stores/workspace.svelte';
   import { auth } from '../lib/stores/auth.svelte';
   import { plugins } from '../lib/stores/plugins.svelte';
   import { activity } from '../lib/stores/activity.svelte';
   import { proof } from '../lib/stores/proof.svelte';
   import ProofStatusChip from '../lib/components/ProofStatusChip.svelte';
   import { ctxMenu } from '../lib/contextmenu.svelte';
+  import { sessionOrder, applyOrder } from '../lib/stores/sessionOrder.svelte';
+  import { viewport } from '../lib/stores/viewport.svelte';
   import { confirmer } from '../lib/confirm.svelte';
   import { toasts } from '../lib/toast.svelte';
   import type { WorkspaceWithRole } from '../lib/api/types';
@@ -70,7 +72,7 @@
     agentSel = next;
   }
   function agentSelectAll(): void {
-    agentSel = agentSelIds.length === fAgents.length ? new Set() : new Set(fAgents.map((s) => s.id));
+    agentSel = agentSelIds.length === selectable.length ? new Set() : new Set(selectable.map((s) => s.id));
   }
   function setAgentSelMode(on: boolean): void {
     agentSelMode = on;
@@ -132,8 +134,58 @@
     if (ws.needsYouFilter && ws.needsYou[s.id] !== true) return false;
     return q === '' || s.title.toLowerCase().includes(q);
   };
-  const fAgents = $derived(ws.plainAgentSessions.filter(matches));
-  const agentSelIds = $derived(fAgents.filter((s) => agentSel.has(s.id)).map((s) => s.id));
+  // ── Manual sidebar order (C3b) ───────────────────────────────────────────
+  // "Recent" is the daemon's order, rendered unchanged. "Manual" applies the
+  // persisted id list, with sessions it has never seen on TOP by recency.
+  $effect(() => {
+    sessionOrder.load(ws.currentId ?? SCRATCH_WORKSPACE_ID);
+  });
+  const orderedAgents = $derived(
+    sessionOrder.mode === 'manual' ? applyOrder(ws.plainAgentSessions, sessionOrder.order) : ws.plainAgentSessions,
+  );
+  const fAgents = $derived(orderedAgents.filter(matches));
+  // Rows drag only in the flat Agents list: never while searching, selecting,
+  // needs-you filtering, or on phones (HTML5 DnD is inert on iOS Safari).
+  const rowsDraggable = $derived(q === '' && !agentSelMode && !ws.needsYouFilter && !viewport.isPhone);
+  let rowDragId = $state<string | null>(null);
+  let rowDragOverId = $state<string | null>(null);
+  function onRowDragStart(e: DragEvent, id: string): void {
+    rowDragId = id;
+    e.dataTransfer?.setData('text/plain', id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+  function onRowDragOver(e: DragEvent, id: string): void {
+    if (!rowDragId || id === rowDragId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    rowDragOverId = id;
+  }
+  function onRowDrop(e: DragEvent, id: string): void {
+    e.preventDefault();
+    if (rowDragId && rowDragId !== id) sessionOrder.dragTo(fAgents.map((x) => x.id), rowDragId, id);
+    rowDragId = null;
+    rowDragOverId = null;
+  }
+  function onRowDragEnd(): void {
+    rowDragId = null;
+    rowDragOverId = null;
+  }
+  function openSortMenu(e: MouseEvent | KeyboardEvent): void {
+    ctxMenu.show(e, [
+      { label: `${sessionOrder.mode === 'recent' ? '✓ ' : ''}Sort: Recent`, action: () => sessionOrder.setMode('recent') },
+      {
+        label: `${sessionOrder.mode === 'manual' ? '✓ ' : ''}Sort: Manual (drag rows)`,
+        action: () => sessionOrder.setMode('manual', fAgents.map((x) => x.id)),
+      },
+      { separator: true },
+      { label: 'Reset to recent', icon: 'refresh', disabled: sessionOrder.mode === 'recent', action: () => sessionOrder.reset() },
+    ]);
+  }
+  // Workspace-less sessions (the "No workspace" group below the flat list).
+  const fScratch = $derived(ws.scratchSessions.filter(matches));
+  // Select mode covers the flat list AND the "No workspace" group.
+  const selectable = $derived([...fAgents, ...fScratch]);
+  const agentSelIds = $derived(selectable.filter((s) => agentSel.has(s.id)).map((s) => s.id));
   const fTelegram = $derived(ws.telegramSessions.filter(matches));
   const fSlack = $derived(ws.slackSessions.filter(matches));
   // Capped views (full list when searching or "show all" toggled).
@@ -239,9 +291,16 @@
   }
 
   function startRename(id: string, current: string): void {
-    if (ws.myRole === 'viewer') return;
+    const s = ws.sessions.find((x) => x.id === id);
+    if (!s || !ws.canEditSession(s)) return;
     renamingId = id;
     draft = current;
+  }
+
+  /** Open the New Session sheet pre-set to "No workspace". */
+  function newScratchSession(): void {
+    ui.newSessionScratch = true;
+    ui.newSessionOpen = true;
   }
 
   async function commitRename(): Promise<void> {
@@ -437,7 +496,7 @@
             {/if}
             {#each ws.archivedSessions as s (s.id)}
               <div class="nested-row" class:selected={archSel.has(s.id)}>
-                {#if ws.myRole !== 'viewer'}
+                {#if ws.canEditSession(s)}
                   <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
                 {/if}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -445,12 +504,13 @@
                   class="nav-item nested-item archived"
                   title={s.title}
                   oncontextmenu={(e) => ctxMenu.show(e, [
-                    ...(ws.myRole !== 'viewer' ? [
+                    ...(ws.canEditSession(s) ? [
                       { label: 'Unarchive', icon: 'refresh', action: () => ws.unarchiveSession(s.id) },
                       { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
                     ] : []),
                     { separator: true },
                     { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+                    { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
                   ])}
                 >
                   <StatusDot status="exited" />
@@ -461,7 +521,7 @@
                     <span class="provider">{s.provider}</span>
                   {/if}
                 </div>
-                {#if ws.myRole !== 'viewer'}
+                {#if ws.canEditSession(s)}
                   <button class="row-action" title="Restore" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
                     <Icon name="refresh" size={11} />
                   </button>
@@ -628,6 +688,7 @@
       onclick={() => router.go('agents')}
       oncontextmenu={(e) => ctxMenu.show(e, [
         { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+        { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         { label: 'Add workspace…', icon: 'folder', action: () => (ui.newWorkspaceOpen = true) },
       ])}
     >
@@ -637,7 +698,7 @@
         <span class="count-chip working">{ws.workingCount}</span>
       {/if}
     </button>
-    {#if ws.myRole !== 'viewer' && fAgents.length > 0}
+    {#if selectable.some((s) => ws.canEditSession(s))}
       <button
         class="icon-btn twisty sel-toggle"
         class:on={agentSelMode}
@@ -648,6 +709,19 @@
         data-testid="agents-select-toggle"
       >
         <Icon name={agentSelMode ? 'check' : 'square'} size={12} />
+      </button>
+    {/if}
+    {#if fAgents.length > 1}
+      <button
+        class="icon-btn twisty sort-toggle"
+        class:on={sessionOrder.mode === 'manual'}
+        onclick={openSortMenu}
+        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openSortMenu(e)}
+        title={sessionOrder.mode === 'manual' ? 'Manual order — click to change' : 'Sort sessions'}
+        aria-label="Sort sessions"
+        data-testid="agents-sort-toggle"
+      >
+        <Icon name={sessionOrder.mode === 'manual' ? 'grip' : 'arrowDown'} size={12} />
       </button>
     {/if}
     <button
@@ -672,11 +746,11 @@
   </div>
 
   {#if q ? fAgents.length > 0 : agentsOpen}
-    <div class="nested">
+    <div class="nested" data-testid="agents-list">
       {#if agentSelMode}
         <div class="arch-tools" data-testid="agents-select-tools">
           <label class="arch-all" title="Select all sessions">
-            <input type="checkbox" aria-label="Select all sessions" checked={agentSelIds.length > 0 && agentSelIds.length === fAgents.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < fAgents.length} onchange={agentSelectAll} />
+            <input type="checkbox" aria-label="Select all sessions" checked={agentSelIds.length > 0 && agentSelIds.length === selectable.length} indeterminate={agentSelIds.length > 0 && agentSelIds.length < selectable.length} onchange={agentSelectAll} />
             <span>{agentSelIds.length > 0 ? `${agentSelIds.length} selected` : 'Select all'}</span>
           </label>
           <button class="row-action arch-del-sel" disabled={agentSelIds.length === 0} title="Archive selected sessions" aria-label="Archive selected sessions" data-testid="agents-archive-selected" onclick={() => void archiveSelectedAgents()}>
@@ -688,9 +762,34 @@
         </div>
       {/if}
       {#each fAgents as s (s.id)}
-        {@render sessionRow(s)}
+        {@render sessionRow(s, undefined, true)}
       {:else}
         <div class="nested-empty">No sessions — ⌘T to start one</div>
+      {/each}
+    </div>
+  {/if}
+
+  <!-- Workspace-less sessions (the daemon's hidden scratch workspace): one
+       group in every workspace and with none. Plain `sessionRow`s — they are
+       already in `ws.sessions`, so open / rename / archive work as above. -->
+  {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="ws-group-label"
+      title="Sessions not tied to any workspace"
+      data-testid="scratch-group"
+      oncontextmenu={(e) => ctxMenu.show(e, [
+        { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
+      ])}
+    >
+      <Icon name="home" size={11} />
+      <span class="ellipsis">No workspace</span>
+    </div>
+    <div class="nested">
+      {#each fScratch as s (s.id)}
+        {@render sessionRow(s)}
+      {:else}
+        <div class="nested-empty">No sessions — ⌘T, then “No workspace”</div>
       {/each}
     </div>
   {/if}
@@ -778,13 +877,26 @@
   {/if}
 {/snippet}
 
-{#snippet sessionRow(s: Session, otherWs?: string)}
+{#snippet sessionRow(s: Session, otherWs?: string, reorderable = false)}
   {@const status = ws.statusMap[s.id] ?? s.status}
   {@const resumable = isResumable(s, status)}
   {@const sum = activity.summary(s.id)}
   {@const proofRow = proof.summaryFor('session', s.id)}
   {@const needsYou = ws.needsYou[s.id] === true}
-  <div class="nested-row" class:needs-you={needsYou} class:selected={agentSelMode && agentSel.has(s.id)}>
+  {@const dnd = rowsDraggable && reorderable}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="nested-row"
+    class:needs-you={needsYou}
+    class:selected={agentSelMode && agentSel.has(s.id)}
+    class:drag-over={rowDragOverId === s.id}
+    draggable={dnd}
+    ondragstart={dnd ? (e) => onRowDragStart(e, s.id) : undefined}
+    ondragover={dnd ? (e) => onRowDragOver(e, s.id) : undefined}
+    ondragleave={() => { if (rowDragOverId === s.id) rowDragOverId = null; }}
+    ondrop={dnd ? (e) => onRowDrop(e, s.id) : undefined}
+    ondragend={onRowDragEnd}
+  >
     {#if agentSelMode && !otherWs}
       <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
     {/if}
@@ -809,8 +921,11 @@
         ondblclick={() => startRename(s.id, s.title)}
         oncontextmenu={(e) => ctxMenu.show(e, [
           { label: 'Rename', icon: 'edit', action: () => startRename(s.id, s.title) },
+          ...(reorderable && fAgents.length > 1
+            ? [{ label: 'Move to top', icon: 'arrowUp', action: () => { const ids = fAgents.map((x) => x.id); sessionOrder.dragTo(ids, s.id, ids[0]); } }]
+            : []),
           { separator: true },
-          ...(ws.myRole !== 'viewer' ? [
+          ...(ws.canEditSession(s) ? [
             // In-progress agent only: respawn a stuck PTY (provider resume when
             // possible). Idle/exited/reconnectable sessions have their own paths.
             ...(s.kind === 'agent' && (status === 'running' || status === 'working')
@@ -821,6 +936,7 @@
           ] : []),
           { separator: true },
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+          { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         ])}
         title={resumable ? `${s.title} — ${SUSPENDED_TIP}` : `${s.title} — double-click to rename`}
       >
@@ -857,7 +973,7 @@
           <span class="provider">{s.provider}</span>
         {/if}
       </button>
-      {#if ws.myRole !== 'viewer'}
+      {#if ws.canEditSession(s)}
         <button
           class="row-action"
           title="Close session (archive or delete)"
@@ -872,6 +988,12 @@
 {/snippet}
 
 <style>
+  .nested-row.drag-over {
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+  .nested-row[draggable='true'] .nested-item {
+    cursor: grab;
+  }
   .navigator {
     /* width is set inline from ui.railWidth (drag-resizable) */
     height: 100%;

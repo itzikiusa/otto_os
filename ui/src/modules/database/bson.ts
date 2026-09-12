@@ -1,6 +1,7 @@
 // Display helpers for MongoDB result values. The Mongo driver returns typed
 // values whose plain JSON form is ambiguous as MongoDB Extended JSON sentinels —
-// `{"$oid": …}` (ObjectId), `{"$date": …}` (Date), `{"$numberDecimal": …}` — so
+// `{"$oid": …}` (ObjectId), `{"$date": …}` (Date), `{"$numberDecimal": …}`,
+// `{"$numberLong": …}`, `{"$uuid": …}`, `{"$binary": …}`, `{"$timestamp": …}` — so
 // the grid/JSON view can SHOW the real type (`ObjectId("…")` / `ISODate("…")`),
 // which both tells the user what to query and round-trips: a "query by value" on
 // such a cell re-emits the sentinel, which the runner's parser decodes back to
@@ -8,7 +9,8 @@
 
 /**
  * If `v` is a recognised BSON sentinel, return its mongosh-style display string
- * (`ObjectId("…")`, `ISODate("…")`, or the decimal text); otherwise `null`.
+ * (`ObjectId("…")`, `ISODate("…")`, `NumberLong("…")`, `UUID("…")`, `BinData(…)`,
+ * `Timestamp(…)`, or the decimal text); otherwise `null`.
  */
 export function bsonScalar(v: unknown): string | null {
   if (v === null || typeof v !== 'object' || Array.isArray(v)) return null;
@@ -29,6 +31,26 @@ export function bsonScalar(v: unknown): string | null {
     return `ISODate("${iso}")`;
   }
   if (k === '$numberDecimal' && typeof o.$numberDecimal === 'string') return o.$numberDecimal;
+  // The remaining sentinels the results path emits (see the driver's
+  // `bson_to_json_typed`): a Long past 2^53, UUIDs, raw binary and the internal
+  // Timestamp — shown with their mongosh constructors so the type is visible
+  // and the text pastes back into a query.
+  if (k === '$numberLong' && (typeof o.$numberLong === 'string' || typeof o.$numberLong === 'number')) {
+    return `NumberLong("${o.$numberLong}")`;
+  }
+  if (k === '$uuid' && typeof o.$uuid === 'string') return `UUID("${o.$uuid}")`;
+  if (k === '$binary' && o.$binary && typeof o.$binary === 'object') {
+    const b = o.$binary as Record<string, unknown>;
+    if (typeof b.base64 === 'string') {
+      // The wire carries the subtype as two hex digits; mongosh takes an int.
+      const sub = typeof b.subType === 'string' ? parseInt(b.subType, 16) : Number(b.subType ?? 0);
+      return `BinData(${Number.isFinite(sub) ? sub : 0}, "${b.base64}")`;
+    }
+  }
+  if (k === '$timestamp' && o.$timestamp && typeof o.$timestamp === 'object') {
+    const t = o.$timestamp as Record<string, unknown>;
+    if (typeof t.t === 'number' && typeof t.i === 'number') return `Timestamp(${t.t}, ${t.i})`;
+  }
   return null;
 }
 

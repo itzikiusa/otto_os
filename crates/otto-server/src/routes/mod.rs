@@ -50,8 +50,14 @@ pub mod workflows;
 pub mod search;
 pub mod workspaces;
 
+use axum::extract::Request;
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
+
+use otto_core::domain::SCRATCH_WORKSPACE_ID;
 
 use crate::state::ServerCtx;
 
@@ -210,6 +216,20 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/workspaces",
             get(workspaces::list).post(workspaces::create),
+        )
+        // The system-owned scratch workspace (workspace-less sessions). A
+        // static segment, so it ranks above `/workspaces/{id}` regardless of
+        // order; kept adjacent for readability. Read-only — and because that
+        // static match SHADOWS `/workspaces/{id}` for this exact path, the
+        // edit methods must be registered here too or axum answers 405 instead
+        // of the 409 the contract promises (the `{id}` handlers are never
+        // reached). `/workspaces/scratch/members` is a different path and still
+        // lands on the `{id}` handler's own `reject_system_workspace`.
+        .route(
+            "/workspaces/scratch",
+            get(workspaces::get_scratch)
+                .patch(workspaces::reject_scratch_edit)
+                .delete(workspaces::reject_scratch_edit),
         )
         .route(
             "/workspaces/{id}",
@@ -529,4 +549,143 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .merge(snips::snips_routes())
         // --- Browser (reader/annotate tabs + on-demand page fetch) -------
         .merge(browser::routes())
+}
+
+// ── The `scratch` workspace is a SESSION home, not a workspace API ──────────
+// `WorkspacesRepo::role_of` hands every authenticated user an implicit Editor
+// role on `SCRATCH_WORKSPACE_ID` so workspace-less sessions need no membership
+// rows. `require_ws_role` is the only gate on ~40 other `/workspaces/{wid}/…`
+// route families (api-client collections/environments/cookies, workflows,
+// mcp-servers, connections, vault, memory, …), so without a second gate that
+// implicit Editor would make every one of those families a shared, world-
+// writable store keyed on a workspace whose root is the daemon's `$HOME`.
+//
+// The gate is a path check, not a role change: only the routes contract #16a
+// actually promises under `scratch` — the session family, the broadcast relay
+// and the activity summary — exist there; everything else answers `404`, as if
+// the route had never been mounted for that id.
+
+/// Whether `path` may reach a handler. True for every path that is not under
+/// `/workspaces/scratch/…` (this guard's only business) and for the session
+/// family + `broadcast` + `activity/summary` inside it.
+///
+/// Accepts the path with or without the `/api/v1` prefix: the layer runs inside
+/// the `nest("/api/v1", …)`, where axum has already stripped it, while callers
+/// and tests speak full URLs.
+fn scratch_path_allowed(path: &str) -> bool {
+    let p = path.strip_prefix("/api/v1").unwrap_or(path);
+    let Some(rest) = p.strip_prefix("/workspaces/") else {
+        return true;
+    };
+    // `/workspaces/scratch` itself (contract #16a) has no tail — untouched.
+    let Some((wid, tail)) = rest.split_once('/') else {
+        return true;
+    };
+    // axum routes on the RAW path but hands `{wid}` to handlers percent-DECODED,
+    // so `/workspaces/scr%61tch/workflows` would reach the scratch workspace
+    // through a raw-string comparison. Decode the id before comparing; the tail
+    // stays raw, which only ever refuses more (an encoded `sessions` 404s).
+    if pct_decode(wid) != SCRATCH_WORKSPACE_ID {
+        return true;
+    }
+    tail == "sessions"
+        || tail.starts_with("sessions/")
+        || tail == "broadcast"
+        || tail == "activity/summary"
+        // Not a session route, but the one the contract promises answers `409`
+        // ("member edits → 409", `reject_system_workspace`); a 404 here would
+        // silently change that documented answer. `GET` is admin-gated and the
+        // row has no members, so nothing leaks.
+        || tail == "members"
+}
+
+/// Minimal percent-decode for one path segment (ASCII comparison only — an
+/// undecodable byte run is left as-is, which can only make the segment differ
+/// from `scratch` and so never opens a path up).
+fn pct_decode(seg: &str) -> std::borrow::Cow<'_, str> {
+    if !seg.contains('%') {
+        return std::borrow::Cow::Borrowed(seg);
+    }
+    let b = seg.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hi = (b[i + 1] as char).to_digit(16);
+            let lo = (b[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    std::borrow::Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// `404` for any `/workspaces/scratch/…` route outside the session family.
+/// Layered over the whole protected router (core routes + every module extra)
+/// in `build_router`, so a family added later is covered by default.
+pub async fn scratch_guard(req: Request, next: Next) -> Response {
+    if !scratch_path_allowed(req.uri().path()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(req).await
+}
+
+#[cfg(test)]
+mod scratch_guard_tests {
+    use super::scratch_path_allowed;
+
+    #[test]
+    fn session_family_broadcast_and_activity_summary_are_allowed() {
+        for p in [
+            "/api/v1/workspaces/scratch/sessions",
+            "/api/v1/workspaces/scratch/sessions/01X/transcript",
+            "/api/v1/workspaces/scratch/broadcast",
+            "/api/v1/workspaces/scratch/activity/summary",
+            // Kept reachable so the system-workspace guard still answers 409.
+            "/api/v1/workspaces/scratch/members",
+            // The same paths as the nested router sees them.
+            "/workspaces/scratch/sessions",
+            "/workspaces/scratch/sessions/01X/tasks",
+        ] {
+            assert!(scratch_path_allowed(p), "{p} must stay reachable");
+        }
+    }
+
+    #[test]
+    fn every_other_workspace_family_is_refused_under_scratch() {
+        for p in [
+            "/api/v1/workspaces/scratch/api-client/environments",
+            "/api/v1/workspaces/scratch/workflows",
+            "/api/v1/workspaces/scratch/mcp-servers",
+            "/api/v1/workspaces/scratch/connections",
+            "/api/v1/workspaces/scratch/history/transcript",
+            "/workspaces/scratch/api-client/cookies",
+            // A near-miss that must not slip through the prefix test.
+            "/api/v1/workspaces/scratch/sessions-export",
+            "/api/v1/workspaces/scratch/",
+            // Percent-encoded id: axum would still route it to `wid = scratch`.
+            "/api/v1/workspaces/scr%61tch/workflows",
+        ] {
+            assert!(!scratch_path_allowed(p), "{p} must 404");
+        }
+    }
+
+    #[test]
+    fn paths_outside_the_scratch_subtree_are_untouched() {
+        for p in [
+            "/api/v1/workspaces/scratch",
+            "/workspaces/scratch",
+            "/api/v1/workspaces/01X/workflows",
+            "/api/v1/workspaces",
+            "/api/v1/sessions/01X",
+            "/health",
+        ] {
+            assert!(scratch_path_allowed(p), "{p} must be left alone");
+        }
+    }
 }

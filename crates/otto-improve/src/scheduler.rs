@@ -62,7 +62,9 @@ impl Scheduler {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            match self.workspaces.list_all().await {
+            // User-facing list: a scheduled improvement run must never scan the
+            // scratch workspace (its root is the daemon `$HOME`).
+            match self.workspaces.list_user_all().await {
                 Ok(list) => {
                     let now = Utc::now();
                     for ws in list {

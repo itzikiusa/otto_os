@@ -288,6 +288,20 @@ async fn run(cfg: Config) -> Result<(), String> {
     // now that the Arc exists.
     prompt_guard.set_manager(Arc::downgrade(&manager));
     let workspaces = WorkspacesRepo::new(pool.clone());
+    // The system-owned scratch workspace (workspace-less sessions) lives at the
+    // daemon user's home; created on first boot, healed on every later one.
+    // Never `/`: this root is the default cwd of every workspace-less session
+    // AND the folder they are pre-trusted for ("may write anywhere under"), so
+    // a bare launchd context with no `$HOME` must fall back to the daemon's own
+    // data dir — the same resolution the session manager uses below.
+    let home = dirs::home_dir()
+        .unwrap_or_else(|| cfg.data_dir.clone())
+        .to_string_lossy()
+        .into_owned();
+    workspaces
+        .ensure_scratch(&home)
+        .await
+        .map_err(|e| format!("ensure scratch workspace: {e}"))?;
     let secrets_arc = secrets.clone();
     let connections = Arc::new(ConnectionsService::new(
         ConnectionsRepo::new(pool.clone()),

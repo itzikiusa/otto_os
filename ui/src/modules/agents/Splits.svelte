@@ -1,75 +1,100 @@
 <script lang="ts">
-  // Split layout: 1 pane full, 2 panes split on ws.splitAxis, 3–4 panes in a
-  // 2×2 grid. Gutters are draggable (adjust col/row fractions).
-  import SessionView from './SessionView.svelte';
-  import DatabasePage from '../database/DatabasePage.svelte';
-  import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
+  // Split layout host: renders the nested split TREE (`layout.tree`) through the
+  // recursive SplitNode, and owns the layout-wide keyboard chords + ⌘K commands.
+  // Pane membership, fractions and focus live in the layout store — this file
+  // only mounts the root and keeps the broadcast bar.
+  import SplitNode from './SplitNode.svelte';
+  import { ws, DB_PANE_ID, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
+  import { layout, type Preset, type Rect, type Side } from '../../lib/stores/splitLayout.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import type { BroadcastResp } from '../../lib/api/types';
 
-  let host: HTMLDivElement;
+  /** Live pane geometry, read at call time — the keyboard move picks the
+   *  geometric neighbour on the requested side, exactly like a tiling WM. */
+  function paneRects(): Map<string, Rect> {
+    return new Map(
+      [...document.querySelectorAll<HTMLElement>('[data-pane-key]')].map((el) => [
+        el.dataset.paneKey ?? '',
+        el.getBoundingClientRect() as Rect,
+      ]),
+    );
+  }
 
-  const gridStyle = $derived.by(() => {
-    const n = ws.panes.length;
-    const c = Math.round(ws.colFrac * 1000) / 10;
-    const r = Math.round(ws.rowFrac * 1000) / 10;
-    if (n <= 1) return 'grid-template-columns: 1fr; grid-template-rows: 1fr;';
-    if (n === 2) {
-      return ws.splitAxis === 'col'
-        ? `grid-template-columns: ${c}% ${100 - c}%; grid-template-rows: 1fr;`
-        : `grid-template-columns: 1fr; grid-template-rows: ${r}% ${100 - r}%;`;
-    }
-    return `grid-template-columns: ${c}% ${100 - c}%; grid-template-rows: ${r}% ${100 - r}%;`;
-  });
+  /** After any layout move the caller re-focuses the pane so `activeSessionId`,
+   *  the route and the navigator highlight follow (only focusPane routes). */
+  function move(side: Side): void {
+    layout.moveFocused(side, paneRects());
+    ws.focusPane(layout.focusedIndex);
+  }
 
-  function startDrag(axis: 'col' | 'row', e: PointerEvent): void {
-    e.preventDefault();
-    const rect = host.getBoundingClientRect();
-    const move = (ev: PointerEvent) => {
-      if (axis === 'col') {
-        ws.setSplitFrac('col', (ev.clientX - rect.left) / rect.width);
-      } else {
-        ws.setSplitFrac('row', (ev.clientY - rect.top) / rect.height);
+  function preset(p: Preset): void {
+    layout.applyPreset(p);
+    ws.focusPane(layout.focusedIndex);
+  }
+
+  // ── ⌘⌥ chords + ⌘K commands ──────────────────────────────────────────────
+  // Capture phase: xterm turns modified arrows into CSI sequences and cancels
+  // the DOM event in its own textarea handler, and QueryEditor binds ⌘⌥←/→ in
+  // capture too — a bubble listener would never see the chord over a terminal.
+  $effect(() => {
+    if (layout.panes.length < 2) return;
+    const SIDES: Record<string, Side> = {
+      ArrowLeft: 'left',
+      ArrowRight: 'right',
+      ArrowUp: 'up',
+      ArrowDown: 'down',
+    };
+    const h = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey) return;
+      // Inside a Database pane ⌘⌥←/→ stay with the query editor (tab switch).
+      if (document.activeElement?.closest('.db-pane')) return;
+      const side = SIDES[e.key];
+      // `e.code`, not `e.key`: with ⌥ held macOS delivers the ALTERED character
+      // (⌘⌥S → `e.key === 'ß'`), so a key comparison is dead on the only shipped
+      // platform. QueryEditor's ⌥⌘T/W use `e.code` for the same reason.
+      if (!side && e.code !== 'KeyS') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (side) move(side);
+      else {
+        layout.swapWithNext();
+        ws.focusPane(layout.focusedIndex);
       }
     };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
+    window.addEventListener('keydown', h, { capture: true });
+    const unregister = registry.register('pane-layout', [
+      { id: 'layout.move-left', title: 'Move Pane Left', group: 'Layout', shortcut: '⌘⌥←', keywords: 'split pane arrange tile', run: () => move('left') },
+      { id: 'layout.move-right', title: 'Move Pane Right', group: 'Layout', shortcut: '⌘⌥→', keywords: 'split pane arrange tile', run: () => move('right') },
+      { id: 'layout.move-up', title: 'Move Pane Up', group: 'Layout', shortcut: '⌘⌥↑', keywords: 'split pane arrange tile', run: () => move('up') },
+      { id: 'layout.move-down', title: 'Move Pane Down', group: 'Layout', shortcut: '⌘⌥↓', keywords: 'split pane arrange tile', run: () => move('down') },
+      {
+        id: 'layout.swap-next',
+        title: 'Swap Pane With Next',
+        group: 'Layout',
+        shortcut: '⌘⌥S',
+        keywords: 'split pane arrange tile',
+        run: () => {
+          layout.swapWithNext();
+          ws.focusPane(layout.focusedIndex);
+        },
+      },
+      { id: 'layout.preset-cols', title: 'Layout: Equal Columns', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('cols') },
+      { id: 'layout.preset-rows', title: 'Layout: Equal Rows', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('rows') },
+      { id: 'layout.preset-one-two-below', title: 'Layout: One Above Two', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('one-two-below') },
+      { id: 'layout.preset-one-two-beside', title: 'Layout: One Beside Two', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('one-two-beside') },
+      { id: 'layout.preset-grid', title: 'Layout: Grid', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('grid') },
+    ]);
+    return () => {
+      window.removeEventListener('keydown', h, { capture: true });
+      unregister();
     };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  }
-
-  /** Keyboard resize for the split gutters (a11y — pointer-only otherwise):
-   *  arrows nudge the fraction by 2%, Home/End jump to the 20/80 bounds. */
-  function gutterKeydown(axis: 'col' | 'row', e: KeyboardEvent): void {
-    const cur = axis === 'col' ? ws.colFrac : ws.rowFrac;
-    const dec = axis === 'col' ? e.key === 'ArrowLeft' : e.key === 'ArrowUp';
-    const inc = axis === 'col' ? e.key === 'ArrowRight' : e.key === 'ArrowDown';
-    let next: number | null = null;
-    if (dec) next = cur - 0.02;
-    else if (inc) next = cur + 0.02;
-    else if (e.key === 'Home') next = 0.2;
-    else if (e.key === 'End') next = 0.8;
-    if (next === null) return;
-    e.preventDefault();
-    ws.setSplitFrac(axis, next);
-  }
-
-  const showColGutter = $derived(
-    ws.panes.length >= 3 || (ws.panes.length === 2 && ws.splitAxis === 'col'),
-  );
-  const showRowGutter = $derived(
-    ws.panes.length >= 3 || (ws.panes.length === 2 && ws.splitAxis === 'row'),
-  );
-
-  const colGutterPos = $derived(`left: calc(${ws.colFrac * 100}% - 3px);`);
-  const rowGutterPos = $derived(`top: calc(${ws.rowFrac * 100}% - 3px);`);
+  });
 
   // ── Broadcast-input mode ────────────────────────────────────────────────
-  // When on (only available with ≥2 panes), a compose bar appears below the
-  // grid; pressing Enter relays the text to all visible session panes via
+  // When on (only available with ≥2 panes), a compose bar appears above the
+  // tree; pressing Enter relays the text to all visible session panes via
   // the existing `POST /workspaces/{id}/broadcast` endpoint (targets only
   // the pane session ids, not every live session in the workspace).
   let broadcastMode = $state(false);
@@ -82,9 +107,22 @@
     [...new Set(ws.panes.filter((id) => id !== DB_PANE_ID))],
   );
 
-  // Auto-disable broadcast mode when panes collapse to 1 or 0.
+  // `POST /workspaces/{id}/broadcast` is a WORKSPACE route: it needs a current
+  // workspace, and the daemon only relays to sessions that live in it. A
+  // workspace-less (scratch) pane can therefore never be a target, and with no
+  // workspace selected there is no id to post to at all — in both cases the bar
+  // would offer a compose box whose Enter silently does nothing, so hide it.
+  const broadcastable = $derived(
+    ws.currentId !== null &&
+      !broadcastTargets.some(
+        (id) => ws.sessions.find((s) => s.id === id)?.workspace_id === SCRATCH_WORKSPACE_ID,
+      ),
+  );
+
+  // Auto-disable broadcast mode when panes collapse to 1 or 0, or when the
+  // targets stop being broadcastable (a scratch session dropped into a pane).
   $effect(() => {
-    if (ws.panes.length < 2) broadcastMode = false;
+    if (ws.panes.length < 2 || !broadcastable) broadcastMode = false;
   });
 
   async function sendBroadcast(): Promise<void> {
@@ -117,8 +155,8 @@
   }
 </script>
 
-<div class="splits" bind:this={host} class:has-broadcast={broadcastMode}>
-  {#if ws.panes.length >= 2 && broadcastTargets.length >= 2}
+<div class="splits" class:has-broadcast={broadcastMode}>
+  {#if ws.panes.length >= 2 && broadcastTargets.length >= 2 && broadcastable}
     <div class="broadcast-bar-wrap">
       <button
         class="broadcast-toggle"
@@ -145,60 +183,11 @@
       {/if}
     </div>
   {/if}
-  <div class="grid" style={gridStyle}>
-    {#each ws.panes as paneId, i (i)}
-      {#if paneId === DB_PANE_ID}
-        <div class="db-pane" role="group" aria-label="Database" class:focused={ws.focusedPane === i && ws.panes.length > 1} onpointerdown={() => ws.focusPane(i)}>
-          {#if ws.panes.length > 1}
-            <button class="db-pane-close" title="Close pane" aria-label="Close pane" onclick={() => ws.closePane(i)}>✕</button>
-          {/if}
-          <DatabasePage />
-        </div>
-      {:else}
-        <SessionView
-          sessionId={paneId}
-          focused={ws.focusedPane === i && ws.panes.length > 1}
-          showClose={ws.panes.length > 1}
-          onfocus={() => ws.focusPane(i)}
-          closeTitle="Close session (⌘W)"
-          onclosepane={() => void ws.requestCloseTab(paneId)}
-        />
-      {/if}
-    {/each}
+  <div class="tree">
+    {#if layout.tree}
+      <SplitNode node={layout.tree} />
+    {/if}
   </div>
-
-  {#if showColGutter}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-    <div
-      class="gutter col"
-      style={colGutterPos}
-      onpointerdown={(e) => startDrag('col', e)}
-      onkeydown={(e) => gutterKeydown('col', e)}
-      role="separator"
-      tabindex="0"
-      aria-orientation="vertical"
-      aria-label="Resize split (arrow keys)"
-      aria-valuenow={Math.round(ws.colFrac * 100)}
-      aria-valuemin={20}
-      aria-valuemax={80}
-    ></div>
-  {/if}
-  {#if showRowGutter}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-    <div
-      class="gutter row"
-      style={rowGutterPos}
-      onpointerdown={(e) => startDrag('row', e)}
-      onkeydown={(e) => gutterKeydown('row', e)}
-      role="separator"
-      tabindex="0"
-      aria-orientation="horizontal"
-      aria-label="Resize split (arrow keys)"
-      aria-valuenow={Math.round(ws.rowFrac * 100)}
-      aria-valuemin={20}
-      aria-valuemax={80}
-    ></div>
-  {/if}
 </div>
 
 <style>
@@ -267,86 +256,14 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .grid {
-    display: grid;
-    gap: 8px;
+  /* The root fills the host; every nested track is sized by SplitNode. */
+  .tree {
     flex: 1;
     min-height: 0;
+    display: grid;
   }
-  .db-pane {
-    position: relative;
+  .tree > :global(*) {
     min-width: 0;
     min-height: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    overflow: hidden;
-  }
-  .db-pane.focused {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  }
-  .db-pane-close {
-    position: absolute;
-    top: 6px;
-    inset-inline-end: 8px;
-    z-index: 25;
-    width: 20px;
-    height: 20px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 11px;
-    line-height: 1;
-  }
-  .db-pane-close:hover {
-    color: var(--text);
-  }
-  .gutter {
-    position: absolute;
-    z-index: 10;
-  }
-  .gutter.col {
-    top: 8px;
-    bottom: 8px;
-    width: 8px;
-    cursor: col-resize;
-  }
-  .gutter.row {
-    inset-inline-start: 8px;
-    inset-inline-end: 8px;
-    height: 8px;
-    cursor: row-resize;
-  }
-  .gutter:focus-visible {
-    outline: none;
-  }
-  .gutter:focus-visible::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    margin: auto;
-    background: color-mix(in srgb, var(--accent) 65%, transparent);
-    border-radius: 2px;
-  }
-  .gutter.col:focus-visible::after {
-    width: 2px;
-  }
-  .gutter.row:focus-visible::after {
-    height: 2px;
-  }
-  .gutter:hover::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    margin: auto;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
-    border-radius: 2px;
-  }
-  .gutter.col:hover::after {
-    width: 2px;
-  }
-  .gutter.row:hover::after {
-    height: 2px;
   }
 </style>

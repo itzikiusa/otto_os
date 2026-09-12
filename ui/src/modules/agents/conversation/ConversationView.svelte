@@ -22,6 +22,7 @@
   import LiveDraft from './LiveDraft.svelte';
   import { transcript, type TranscriptSource } from '../../../lib/stores/transcript.svelte';
   import { ws } from '../../../lib/stores/workspace.svelte';
+  import { ctxMenu } from '../../../lib/contextmenu.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { groupTurns, activeQueued, fmtCost, fmtDuration, fmtTokens } from './format';
@@ -317,11 +318,39 @@
     },
   };
   const unavailable = $derived(t?.unavailable_reason ? UNAVAILABLE[t.unavailable_reason] : null);
+
+  // ── Header chrome by PANE width, not window width ────────────────────────
+  // A chat can live in a 200px split pane or a full-window tab; `.conv` is the
+  // sized flex child, so its inline size is the only honest measure. The
+  // `@container` blocks at the bottom use the SAME numbers — CSS hides, this
+  // decides what the folded menu has to carry (same contract as the pane header).
+  let convW = $state(0);
+  const headTier = $derived(convW <= 0 ? 0 : convW <= 260 ? 3 : convW <= 360 ? 2 : convW <= 420 ? 1 : 0);
+
+  /** ≤260px: search, Show system and reload collapse into one ⋯-style button. */
+  function openHeadMenu(e: MouseEvent | KeyboardEvent): void {
+    ctxMenu.show(e, [
+      {
+        label: 'Search…',
+        icon: 'search',
+        action: () => {
+          openSearch();
+          void tick().then(() => searchEl?.focus());
+        },
+      },
+      {
+        label: `Show system${showSystem ? ' ✓' : ''}`,
+        icon: showSystem ? 'eye' : 'eyeOff',
+        action: () => transcript.setShowSystem(!showSystem),
+      },
+      { label: 'Reload transcript', icon: 'refresh', action: () => void conv.load() },
+    ]);
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="conv" data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey}>
-  <header class="conv-head">
+<div class="conv" bind:clientWidth={convW} data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey}>
+  <header class="conv-head" class:folded={headTier >= 3 && searchOpen}>
     {#if t?.provider && hasProviderIcon(t.provider)}<ProviderIcon provider={t.provider} size={13} />{/if}
     <span class="conv-title" title={t?.title ?? ''}>{t?.title ?? (conv.loading ? 'Loading…' : 'Conversation')}</span>
     {#if t?.model}<span class="chip mono">{t.model}</span>{/if}
@@ -335,7 +364,7 @@
     {/if}
     <span class="grow"></span>
     {#if searchOpen}
-      <div class="search" role="search">
+      <div class="search" class:wide={headTier >= 3} role="search">
         <Icon name="search" size={12} />
         <input
           bind:this={searchEl}
@@ -350,14 +379,36 @@
         <button class="icon-btn" title="Next match (⏎)" aria-label="Next match" disabled={!hits.length} onclick={() => jumpTo(hitIdx + 1)}><Icon name="chevronDown" size={11} /></button>
         <button class="icon-btn" title="Close (Esc)" aria-label="Close search" onclick={closeSearch}><Icon name="x" size={11} /></button>
       </div>
-    {:else}
+    {:else if headTier < 3}
       <button class="icon-btn" title="Search this conversation (⌘F)" aria-label="Search this conversation" onclick={openSearch}><Icon name="search" size={12} /></button>
     {/if}
-    <label class="sys-toggle" title="Reveal system reminders, hooks, attachments and injected queue items">
-      <input type="checkbox" checked={showSystem} onchange={(e) => transcript.setShowSystem((e.currentTarget as HTMLInputElement).checked)} />
-      Show system
-    </label>
-    <button class="icon-btn" title="Reload transcript" aria-label="Reload transcript" onclick={() => void conv.load()}><Icon name="refresh" size={12} /></button>
+    {#if headTier >= 3}
+      <!-- Narrowest: search + system + reload behind one clamped menu. -->
+      <button
+        class="icon-btn"
+        aria-label="Conversation actions"
+        title="Conversation actions"
+        onclick={openHeadMenu}
+        onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && openHeadMenu(e)}
+      >⋯</button>
+    {:else if headTier >= 2}
+      <!-- Narrow: the labelled checkbox becomes an icon toggle. -->
+      <button
+        class="icon-btn"
+        aria-pressed={showSystem}
+        aria-label="Show system"
+        title="Reveal system reminders, hooks, attachments and injected queue items"
+        onclick={() => transcript.setShowSystem(!showSystem)}
+      ><Icon name={showSystem ? 'eye' : 'eyeOff'} size={12} /></button>
+    {:else}
+      <label class="sys-toggle" title="Reveal system reminders, hooks, attachments and injected queue items">
+        <input type="checkbox" checked={showSystem} onchange={(e) => transcript.setShowSystem((e.currentTarget as HTMLInputElement).checked)} />
+        Show system
+      </label>
+    {/if}
+    {#if headTier < 3}
+      <button class="icon-btn" title="Reload transcript" aria-label="Reload transcript" onclick={() => void conv.load()}><Icon name="refresh" size={12} /></button>
+    {/if}
   </header>
 
   <div class="conv-list" bind:this={listEl} onscroll={onScroll} dir="auto">
@@ -445,6 +496,10 @@
     position: relative;
     background: var(--bg);
     color: var(--text);
+    /* The chat sheds chrome by its OWN width — it renders full-window in a tab
+       and 200px wide in a split pane, and the window said nothing about that.
+       Breakpoints mirror the `@container` blocks below + `headTier` above. */
+    container-type: inline-size;
   }
   .conv-head {
     display: flex;
@@ -500,10 +555,23 @@
     text-align: center;
     white-space: nowrap;
   }
-  @media (max-width: 640px) {
+  /* ≤360px: the search box gives up half its width (the toggle went icon-only). */
+  @container (max-width: 360px) {
     .search-in {
       width: 110px;
     }
+  }
+  /* ≤260px: an OPEN search box owns the whole row — the title steps aside. */
+  .search.wide {
+    flex: 1;
+  }
+  .search.wide .search-in {
+    width: 100%;
+    flex: 1;
+  }
+  /* …and the title steps aside only while that box is open. */
+  .conv-head.folded .conv-title {
+    display: none;
   }
   .sys-toggle {
     display: inline-flex;
@@ -573,7 +641,9 @@
     cursor: pointer;
     box-shadow: var(--shadow);
   }
-  @media (max-width: 640px) {
+  /* ≤420px: turn/cost stats and the model chip go first — both are recoverable
+     from the session header and the composer status line. */
+  @container (max-width: 420px) {
     .stats,
     .conv-head .chip {
       display: none;

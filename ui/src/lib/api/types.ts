@@ -4762,6 +4762,38 @@ export interface QueryStats {
   bytes_read?: number | null;
 }
 
+/** Body of `POST /connections/{id}/db/query` — mirrors `QueryRequest` in
+ *  `crates/otto-dbviewer/src/types.rs` (contract §"Database Explorer"). Every
+ *  field but `statement` is `#[serde(default)]` on the wire, so the client only
+ *  sends the ones that apply to the run. */
+export interface RunQueryReq {
+  statement: string;
+  /** Soft cap on returned rows (the auto-limiter's `n`). */
+  max_rows?: number | null;
+  /** Node context to scope execution — the active database / Redis keyspace. */
+  node?: string | null;
+  /** Explicit acknowledgement of a write/DDL on a guarded (production /
+   *  read-only) connection; set only after the typed confirmation. */
+  confirm_write?: boolean;
+  /** Client-supplied id so `…/db/cancel` can issue engine-native cancellation. */
+  query_id?: string | null;
+  /** Per-statement wall-clock timeout in ms (0 / absent = no limit). */
+  timeout_ms?: number | null;
+  /** Redact cell values server-side before they leave the daemon. */
+  mask?: boolean | null;
+  /** Zero-based row offset — applied only to an auto-limited single statement. */
+  offset?: number | null;
+  /** Keyset cursor: the previous page's {@link QueryResult.next_cursor} echoed
+   *  back verbatim. Applied only to a keyset-eligible MongoDB `find` (where it
+   *  replaces `skip`); ignored everywhere else, so it may always ride along
+   *  with `offset`. Opaque Extended-JSON — never inspected client-side. */
+  cursor?: unknown;
+  /** Return the query plan instead of running it (Mongo: server `explain`). */
+  explain?: boolean;
+  /** Engine-specific positional/named params (unused by the Explorer UI). */
+  params?: unknown;
+}
+
 /** Result of running a statement: tabular rows + stats.
  *
  *  For a **multi-statement batch** the top-level fields describe the FIRST
@@ -4793,6 +4825,13 @@ export interface QueryResult {
    *  so the UI shows its pager exactly then; absent for explicit user
    *  LIMIT/OFFSET, non-paginatable statements, and batches. */
   auto_limited?: number | null;
+  /** Keyset-pagination cursor for the NEXT page (MongoDB only): the Extended-JSON
+   *  `_id` of the last row returned (`{"$oid": …}`, a number, a string…).
+   *  Present only when the page was keyset-eligible — an unconstrained `find`
+   *  with no `_id` in the filter and no sort or `{_id: 1}` — AND the auto-limit
+   *  truncated it. Echo it back verbatim as `cursor` on the next-page request;
+   *  absent ⇒ page by `offset` as before. */
+  next_cursor?: unknown;
 }
 
 /** One node in a normalized query plan (`POST …/db/query-plan`). `warnings`
@@ -5041,8 +5080,10 @@ export interface DbCapabilities {
    *  pooled engines — each run acquires an independent connection. */
   transactions: boolean;
   multi_statement: boolean;
-  /** Server-side cancel of an in-flight query (MySQL/ClickHouse). When false
-   *  (MongoDB/Redis) the Stop button is client-side only. */
+  /** Server-side cancel of an in-flight query: MySQL/ClickHouse/Postgres/MongoDB
+   *  (Mongo: the run is tagged `comment: "otto:<query_id>"`, cancel resolves it
+   *  via `$currentOp` + `killOp`; silently a no-op on a server that denies
+   *  `inprog`/`killop`). When false (Redis) the Stop button is client-side only. */
   cancel?: boolean;
   /** The engine can produce a query plan (drives the Explain button; false for
    *  Redis, which has no plan surface). */

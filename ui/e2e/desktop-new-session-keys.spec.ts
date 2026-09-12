@@ -57,7 +57,7 @@ test.describe('new-session keyboard flow', () => {
     await expect(dialog.locator('.provider-card.selected .provider-name')).toHaveText(before);
 
     // Arrows must also work from OUTSIDE the grid (e.g. after clicking a label).
-    await dialog.locator('.provider-label').click();
+    await dialog.locator('#ns-provider-label').click();
     await page.keyboard.press('ArrowRight');
     await expect(dialog.locator('.provider-card.selected .provider-name')).not.toHaveText(before);
 

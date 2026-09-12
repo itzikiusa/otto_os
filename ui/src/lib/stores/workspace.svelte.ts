@@ -18,17 +18,25 @@ import { toasts } from '../toast.svelte';
 import { confirmer } from '../confirm.svelte';
 import { ui, clientId } from './ui.svelte';
 import { winKey } from '../win';
+import { layout, type Axis } from './splitLayout.svelte';
+import { MAX_PANES } from './splitLayout';
 
 // Layout state is per-WINDOW (multi-window): winKey() namespaces these by the
 // window's label so two windows never clobber each other's workspace/tabs/view.
 // The main window keeps the legacy unprefixed keys.
 const LS_CURRENT = 'otto_workspace';
 const LS_TABS = 'otto_tabs_'; // + workspace id
-const LS_PANES = 'otto_panes_'; // + workspace id — split panes + axis
 // App-wide (deliberately NOT winKey-namespaced): whether the sidebar lists
 // sessions from every workspace, grouped by workspace, instead of only the
 // current one. Default ON — a session shouldn't vanish on a workspace switch.
 const LS_ALL_WS = 'otto_nav_all_ws';
+
+/** Id of the daemon's hidden, system-owned **scratch** workspace — the home of
+ *  workspace-less sessions. Mirrors `SCRATCH_WORKSPACE_ID` in
+ *  `crates/otto-core/src/domain.rs`. Never in `workspaces` (hidden from
+ *  `GET /workspaces`); read via `GET /workspaces/scratch`. Also the tabs/panes
+ *  persistence key when no workspace is selected. */
+export const SCRATCH_WORKSPACE_ID = 'scratch';
 
 /** Background-spawned session sources that never surface in the sidebar's flat
  *  session lists (they live in their own panels/views). MUST stay byte-identical
@@ -63,7 +71,7 @@ const BACKGROUND_SOURCES = new Set([
 ]);
 
 /** A user-facing foreground session (sidebar-listable). */
-function isForeground(s: Session): boolean {
+export function isForeground(s: Session): boolean {
   const src = (s.meta as { source?: string } | null)?.source;
   return src == null || !BACKGROUND_SOURCES.has(src);
 }
@@ -72,21 +80,17 @@ function isForeground(s: Session): boolean {
  *  the DB Explorer live as a pane in the Agents split, beside an agent. */
 export const DB_PANE_ID = '__db_explorer__';
 
-export type SplitAxis = 'col' | 'row';
-
-/** Restore a persisted split-gutter fraction (0.2–0.8), else the 50/50 default. */
-function readFrac(key: string): number {
-  try {
-    const v = Number(localStorage.getItem(winKey(key)));
-    return Number.isFinite(v) && v >= 0.2 && v <= 0.8 ? v : 0.5;
-  } catch {
-    return 0.5;
-  }
-}
+export type SplitAxis = Axis;
 
 class WorkspaceStore {
   workspaces: WorkspaceWithRole[] = $state([]);
   currentId: Id | null = $state(null);
+  /** The hidden scratch workspace (`GET /workspaces/scratch`) — null on a
+   *  daemon without it. Its `root_path` is the daemon `$HOME`, the default cwd
+   *  of a workspace-less session. */
+  scratch: Workspace | null = $state(null);
+  /** Sessions of the current workspace PLUS the scratch workspace's (always
+   *  loaded, so workspace-less sessions work with zero workspaces). */
   sessions: Session[] = $state([]);
   /** Programmatic PTY input keyed by session id, with a bump counter so the
    *  Terminal applies each injection exactly once (e.g. DB rows → running agent). */
@@ -109,27 +113,19 @@ class WorkspaceStore {
 
   /** open session tabs (ids), in tab-bar order */
   openTabs: Id[] = $state([]);
-  /** split panes: session ids rendered side by side (1–4) */
-  panes: Id[] = $state([]);
-  focusedPane = $state(0);
-  splitAxis: SplitAxis = $state('col');
-  // Split gutter fractions survive reloads (per window, like the other layout
-  // state); writes go through setSplitFrac so the drag persists what it sets.
-  colFrac = $state(readFrac('otto_split_col_frac'));
-  rowFrac = $state(readFrac('otto_split_row_frac'));
-
-  setSplitFrac(axis: SplitAxis, frac: number): void {
-    const f = Math.min(0.8, Math.max(0.2, frac));
-    if (axis === 'col') this.colFrac = f;
-    else this.rowFrac = f;
-    try {
-      localStorage.setItem(
-        winKey(axis === 'col' ? 'otto_split_col_frac' : 'otto_split_row_frac'),
-        String(f),
-      );
-    } catch {
-      /* private mode */
-    }
+  /** Split panes — projections of the layout tree (leaf order; duplicates legal).
+   *  Mutate via `layout` or the methods below. */
+  get panes(): Id[] {
+    return layout.panes;
+  }
+  get focusedPane(): number {
+    return layout.focusedIndex;
+  }
+  set focusedPane(i: number) {
+    layout.focusIndex(i);
+  }
+  get splitAxis(): SplitAxis {
+    return layout.axis;
   }
 
   /** global session-status map (fed by loads + events WS) */
@@ -160,7 +156,21 @@ class WorkspaceStore {
     this.workspaces.find((w) => w.id === this.currentId) ?? null,
   );
 
-  myRole: 'viewer' | 'editor' | 'admin' = $derived(this.current?.my_role ?? 'viewer');
+  /** The caller's role in the current workspace. With NO workspace at all the
+   *  only sessions are the scratch ones, where every user is an implicit
+   *  Editor — so `editor`, not the `viewer` default, or a fresh account could
+   *  not drive the workspace-less session it just started. Per-session gates
+   *  use {@link canEditSession}. */
+  myRole: 'viewer' | 'editor' | 'admin' = $derived(
+    this.current?.my_role ?? (this.currentId === null ? 'editor' : 'viewer'),
+  );
+
+  /** Whether the caller may act on session `s` (rename / archive / delete):
+   *  Editor+ in the current workspace — always true for a workspace-less
+   *  session, since the scratch workspace grants every user Editor. */
+  canEditSession(s: Session): boolean {
+    return s.workspace_id === SCRATCH_WORKSPACE_ID || this.myRole !== 'viewer';
+  }
 
   activeSessionId: Id | null = $derived(this.panes[this.focusedPane] ?? null);
 
@@ -178,13 +188,39 @@ class WorkspaceStore {
   mainSessions: Session[] = $derived(
     // Background-spawned sessions (workflow steps, review agents, vault docs
     // writers, PR drafts, …) live in their own panels and stay out of the tiled
-    // grid unless the user explicitly opened them as a tab.
-    this.activeSessions.filter((s) => isForeground(s) || this.openTabs.includes(s.id)),
+    // grid unless the user explicitly opened them as a tab. Workspace-less
+    // (scratch) sessions are loaded in EVERY workspace for the sidebar's "No
+    // workspace" group — the same rule keeps them out of this workspace's grid
+    // (they are not its sessions, exactly as {@link agentSessions} has it)
+    // unless the user opened one. With no workspace selected they are all there
+    // is, so the grid is theirs.
+    this.activeSessions.filter(
+      (s) =>
+        (isForeground(s) &&
+          (this.currentId === null || s.workspace_id !== SCRATCH_WORKSPACE_ID)) ||
+        this.openTabs.includes(s.id),
+    ),
   );
 
-  /** Active agent sessions (claude/codex/shell) — sidebar "Agents" group. */
+  /** Active agent sessions (claude/codex/shell) of the current workspace —
+   *  sidebar "Agents" group. Scratch sessions have their own group
+   *  ({@link scratchSessions}). */
   agentSessions: Session[] = $derived(
-    this.sessions.filter((s) => !s.archived && s.kind === 'agent'),
+    this.sessions.filter(
+      (s) => !s.archived && s.kind === 'agent' && s.workspace_id !== SCRATCH_WORKSPACE_ID,
+    ),
+  );
+
+  /** Foreground agent sessions of the hidden scratch workspace — the sidebar
+   *  "No workspace" group. Present in every workspace and with none. */
+  scratchSessions: Session[] = $derived(
+    this.sessions.filter(
+      (s) =>
+        !s.archived &&
+        s.kind === 'agent' &&
+        s.workspace_id === SCRATCH_WORKSPACE_ID &&
+        isForeground(s),
+    ),
   );
 
   /** Active connection sessions (ssh/db/custom) — sidebar "Connections" group. */
@@ -377,47 +413,123 @@ class WorkspaceStore {
 
   async load(): Promise<void> {
     this.workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
+    // The hidden scratch workspace — best-effort: a daemon without it leaves
+    // `scratch` null and the sheet falls back to `~`.
+    try {
+      this.scratch = await api.get<Workspace>(`/workspaces/${SCRATCH_WORKSPACE_ID}`);
+    } catch {
+      this.scratch = null;
+    }
     const saved = localStorage.getItem(winKey(LS_CURRENT));
     const found = this.workspaces.find((w) => w.id === saved);
     const target = found ?? this.workspaces[0] ?? null;
     if (target) await this.select(target.id);
+    else await this.selectNone();
   }
 
   async select(id: Id): Promise<void> {
     if (this.currentId === id && this.sessions.length > 0) return;
     this.currentId = id;
     localStorage.setItem(winKey(LS_CURRENT), id);
-    await this.refreshSessions();
+    // Pin both persistence keys NOW, before the await below: the route→store
+    // effect may `openSession` while sessions are still loading, and that
+    // persist must land under this workspace so `restoreLayout` sees it.
+    this.tabsKey = id;
+    this.bindTabsKey(id);
+    // No phantom-tab reconcile on a switch: it would prune the OLD workspace's
+    // tabs against the NEW session list and persist that under the new key,
+    // clobbering this workspace's saved layout before `restoreLayout` reads it.
+    await this.refreshSessions({ reconcile: false });
     void this.refreshActiveWorkflowRuns();
     void this.refreshOtherSessions();
+    this.restoreLayout(id);
+  }
+
+  /** Zero-workspace mode (a fresh account, or the last workspace archived):
+   *  no current workspace, only scratch sessions, layout keyed on
+   *  `SCRATCH_WORKSPACE_ID` so tabs/panes still survive reloads. */
+  private async selectNone(): Promise<void> {
+    this.currentId = null;
+    this.activeWorkflowRuns = [];
+    this.otherWsSessions = [];
+    this.tabsKey = SCRATCH_WORKSPACE_ID;
+    this.bindTabsKey(SCRATCH_WORKSPACE_ID);
+    await this.refreshSessions({ reconcile: false });
+    this.restoreLayout(SCRATCH_WORKSPACE_ID);
+  }
+
+  /** Point both persistence keys at `key` and stop writing under it until
+   *  {@link restoreLayout} has READ it — `select()` awaits the session refresh
+   *  in between, and an `openSession` landing in that window (the route→store
+   *  effect replaying `#/agents/<id>` on a reload) would otherwise persist a
+   *  one-tab / one-pane state over the very payload we are about to restore.
+   *  What it opened is not lost: both halves replay it after the read. */
+  private bindTabsKey(key: string): void {
+    this.tabsKey = key;
+    this.tabsHydrated = false;
+    this.pendingTabs = [];
+    layout.bindKey(key);
+  }
+
+  /** Restore the open tabs + split layout persisted under `key` (a workspace
+   *  id, or `SCRATCH_WORKSPACE_ID` with no workspace selected). Runs after
+   *  {@link refreshSessions} so only ids that still exist survive. */
+  private restoreLayout(key: string): void {
+    // Pin the tabs key here, exactly like `layout.restore(key)` pins `wsKey`:
+    // `select()` sets `currentId` and then AWAITS `refreshSessions`, so a
+    // `persistTabs()` in between (a `session_removed` event → `closeTab`) would
+    // otherwise write the OLD workspace's tabs under the NEW id.
+    this.tabsKey = key;
     // restore tabs for this workspace
-    const raw = localStorage.getItem(winKey(LS_TABS + id));
+    const raw = localStorage.getItem(winKey(LS_TABS + key));
     const ids: Id[] = raw ? JSON.parse(raw) : [];
     // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
     const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
-    this.openTabs = valid;
-    // Restore the split layout (pane membership + axis) persisted alongside the
-    // tabs, so a 2–4 pane arrangement survives reloads like colFrac/rowFrac do.
-    let panes: Id[] = [];
-    try {
-      const savedLayout = localStorage.getItem(winKey(LS_PANES + id));
-      if (savedLayout) {
-        const layout = JSON.parse(savedLayout) as { panes?: Id[]; axis?: SplitAxis };
-        panes = (layout.panes ?? []).filter((p) => valid.includes(p)).slice(0, 4);
-        if (layout.axis === 'col' || layout.axis === 'row') this.splitAxis = layout.axis;
-      }
-    } catch {
-      /* corrupt/private mode — fall through to the single-pane default */
-    }
-    this.panes = panes.length > 0 ? panes : valid.length > 0 ? [valid[0]] : [];
-    this.focusedPane = 0;
+    // Tabs opened while this key was still un-hydrated (see {@link bindTabsKey})
+    // are appended — the route→store effect's session must survive the restore.
+    const pending = this.pendingTabs.filter(
+      (t) => !valid.includes(t) && (t === DB_PANE_ID || this.sessions.some((s) => s.id === t)),
+    );
+    this.pendingTabs = [];
+    this.tabsHydrated = true;
+    this.openTabs = [...valid, ...pending];
+    if (pending.length > 0) this.persistTabs();
+    // Restore the split layout persisted alongside the tabs (v2 tree, or a v1
+    // {panes, axis} payload migrated through the old window fractions).
+    const open = this.openTabs;
+    layout.restore(key, (sid) => open.includes(sid), open[0] ?? null);
   }
 
-  async refreshSessions(): Promise<void> {
-    if (!this.currentId) return;
+  /** Whether a session with this workspace id belongs in `sessions`: the
+   *  current workspace's, plus the scratch workspace's (always loaded). */
+  private belongsHere(wsId: Id): boolean {
+    return wsId === this.currentId || wsId === SCRATCH_WORKSPACE_ID;
+  }
+
+  /** Reload `sessions` for the current workspace (+ scratch). `reconcile`
+   *  (default on) prunes phantom tabs afterwards; a workspace switch turns it
+   *  off because {@link restoreLayout} replaces the layout wholesale. */
+  async refreshSessions(opts: { reconcile?: boolean } = {}): Promise<void> {
     this.sessionsLoading = true;
     try {
-      const all = await api.get<Session[]>(`/workspaces/${this.currentId}/sessions`);
+      const wsId = this.currentId;
+      // The current workspace's sessions (when one is selected) plus the
+      // scratch workspace's — always, best-effort (a daemon without the
+      // scratch row answers 403, which leaves workspace-less sessions empty
+      // and everything else unchanged). Deduped by id defensively.
+      const [own, scratch] = await Promise.all([
+        wsId ? api.get<Session[]>(`/workspaces/${wsId}/sessions`) : Promise.resolve([]),
+        api
+          .get<Session[]>(`/workspaces/${SCRATCH_WORKSPACE_ID}/sessions`)
+          .catch(() => [] as Session[]),
+      ]);
+      const seen = new Set<Id>();
+      const all: Session[] = [];
+      for (const s of [...own, ...scratch]) {
+        if (seen.has(s.id)) continue;
+        seen.add(s.id);
+        all.push(s);
+      }
       // Background engine sessions (insights, canvas/db assist, workflow steps,
       // review agents, PR drafts, …) are NOT stripped here: they stay in
       // `this.sessions` so their owning panels can look them up / open them,
@@ -437,7 +549,7 @@ class WorkspaceStore {
       }
       this.sessions = kept;
       for (const s of this.sessions) this.statusMap[s.id] = s.status;
-      this.reconcileTabs();
+      if (opts.reconcile !== false) this.reconcileTabs();
     } finally {
       this.sessionsLoading = false;
     }
@@ -455,34 +567,30 @@ class WorkspaceStore {
       this.openTabs = tabs;
       this.persistTabs();
     }
-    const panes = this.panes.filter(exists);
-    if (panes.length !== this.panes.length) {
-      this.panes = panes.length > 0 ? panes : tabs.length > 0 ? [tabs[0]] : [];
-      if (this.focusedPane >= this.panes.length) {
-        this.focusedPane = Math.max(0, this.panes.length - 1);
-      }
-      this.persistPanes();
-    }
+    layout.retain(exists);
+    if (layout.panes.length === 0 && tabs.length > 0) layout.setFocusedSession(tabs[0]);
   }
+
+  /** Storage-key suffix for the open tabs: whatever {@link restoreLayout} last
+   *  restored — the current workspace, or the scratch id when none is selected
+   *  (workspace-less sessions still keep their tabs). NOT derived from
+   *  `currentId`: it must not move until the new workspace's tabs are loaded. */
+  private tabsKey: string = SCRATCH_WORKSPACE_ID;
+  /** Mirrors the layout store's own gate: false between {@link bindTabsKey} and
+   *  the {@link restoreLayout} that reads the key. */
+  private tabsHydrated = true;
+  /** Tabs opened during that window, replayed by {@link restoreLayout}. */
+  private pendingTabs: Id[] = [];
 
   private persistTabs(): void {
-    if (this.currentId) {
-      localStorage.setItem(winKey(LS_TABS + this.currentId), JSON.stringify(this.openTabs));
-    }
+    if (!this.tabsHydrated) return;
+    localStorage.setItem(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
   }
 
-  /** Persist the split layout (pane membership + axis) per workspace, so a
-   *  2–4 pane arrangement survives reloads (restored in {@link select}). */
+  /** Persist the split layout per workspace, so an arrangement of up to
+   *  MAX_PANES (15) panes survives reloads (restored in {@link select}). */
   private persistPanes(): void {
-    if (!this.currentId) return;
-    try {
-      localStorage.setItem(
-        winKey(LS_PANES + this.currentId),
-        JSON.stringify({ panes: this.panes, axis: this.splitAxis }),
-      );
-    } catch {
-      /* private mode */
-    }
+    layout.persist();
   }
 
   /** Update tab + pane bookkeeping to make `id` the focused session.
@@ -505,15 +613,10 @@ class WorkspaceStore {
     this.clearNeedsYou(id);
     if (!this.openTabs.includes(id)) {
       this.openTabs = [...this.openTabs, id];
+      if (!this.tabsHydrated) this.pendingTabs = [...this.pendingTabs, id];
       this.persistTabs();
     }
-    if (this.panes.length === 0) {
-      this.panes = [id];
-      this.focusedPane = 0;
-    } else {
-      this.panes[this.focusedPane] = id;
-      this.panes = [...this.panes];
-    }
+    layout.setFocusedSession(id);
     this.persistPanes();
     // Activating a tab clears its unread-activity dot.
     if (this.unread[id]) {
@@ -568,11 +671,11 @@ class WorkspaceStore {
 
   /** Add a freshly created session object and navigate to it. */
   addSession(s: Session): void {
-    if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
+    if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
-    if (s.workspace_id === this.currentId) this.navigateToSession(s.id);
+    if (this.belongsHere(s.workspace_id)) this.navigateToSession(s.id);
   }
 
   /**
@@ -583,35 +686,45 @@ class WorkspaceStore {
    * the 1–4 pane cap was hit (caller can toast).
    */
   addSessionInSplit(s: Session): boolean {
-    if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
+    if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
-    if (s.workspace_id !== this.currentId) return false;
+    if (!this.belongsHere(s.workspace_id)) return false;
     return this.openInSplit(s.id);
+  }
+
+  /** Where a new session goes: the hidden scratch workspace when asked for a
+   *  workspace-less session, else the current workspace. Throws only when
+   *  neither exists. */
+  private createTarget(opts?: { scratch?: boolean }): Id {
+    const target = opts?.scratch ? SCRATCH_WORKSPACE_ID : this.currentId;
+    if (!target) throw new Error('no workspace selected');
+    return target;
   }
 
   /**
    * Like {@link createSession} but does NOT route to the new session — for
    * hosts that embed the session where they are (the Browser page's agent
    * dock) and must stay put. Same device stamp + list/status bookkeeping.
+   * `opts.scratch` starts a workspace-less session (scratch workspace).
    */
-  async createSessionQuiet(req: CreateSessionReq): Promise<Session> {
-    if (!this.currentId) throw new Error('no workspace selected');
+  async createSessionQuiet(req: CreateSessionReq, opts?: { scratch?: boolean }): Promise<Session> {
+    const target = this.createTarget(opts);
     const stamped: CreateSessionReq = {
       ...req,
       meta: { ...(req.meta ?? {}), client_id: clientId() },
     };
-    const s = await api.post<Session>(`/workspaces/${this.currentId}/sessions`, stamped);
-    if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
+    const s = await api.post<Session>(`/workspaces/${target}/sessions`, stamped);
+    if (this.belongsHere(s.workspace_id) && !this.sessions.some((x) => x.id === s.id)) {
       this.sessions = [...this.sessions, s];
     }
     this.statusMap[s.id] = s.status;
     return s;
   }
 
-  async createSession(req: CreateSessionReq): Promise<Session> {
-    if (!this.currentId) throw new Error('no workspace selected');
+  async createSession(req: CreateSessionReq, opts?: { scratch?: boolean }): Promise<Session> {
+    const target = this.createTarget(opts);
     // Stamp the device that started this session (preserving any caller meta,
     // e.g. {origin:'manual'}) so the opt-in per-device isolation filter can
     // recognize its own sessions.
@@ -619,7 +732,7 @@ class WorkspaceStore {
       ...req,
       meta: { ...(req.meta ?? {}), client_id: clientId() },
     };
-    const s = await api.post<Session>(`/workspaces/${this.currentId}/sessions`, stamped);
+    const s = await api.post<Session>(`/workspaces/${target}/sessions`, stamped);
     this.addSession(s);
     return s;
   }
@@ -657,12 +770,7 @@ class WorkspaceStore {
     if (this.currentId === id) {
       const next = this.workspaces[0];
       if (next) await this.select(next.id);
-      else {
-        this.currentId = null;
-        this.sessions = [];
-        this.openTabs = [];
-        this.panes = [];
-      }
+      else await this.selectNone();
     }
   }
 
@@ -682,10 +790,7 @@ class WorkspaceStore {
       closedIdx >= 0
         ? this.openTabs[Math.min(closedIdx, this.openTabs.length - 1)] ?? null
         : this.openTabs[this.openTabs.length - 1] ?? null;
-    const mapped: (Id | null)[] = this.panes.map((p) => (p === id ? fallback : p));
-    const panes = mapped.filter((p, i, arr): p is Id => p !== null && arr.indexOf(p) === i);
-    this.panes = panes.length > 0 ? panes : fallback ? [fallback] : [];
-    this.focusedPane = Math.min(this.focusedPane, Math.max(0, this.panes.length - 1));
+    layout.replaceSession(id, fallback);
     this.persistPanes();
     // Keep the route in step: if the hash still points at the closed session,
     // the route→store effect would resurrect the tab on the next reload / Back /
@@ -815,23 +920,18 @@ class WorkspaceStore {
   }
 
   split(axis: SplitAxis): void {
-    if (this.panes.length >= 4 || this.panes.length === 0) return;
-    if (this.panes.length === 1) this.splitAxis = axis;
-    const cur = this.panes[this.focusedPane];
-    this.panes = [...this.panes, cur];
-    this.focusedPane = this.panes.length - 1;
-    this.persistPanes();
+    if (layout.splitFocused(axis)) this.persistPanes();
   }
 
   /**
-   * Open a session **beside** the current one(s): append its id to `panes` as a
-   * new split pane (respecting the 1–4 cap) and focus it, so it sits side by side
-   * with the existing panes rather than replacing the active tab. Used to attach
-   * an opened connection terminal next to an agent.
+   * Open a session **beside** the current one(s): insert it as a new leaf next
+   * to the focused pane (respecting the MAX_PANES (15) cap) and focus it, so it
+   * sits side by side with the existing panes rather than replacing the active
+   * tab. Used to attach an opened connection terminal next to an agent.
    *
-   * Returns `true` if it landed in a pane, or `false` when the 1–4 cap is hit
-   * (the caller can surface a toast). Unlike `openSession`, this never replaces
-   * the focused pane — except when at the cap, where the focused pane is reused.
+   * Returns `true` if it landed in a pane, or `false` when the cap is hit (the
+   * caller can surface a toast). Unlike `openSession`, this never replaces the
+   * focused pane — except when at the cap, where the focused pane is reused.
    */
   openInSplit(id: Id): boolean {
     // Keep tab bookkeeping consistent (same as openSession).
@@ -844,41 +944,19 @@ class WorkspaceStore {
     if (this.viewMode !== 'tabs') this.setViewMode('tabs');
     this.maximizedId = null;
 
-    // Already on screen → just focus it.
-    const existing = this.panes.indexOf(id);
-    if (existing >= 0) {
-      this.focusedPane = existing;
-      return true;
-    }
-    // Empty layout → this becomes the sole pane.
-    if (this.panes.length === 0) {
-      this.panes = [id];
-      this.focusedPane = 0;
-      return true;
-    }
-    // At the 1–4 cap → reuse the focused pane and report the cap was hit.
-    if (this.panes.length >= 4) {
-      this.panes[this.focusedPane] = id;
-      this.panes = [...this.panes];
-      return false;
-    }
-    // Append as a new pane beside the current one(s) and focus it.
-    this.panes = [...this.panes, id];
-    this.focusedPane = this.panes.length - 1;
+    const ok = layout.addBeside(id); // existing leaf → focus; at MAX_PANES → focused leaf reused + false
     this.persistPanes();
-    return true;
+    return ok;
   }
 
   closePane(idx: number): void {
-    if (this.panes.length <= 1) return;
-    this.panes = this.panes.filter((_, i) => i !== idx);
-    this.focusedPane = Math.min(this.focusedPane, this.panes.length - 1);
+    layout.removeAt(idx);
     this.persistPanes();
   }
 
   focusPane(idx: number): void {
     if (idx < 0 || idx >= this.panes.length) return;
-    this.focusedPane = idx;
+    layout.focusIndex(idx);
     // Keep the route in sync with the focused pane so the URL + Back/Forward and
     // the navigator highlight track the click. The route→store effect reads
     // activeSessionId untracked, so this never clobbers; router.go dedupes a
@@ -895,8 +973,8 @@ class WorkspaceStore {
 
   /**
    * Make a set of sessions visible side-by-side: switch to the tiled grid and
-   * register them as open tabs (≤4 ⇒ also lay them out as split panes so they
-   * tile even in tabs view). Used by the Plan tab to surface its live planning
+   * register them as open tabs (also laid out as split panes, up to MAX_PANES
+   * (15), so they tile even in tabs view). Used by the Plan tab to surface its live planning
    * agents the moment they spawn. Unknown ids are tolerated — `reconcileTabs`
    * prunes any that never materialize; `session_created` events fill the rest in.
    */
@@ -906,14 +984,15 @@ class WorkspaceStore {
       this.openTabs = [...this.openTabs, ...fresh];
       this.persistTabs();
     }
-    // Lay out up to 4 as side-by-side panes (the grid shows them all in tiled
+    // Lay them out as side-by-side panes (the grid shows them all in tiled
     // view; panes give a clean split if the user flips back to tabs view).
-    const paneset = [...this.panes];
+    // Stop AT the cap: `addBeside` at MAX_PANES reuses the focused leaf, which
+    // would silently replace the focused session once per surplus id — and
+    // persist it. The tiled grid still shows every id.
     for (const id of ids) {
-      if (paneset.length >= 4) break;
-      if (!paneset.includes(id)) paneset.push(id);
+      if (layout.panes.length >= MAX_PANES) break;
+      if (!layout.panes.includes(id)) layout.addBeside(id, { focus: false });
     }
-    this.panes = paneset.length > 0 ? paneset : this.panes;
     this.persistPanes();
     this.maximizedId = null;
     this.setViewMode('tiled');
@@ -1055,13 +1134,9 @@ class WorkspaceStore {
       case 'session_created': {
         const s = ev.session;
         this.statusMap[s.id] = s.status;
-        if (s.workspace_id === this.currentId && !this.sessions.some((x) => x.id === s.id)) {
-          this.sessions = [...this.sessions, s];
-        } else if (
-          s.workspace_id !== this.currentId &&
-          this.allWorkspaces &&
-          !this.otherWsSessions.some((x) => x.id === s.id)
-        ) {
+        if (this.belongsHere(s.workspace_id)) {
+          if (!this.sessions.some((x) => x.id === s.id)) this.sessions = [...this.sessions, s];
+        } else if (this.allWorkspaces && !this.otherWsSessions.some((x) => x.id === s.id)) {
           this.otherWsSessions = [...this.otherWsSessions, s];
         }
         break;
@@ -1099,7 +1174,7 @@ class WorkspaceStore {
           delete next[ev.session_id];
           this.unread = next;
         }
-        if (ev.workspace_id === this.currentId) {
+        if (this.belongsHere(ev.workspace_id)) {
           this.sessions = this.sessions.filter((s) => s.id !== ev.session_id);
           if (this.openTabs.includes(ev.session_id)) this.closeTab(ev.session_id);
         } else {

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { ensureGridView } from './helpers';
 
 // ── DB Explorer sweep — MongoDB engine, mobile + tablet, both orientations ──────
 //
@@ -192,6 +193,8 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     await runStatement(page, 'db.customers.find({})');
 
     await ensureResultsOpen(page);
+    // Mongo results open in Vertical view; every assertion below reads the grid.
+    await ensureGridView(page);
     // Documents render as table rows; ≥1 customer (the seed has 4).
     await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({
       timeout: 20_000,
@@ -217,6 +220,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // Start clean (a prior aborted run may have left a doc behind).
     await runStatement(page, `db.${coll}.deleteMany({})`);
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(
       page.locator('.grid tbody td', { hasText: /^deleted \d+$/ }).first(),
     ).toBeVisible({ timeout: 20_000 });
@@ -224,6 +228,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // insertOne → status cell "inserted 1".
     await runStatement(page, `db.${coll}.insertOne({k:1, note:"e2e"})`);
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(
       page.locator('.grid tbody td', { hasText: 'inserted 1' }).first(),
     ).toBeVisible({ timeout: 20_000 });
@@ -231,6 +236,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // updateOne → status cell "matched 1, modified 1".
     await runStatement(page, `db.${coll}.updateOne({k:1},{$set:{note:"updated"}})`);
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(
       page.locator('.grid tbody td', { hasText: 'modified 1' }).first(),
     ).toBeVisible({ timeout: 20_000 });
@@ -238,6 +244,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // find → the doc now shows note "updated".
     await runStatement(page, `db.${coll}.find({})`);
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({
       timeout: 20_000,
     });
@@ -249,6 +256,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // deleteMany({}) is the documented fallback and IS supported).
     await runStatement(page, `db.${coll}.deleteMany({})`);
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(
       page.locator('.grid tbody td', { hasText: 'deleted 1' }).first(),
     ).toBeVisible({ timeout: 20_000 });
@@ -261,6 +269,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // customers have several fields → a good width stressor.
     await runStatement(page, 'db.customers.find({})');
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({
       timeout: 20_000,
     });
@@ -297,6 +306,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // ops render their status as a single-cell grid row (see test 4).
     await runStatement(page, `db.${coll}.deleteMany({})`);
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(
       page.locator('.grid tbody td', { hasText: /^deleted \d+$/ }).first(),
     ).toBeVisible({ timeout: 20_000 });
@@ -310,6 +320,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     });
     await runStatement(page, `db.${coll}.insertMany([${docs.join(',')}])`);
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(
       page.locator('.grid tbody td', { hasText: 'inserted 40' }).first(),
     ).toBeVisible({ timeout: 20_000 });
@@ -318,6 +329,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // driver's default 50-row cap).
     await runStatement(page, `db.${coll}.find({}).limit(40)`);
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({
       timeout: 20_000,
     });
@@ -346,6 +358,7 @@ test.describe('DB Explorer — MongoDB sweep', () => {
     // Cleanup.
     await runStatement(page, `db.${coll}.deleteMany({})`);
     await ensureResultsOpen(page);
+    await ensureGridView(page);
     await expect(
       page.locator('.grid tbody td', { hasText: 'deleted 40' }).first(),
     ).toBeVisible({ timeout: 20_000 });

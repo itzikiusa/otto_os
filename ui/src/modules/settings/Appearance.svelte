@@ -164,6 +164,29 @@
     </label>
   </div>
 
+  <div class="section-title">Database Explorer</div>
+  <label class="row num-row">
+    <span>Switch to Vertical view when a result has more than</span>
+    <input
+      type="number"
+      class="input num-input mono"
+      min="0"
+      max="500"
+      step="1"
+      value={ui.dbAutoVerticalCols}
+      oninput={(e) => {
+        // A cleared box is mid-edit, not "0" — leave the setting until a number lands.
+        if (e.currentTarget.value !== '') ui.setDbAutoVerticalCols(Number(e.currentTarget.value));
+      }}
+      aria-label="Auto-Vertical column threshold"
+    />
+    <span>columns</span>
+  </label>
+  <p class="hint-line">
+    0 = never. Applies unless you picked a view for that tab (the Grid / Vertical / JSON switch
+    or ⇧⌘V); MongoDB results open in Vertical by default. Saved per device.
+  </p>
+
   <div class="section-title">Sidebar</div>
   <p class="hint-line">
     Show, hide and reorder the items in the left sidebar — keep only what you use. Hidden items
@@ -303,6 +326,15 @@
     padding: 1px 6px;
     margin-inline-start: 6px;
     vertical-align: middle;
+  }
+  .num-row {
+    font-size: 12.5px;
+    color: var(--text);
+    margin-top: 8px;
+  }
+  .num-input {
+    width: 64px;
+    text-align: end;
   }
   .accent-input {
     width: 36px;

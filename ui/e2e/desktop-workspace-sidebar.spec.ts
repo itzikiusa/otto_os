@@ -82,9 +82,14 @@ test.describe('all-workspaces sidebar + workspace management', () => {
       nav.locator('.nested-item.active', { hasText: SESS_B }),
     ).toBeVisible({ timeout: 15_000 });
 
-    // Toggle OFF → foreign groups disappear and the choice persists.
+    // Toggle OFF → foreign groups disappear and the choice persists. The
+    // "No workspace" group shares the `.ws-group-label` markup but is NOT a
+    // workspace group: scratch sessions are global to the daemon (and this
+    // suite's 4 workers share one), so it is excluded rather than counted.
     await nav.getByRole('button', { name: 'Toggle all-workspaces session list' }).click();
-    await expect(nav.locator('.ws-group-label')).toHaveCount(0);
+    await expect(
+      nav.locator('.ws-group-label').filter({ hasNotText: 'No workspace' }),
+    ).toHaveCount(0);
     expect(await page.evaluate(() => localStorage.getItem('otto_nav_all_ws'))).toBe('0');
   });
 

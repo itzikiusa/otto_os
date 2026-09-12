@@ -1,5 +1,6 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
+import { ensureGridView } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — "Copy as INSERT" across engines, against the seeded Docker stack.
@@ -64,6 +65,9 @@ async function runQuery(page: Page, sql: string): Promise<void> {
   await content.pressSequentially(sql, { delay: 6 });
   await page.keyboard.press('Escape'); // dismiss autocomplete
   await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+  // Mongo results open in Vertical view; the row menu below is the grid's (a
+  // no-op for ClickHouse, which starts in Grid).
+  await ensureGridView(page);
   await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({
     timeout: 20_000,
   });
@@ -141,8 +145,9 @@ test.describe('MongoDB', () => {
     expect(docs, 'Mongo must not get SQL').not.toContain('INSERT INTO');
     expect(docs).toContain('db.orders.insertMany([');
     expect(docs).toContain('"status"');
-    // The seeded `_id`s are plain numbers, so they stay numbers — the `$oid`
-    // wrapper is only for 24-hex ObjectId strings.
+    // Values are emitted verbatim: the seeded `_id`s are plain numbers, so they
+    // stay numbers (a real ObjectId would arrive — and be re-emitted — as the
+    // `{"$oid": …}` sentinel).
     expect(docs).toMatch(/"_id":\s*1\b/);
 
     // 2) The ungating: project `_id` away → not editable, still copyable.

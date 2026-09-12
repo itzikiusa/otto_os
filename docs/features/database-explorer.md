@@ -28,8 +28,14 @@ updated in place ("Save as new" forks), and searched; **History** has a search
 box and a **Load more** pager. The main area is a tab strip —
 **Query · Builder · Structure · Diagram · Dashboards** — over the active view.
 The workbench **restores itself on reload** (open connection tabs, the selected
-connection, and each connection's active view come back), and a connection tab
-shows a green **health dot** with server version + connect latency once ready.
+connection, each connection's active view, its open query tabs — pinned ones
+first — and the **result view** each tab was left in come back), and a
+connection tab shows a green **health dot** with server version + connect
+latency once ready. Results render in one of three views — **Grid**, **Vertical**
+(one record per block) or **JSON** — and the view is chosen for you unless you
+pick one: **MongoDB opens in Vertical**, the SQL engines and Redis in Grid, and
+any result **wider than N columns** (a user setting, default 10) switches to
+Vertical so a record is readable without a horizontal scroll (§5).
 You can also dock a connection's full explorer *beside an agent* in the Agents
 split ("Open beside agents (split)" from a connection's right-click menu), so an
 agent and a live DB sit side by side.
@@ -56,6 +62,9 @@ query history, and persists saved queries / dashboards / widgets in SQLite.
 | SSH tunnel (`-L` local forward / `-D` SOCKS5) | `crates/otto-ssh/src/lib.rs` |
 | Shared types (engine, schema tree, query req/res, capabilities) | `crates/otto-dbviewer/src/types.rs` |
 | UI page + components | `ui/src/modules/database/*.svelte` |
+| Results orchestrator (toolbar, view switch, filter/sort, pager) + the three views | `ResultsGrid.svelte` → `GridView.svelte` / `VerticalView.svelte` / `JsonView.svelte` |
+| Edit flow (pending changes, review modal, doc editor, cell viewer) + per-engine statement builders | `EditFlow.svelte.ts`, `edit-{sql,mongo,redis}.ts` |
+| View-mode precedence, tab/pin persistence, connection view memory | `ui/src/lib/stores/database.svelte.ts` (`effectiveViewMode`) |
 | API client types (mirror the contract) | `ui/src/lib/api/types.ts` |
 
 ### Per-engine support matrix
@@ -69,7 +78,7 @@ affordances appear) plus the introspection each driver actually performs.
 | `joins` (Builder + ERD edges enabled) | yes | yes | no | no | yes |
 | `transactions` | no | no | no | no | no |
 | `multi_statement` | yes | yes | yes | yes | yes |
-| `cancel` (server-side per-query cancel) | yes | yes | no | no | yes |
+| `cancel` (server-side per-query cancel) | yes | yes | no | yes | yes |
 | `explain` (query-plan panel) | yes | yes | no | yes | yes |
 | `default_port` | 3306 | 5432 | 6379 | 27017 | 8123 |
 | `query_language` (editor mode) | `sql` | `sql` | `redis` | `mongo` | `sql` |
@@ -77,19 +86,23 @@ affordances appear) plus the introspection each driver actually performs.
 | Builder tab (visual JOIN) | yes | yes | — | — | yes |
 | Diagram tab (ERD) | yes (FK edges) | yes (FK edges) | — (no Diagram) | yes (cards, no edges) | yes (FK edges) |
 | Visual JOIN / FK relationships | yes | yes | no | no | yes |
-| Inline editing (approval-gated) | yes (single-table SELECT w/ PK) | yes (single-table SELECT w/ PK) | no | yes (single-collection find by `_id`) | yes (`ALTER … UPDATE`) |
+| Inline editing (approval-gated) | yes (single-table SELECT w/ PK) | yes (single-table SELECT w/ PK) | yes (`GET`/`HGETALL`/`HGET`/`LRANGE`/`SMEMBERS`/`ZRANGE` results) | yes (single-collection find by `_id`; nested fields via dotted `$set`/`$unset`/`$rename`) | yes (`ALTER … UPDATE`) |
 | Streaming export to file | yes (sqlx cursor) | yes (sqlx cursor) | no (buffered, 100k cap) | yes (cursor) | yes (HTTP `FORMAT` splice) |
 | File import | yes (batched `INSERT`) | yes (batched `INSERT`) | no | yes (`insertMany`) | yes (batched `INSERT`) |
 | Query-plan source | `EXPLAIN FORMAT=JSON` | `EXPLAIN (FORMAT JSON)` | — (no plan) | `explain` (queryPlanner) | `EXPLAIN json=1` (+plain fallback) |
 | Triggers browse | yes (`SHOW CREATE TRIGGER`) | — | — | — | — |
-| Engine-native query cancel | yes (`KILL QUERY`) | yes (`pg_cancel_backend`) | no-op | no-op | yes (`KILL QUERY`, HTTP transport) |
+| Engine-native query cancel | yes (`KILL QUERY`) | yes (`pg_cancel_backend`) | no-op | yes (`$currentOp` comment tag + `killOp`; needs `inprog`/`killop`) | yes (`KILL QUERY`, HTTP transport) |
 | Automatic read `LIMIT` | yes (1000) | yes (1000) | n/a (`SCAN` caps) | n/a (`.limit()`/cap) | yes (1000) |
+| Keyset pagination (Next = `_id > last`) | no (`OFFSET`) | no (`OFFSET`) | n/a | yes (`_id` sort only; Prev is offset-based) | no (`OFFSET`) |
+| Type fidelity (typed round-trip) | native | native | strings | ObjectId / Date / Decimal128 / Long > 2⁵³ / UUID / Binary / Timestamp | native |
+| Default result view | Grid | Grid | Grid | **Vertical** | Grid |
 
 > **Honesty notes.** `transactions` is `false` for **every** engine: the explorer
 > acquires each query from a connection pool, so there is no pinned session to hold
 > a `BEGIN…COMMIT` open (the flag was `true` for MySQL/Mongo before with nothing
 > behind it). `multi_statement` is `true` for all five (Mongo already ran
 > `;`-separated scripts). `cancel` labels whether **Stop** hits the engine or is a
+> client-side drop — MongoDB is now engine-side too (§4), Redis remains the one
 > client-side drop; `explain` gates the **Explain** query-plan button (hidden for
 > Redis).
 
@@ -421,11 +434,23 @@ What each engine contributes to the candidate pool:
 ### Multiple query tabs
 
 The **Query** view (`QueryEditor.svelte`) has a tab strip: each tab is an
-independent statement + result. Add tabs with the **+** button; close with the
-**×** (hidden when only one tab remains); **double-click** a tab to rename. A tab
-shows a pulsing dot while running and a red dot on error. Tab titles
-auto-derive (explicit name → the table after `FROM`/`UPDATE`/`INTO` → a verb
-snippet → "Query N").
+independent statement + result. Add tabs with the **+** button (⌥⌘T); close with
+the **×** (hidden when only one tab remains) or ⌥⌘W; **double-click** a tab to
+rename; ⇧⌥⌘W reopens the last closed tab. A tab shows a pulsing dot while
+running and a red dot on error. Tab titles auto-derive (explicit name → the
+table after `FROM`/`UPDATE`/`INTO` → a verb snippet → "Query N"). Each tab also
+remembers its **result view** (Grid / Vertical / JSON — §5): the view is stored
+with the tab, so switching tabs never resets it, and **⇧⌘V** cycles
+Grid → Vertical → JSON on the active tab.
+
+**Right-click a tab** for **Pin tab / Unpin tab**, **Rename**, **Close others**
+and **Close all**. A **pinned** tab (📌 glyph, no ×) survives *Close others* /
+*Close all* and refuses × / ⌥⌘W with an "Unpin to close" toast until you unpin
+it — the two bulk actions say "(keeps pinned tabs)" whenever a pin exists.
+Pinned tabs group at the front of the strip; pins, tab order, statements,
+variables and view picks are all persisted per connection (`otto_db_tabs`), so
+a pinned tab is still there after a reload or an app restart. Closed tabs'
+running queries are cancelled (server-side too) exactly like a single close.
 
 ### Running a query
 
@@ -441,9 +466,11 @@ under a **running overlay** (elapsed seconds + Cancel); **Esc** cancels. When a
 bare SELECT was auto-limited, the footer grows a **pager**
 (`‹ Prev · rows a–b · Next ›`) that re-runs server-side with `OFFSET`/`skip`
 (with an "unordered" hint when the statement has no `ORDER BY`; an explicit
-user `LIMIT` disables it). The **⌨** toolbar popover lists every shortcut
-(⌘↵, ⇧⌘↵, ⌘S save, ⇧⌘F format, Esc cancel, ⌥⌘→/← switch query tabs, ⌥⌘T new
-tab, ⌥⌘W close tab). The toolbar also has:
+user `LIMIT` disables it; on MongoDB **Next** walks the collection by `_id`
+instead of `skip` — see §5). The **⌨** toolbar popover lists every shortcut
+(⌘↵, ⇧⌘↵, ⌘S save, ⇧⌘F format, ⇧⌘V cycle the results view, Esc cancel, ⌥⌘→/←
+switch query tabs, ⌥⌘T new tab, ⌥⌘W close tab, ⇧⌥⌘W reopen). The toolbar also
+has:
 
 - **Save** — name and store the statement as a workspace **saved query** (visible
   in the sidebar's **Saved** switch; see §11).
@@ -454,6 +481,13 @@ tab, ⌥⌘W close tab). The toolbar also has:
   **Mongo** uses a structural JS/JSON re-indenter (`db.coll.op({…})` / pipelines —
   the SQL formatter can't parse it), Redis (one-line commands) is a no-op.
 - **Ask AI** — the examine-with-agent hand-off (see §9).
+- **Variables** — a statement may reference `:name`, `{name}` or `{{name}}`
+  placeholders; the bar under the editor holds a value + type (`string` quoted /
+  `number` raw / `raw` verbatim) per variable, per tab. **Running with a missing
+  value prompts for it** (a small **Query variables** dialog, one row per
+  unfilled name, Enter runs) instead of failing; opening a **saved query** that contains
+  placeholders opens the same prompt straight away. Values are persisted with
+  the tab.
 - **Active database** selector — scope queries to a DB (or a Redis keyspace) so
   you can drop the `db.` prefix.
 - **Limit** selector — the automatic row cap (below).
@@ -533,9 +567,18 @@ blocked one): the client sends a `query_id` with the run; **Stop** posts that id
 to `POST …/db/cancel`, and the service issues:
 
 - **MySQL** → `KILL QUERY <connection-id>` (captured from `CONNECTION_ID()`).
+- **PostgreSQL** → `pg_cancel_backend(<pid>)`.
 - **ClickHouse** → `KILL QUERY WHERE query_id = '<id>'` (HTTP transport only).
-- **Redis / MongoDB** → no engine-native per-query cancel; cancel is a **no-op
-  success** (the UI just drops the in-flight request).
+- **MongoDB** → every `find` / `aggregate` / `count` issued with a `query_id`
+  is tagged with a **comment** (`otto:<query_id>`); **Stop** runs
+  `$currentOp` on a second connection, matches `command.comment` against that
+  tag and issues `killOp` for each matching op id. Best-effort: it needs the
+  `inprog` and `killop` privileges — without them the cancel logs a warning and
+  succeeds as a client-side drop (the query keeps running on the server until it
+  finishes). Writes and full mongosh **scripts** are not tagged, so they cannot
+  be cancelled server-side.
+- **Redis** → no engine-native per-query cancel; cancel is a **no-op success**
+  (the UI just drops the in-flight request).
 
 Cancelling an unknown / already-finished query, or one that belongs to a
 different connection, is always a benign `204` — never an error.
@@ -544,17 +587,143 @@ different connection, is always a benign `204` — never an error.
 
 ## 5. Results grid
 
-Results render in a **virtualized grid** (`ResultsGrid.svelte`) — only the rows
-in view are in the DOM, so 100k-row results scroll smoothly. Three view modes:
-**Grid** (columnar, default), **Vertical** (one record per block), and **JSON**
-(**one JSON object per row** — each row is its own bordered, numbered, copyable
-block rather than a single big array, so row boundaries are unmistakable; the
-server payload is unchanged, only the rendering differs). Complex cells
-(objects/arrays) show as compact JSON
-with click-to-expand; `NULL` renders as a dimmed `∅`. A **Search rows…** box
-filters the current view. The footer shows the row count (annotated "(filtered)"
-/ "(sorted)" when active) and the query duration in ms, plus the **truncated**
-and **🔒 Masked** badges when applicable.
+Results render through one orchestrator (`ResultsGrid.svelte` — toolbar, view
+switch, client-side filter/sort, selection bar, pending-edits bar, footer pager)
+over three interchangeable views of the same rows:
+
+- **Grid** (`GridView.svelte`) — a **virtualized** columnar table: only the rows
+  in view are in the DOM, so 100k-row results scroll smoothly. Complex cells
+  (objects/arrays) show as compact JSON with click-to-expand (or **Expand JSON**
+  for all of them); `NULL` renders as a dimmed `∅`.
+- **Vertical** (`VerticalView.svelte`) — **one record per block**, each field on
+  its own `field: value` row, nested documents rendered as nested rows (below).
+  The Postgres `\x` / ClickHouse `FORMAT Vertical` way of reading a wide or
+  ragged record.
+- **JSON** (`JsonView.svelte`) — **one JSON object per row**: each row is its own
+  bordered, numbered, copyable block rather than a single big array, so row
+  boundaries are unmistakable.
+
+The server payload is identical in all three — only the rendering differs. The
+Vertical and JSON views are not virtualized (one document can be enormous on its
+own), so they draw records in **batches** (a "Show N more" button grows the
+window; 500 is the hard ceiling per view). A **Search rows…** box filters the
+current view in every mode. The footer shows the row count (annotated
+"(filtered)" / "(sorted)" when active) and the query duration in ms, plus the
+**truncated** and **🔒 Masked** badges when applicable.
+
+### View mode & auto-Vertical
+
+The **Grid · Vertical · JSON** switch in the results toolbar is a per-tab
+choice, and the view a result actually renders in is resolved by
+`effectiveViewMode` (`ui/src/lib/stores/database.svelte.ts`) with this
+precedence — first match wins:
+
+1. **Your explicit pick for this tab** (the switch, or **⇧⌘V** which cycles
+   Grid → Vertical → JSON → Grid) — stored on the tab, persisted with it, never
+   reset by switching tabs or reloading.
+2. **The auto-Vertical threshold** — a result with **more than N columns**
+   renders in Vertical (N is *Settings → Appearance → Database Explorer*,
+   default **10**, `0` = never). It never overrides a pick made on the tab.
+3. **The view remembered for the connection** — the last explicit pick made on
+   any tab of that connection (persisted in its `otto_db_view` entry next to its
+   main/side pane), so the next tab you open there starts the same way.
+4. **The engine default** — **MongoDB → Vertical**; MySQL, PostgreSQL,
+   ClickHouse and Redis → Grid.
+
+The switch's tooltip names the rule in force ("your pick for this tab",
+"auto: 12 columns > 10", "remembered for this connection", "engine default").
+Once you have picked a view on a tab a dimmed **Auto** chip appears next to the
+three modes; it clears **that tab's pick only** (the connection memory stays)
+and its tooltip says which view that would restore. The threshold lives in the
+browser profile (localStorage), like the other Appearance preferences — it is
+not synced through `PUT /settings`. Dashboard widget mini-grids and the AWS
+Athena view mount the same component without a query tab and keep a local
+Grid-first switch.
+
+### Vertical view: nested documents
+
+In Vertical view a sub-document or array renders as **nested `field: value`
+rows** (indented under its parent), **expanded by default** — you read
+`meta.brand_id` where it sits instead of clicking into a `{…}` summary. Large
+documents stay responsive through a **node budget** (default 400 nodes per
+record, breadth-first, arrays in 50-item chunks) rather than the old
+"collapse past depth 2 or 20 keys" cutoff: branches that don't fit the budget
+render as a one-line summary you can open; **Expand all** (warns first when the
+records currently DRAWN are estimated past 20,000 nodes in total — the estimate
+is summed over the batch, not per record), **Collapse all** and **Reset** sit in
+the view's header. Expansion is **sticky by path across records**: opening
+`items.0.meta` in record 1 keeps `items.*.meta` open in every other record on
+screen (array indices are normalised, so a pick on the first element applies to
+its siblings). The JSON view uses the same plan and the same three buttons. The
+expansion state resets when the result's columns change.
+
+### Editing in Vertical view
+
+**Double-click any value** — top-level or nested — to edit it inline. The editor
+is **typed** (ObjectId · Date · number · long · decimal · bool · null · string ·
+JSON, pre-selected from the current value; ObjectId = 24 hex, Date parses to
+ISO, long/decimal validated) and the edit **parks as a pending change** exactly
+like a grid cell (amber row marker, pending-edits bar, **Review & apply**). A
+field's right-click menu adds **Set null**, **Delete field ($unset)…**,
+**Rename field…**, **Add field here…**, **Copy path** and **Copy value**; the
+record's **⋯** menu adds **Add field…**, **Insert document…**, **Copy as JSON**,
+**Export…**, **Compare** and **Replace document (JSON)…** (the whole-document
+editor). On **MongoDB** the review builds one `updateOne` per touched document
+with **dotted paths** — `{"$set": {"items.0.qty": 7}, "$unset": {"legacy": ""},
+"$rename": {"old": "new"}}` — so concurrent edits to other fields are left
+alone (the old whole-document `replaceOne` is now only the explicit *Replace
+document* action). Conflicting parks are refused with a toast (rename a path
+then edit the new name; a `$set` under a path being `$unset` replaces the
+earlier change). On the **SQL engines** the same double-click produces the
+existing `UPDATE … SET col = v` path (top-level column), and an edit *inside* a
+JSON column rewrites that whole column value in the same `UPDATE` — no separate
+code path. The review modal shows a **diff table** (path · before → after, per
+operation) above the editable statement for every change, including
+*Replace document* (computed by flattening old vs new).
+
+### Compare two records
+
+Select **exactly two rows** (checkboxes in the grid, or **Compare with…** from
+two record ⋯ menus in Vertical/JSON) and press **Compare** in the **selection bar**
+— the grid's path, it appears as soon as rows are selected. The toolbar's
+**Compare…** button is the Vertical/JSON path: it is rendered only outside Grid
+and enabled at exactly two. Either opens a side-by-side **diff modal**: one row per
+leaf path, classed *same / changed / only-left / only-right*, an "only
+differences" toggle (on by default), and **Copy as JSON patch** (`set`/`unset`
+operations that turn the left record into the right one). Read-only — it is a
+review aid, not an edit path.
+
+### Mongo filter bar
+
+On a MongoDB connection, when the active statement is a single `find(…)`, a
+one-line **filter bar** sits above the results: type a `{ field: value }`
+object (column chips insert `"col": ` at the caret), choose **Replace** (the
+new object becomes the `find` filter) or **AND** (merged into the existing
+one), and press **Run** / Enter — the statement is rewritten in the editor and
+re-run. It reuses the same `find(` splicer as *Query by value* / *Add to
+query*; an unbalanced object is rejected with a toast; the bar hides for
+aggregates, multi-statement buffers and scripts.
+
+### Aggregate pipeline builder
+
+**Pipeline…** in the results toolbar (MongoDB only) opens a stage-by-stage
+builder: add `$match` / `$project` / `$sort` / `$limit` / `$skip` / `$group` /
+`$unwind` / `$lookup` / `$addFields` / `$count` (or a raw stage), reorder or
+delete stages, and watch the formatted `db.<collection>.aggregate([...])`
+preview update live. **Insert** writes it into the editor; **Run** inserts and
+runs. The collection defaults to the one the current result was read from
+(else the object selected in the tree, else a text box); the draft is kept per
+connection in localStorage so closing the dialog loses nothing.
+
+### Single-document import/export
+
+From a record's **⋯** menu (Vertical/JSON): **Copy as JSON** copies the
+pretty-printed document, **Export…** downloads it as `<collection>-<id>.json`.
+The toolbar's **Insert from JSON…** (and the record menu's **Insert
+document…**) opens the document editor in insert mode — paste or type a JSON
+object and **Save** builds `db.<collection>.insertOne(<doc>)` (SQL: an
+`INSERT INTO … VALUES` from the keys that match result columns) through the
+usual review modal. Whole-result import/export (files, streaming) is §10/§10b.
 
 ### Client-side filter & sort
 
@@ -617,15 +786,30 @@ A result is editable only when Otto can target a row unambiguously:
   disabled with an inline reason. ClickHouse edits generate an `ALTER … UPDATE`
   mutation.
 - **MongoDB** — a **single-collection** `find` (or translated `SELECT`) **that
-  includes `_id`**; edits build an `updateOne` (and duplicates an `insertOne`,
-  deletes a `deleteMany`) targeting `_id`.
-- **Redis** — not editable from the grid.
+  includes `_id`**; edits build an `updateOne` targeting `_id` whose `$set` /
+  `$unset` / `$rename` carry **dotted paths** for nested fields (a cell edit in
+  the grid is a top-level `$set`; the Vertical view reaches any depth — see
+  *Editing in Vertical view*), duplicates an `insertOne`, deletes a
+  `deleteMany`. Typed values round-trip as EJSON (`{"$oid"}`, `{"$date"}`,
+  `{"$numberDecimal"}`, `{"$numberLong"}` …).
+- **Redis** — the result of a single `GET`, `HGETALL`, `HGET`, `LRANGE`,
+  `SMEMBERS` or `ZRANGE` is editable: a value edit reviews as
+  `SET k "v" KEEPTTL` (the key's TTL is preserved), `HSET k field v`,
+  `LSET k i v` or `ZADD k score member`; a row delete as `DEL` / `HDEL` /
+  `SREM` / `ZREM`; a hash's **Add field** as `HSET`. Set members can be removed
+  but not edited in place, and the list **index** column is read-only. Editing a
+  **hash field** or a **zset member** name is a **rename**, so it reviews as two
+  commands — `HDEL` + `HSET` (the value is carried over) / `ZREM` + `ZADD` (the
+  score is) — and is skipped with a note when the row cap cut the reply between
+  the name and its value. Anything else Redis returns (`SCAN`, `KEYS`, `INFO`,
+  multi-line scripts) stays read-only.
 
 The review modal is titled for the operation ("Review UPDATE", "Review DELETE",
 "Review INSERT (duplicate row)", "Review updateOne", "Review ALTER … UPDATE
-(mutation)", …), shows the editable statement, and warns it will run against the
-connection. On a **production / read-only** connection a **typed confirmation**
-is required first (see §13).
+(mutation)", …), shows a **diff table** of every change (path · before → after)
+above the editable statement, and warns it will run against the connection. On
+a **production / read-only** connection a **typed confirmation** is required
+first (see §13).
 
 ### Copy & export from the grid
 
@@ -913,15 +1097,37 @@ root): `…/db/saved-queries`, `…/db/dashboards`, `…/db/widgets`,
 `GET|PATCH|DELETE /db/dashboards/{id}`, `PATCH|DELETE /db/widgets/{id}`, and
 `POST /db/widgets/{id}/run`.
 
-`RunQueryReq` notes: `query_id` (client-generated, enables cancel); `timeout_ms`
-(MySQL `MAX_EXECUTION_TIME` hint; others = context deadline); `mask` (server-side
-redaction); `confirm_write` (typed-confirmation acknowledgement for a guarded
-connection); `offset` (server-side paging for auto-limited statements). A batch
-response puts the first statement's result at the top level with the rest in
-`more_results[]` (each with a `statement` preview and an `errored` flag);
-`auto_limited` carries the applied cap so the UI can page. `ExportToPathReq` =
-`{statement, node?, format?, local_path, max_rows?}` → `ExportToPathResp` =
-`{local_path, rows, bytes, duration_ms}`.
+`RunQueryReq` notes: `query_id` (client-generated, enables cancel — on MongoDB
+it also becomes the `otto:<query_id>` comment tag `killOp` matches on);
+`timeout_ms` (MySQL `MAX_EXECUTION_TIME` hint; others = context deadline);
+`mask` (server-side redaction); `confirm_write` (typed-confirmation
+acknowledgement for a guarded connection); `offset` (server-side paging for
+auto-limited statements); `cursor?` (EJSON of the last `_id` of the previous
+page — **keyset paging**, MongoDB only, see below). A batch response puts the
+first statement's result at the top level with the rest in `more_results[]`
+(each with a `statement` preview and an `errored` flag); `auto_limited` carries
+the applied cap so the UI can page; `next_cursor?` (EJSON of the last `_id`
+returned) is present only when the page was keyset-eligible **and** truncated.
+`ExportToPathReq` = `{statement, node?, format?, local_path, max_rows?}` →
+`ExportToPathResp` = `{local_path, rows, bytes, duration_ms}`.
+
+**Keyset pagination (MongoDB).** A `find` is keyset-eligible when it has no
+explicit `.limit()`, no sort (or `{_id: 1}`), and no `_id` key in its filter.
+For such a find the driver forces `sort: {_id: 1}` on *every* page and, when a
+`cursor` is sent, ANDs `{_id: {$gt: <cursor>}}` onto the filter instead of
+`skip`-ping — so **Next** in the footer pager costs the same on page 200 as on
+page 1 and never repeats or skips a document that moved. **Prev** stays
+offset-based (`skip`), as does any non-eligible find (a `cursor` sent with one
+is ignored and the request falls back to `offset` silently).
+
+**Type fidelity (MongoDB).** Result cells carry BSON types as EJSON sentinels —
+`{"$oid"}`, `{"$date"}`, `{"$numberDecimal"}`, `{"$numberLong": "<digits>"}`
+(only when |n| > 2⁵³, smaller integers are plain JSON numbers), `{"$uuid"}`,
+`{"$binary": {"base64", "subType"}}`, `{"$timestamp": {"t", "i"}}` — and every
+one of them is decoded back on the way in (`decode_ejson`), so an edited
+ObjectId / Date / Decimal128 / Long / UUID / Binary / Timestamp round-trips
+without loss. The UI renders them as `ObjectId("…")`, `ISODate("…")`,
+`NumberLong("…")`, `UUID("…")`, `BinData(n, "…")`, `Timestamp(t, i)`.
 
 ---
 
@@ -933,10 +1139,29 @@ response puts the first statement's result at the top level with the rest in
 - **Builder & Diagram** require `joins` (SQL engines). Redis has no Diagram; Mongo's
   Diagram shows cards but no edges.
 - **Inline editing** needs an unambiguously addressable row (single-table SELECT
-  with PK / single-collection find with `_id`); Redis is read-only in the grid.
+  with PK / single-collection find with `_id`). **Redis editing** covers the
+  result of one `GET` / `HGETALL` / `HGET` / `LRANGE` / `SMEMBERS` / `ZRANGE`
+  only (set members: delete, not edit; a hash field / zset member name edit is a
+  rename — `HDEL`+`HSET` / `ZREM`+`ZADD`); everything else Redis returns stays
+  read-only. A nested edit inside a **SQL JSON column** rewrites the **whole
+  column value** in the `UPDATE` (SQL has no dotted `$set`), so concurrent
+  edits to other keys of that same column are overwritten — Mongo's dotted
+  paths don't have this limitation.
 - **Cancellation** is engine-native for MySQL, PostgreSQL (`pg_cancel_backend`),
-  and ClickHouse (HTTP transport). Redis/Mongo cancel is a client-side drop (the
+  ClickHouse (HTTP transport) and MongoDB (`$currentOp` comment tag + `killOp`,
+  which needs the `inprog` + `killop` privileges — without them the cancel
+  degrades to a client-side drop with a daemon-side warning, and full mongosh
+  scripts / writes are never tagged). Redis cancel is a client-side drop (the
   `cancel` capability flag labels this in the UI).
+- **Pagination**: MongoDB pages forward by keyset (`_id > last`) only for a
+  `find` with no explicit limit, no sort other than `{_id: 1}` and no `_id`
+  filter; **Prev** and every other engine/statement page by `OFFSET` / `skip`.
+- **Result view**: the auto-Vertical column threshold (and the rest of the
+  Appearance settings) is stored **per browser profile** (localStorage), not in
+  the daemon's `PUT /settings` — it does not follow you across devices, and a
+  second browser profile starts at the default (10). Per-tab picks and the
+  per-connection memory are localStorage too; closing a connection tab forgets
+  its remembered view along with its main/side pane (the tab picks survive).
 - **Transactions**: the `transactions` capability is `false` for every engine —
   queries run on pooled connections, so there is no pinned session to hold a
   `BEGIN…COMMIT` open across runs.
@@ -1031,9 +1256,20 @@ response puts the first statement's result at the top level with the rest in
 - **Inline editing is disabled** — the result isn't uniquely addressable: include
   the table's primary key (or `_id` for Mongo) and use a single-table/-collection
   query (no JOIN/GROUP BY/aggregate).
-- **Stop didn't kill the query (Redis/Mongo)** — those engines have no native
-  per-query cancel; the client just drops the request. MySQL/ClickHouse-HTTP issue
-  a real `KILL QUERY`.
+- **Stop didn't kill the query (Redis)** — Redis has no native per-query cancel;
+  the client just drops the request. MySQL/ClickHouse-HTTP issue a real
+  `KILL QUERY`, PostgreSQL `pg_cancel_backend`.
+- **Cancel didn't stop my Mongo query** — server-side cancel needs the
+  connection's user to hold `inprog` (to see the op in `$currentOp`) and
+  `killop`; without them Stop only drops the HTTP wait and the daemon logs a
+  warning. Full **mongosh scripts** and **writes** are never tagged, so they can
+  only be dropped client-side. Grant the privileges (or the `clusterMonitor` +
+  `hostManager` roles) and re-run.
+- **My result opened in Vertical, I wanted the grid** — MongoDB defaults to
+  Vertical, and any engine switches to Vertical past the column threshold
+  (*Settings → Appearance → Database Explorer*, default 10; `0` disables it).
+  Pick **Grid** on the tab (or ⇧⌘V) — the pick sticks to that tab and is
+  remembered for the connection; the **Auto** chip returns to automatic.
 - **Export wrote to the wrong machine** — `export-to-path` writes the **daemon
   host's** disk; for a remotely-running daemon the file lands there, not on your
   laptop. Use the browser-download export (CSV/JSON) to pull to the client.

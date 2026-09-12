@@ -1253,6 +1253,7 @@ impl DbViewerService {
             query_id: None,
             mask: Some(true),
             offset: None,
+            cursor: None,
         };
         self.run(conn_id, user_id, &safe).await
     }

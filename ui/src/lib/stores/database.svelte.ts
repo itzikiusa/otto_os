@@ -20,6 +20,7 @@ import type {
   DbCapabilities,
   DbCompletionItem,
   DbDashboard,
+  DbEngine,
   DbHistoryEntry,
   DbQueryPlan,
   DbSavedQuery,
@@ -33,6 +34,7 @@ import type {
   ObjectHit,
   ObjectSearchResult,
   QueryResult,
+  RunQueryReq,
   SchemaNode,
   Session,
 } from '../api/types';
@@ -362,6 +364,61 @@ export type FilterCond =
   | { kind: 'col'; column: string; op: 'in' | 'not_in'; values: FilterVal[] }
   | { kind: 'raw'; text: string };
 
+// ── Result view mode ──────────────────────────────────────────────────────────
+// How a tab's result renders: a columnar grid, one record per block (Postgres
+// `\x` / ClickHouse FORMAT Vertical) or one JSON object per row. Where the mode
+// comes from is layered — see `effectiveViewMode` — so an explicit pick never
+// fights the automatic defaults, and nothing here resets on a tab switch.
+export type ViewMode = 'grid' | 'vertical' | 'json';
+const VIEW_MODES: readonly ViewMode[] = ['grid', 'vertical', 'json'];
+function isViewMode(v: unknown): v is ViewMode {
+  return typeof v === 'string' && (VIEW_MODES as readonly string[]).includes(v);
+}
+/** The view a result opens in when nothing else decided. Mongo documents are
+ *  nested and ragged, so they read best one record at a time; the SQL engines
+ *  (and Redis) keep the columnar grid. */
+export const ENGINE_DEFAULT_VIEW: Record<DbEngine, ViewMode> = {
+  mongodb: 'vertical',
+  mysql: 'grid',
+  postgres: 'grid',
+  clickhouse: 'grid',
+  redis: 'grid',
+};
+/** Everything `effectiveViewMode` / `viewModeReason` weigh. `autoVerticalCols`
+ *  is the user's "switch to Vertical past N columns" setting (0 = never). */
+export interface ViewModeInputs {
+  tabPick: ViewMode | null;
+  connPick: ViewMode | null;
+  columnCount: number;
+  autoVerticalCols: number;
+  engine: DbEngine | null;
+}
+function wideResult(a: ViewModeInputs): boolean {
+  return a.autoVerticalCols > 0 && a.columnCount > a.autoVerticalCols;
+}
+/**
+ * The view a result renders in. Precedence, first match wins:
+ *   1. an explicit pick on THIS tab (the segmented control / ⇧⌘V);
+ *   2. the wide-result threshold — more columns than the user's limit → Vertical;
+ *   3. the pick remembered for the connection (the last explicit pick on it);
+ *   4. the engine default (`ENGINE_DEFAULT_VIEW`), Grid when the engine is unknown.
+ * So the threshold never overrides a choice made on the tab, and a choice made
+ * on another tab of the same connection only fills in when nothing else did.
+ */
+export function effectiveViewMode(a: ViewModeInputs): ViewMode {
+  if (a.tabPick) return a.tabPick;
+  if (wideResult(a)) return 'vertical';
+  if (a.connPick) return a.connPick;
+  return (a.engine ? ENGINE_DEFAULT_VIEW[a.engine] : undefined) ?? 'grid';
+}
+/** Why `effectiveViewMode` chose what it chose — the view switch's tooltip. */
+export function viewModeReason(a: ViewModeInputs): string {
+  if (a.tabPick) return 'your pick for this tab';
+  if (wideResult(a)) return `auto: ${a.columnCount} columns > ${a.autoVerticalCols}`;
+  if (a.connPick) return 'remembered for this connection';
+  return 'engine default';
+}
+
 /** An open query tab: an editable statement + its last result + quick filters. */
 export interface QueryTab {
   id: number;
@@ -430,6 +487,18 @@ export interface QueryTab {
    * result lands, the user stops the query, or the server no longer knows the id.
    */
   pending?: { queryId: string; connId: Id } | null;
+  /**
+   * The user's explicit result view for this tab (segmented control / ⇧⌘V);
+   * `null`/absent = automatic (threshold → connection memory → engine default,
+   * see `effectiveViewMode`). Persisted with the tab so it survives a reload and
+   * is NOT reset by switching tabs.
+   */
+  viewMode?: ViewMode | null;
+  /**
+   * A pinned tab survives "Close others" / "Close all" and can't be closed by
+   * × / ⌥⌘W until unpinned. Pinned tabs sit first in the strip. Persisted.
+   */
+  pinned: boolean;
 }
 
 /** Normalize a persisted vars blob — legacy `Record<string,string>` (bare value)
@@ -469,7 +538,24 @@ function blankTab(statement = ''): QueryTab {
     vars: {},
     offset: 0,
     pending: null,
+    viewMode: null,
+    pinned: false,
   };
+}
+
+/**
+ * Pinned tabs first (stable within each group), the way the strip shows them —
+ * shared by pin/unpin and the reload restore so the order never changes across a
+ * reload. Returns the reordered list plus where `activeIdx` moved to.
+ */
+function orderPinnedFirst(
+  tabs: QueryTab[],
+  activeIdx: number,
+): { tabs: QueryTab[]; activeTab: number } {
+  const active = tabs[activeIdx];
+  const ordered = [...tabs.filter((t) => t.pinned), ...tabs.filter((t) => !t.pinned)];
+  const activeTab = active ? Math.max(0, ordered.indexOf(active)) : 0;
+  return { tabs: ordered, activeTab };
 }
 
 /** Main-pane tabs of the DB page. */
@@ -524,6 +610,7 @@ interface ConnSnapshot {
   history: DbHistoryEntry[];
   mainTab: DbMainTab;
   sideTab: DbSideTab;
+  connView: ViewMode | null;
 }
 
 export type ConnPhase = 'connecting' | 'ready' | 'error';
@@ -588,6 +675,14 @@ class DatabaseStore {
    */
   connStatus: Map<Id, ConnStatus> = $state(new Map());
   capabilities: DbCapabilities | null = $state(null);
+  /**
+   * The result view remembered for the selected connection — the last explicit
+   * pick made on any of its tabs (`setViewMode`). Fills in for tabs without a
+   * pick of their own (precedence in `effectiveViewMode`); never copied INTO a
+   * tab. Per-connection (snapshotted); persisted in the connection's
+   * `otto_db_view:` entry next to its main/side pane.
+   */
+  connView: ViewMode | null = $state(null);
   testResult: DbTestResult | null = $state(null);
   testing = $state(false);
   /** Default row cap for statements without an explicit LIMIT (persisted). */
@@ -979,6 +1074,7 @@ class DatabaseStore {
         tab.error = null;
       }
       state.capabilities = null;
+      state.connView = null;
       state.testResult = null;
       state.schemaRoot = [];
       state.childrenCache = new Map();
@@ -1071,6 +1167,12 @@ class DatabaseStore {
     // A closed tab must not keep querying: cancel its in-flight run (server-side
     // too) and drop its pending marker so the reattach loop stops polling it.
     const closing = this.tabs[i];
+    // A pin is a promise the tab stays: every close path (×, ⌥⌘W, the strip
+    // menu) refuses until it's unpinned, instead of silently discarding work.
+    if (closing?.pinned) {
+      toasts.info('Unpin to close');
+      return;
+    }
     if (closing) this.abortQuery(closing.id);
     if (this.tabs.length === 1) {
       this.tabs = [blankTab()];
@@ -1081,6 +1183,70 @@ class DatabaseStore {
       else if (i < this.activeTab) this.activeTab -= 1;
     }
     this.persistTabs();
+  }
+  /**
+   * Close every tab but `i`, or (`closeAllTabs`) every tab — pinned tabs always
+   * survive both. Closed tabs' runs are cancelled exactly like `closeTab`; when
+   * nothing survives a fresh blank tab takes over.
+   */
+  closeOtherTabs(i: number): void {
+    this.closeTabsWhere((t, idx) => idx !== i && !t.pinned, i);
+  }
+  closeAllTabs(): void {
+    this.closeTabsWhere((t) => !t.pinned, null);
+  }
+  private closeTabsWhere(
+    shouldClose: (t: QueryTab, idx: number) => boolean,
+    keepActive: number | null,
+  ): void {
+    const active = keepActive === null ? null : this.tabs[keepActive] ?? null;
+    const survivors: QueryTab[] = [];
+    for (const [idx, t] of this.tabs.entries()) {
+      if (shouldClose(t, idx)) this.abortQuery(t.id);
+      else survivors.push(t);
+    }
+    this.tabs = survivors.length ? survivors : [blankTab()];
+    // Keep the caller's tab focused when it survived; else the first survivor
+    // (a pinned tab, or the fresh blank one).
+    const at = active ? this.tabs.indexOf(active) : -1;
+    this.activeTab = at >= 0 ? at : 0;
+    this.persistTabs();
+  }
+  /** Pin / unpin a tab. Pinned tabs group at the front of the strip (the same
+   *  order a reload restores), so pinning moves the tab there and unpinning
+   *  drops it to the head of the unpinned group; focus follows the active tab. */
+  togglePinTab(i: number): void {
+    const t = this.tabs[i];
+    if (!t) return;
+    t.pinned = !t.pinned;
+    const ordered = orderPinnedFirst(this.tabs, this.activeTab);
+    this.tabs = ordered.tabs;
+    this.activeTab = ordered.activeTab;
+    this.persistTabs();
+  }
+
+  // ── Result view mode ──────────────────────────────────────────────────────
+  /**
+   * Set the active tab's explicit result view (`null` = back to automatic). An
+   * explicit pick is ALSO remembered for the connection so the next tab opened
+   * here starts the same way — but the memory is only ever a fallback: it never
+   * writes into a tab, so clearing a tab's pick really returns it to automatic.
+   */
+  setViewMode(mode: ViewMode | null): void {
+    const t = this.tab;
+    if (!t) return;
+    t.viewMode = mode;
+    this.persistTabs();
+    if (mode !== null) {
+      this.connView = mode;
+      this.persistView();
+    }
+  }
+  /** ⇧⌘V: Grid → Vertical → JSON → Grid, stepping from the view actually on
+   *  screen (`effective`, resolved by the caller) and stored as an explicit pick. */
+  cycleViewMode(effective: ViewMode): void {
+    const next: Record<ViewMode, ViewMode> = { grid: 'vertical', vertical: 'json', json: 'grid' };
+    this.setViewMode(next[effective] ?? 'grid');
   }
   setStatement(value: string): void {
     const t = this.tab;
@@ -1175,6 +1341,10 @@ class DatabaseStore {
             // Data-protection toggles survive a reload with the tab.
             timeout_ms: t.timeout_ms ?? undefined,
             mask: t.mask || undefined,
+            // The explicit result view + pin survive too (absent = automatic /
+            // unpinned, so older payloads read back unchanged).
+            viewMode: t.viewMode ?? undefined,
+            pinned: t.pinned || undefined,
           })),
           activeTab: this.activeTab,
           activeDb: this.activeDb,
@@ -1203,6 +1373,8 @@ class DatabaseStore {
           pending?: { queryId?: string; connId?: string } | null;
           timeout_ms?: number;
           mask?: boolean;
+          viewMode?: unknown;
+          pinned?: unknown;
         }[];
         activeTab?: number;
         activeDb?: string | null;
@@ -1220,10 +1392,17 @@ class DatabaseStore {
           t.pending && t.pending.queryId && t.pending.connId === connId
             ? { queryId: t.pending.queryId, connId: t.pending.connId }
             : null,
+        // Unknown view names (a newer build's mode) fall back to automatic.
+        viewMode: isViewMode(t.viewMode) ? t.viewMode : null,
+        pinned: t.pinned === true,
       }));
       if (!tabs.length) return null;
-      const activeTab = Math.min(Math.max(0, p.activeTab ?? 0), tabs.length - 1);
-      return { tabs, activeTab, activeDb: p.activeDb ?? null };
+      // Pinned tabs are never dropped and always lead the strip.
+      const ordered = orderPinnedFirst(
+        tabs,
+        Math.min(Math.max(0, p.activeTab ?? 0), tabs.length - 1),
+      );
+      return { tabs: ordered.tabs, activeTab: ordered.activeTab, activeDb: p.activeDb ?? null };
     } catch {
       return null;
     }
@@ -1297,7 +1476,8 @@ class DatabaseStore {
     }
   }
 
-  /** Persist the active connection's main/side view (which pane it's showing). */
+  /** Persist the active connection's main/side view (which pane it's showing)
+   *  plus its remembered result view (`connView`; omitted when none). */
   private persistView(): void {
     if (typeof localStorage === 'undefined' || this.restoring || !this.selectedConnId) return;
     const key = this.viewKey(this.selectedConnId);
@@ -1305,27 +1485,37 @@ class DatabaseStore {
       // 'connections' is the global picker, never a per-connection view — store
       // 'schema' instead so a restore lands on the connection's own schema.
       const side = this.sideTab === 'connections' ? 'schema' : this.sideTab;
-      localStorage.setItem(key, JSON.stringify({ main: this.mainTab, side }));
+      localStorage.setItem(
+        key,
+        JSON.stringify({
+          main: this.mainTab,
+          side,
+          ...(this.connView ? { view: this.connView } : {}),
+        }),
+      );
     } catch {
       /* non-fatal */
     }
   }
 
-  /** Read a connection's persisted main/side view, validated to the known tab
-   *  ids. Returns null when absent/invalid so the caller falls back to defaults. */
-  private restoreView(connId: Id): { main: DbMainTab; side: DbSideTab } | null {
+  /** Read a connection's persisted main/side view (validated to the known tab
+   *  ids) and remembered result view (validated, else null). Returns null when
+   *  absent/invalid so the caller falls back to defaults. */
+  private restoreView(
+    connId: Id,
+  ): { main: DbMainTab; side: DbSideTab; view: ViewMode | null } | null {
     if (typeof localStorage === 'undefined') return null;
     const legacy = this.legacyViewKey(connId);
     const raw =
       localStorage.getItem(this.viewKey(connId)) ?? (legacy ? localStorage.getItem(legacy) : null);
     if (!raw) return null;
     try {
-      const p = JSON.parse(raw) as { main?: string; side?: string };
+      const p = JSON.parse(raw) as { main?: string; side?: string; view?: unknown };
       const mains: DbMainTab[] = ['query', 'builder', 'structure', 'diagram', 'dashboards'];
       const sides: DbSideTab[] = ['schema', 'saved', 'history'];
       const main = mains.includes(p.main as DbMainTab) ? (p.main as DbMainTab) : 'query';
       const side = sides.includes(p.side as DbSideTab) ? (p.side as DbSideTab) : 'schema';
-      return { main, side };
+      return { main, side, view: isViewMode(p.view) ? p.view : null };
     } catch {
       return null;
     }
@@ -1471,6 +1661,7 @@ class DatabaseStore {
       // collapse it to 'schema' so reopening a connection never lands back on
       // the picker.
       sideTab: this.sideTab === 'connections' ? 'schema' : this.sideTab,
+      connView: this.connView,
     });
   }
 
@@ -1508,6 +1699,7 @@ class DatabaseStore {
     this.history = snap.history;
     this.mainTab = snap.mainTab;
     this.sideTab = snap.sideTab;
+    this.connView = snap.connView;
     // A snapshot captured mid-load (a switch-away made the epoch guards drop
     // the fetches) has an empty root — re-fetch instead of restoring a
     // permanently empty tree.
@@ -1600,6 +1792,7 @@ class DatabaseStore {
       // Nothing left open — clear the active working set.
       this.selectedConnId = null;
       this.capabilities = null;
+      this.connView = null;
       this.testResult = null;
       this.schemaRoot = [];
       this.childrenCache = new Map();
@@ -1669,6 +1862,7 @@ class DatabaseStore {
     const epoch = this.epochOf(id);
     this.selectedConnId = id;
     this.capabilities = null;
+    this.connView = null;
     this.activeDb = null;
     this.schemaRoot = [];
     this.childrenCache = new Map();
@@ -1697,6 +1891,8 @@ class DatabaseStore {
     const view = this.restoreView(id);
     this.mainTab = view?.main ?? 'query';
     this.sideTab = view?.side ?? 'schema';
+    // …and the result view remembered for it (null = engine default).
+    this.connView = view?.view ?? null;
     // Fresh window of history for this connection.
     this.historyLimit = 100;
     await Promise.all([this.loadCapabilities(id), this.loadSchemaRoot(id), this.loadHistory(id)]);
@@ -2178,7 +2374,7 @@ class DatabaseStore {
   async runQuery(
     statement?: string,
     node?: string,
-    opts?: { transient?: boolean; keepOffset?: boolean },
+    opts?: { transient?: boolean; keepOffset?: boolean; cursor?: unknown },
   ): Promise<QueryResult | null> {
     const id = this.selectedConnId;
     const t = this.tab;
@@ -2222,27 +2418,30 @@ class DatabaseStore {
       const tabTimeoutMs = this.tab?.timeout_ms ?? null;
 
       const tabMask = this.tab?.mask ?? false;
-      const post = (confirmWrite: boolean): Promise<QueryResult> =>
-        api.post<QueryResult>(
-          `${this.connBase(id)}/query`,
-          {
-            statement: sql,
-            max_rows: explicit ?? this.rowLimit,
-            node: scopeNode,
-            confirm_write: confirmWrite,
-            // Per-run id so the cancel endpoint can issue engine-native
-            // cancellation (KILL QUERY / etc.) for this in-flight query.
-            query_id: queryId,
-            // Footer pager: server appends OFFSET (Mongo: skip) when auto-limiting.
-            ...(t.offset > 0 ? { offset: t.offset } : {}),
-            // Driver-enforced timeout (engine-native, e.g. MySQL MAX_EXECUTION_TIME).
-            ...(tabTimeoutMs && tabTimeoutMs > 0 ? { timeout_ms: tabTimeoutMs } : {}),
-            // Server-side PII/prod masking: redacts cell values before they leave
-            // the server. Only sent when the toggle is explicitly on.
-            ...(tabMask ? { mask: true } : {}),
-          },
-          controller.signal,
-        );
+      const post = (confirmWrite: boolean): Promise<QueryResult> => {
+        const body: RunQueryReq = {
+          statement: sql,
+          max_rows: explicit ?? this.rowLimit,
+          node: scopeNode,
+          confirm_write: confirmWrite,
+          // Per-run id so the cancel endpoint can issue engine-native
+          // cancellation (KILL QUERY / etc.) for this in-flight query.
+          query_id: queryId,
+          // Footer pager: server appends OFFSET (Mongo: skip) when auto-limiting.
+          ...(t.offset > 0 ? { offset: t.offset } : {}),
+          // Keyset "Next" (Mongo): the previous page's `next_cursor`, echoed back
+          // so the server pages by `_id > cursor` instead of `skip`. Sent next to
+          // `offset` — the server ignores `skip` when the cursor applies and falls
+          // back to it when the find isn't keyset-eligible.
+          ...(opts?.cursor !== undefined ? { cursor: opts.cursor } : {}),
+          // Driver-enforced timeout (engine-native, e.g. MySQL MAX_EXECUTION_TIME).
+          ...(tabTimeoutMs && tabTimeoutMs > 0 ? { timeout_ms: tabTimeoutMs } : {}),
+          // Server-side PII/prod masking: redacts cell values before they leave
+          // the server. Only sent when the toggle is explicitly on.
+          ...(tabMask ? { mask: true } : {}),
+        };
+        return api.post<QueryResult>(`${this.connBase(id)}/query`, body, controller.signal);
+      };
 
       let result: QueryResult;
       try {
@@ -2302,7 +2501,9 @@ class DatabaseStore {
    * Page the active tab's auto-limited result by `delta` pages (±1). The page
    * size is the server's applied LIMIT (`auto_limited`); re-runs the same
    * statement with the new row offset (server appends OFFSET / Mongo skip).
-   * No-op when the current result wasn't auto-paginated.
+   * "Next" on a keyset-eligible Mongo find also echoes the page's `next_cursor`
+   * back as `cursor`, so the server pages by `_id > cursor` instead of `skip`;
+   * "Prev" stays offset-based. No-op when the current result wasn't auto-paginated.
    */
   runPage(delta: number): void {
     const t = this.tab;
@@ -2310,6 +2511,9 @@ class DatabaseStore {
     if (!t || pageSize <= 0) return;
     const next = Math.max(0, t.offset + delta * pageSize);
     if (next === t.offset) return;
+    // The cursor belongs to the page the user is LEAVING — read it before the
+    // re-run replaces `t.result`.
+    const cursor = delta > 0 ? (t.result?.next_cursor ?? undefined) : undefined;
     t.offset = next;
     // Page the statement (and scope node) that PRODUCED the result — the editor
     // buffer / active DB may have been edited since the run. `transient` keeps
@@ -2317,6 +2521,7 @@ class DatabaseStore {
     void this.runQuery(t.ran_statement ?? undefined, t.ran_node ?? undefined, {
       keepOffset: true,
       transient: true,
+      cursor,
     });
   }
 

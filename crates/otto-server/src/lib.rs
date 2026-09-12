@@ -128,17 +128,24 @@ pub fn build_router(
     for extra in api_extras {
         protected = protected.merge(extra);
     }
-    // Two route_layers, applied bottom-up so the auth chokepoint runs FIRST and
+    // Three route_layers, applied bottom-up so the auth chokepoint runs FIRST and
     // the feature guard runs immediately after it: `route_layer` calls wrap
     // outermost-last, so the guard (added first → inner) sees the `AuthUser`
-    // extension the auth middleware (added second → outer) inserts, and the
+    // extension the auth middleware (added last → outer) inserts, and the
     // `MatchedPath` axum sets on the matched route. The guard adds the per-user
     // feature axis on top of the unchanged workspace-role gates in the handlers.
+    //
+    // The scratch guard sits between them, and deliberately AFTER the api_extras
+    // merge above: the implicit Editor every user holds on the `scratch`
+    // workspace must not reach the workspace-scoped families the module routers
+    // mount either (connections, db, vault, memory, swarm, …), so it has to wrap
+    // the whole protected router, not just the core routes.
     let protected = protected
         .route_layer(axum::middleware::from_fn_with_state(
             ctx.clone(),
             feature_guard::feature_guard::<ServerCtx>,
         ))
+        .route_layer(axum::middleware::from_fn(routes::scratch_guard))
         .route_layer(axum::middleware::from_fn_with_state(
             ctx.clone(),
             auth::auth_middleware,

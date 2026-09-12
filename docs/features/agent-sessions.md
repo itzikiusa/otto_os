@@ -52,6 +52,7 @@ Svelte UI ──HTTP+WS──▶ ottod (127.0.0.1:7700) ──spawns──▶ cl
 | Activity trail + task tracker ingest endpoints | `crates/otto-server/src/routes/activity.rs` |
 | RBAC route → capability map | `crates/otto-server/src/policy.rs` |
 | Domain types (`Session`, `SessionStatus`, `TrailEvent`, `AgentTask`, …) | `crates/otto-core/src/domain.rs` |
+| Scratch workspace (`SCRATCH_WORKSPACE_ID`, `ensure_scratch`, implicit Editor, `GET /workspaces/scratch`, 409 guards) | `crates/otto-core/src/domain.rs`, `crates/otto-state/src/workspaces.rs`, `crates/otto-server/src/routes/workspaces.rs`, `crates/ottod/src/main.rs` (boot) |
 | Create / input DTOs | `crates/otto-core/src/api.rs` |
 | New-session modal | `ui/src/modules/agents/NewSession.svelte` |
 | Session pane (header, ⋯ menu, status, idle countdown) | `ui/src/modules/agents/SessionView.svelte` |
@@ -71,6 +72,11 @@ Svelte UI ──HTTP+WS──▶ ottod (127.0.0.1:7700) ──spawns──▶ cl
 Open **New Session** (the agents page **New Session** button, or `⌘T`). The
 modal (`NewSession.svelte`) offers:
 
+- **Workspace** — a two-way switch: the **current workspace** (its name) or
+  **No workspace**. With no workspace at all only "No workspace" exists and is
+  pre-selected. "No workspace" starts a *workspace-less* session (below); the
+  palette command **New Session (no workspace)** and the sidebar's **New
+  session (no workspace)…** menu items open the sheet with it pre-selected.
 - **Provider** — cards for `claude` ("Claude Code CLI"), `codex` ("Codex CLI"),
   `shell` ("Plain shell"), plus any custom providers from `GET /meta.providers`.
   The configured default provider is pre-selected and carries a **default**
@@ -109,6 +115,49 @@ modal (`NewSession.svelte`) offers:
 Press **Start Session**. A session can also pin a model: when `meta.model` is
 set, the daemon appends `--model <name>` for `claude` / `codex` (silently
 omitted for `agy` / `shell`).
+
+### Workspace-less (scratch) sessions
+
+A session does not have to belong to one of your workspaces. Pick **No
+workspace** in the sheet (or the palette command / sidebar menu item) and the
+session is created in the daemon's **scratch workspace** — a system-owned,
+hidden workspace row with the fixed id `scratch`, created (and healed) on every
+daemon boot by `WorkspacesRepo::ensure_scratch`, whose `root_path` is the
+daemon user's `$HOME`. Because it *is* a workspace row, everything that keys on
+`workspace_id` — RBAC, WS delivery, archive / resume / restart, handover,
+trail, transcripts, shares — works unchanged. What differs:
+
+- **Hidden.** It never appears in `GET /workspaces`, the workspace picker, the
+  sidebar Workspaces section, onboarding, or the host selection of vault /
+  insights / self-improvement runs. `GET /workspaces/scratch` is its one read
+  route; `PATCH` / `DELETE /workspaces/scratch` and member edits answer 409.
+- **Everyone is an Editor there** (implicitly — no membership rows), so any
+  authenticated user can `POST /workspaces/scratch/sessions`. Isolation still
+  holds: `GET /workspaces/scratch/sessions` lists only the caller's own
+  sessions (root: all), and every session route stays owner-or-admin. Root
+  is Admin everywhere, including scratch.
+- **Default folder is `~`.** In scratch mode the sheet defaults the working
+  directory to the scratch `root_path` (the daemon `$HOME`), offers the cwds of
+  your other scratch sessions as recents, uses the *global* default provider
+  (there is no workspace setting), hides the workspace-scoped **Preview
+  context**, and shows the one-line notice *"Home folder: the agent is trusted
+  for, and may write anywhere under, ~"* whenever the folder is the home
+  directory (see §5 — trust follows the session cwd). Any other folder is
+  confined exactly like a workspace session.
+- **Sidebar.** Scratch sessions are listed in a **No workspace** group (home
+  icon, tooltip "Sessions not tied to any workspace") under the flat Agents
+  list — present in every workspace and when you have none. Right-click the
+  group (or any Agents row / header) for **New session (no workspace)…**. They
+  are loaded beside the current workspace's sessions on every refresh, so
+  tabs, panes, status dots, archive and rename behave as usual; with zero
+  workspaces the tab/pane layout is persisted under the `scratch` key
+  (`otto_tabs_scratch` / `otto_panes_scratch`) so it survives reloads too. The
+  **tiled grid** stays the current workspace's, though: a scratch session joins
+  it once you open it (it is then an open tab), and with no workspace selected
+  the grid is made of them alone.
+- **Handover stays same-workspace.** The daemon rejects cross-workspace
+  handovers, so a scratch session hands over only to a *new* agent or to
+  another scratch session; the target picker lists exactly those.
 
 ### Default provider resolution
 
@@ -259,14 +308,43 @@ on `claude`/`codex` repaints.
 
 ### Watching, splitting, tiling
 
-- **Split view** (`Splits.svelte`) — arrange panes side-by-side/stacked; drag
-  the gutter to resize (column/row fraction clamped 0.2–0.8). With ≥2 panes and
-  ≥2 session targets a **broadcast bar** appears: *"↗ broadcast"* sends one line
-  to all visible sessions via `POST /workspaces/{id}/broadcast {text,
-  session_ids}`.
+- **Split view** (`Splits.svelte` + `SplitNode.svelte`) — a nested split **tree**:
+  split any pane left/right/up/down, drag **any** gutter (each split node has its
+  own fraction, 0.1–0.9, and a drag refuses to take either side below 160 px), up
+  to **15** panes. Presets — *Equal columns*, *Equal rows*, *One above two*, *One
+  beside two*, *Grid* — sit in the pane ⋯ menu (and on the Database pane's ✕
+  right-click) and in `⌘K`. The layout persists per workspace in
+  `otto_panes_<ws>` as v2 `{v, tree, focused}`; an old v1 `{panes, axis}` payload
+  still restores, with the old per-window `otto_split_col_frac` /
+  `otto_split_row_frac` as the root fraction. With ≥2 panes and ≥2 session targets
+  a **broadcast bar** appears: *"↗ broadcast"* sends one line to all visible
+  sessions via `POST /workspaces/{id}/broadcast {text, session_ids}`.
+- **Reordering panes** — drag a pane by the **grip** in its header: drop on
+  another pane's **centre** to swap the two sessions, on an **edge quarter** to
+  move the pane into a new split beside it. Without a mouse: `⌘⌥←/→/↑/↓` move the
+  focused pane to its geometric neighbour and `⌘⌥S` swaps it with the next (in a
+  Database pane `⌘⌥←/→` stay with the query editor's tab switch), and the same
+  moves plus every preset are `⌘K` commands.
+- **Sidebar order** — the flat Agents list is rendered in the order the daemon
+  returns (`GET /workspaces/{id}/sessions` is `ORDER BY created_at` — creation
+  order, oldest first; the control still calls it *Recent*) until you drag a row.
+  Dragging switches the list to *Manual* (the sort control in the group header);
+  there, sessions the manual order has never seen go on TOP by `last_active_at`,
+  newest first, and *Reset to recent* returns to the daemon's order.
+  Telegram/Slack lists and other-workspace groups cannot be reordered, nor can a
+  filtered list. Persisted as `otto_session_order_<ws>`.
+- **Pane header at narrow widths** — the header sheds chrome by its own width, in
+  this order: cwd → provider text → themed full name → terminal font/copy toolbar
+  → task / handover / idle chips → the view toggle becomes an icon menu and
+  restart + zoom fold into ⋯ → the drag grip → the title and ✕ fold into ⋯. Every
+  control stays reachable through ⋯ — nothing is ever clipped: width picks the
+  starting fold, then the header is MEASURED and folded one tier further until
+  the inline set genuinely fits, so a session carrying extra chrome (a task
+  chip, a handover crumb, a themed name) can never push ✕ past the edge.
 - **Tiled view** (`TiledView.svelte`) — see every session at once in a grid (1→2
-  →3→4 columns by count). To preserve the idle-suspend memory design, **at most
-  `MAX_LIVE_TILES` = 6 tiles are live** (open a WS + resume): always the focused
+  →3→4 columns by count). Drag a tile onto another to reorder; the order is
+  remembered per workspace (`otto_tile_order_<ws>`). To preserve the idle-suspend
+  memory design, **at most `MAX_LIVE_TILES` = 15 tiles are live** (open a WS + resume): always the focused
   tile, then user-pinned tiles, then visible tiles (tracked by an
   `IntersectionObserver`), up to the cap. Everything else is a lightweight
   **placeholder** — a header + status dot + provider chip + *"Click to attach"* —
@@ -539,6 +617,23 @@ that, both best-effort and never fatal:
    and `[hints] project_picker_disabled = true` so sessions started from home /
    Desktop / `/tmp` don't open the "choose a project folder" picker.
 
+**Trust follows the session cwd, not the workspace.** Both layers key on the
+SESSION's `cwd` (`trust::ensure_trusted(&session.provider, &session.cwd)`), as
+does the process sandbox (`SandboxPolicy::for_agent(&cwd, …)`, whose first
+writable root is the cwd); a workspace's `root_path` is only the *default* a
+session's cwd falls back to when the request omits one — nothing passes it to
+trust or the sandbox. So a session started in a project folder is confined to
+that folder whether or not it belongs to a workspace, and the scratch
+workspace's `root_path = $HOME` is inert by itself. The consequence for a
+**workspace-less session started in the home folder** (the scratch default):
+the sandbox's writable root is the whole home directory and the provider trust
+grant is written for `$HOME` — a grant Claude Code honours for that folder and,
+via its ancestor lookup, for every folder under it (codex likewise; grok
+refuses over-broad roots, so no grok grant is written and its prompt-guard
+approval covers the session instead). The New Session sheet says so under the
+folder field whenever the cwd is `~`; pick a narrower folder there to get the
+usual confinement.
+
 ---
 
 ## 6. Activity trail & task tracker (live agent telemetry)
@@ -645,6 +740,7 @@ resolve the owning workspace from the row and role-check against it.
 | `GET /meta` | public | `MetaResp` — `providers`, `default_provider`, `tools` |
 | `GET /workspaces/{id}/sessions` | ws viewer (`Agents:View`) | `Session[]` (you see your own; ws-admin/root see all); optional `?archived=&kind=&source=&status=` filters; rows carry transient `live` + `viewers` |
 | `POST /workspaces/{id}/sessions` | ws editor (`Agents:Edit`) | `CreateSessionReq` → `Session` |
+| `GET /workspaces/scratch` | `Agents:View` | the hidden scratch `Workspace` (`id: "scratch"`, `root_path` = daemon `$HOME`); every user is an implicit Editor there, so `…/scratch/sessions` starts / lists workspace-less sessions (§2); `PATCH`/`DELETE` + member edits → 409 |
 | `GET /sessions/{id}` | owner-or-admin | `Session` (with transient `live`, `viewers`) |
 | `PATCH /sessions/{id}` | owner-or-admin | `UpdateSessionReq{title?, meta?}` → `Session` |
 | `DELETE /sessions/{id}` | owner-or-admin | 204 — kills PTY, removes row |
@@ -704,13 +800,16 @@ session in place (e.g. live handover-progress flags).
 ## 9. Capabilities & limitations
 
 **Can:**
-- Run claude / codex / agy / shell as real PTYs you can watch, type into, split,
-  and tile; add custom providers via settings without a rebuild.
+- Run claude / codex / agy / shell as real PTYs you can watch, type into, split
+  (up to 15 panes, free-form nested layouts), and tile; add custom providers via
+  settings without a rebuild.
 - Survive daemon restarts and idle-suspend without losing a claude conversation.
 - Multi-attach: several clients watch the same session, output broadcast to all.
 - Persist 10,000 lines of scrollback across reconnects, grep-searchable
   server-side.
-- Auto-trust the workspace folder and auto-clear stray approval prompts.
+- Auto-trust the session folder and auto-clear stray approval prompts.
+- Start a session without any workspace (the hidden scratch workspace, default
+  cwd `~`) — sidebar "No workspace" group, archive / resume / hand over as usual.
 - Stream a live activity trail + task tracker, and drive everything over HTTP/WS.
 
 **Limitations / by design:**
@@ -733,6 +832,9 @@ session in place (e.g. live handover-progress flags).
   handled by the stuck-detector (retry/notify), not silently accepted.
 - The PTY ring buffer caps history at 10,000 lines / 2 MiB per session; older
   output ages out.
+- **Handover is same-workspace only** — a workspace-less (scratch) session can
+  hand over to a new agent or to another scratch session, never into a
+  workspace session (and vice versa).
 
 ---
 
@@ -741,7 +843,9 @@ session in place (e.g. live handover-progress flags).
 A **handover** pushes the working context of one agent into another (e.g.
 Claude → Codex) so you don't re-explain a task by hand. `POST
 /sessions/{id}/handover` (Editor on the source's workspace) spawns the target in
-the **same workspace + cwd**, returns it immediately, then in the background
+the **same workspace + cwd** (a scratch session's target is a scratch session —
+the daemon rejects an existing target from another workspace, and the picker
+only offers same-workspace agents), returns it immediately, then in the background
 gathers the source's recent work (claude transcript digest, else PTY
 scrollback), summarizes it into a structured brief, and injects it into the
 target as one bracketed-paste block. The request shape carries the target
@@ -766,7 +870,14 @@ pane's *"Hand over to…"* menu item (`Handover.svelte`).
   only **their own** sessions (`created_by`); workspace-admins and root see all.
   The terminal WS (`/ws/term`) enforces the same owner-or-admin gate before
   upgrade — a non-owner viewer/editor gets `403`. The activity summary restricts
-  non-admins to their own sessions.
+  non-admins to their own sessions. The scratch workspace grants every
+  authenticated user **Editor** (implicitly, never Admin), so its sessions are
+  owner-scoped like any other: you list, attach to and control only the
+  workspace-less sessions you created; root sees all. **Only the session routes
+  exist under `scratch`** — `/workspaces/scratch/sessions…`, plus
+  `…/broadcast` and `…/activity/summary`. Every other `/workspaces/scratch/…`
+  family (api-client, workflows, mcp-servers, connections, vault, …) answers
+  **404**, so that implicit Editor is a session grant and nothing more.
 - **Viewer = read-only terminal.** A workspace viewer may attach and watch but
   cannot send input/resize (frames dropped server-side). Editor+ may drive it.
 - **Share-link throttle.** WS token validation is rate-limited per IP: **10**
@@ -775,8 +886,10 @@ pane's *"Hand over to…"* menu item (`Handover.svelte`).
 - **Force-terminate.** An admin terminate or a revoked mobile share-link evicts
   every attached viewer with a `{"type":"terminated"}` frame and an immediate
   socket close.
-- **Folder trust** is granted only for the workspace folder the user chose (and
-  its path variants); the prompt-guard accepts only a narrow phrase set (§5).
+- **Folder trust** is granted only for the session's cwd (the workspace folder
+  by default; `~` for a workspace-less session started in the home folder —
+  which then covers everything under it, see §5) and its path variants; the
+  prompt-guard accepts only a narrow phrase set (§5).
 - **Secrets.** Connection-session secrets live in the macOS Keychain, never in
   the session row. Ingest tokens are per-session and revoked on removal.
 

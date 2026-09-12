@@ -60,6 +60,7 @@ const LS = {
   browserAgentOpen: 'otto_browser_agent_open',
   browserAgentH: 'otto_browser_agent_h',
   dbDockWidth: 'otto_db_dock_width',
+  dbAutoVerticalCols: 'otto_db_auto_vertical_cols',
   wfCtx: 'otto_wf_ctx_open',
   wfCtxWidth: 'otto_wf_ctx_width',
   wfCtxTab: 'otto_wf_ctx_tab',
@@ -146,6 +147,11 @@ function clampRight(px: number): number {
 }
 function clampRail(px: number): number {
   return Math.max(RAIL_MIN, Math.min(RAIL_MAX, Math.round(px)));
+}
+/** DB Explorer "auto-Vertical past N columns" threshold: 0 = never, capped so
+ *  a typo can't disable the feature by accident; NaN → the default (10). */
+function clampCols(n: number): number {
+  return Number.isNaN(n) ? 10 : Math.max(0, Math.min(500, Math.round(n)));
 }
 function clampWfCtx(px: number): number {
   return Math.max(WF_CTX_MIN, Math.min(WF_CTX_MAX, Math.round(px)));
@@ -243,6 +249,8 @@ class UiStore {
   /** Optional text to pre-fill the plain-English box with. */
   palettePrefill = $state('');
   newSessionOpen = $state(false);
+  /** Open the New Session sheet pre-set to a workspace-less (scratch) session. */
+  newSessionScratch = $state(false);
   newWorkspaceOpen = $state(false);
   /** Dedicated broadcast composer (separate from the ⌘K AI orchestrator). */
   broadcastOpen = $state(false);
@@ -310,6 +318,17 @@ class UiStore {
     ((): '' | 'archive' | 'delete' => {
       const v = lsGet(LS.closeTabPref);
       return v === 'archive' || v === 'delete' ? v : '';
+    })(),
+  );
+
+  /** DB Explorer: a result with MORE than this many columns opens in Vertical
+   *  view unless the tab has an explicit view pick (0 = never). Default 10 —
+   *  past that a grid needs horizontal scrolling to read one record. Per device
+   *  (localStorage), like the other appearance preferences. */
+  dbAutoVerticalCols = $state(
+    ((): number => {
+      const raw = lsGet(LS.dbAutoVerticalCols);
+      return raw === null ? 10 : clampCols(Number(raw));
     })(),
   );
 
@@ -619,6 +638,11 @@ class UiStore {
   setCloseTabPref(pref: '' | 'archive' | 'delete'): void {
     this.closeTabPref = pref;
     lsSet(LS.closeTabPref, pref);
+  }
+
+  setDbAutoVerticalCols(n: number): void {
+    this.dbAutoVerticalCols = clampCols(n);
+    lsSet(LS.dbAutoVerticalCols, String(this.dbAutoVerticalCols));
   }
 
   /** Apply data-theme/data-scheme attrs and accent override on <html>. */

@@ -14,16 +14,30 @@
   //
   // Text is interpolated (Svelte-escaped), never `{@html}` — unlike the old
   // highlightJsonHtml path this can't emit markup from data.
+  //
+  // Two disclosure modes. Standalone (no `plan`): the depth/width heuristic
+  // below, local open state — the cell viewer, AWS views, dashboards.
+  // Controlled (`plan` + `expansion` given, the JSON result view): a node is
+  // open iff its dotted `path` is in the owner's plan (a node budget with
+  // sticky per-path overrides, see expansion-plan.ts); toggling records an
+  // override on the shared state and the owner re-plans every record.
   import Self from './JsonTree.svelte';
   import { bsonScalar } from './bson';
+  import { setOverride, type ExpansionState } from './expansion-plan';
 
   interface Props {
     value: unknown;
     /** Object key / array index owning this value; null at the root. */
     label?: string | null;
     depth?: number;
+    /** Dotted path from the record root ('' at the root); controlled mode only. */
+    path?: string;
+    /** Open container paths of this record (controlled mode). */
+    plan?: Set<string>;
+    /** Shared expansion state the toggles write to (controlled mode). */
+    expansion?: ExpansionState;
   }
-  let { value, label = null, depth = 0 }: Props = $props();
+  let { value, label = null, depth = 0, path = '', plan, expansion }: Props = $props();
 
   // Auto-expand only what stays cheap: shallow AND narrow. Everything else opens
   // on click. Tuned so a typical Mongo document shows its top-level shape (and
@@ -51,6 +65,9 @@
   // derived graph isn't settled yet at that point and a lazy read here is exactly
   // the shape that trips `state_unsafe_mutation`.
   function initialOpen(): boolean {
+    // Controlled mode: the record root is not a planned node — it is always
+    // open (its toggle stays local); every other node follows the plan.
+    if (plan) return path === '';
     let n = 0;
     if (Array.isArray(value)) n = value.length;
     else if (value !== null && typeof value === 'object' && bsonScalar(value) === null) {
@@ -58,7 +75,13 @@
     } else return false;
     return n > 0 && depth < AUTO_DEPTH && n <= AUTO_ITEMS;
   }
-  let open = $state(initialOpen());
+  let localOpen = $state(initialOpen());
+  const controlled = $derived(!!plan && path !== '');
+  const open = $derived(controlled ? plan!.has(path) : localOpen);
+  function toggle(): void {
+    if (controlled && expansion) setOverride(expansion, path, !open);
+    else localOpen = !open;
+  }
   let shown = $state(CHUNK);
   let strOpen = $state(false);
 
@@ -92,7 +115,7 @@
         class="line toggle"
         type="button"
         aria-expanded={open}
-        onclick={() => (open = !open)}
+        onclick={toggle}
         title={open ? 'Collapse' : 'Expand'}
       >
         <span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span>
@@ -102,7 +125,7 @@
       {#if open}
         <div class="kids">
           {#each visible as [k, v] (k)}
-            <Self value={v} label={k} depth={depth + 1} />
+            <Self value={v} label={k} depth={depth + 1} path={path ? `${path}.${k}` : k} {plan} {expansion} />
           {/each}
           {#if hiddenCount > 0}
             <button class="more" type="button" onclick={() => (shown += CHUNK)}>

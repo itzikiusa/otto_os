@@ -6,38 +6,80 @@ use axum::Json;
 use otto_core::api::{
     CreateWorkspaceReq, MemberEntry, SetMembersReq, UpdateWorkspaceReq, WorkspaceWithRole,
 };
-use otto_core::domain::{Workspace, WorkspaceRole};
+use otto_core::domain::{Workspace, WorkspaceRole, SCRATCH_WORKSPACE_ID};
 use otto_core::{Error, Id};
 use otto_state::WorkspacesRepo;
 
 use crate::auth::{require_ws_role, CurrentUser};
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::state::ServerCtx;
 
 fn repo(ctx: &ServerCtx) -> WorkspacesRepo {
     WorkspacesRepo::new(ctx.pool.clone())
 }
 
+/// 409 for the system-owned scratch workspace: it is never renamed, moved,
+/// archived or given members through the API (`ensure_scratch` would heal it
+/// at the next boot anyway). Called FIRST in every mutating workspace handler.
+fn reject_system_workspace(id: &Id) -> ApiResult<()> {
+    if id == SCRATCH_WORKSPACE_ID {
+        return Err(ApiError(Error::Conflict(
+            "the scratch workspace is system-owned".into(),
+        )));
+    }
+    Ok(())
+}
+
 /// `GET /api/v1/workspaces` — root sees all (as admin); others their own.
+/// The system-owned scratch workspace is hidden here (user-facing lists);
+/// `GET /workspaces/scratch` is its one read route.
 pub async fn list(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<WorkspaceWithRole>>> {
     let repo = repo(&ctx);
     let rows: Vec<(Workspace, WorkspaceRole)> = if user.is_root {
-        repo.list_all()
+        repo.list_user_all()
             .await?
             .into_iter()
             .map(|w| (w, WorkspaceRole::Admin))
             .collect()
     } else {
-        repo.list_for_user(&user.id).await?
+        repo.list_user_for_user(&user.id).await?
     };
     Ok(Json(
         rows.into_iter()
             .map(|(workspace, my_role)| WorkspaceWithRole { workspace, my_role })
             .collect(),
     ))
+}
+
+/// `GET /api/v1/workspaces/scratch` — the daemon's system-owned scratch
+/// workspace (home of workspace-less sessions). Any authenticated user
+/// (`Agents:View`) may read it: everyone is an implicit Editor there, so the
+/// UI needs its `root_path` (the daemon `$HOME`) as the default session cwd.
+pub async fn get_scratch(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(_user): CurrentUser,
+) -> ApiResult<Json<Workspace>> {
+    Ok(Json(
+        repo(&ctx).get(&SCRATCH_WORKSPACE_ID.to_string()).await?,
+    ))
+}
+
+/// `PATCH`/`DELETE /api/v1/workspaces/scratch` — always `409`.
+///
+/// `/workspaces/scratch` is a STATIC route, so axum matches it ahead of
+/// `/workspaces/{id}` for this exact path and would answer `405 Method Not
+/// Allowed` for any method the static route does not register — never reaching
+/// {@link update}/{@link archive} and their `reject_system_workspace` guard.
+/// Registering both methods here keeps the documented answer (api.md #16a:
+/// "PATCH/DELETE /workspaces/scratch and member edits → 409") true, from the
+/// same single source: the guard itself. The body, if any, is ignored.
+pub async fn reject_scratch_edit(CurrentUser(_user): CurrentUser) -> ApiResult<StatusCode> {
+    reject_system_workspace(&SCRATCH_WORKSPACE_ID.to_string())?;
+    // Unreachable — the guard above always rejects the scratch id.
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /api/v1/workspaces` — creator becomes admin member.
@@ -70,6 +112,7 @@ pub async fn update(
     CurrentUser(user): CurrentUser,
     Json(req): Json<UpdateWorkspaceReq>,
 ) -> ApiResult<Json<Workspace>> {
+    reject_system_workspace(&id)?;
     require_ws_role(&ctx, &user, &id, WorkspaceRole::Admin).await?;
     let ws = repo(&ctx)
         .update(
@@ -89,6 +132,7 @@ pub async fn archive(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
+    reject_system_workspace(&id)?;
     require_ws_role(&ctx, &user, &id, WorkspaceRole::Admin).await?;
     repo(&ctx).update(&id, None, None, None, Some(true)).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -111,6 +155,7 @@ pub async fn set_members(
     CurrentUser(user): CurrentUser,
     Json(req): Json<SetMembersReq>,
 ) -> ApiResult<Json<Vec<MemberEntry>>> {
+    reject_system_workspace(&id)?;
     require_ws_role(&ctx, &user, &id, WorkspaceRole::Admin).await?;
     let repo = repo(&ctx);
     // Existence check (404 for unknown workspace before mutating membership).
@@ -153,4 +198,18 @@ fn expand_home(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reject_system_workspace_is_409_for_scratch_and_ok_otherwise() {
+        let err = reject_system_workspace(&SCRATCH_WORKSPACE_ID.to_string()).unwrap_err();
+        assert!(matches!(err.0, Error::Conflict(_)), "{err:?}");
+        assert!(reject_system_workspace(&otto_core::new_id()).is_ok());
+        // Case matters: only the exact well-known id is system-owned.
+        assert!(reject_system_workspace(&"Scratch".to_string()).is_ok());
+    }
 }
