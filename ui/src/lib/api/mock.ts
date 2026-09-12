@@ -1601,8 +1601,27 @@ const routes: Route[] = [
       for (const b of br) b.is_current = b.name === body.branch;
       st.branch = body.branch;
       st.upstream = br.find((b) => b.is_current)?.upstream ?? null;
+      // `auto_stash` only changes HOW the switch clears a dirty tree; the mock
+      // tree is never dirty, so the response shape is identical either way.
+      void body.auto_stash;
       return { json: st };
     },
+  },
+  { method: 'GET', re: /^\/repos\/([^/]+)\/pull-mode$/, handle: () => ({ json: { mode: 'merge' } }) },
+  {
+    method: 'POST',
+    re: /^\/repos\/([^/]+)\/rebase$/,
+    handle: (m) => {
+      const st = repoStatus[m[1]];
+      if (!st) return problem(404, 'not_found', 'repo');
+      st.behind = 0;
+      return { json: st };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/rebase-preview$/,
+    handle: () => ({ json: { commits: 3, onto_sha: 'abc123' } }),
   },
   { method: 'POST', re: /^\/repos\/([^/]+)\/stash$/, handle: (m) => ({ json: repoStatus[m[1]] }) },
 

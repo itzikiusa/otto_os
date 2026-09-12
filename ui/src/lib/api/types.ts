@@ -2272,6 +2272,34 @@ export interface PullResp {
   note?: string | null;
 }
 
+/** How `POST /repos/{id}/pull` reconciles: merge, rebase, or refuse anything
+ *  that isn't a fast-forward. Absent on the request → the repo's own
+ *  `pull.rebase` / `pull.ff` config decides. */
+export type PullMode = 'merge' | 'rebase' | 'ff_only';
+
+/** `POST /repos/{id}/pull` body (all optional — an empty body is a plain pull). */
+export interface PullReq {
+  auto_stash?: boolean;
+  mode?: PullMode;
+}
+
+/** `GET /repos/{id}/pull-mode` — the mode a plain pull would use. */
+export interface PullModeResp {
+  mode: PullMode;
+}
+
+/** `POST /repos/{id}/rebase` — replay the current branch onto `onto`. */
+export interface RebaseReq {
+  onto: string;
+  auto_stash?: boolean;
+}
+
+/** `GET /repos/{id}/rebase-preview?onto=` — what a rebase would replay. */
+export interface RebasePreview {
+  commits: number;
+  onto_sha: string;
+}
+
 export interface BranchInfo {
   name: string;
   is_current: boolean;
@@ -2420,7 +2448,9 @@ export interface CommitReq {
 
 export interface CheckoutReq {
   branch: string;
-  create: boolean;
+  create?: boolean;
+  /** Stash -u → checkout → pop around a dirty tree. NEVER pulls or merges. */
+  auto_stash?: boolean;
 }
 
 // --- Local merge + conflict resolution (#4) ---
