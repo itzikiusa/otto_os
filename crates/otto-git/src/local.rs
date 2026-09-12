@@ -1262,7 +1262,7 @@ impl LocalGit {
     /// `git stash pop`.
     pub async fn checkout_autostash(&self, branch: &str, create: bool) -> Result<CheckoutOutcome> {
         Self::guard_ref(branch)?;
-        let dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
+        let mut dirty = !self.run(&["status", "--porcelain"]).await?.trim().is_empty();
         if dirty {
             // `--include-untracked`: without it a new file survives the stash and
             // the checkout still dies with "untracked working tree files would be
@@ -1279,10 +1279,31 @@ impl LocalGit {
             if !ok {
                 return Err(upstream_err(&err, &out, code));
             }
+            // Exit 0 with nothing saved (a dirty submodule, say): there is no
+            // entry of OURS to pop, and popping would take the user's own
+            // `stash@{0}` instead.
+            if out.contains("No local changes to save") || err.contains("No local changes to save")
+            {
+                dirty = false;
+            }
         }
         if let Err(e) = self.checkout(branch, create).await {
             if dirty {
-                let _ = self.run(&["stash", "pop"]).await;
+                // The pop rides the same `index.lock` retry as everything else
+                // here: a concurrent agent's lock must not be the reason the
+                // user's changes are left behind in the stash.
+                let (ok, out, _, _) = self
+                    .run_raw_retry_lock(&["stash", "pop"])
+                    .await
+                    .unwrap_or((false, String::new(), String::new(), None));
+                if !ok && !out.contains("CONFLICT") {
+                    return Err(match e {
+                        Error::Conflict(m) => Error::Conflict(format!(
+                            "{m} — your changes are kept in `git stash list`"
+                        )),
+                        other => other,
+                    });
+                }
             }
             return Err(e);
         }
@@ -4224,6 +4245,62 @@ mod tests {
             git.stash_list().await.unwrap().len(),
             1,
             "the stash entry is kept so nothing is lost"
+        );
+    }
+
+    /// `git stash push` exits 0 with "No local changes to save" when porcelain
+    /// is non-empty but nothing is stashable (a submodule with a dirty work
+    /// tree is the real-world shape). Nothing of OURS is on the stack, so the
+    /// switch must not pop — popping would take the user's own `stash@{0}`.
+    #[tokio::test]
+    async fn checkout_autostash_does_not_pop_when_nothing_was_stashed() {
+        let (tmp, dir) = diverged_fixture();
+        // The user's own stash, the entry a bogus pop would steal.
+        write(&dir, "shared.txt", "line1\nUSER STASH\nline3\n");
+        sh_git(&dir, &["stash", "push", "-m", "user"]);
+        // A dirty-but-(pretend)-unstashable tree: porcelain is non-empty, so
+        // `checkout_autostash` takes the stash branch.
+        write(&dir, "scratch.txt", "mine\n");
+
+        // A real submodule fixture reproduces this without a shim, but needs
+        // `protocol.file.allow=always` and a nested clone; forcing the ONE
+        // outcome that matters is deterministic and git-version independent.
+        let sh = shim(
+            tmp.path(),
+            "nostash-git",
+            "if [ \"$1\" = stash ] && [ \"$2\" = push ]; then\n\
+             echo 'No local changes to save'\n\
+             exit 0\n\
+             fi\n\
+             exec git \"$@\"",
+        );
+        let git = LocalGit::new(&dir).with_git_bin(&sh);
+
+        let outcome = git.checkout_autostash("develop", false).await.unwrap();
+        assert_eq!(git.current_branch().await.unwrap(), "develop");
+
+        let stashes = git.stash_list().await.unwrap();
+        assert_eq!(
+            stashes.len(),
+            1,
+            "the user's own stash must survive the switch untouched: {stashes:?}"
+        );
+        assert!(stashes[0].message.contains("user"), "{:?}", stashes[0]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("shared.txt")).unwrap(),
+            "line1\nline2\nline3\n",
+            "the user's stash was not applied onto the new branch"
+        );
+        assert!(
+            !outcome.stashed,
+            "nothing was stashed, so nothing may be reported as stashed: {outcome:?}"
+        );
+        assert!(!outcome.pop_conflicted);
+        let st = git.status().await.unwrap();
+        assert!(
+            !st.changes.iter().any(|c| c.kind == "conflicted"),
+            "a stash we never pushed cannot conflict: {:?}",
+            st.changes
         );
     }
 

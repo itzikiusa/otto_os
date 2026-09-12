@@ -143,6 +143,32 @@ pub fn build_hunk_patch(
     };
     let is_sel = |i: usize| selected.as_ref().is_none_or(|s| s.contains(&i));
 
+    // A `\ No newline` marker is only meaningful on the LAST line of an image.
+    // A partial selection can move a marked line off the end (an unselected
+    // marked `-` becomes context and a kept `+` follows it); `git apply` then
+    // strips that line's newline and glues the next line onto it — silently.
+    if selected.is_some() {
+        let (mut old_marked, mut new_marked) = (false, false);
+        for (i, (line, marker)) in body.iter().enumerate() {
+            let (in_old, in_new) = match line.chars().next().unwrap_or(' ') {
+                '+' => (false, is_sel(i)),
+                '-' => (true, !is_sel(i)),
+                _ => (true, true),
+            };
+            if (in_old && old_marked) || (in_new && new_marked) {
+                return Err(Error::Invalid(
+                    "this selection splits the file's last line — stage the whole hunk".into(),
+                ));
+            }
+            if in_old {
+                old_marked = marker.is_some();
+            }
+            if in_new {
+                new_marked = marker.is_some();
+            }
+        }
+    }
+
     let mut out = String::with_capacity(raw_diff.len());
     for l in &block[..head_end] {
         out.push_str(l);
@@ -221,6 +247,12 @@ fn diff_git_targets(line: &str, path: &str) -> bool {
     else {
         return false;
     };
+    // An exact ` b/<path>` SUFFIX first: `rfind(" b/")` alone cuts at the LAST
+    // occurrence, so a name that itself contains " b/" (`a/x b/y b/x b/y`)
+    // yields `y` and the block is never found (a 404 "no diff for …").
+    if rest.trim_end().ends_with(&format!(" b/{path}")) {
+        return true;
+    }
     // `rfind`, not `find`: a path may itself contain " b/".
     if let Some(idx) = rest.rfind(" b/") {
         if rest[idx + 3..].trim() == path {
@@ -289,7 +321,7 @@ impl LocalGit {
             args.push("--cached");
         }
         args.extend_from_slice(&["--", path]);
-        self.run(&args).await
+        self.run_read(&args).await
     }
 
     /// `git apply [--cached] [--reverse] --recount --whitespace=nowarn -`, with
@@ -706,19 +738,16 @@ index 1111111..2222222 100644
     }
 
     #[test]
-    fn marker_follows_context_converted_del() {
-        // Select only '+M3': '-m3' becomes context and KEEPS its marker.
-        let p = build_hunk_patch(MARKED_DEL, "m.txt", 0, "@@ -1,3 +1,3 @@", Some(&[3])).unwrap();
-        assert!(p.ends_with(
-            "\
-@@ -1,3 +1,4 @@
- m1
- m2
- m3
-\\ No newline at end of file
-+M3
-"
-        ), "{p}");
+    fn marked_del_converted_to_context_before_a_kept_add_is_invalid() {
+        // Select only '+M3': '-m3' would become context and KEEP its marker,
+        // with '+M3' emitted after it. `git apply` reads that marker as "strip
+        // the newline of the preceding line" and glues the two together
+        // ("m3M3") without a word of complaint — so the selection is refused.
+        let e = build_hunk_patch(MARKED_DEL, "m.txt", 0, "@@ -1,3 +1,3 @@", Some(&[3])).unwrap_err();
+        assert!(
+            matches!(&e, Error::Invalid(m) if m.contains("splits the file's last line")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -727,6 +756,16 @@ index 1111111..2222222 100644
         let p = build_hunk_patch(MARKED_ADD, "p.txt", 0, "@@ -1,2 +1,4 @@", Some(&[2])).unwrap();
         assert!(p.ends_with("@@ -1,2 +1,3 @@\n p1\n p2\n+p3\n"), "{p}");
         assert!(!p.contains("No newline"), "{p}");
+    }
+
+    #[test]
+    fn whole_hunk_with_markers_still_ok() {
+        // No selection = no line can move off the end of either image, so the
+        // guard never fires and a marked hunk round-trips byte for byte.
+        let p = build_hunk_patch(MARKED_DEL, "m.txt", 0, "@@ -1,3 +1,3 @@", None).unwrap();
+        assert_eq!(p, MARKED_DEL);
+        let p = build_hunk_patch(MARKED_ADD, "p.txt", 0, "@@ -1,2 +1,4 @@", None).unwrap();
+        assert_eq!(p, MARKED_ADD);
     }
 
     #[test]
@@ -765,6 +804,24 @@ index 1111111..2222222 100644
 +Q2
 ";
         let p = build_hunk_patch(raw, "we\\\"ird.txt", 0, "@@ -1,2 +1,2 @@", None).unwrap();
+        assert_eq!(p, raw);
+    }
+
+    #[test]
+    fn path_containing_b_slash_is_located() {
+        // `rfind(" b/")` alone cuts at the LAST occurrence and yields "y" —
+        // the block is then never found. The exact ` b/<path>` suffix wins.
+        let raw = "\
+diff --git a/x b/y b/x b/y
+index 1111111..2222222 100644
+--- a/x b/y
++++ b/x b/y
+@@ -1,2 +1,2 @@
+ w1
+-w2
++W2
+";
+        let p = build_hunk_patch(raw, "x b/y", 0, "@@ -1,2 +1,2 @@", None).unwrap();
         assert_eq!(p, raw);
     }
 

@@ -17,7 +17,7 @@ use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::http::{repo_ctx, repo_lock, ApiResult, GitCtx};
-use crate::local::{validate_remote_url, LocalGit, PullOutcome};
+use crate::local::{validate_remote_url, LocalGit, PullOutcome, SpawnClass};
 
 /// How `git pull` reconciles diverged history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,10 +103,10 @@ impl LocalGit {
         Self::guard_ref(onto)?;
         let range = format!("{onto}..HEAD");
         let count = self
-            .run(&["rev-list", "--count", "--end-of-options", &range, "--"])
+            .run_read(&["rev-list", "--count", "--end-of-options", &range, "--"])
             .await?;
         let onto_sha = self
-            .run(&["rev-parse", "--verify", "--end-of-options", onto])
+            .run_read(&["rev-parse", "--verify", "--end-of-options", onto])
             .await?
             .trim()
             .to_string();
@@ -119,7 +119,10 @@ impl LocalGit {
     /// Read a single `git config --get <key>`; None when unset (git exits 1) or
     /// empty.
     async fn config_get(&self, key: &str) -> Option<String> {
-        match self.run_raw(&["config", "--get", key], &[]).await {
+        match self
+            .run_raw_class(&["config", "--get", key], &[], SpawnClass::LocalRead)
+            .await
+        {
             Ok((true, out, _, _)) => {
                 let v = out.trim().to_string();
                 (!v.is_empty()).then_some(v)
@@ -223,7 +226,7 @@ impl LocalGit {
 
     /// `git remote -v` → one entry per remote, userinfo stripped.
     pub async fn remotes(&self) -> Result<Vec<RemoteInfo>> {
-        Ok(parse_remotes(&self.run(&["remote", "-v"]).await?))
+        Ok(parse_remotes(&self.run_read(&["remote", "-v"]).await?))
     }
 
     /// Add / re-point / remove a remote. Both positional values are validated

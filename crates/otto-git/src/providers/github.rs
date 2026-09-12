@@ -740,11 +740,14 @@ impl super::GitProvider for Github {
         if !head_ref.is_empty() {
             let path = format!("/repos/{}/{}/git/refs/heads/{head_ref}", r.owner, r.repo);
             if let Err(e) = self.http.ok(self.req(reqwest::Method::DELETE, &path)).await {
-                // The repo's "automatically delete head branches" setting may
-                // have got there first — a 422 "Reference does not exist" is
-                // the wanted end state, not a failure of a merge that landed.
+                // The merge is the operation the caller asked for; the delete
+                // is best-effort. The repo's "automatically delete head
+                // branches" setting may have got there first (422 "Reference
+                // does not exist" = the wanted end state), and a protected
+                // branch or a token without delete rights must not turn a merge
+                // that ALREADY LANDED into a failure the user retries.
                 if !e.to_string().contains("Reference does not exist") {
-                    return Err(e);
+                    tracing::warn!(pr = number, branch = %head_ref, "merged, but the source branch could not be deleted: {e}");
                 }
             }
         }
