@@ -7,23 +7,27 @@
 //! Execution runs through the daemon via a shared `reqwest` client (mirroring
 //! the browser proxy), so requests dodge webview CORS/CSP and get real timing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use otto_core::api::{
-    ApiResponse, ApiRunResult, ApiRunStepResult, ExecuteApiReq, ImportCurlReq, ParsedCurl,
+    ApiOverview, ApiOverviewAutomation, ApiOverviewCollection, ApiOverviewEnvironment,
+    ApiOverviewRequest, ApiResolvedRequest, ApiResponse, ApiRunResult, ApiRunStepResult,
+    ExecuteApiReq, ImportCurlReq, ParsedCurl, RunSavedRequestReq, RunSavedRequestResp,
     UpsertApiAutomationReq, UpsertApiCollectionReq, UpsertApiEnvironmentReq, UpsertApiRequestReq,
 };
 use otto_core::domain::{
     ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiRequest, Connection,
     ConnectionKind, WorkspaceRole,
 };
-use otto_ssh::{SshTunnel, SshTunnelConfig};
+use otto_core::event::Event;
 use otto_core::{Error, Id};
+use otto_ssh::{SshTunnel, SshTunnelConfig};
+use otto_state::api_client::ApiHistoryQuery;
 use otto_state::{
     ApiClientRepo, NewApiAutomation, NewApiCollection, NewApiEnvironment, NewApiHistory,
     NewApiRequest,
@@ -46,6 +50,10 @@ const EXTRAS_MAX_BYTES: usize = 256 * 1024;
 /// Hard cap for `GET .../history?limit=`.
 const HISTORY_MAX: i64 = 500;
 const HISTORY_DEFAULT: i64 = 100;
+/// Agent-facing request/response body cap.
+const AGENT_BODY_MAX: usize = 64 * 1024;
+/// In-band marker appended to an agent-shaped request body that hit the cap.
+const AGENT_BODY_TRUNCATED: &str = "\n…[truncated]";
 /// Execution timeout for outbound requests.
 const EXECUTE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -311,6 +319,135 @@ async fn resolve_socks_proxy(
 }
 
 // ===========================================================================
+// Agent-facing overview
+// ===========================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct OverviewQuery {
+    pub q: Option<String>,
+    pub collection_id: Option<Id>,
+    pub kind: Option<String>,
+}
+
+/// `GET /workspaces/{wid}/api-client/overview`
+pub async fn overview(
+    Path(wid): Path<Id>,
+    Query(query): Query<OverviewQuery>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<ApiOverview>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    let repo = repo(&ctx);
+    let collections = repo.list_collections(&wid).await?;
+    let requests = repo
+        .list_requests(&wid, query.collection_id.as_ref())
+        .await?;
+    let environments = repo.list_environments(&wid).await?;
+    let automations = repo.list_automations(&wid).await?;
+    Ok(Json(build_overview(
+        collections,
+        requests,
+        environments,
+        automations,
+        query.q.as_deref(),
+        query.kind.as_deref().unwrap_or("all"),
+    )))
+}
+
+/// Build the compact, secret-free API-client discovery view.
+pub(crate) fn build_overview(
+    collections: Vec<ApiCollection>,
+    requests: Vec<ApiRequest>,
+    environments: Vec<ApiEnvironment>,
+    automations: Vec<ApiAutomation>,
+    q: Option<&str>,
+    kind: &str,
+) -> ApiOverview {
+    let needle = q.unwrap_or_default().to_ascii_lowercase();
+    let matches = |values: &[&str]| {
+        needle.is_empty()
+            || values
+                .iter()
+                .any(|value| value.to_ascii_lowercase().contains(&needle))
+    };
+    let include_requests = matches!(kind, "all" | "requests");
+    let include_environments = matches!(kind, "all" | "environments");
+    let include_automations = matches!(kind, "all" | "automations");
+
+    ApiOverview {
+        collections: if include_requests {
+            collections
+                .into_iter()
+                .filter(|collection| matches(&[&collection.name]))
+                .map(|collection| ApiOverviewCollection {
+                    id: collection.id,
+                    name: collection.name,
+                    parent_id: collection.parent_id,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        requests: if include_requests {
+            requests
+                .into_iter()
+                .filter(|request| matches(&[&request.name, &request.method, &request.url]))
+                .map(|request| {
+                    let auth_type = request
+                        .auth
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("none")
+                        .to_string();
+                    let agent_authored = is_agent_authored(&request);
+                    ApiOverviewRequest {
+                        id: request.id,
+                        name: request.name,
+                        method: request.method,
+                        url: request.url,
+                        collection_id: request.collection_id,
+                        auth_type,
+                        has_ssh: request.ssh_connection_id.is_some(),
+                        agent_authored,
+                        updated_at: request.updated_at,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        environments: if include_environments {
+            environments
+                .into_iter()
+                .filter(|environment| matches(&[&environment.name]))
+                .map(|environment| ApiOverviewEnvironment {
+                    id: environment.id,
+                    name: environment.name,
+                    is_active: environment.is_active,
+                    variables: api_secrets::mask_variables(&environment.variables),
+                    secret_keys: environment.secret_keys,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        automations: if include_automations {
+            automations
+                .into_iter()
+                .filter(|automation| matches(&[&automation.name]))
+                .map(|automation| ApiOverviewAutomation {
+                    id: automation.id,
+                    name: automation.name,
+                    steps: automation.steps.as_array().map_or(0, Vec::len),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+// ===========================================================================
 // Collections
 // ===========================================================================
 
@@ -385,6 +522,11 @@ pub struct RequestsFilter {
     pub collection_id: Option<Id>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RequestShape {
+    pub shape: Option<String>,
+}
+
 /// `GET /workspaces/{wid}/api-client/requests` (?collection_id)
 pub async fn list_requests(
     Path(wid): Path<Id>,
@@ -403,13 +545,32 @@ pub async fn list_requests(
 /// `GET /workspaces/{wid}/api-client/requests/{id}`
 pub async fn get_request(
     Path((wid, id)): Path<(Id, Id)>,
+    Query(shape): Query<RequestShape>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<ApiRequest>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
     let req = repo(&ctx).get_request(&id).await?;
     ensure_in_workspace(&req.workspace_id, &wid)?;
-    Ok(Json(req))
+    Ok(Json(if shape.shape.as_deref() == Some("agent") {
+        shape_request_agent(req)
+    } else {
+        req
+    }))
+}
+
+/// Apply the bounded, credential-masked request shape used by agents.
+/// `ApiRequest` has no `truncated` flag, so a capped body says so in-band —
+/// otherwise the model reads a silently clipped payload as the whole thing.
+pub(crate) fn shape_request_agent(mut request: ApiRequest) -> ApiRequest {
+    request.auth = api_secrets::redact_auth(&request.auth);
+    request.headers = api_secrets::mask_kv_rows(&request.headers);
+    request.query = api_secrets::mask_kv_rows(&request.query);
+    if request.body.len() > AGENT_BODY_MAX {
+        truncate_string(&mut request.body, AGENT_BODY_MAX);
+        request.body.push_str(AGENT_BODY_TRUNCATED);
+    }
+    request
 }
 
 /// `POST /workspaces/{wid}/api-client/requests`
@@ -417,13 +578,18 @@ pub async fn create_request(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    headers: HeaderMap,
     Json(req): Json<UpsertApiRequestReq>,
 ) -> ApiResult<Json<ApiRequest>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     if req.name.trim().is_empty() {
         return Err(Error::Invalid("request name must not be empty".into()).into());
     }
-    let extras = validate_extras(req.extras.clone())?;
+    let mut extras = validate_extras(req.extras.clone())?;
+    let (source, session_id) = caller_source(&headers);
+    if source["kind"] == "agent" {
+        extras = Some(stamp_agent(extras, session_id.as_deref()));
+    }
     let position = repo(&ctx)
         .list_requests(&wid, req.collection_id.as_ref())
         .await?
@@ -450,27 +616,51 @@ pub async fn update_request(
     Path((wid, id)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-    Json(req): Json<UpsertApiRequestReq>,
+    headers: HeaderMap,
+    Json(mut req): Json<UpsertApiRequestReq>,
 ) -> ApiResult<Json<ApiRequest>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     let repo = repo(&ctx);
     let existing = repo.get_request(&id).await?;
     ensure_in_workspace(&existing.workspace_id, &wid)?;
-    let extras = validate_extras(req.extras.clone())?;
+    let incoming_extras = validate_extras(req.extras.clone())?;
+    let mut extras = if req.extras.is_none() {
+        existing.extras.clone()
+    } else {
+        incoming_extras
+    };
+    let (source, session_id) = caller_source(&headers);
+    if source["kind"] == "agent" {
+        extras = Some(stamp_agent(extras, session_id.as_deref()));
+    }
 
     // Lazy secret migration: plaintext secret members move to the Keychain;
     // markers sent back unchanged keep their stored values.
-    let own_ref = api_secrets::request_ref(&id);
-    let existing_blob = api_secrets::load_blob(ctx.secrets.as_ref(), &own_ref);
-    let (auth_row, blob) =
-        api_secrets::split_auth_secrets(&normalize_json_object(req.auth.clone()), &own_ref, &existing_blob)
-            .map_err(|m| ApiError(Error::Invalid(m)))?;
-    api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob)?;
+    let auth_row = if let Some(incoming) = merged_auth_for_update(&req.auth) {
+        let own_ref = api_secrets::request_ref(&id);
+        let existing_blob = api_secrets::load_blob(ctx.secrets.as_ref(), &own_ref);
+        let (auth_row, blob) = api_secrets::split_auth_secrets(
+            &normalize_json_object(incoming),
+            &own_ref,
+            &existing_blob,
+        )
+        .map_err(|m| ApiError(Error::Invalid(m)))?;
+        api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob)?;
+        auth_row
+    } else {
+        existing.auth.clone()
+    };
 
+    req.auth = auth_row.clone();
     let mut new = req_to_new(&wid, req, existing.position, extras);
     new.auth = auth_row;
     let updated = repo.update_request(&id, new).await?;
     Ok(Json(updated))
+}
+
+/// `None` means an absent/null PATCH auth keeps the stored row and Keychain blob.
+pub(crate) fn merged_auth_for_update(incoming: &Value) -> Option<Value> {
+    (!incoming.is_null()).then(|| incoming.clone())
 }
 
 /// `DELETE /workspaces/{wid}/api-client/requests/{id}`
@@ -645,9 +835,13 @@ pub async fn activate_environment(
 #[derive(Debug, Deserialize)]
 pub struct HistoryFilter {
     pub limit: Option<i64>,
+    pub q: Option<String>,
+    pub status: Option<i64>,
+    pub request_id: Option<String>,
+    pub source: Option<String>,
 }
 
-/// `GET /workspaces/{wid}/api-client/history` (?limit)
+/// `GET /workspaces/{wid}/api-client/history` (optional filters)
 pub async fn list_history(
     Path(wid): Path<Id>,
     Query(filter): Query<HistoryFilter>,
@@ -659,7 +853,32 @@ pub async fn list_history(
         .limit
         .unwrap_or(HISTORY_DEFAULT)
         .clamp(1, HISTORY_MAX);
-    Ok(Json(repo(&ctx).list_history(&wid, limit).await?))
+    Ok(Json(
+        repo(&ctx)
+            .list_history_filtered(
+                &wid,
+                &ApiHistoryQuery {
+                    limit,
+                    q: filter.q,
+                    status: filter.status,
+                    request_id: filter.request_id,
+                    source: filter.source,
+                },
+            )
+            .await?,
+    ))
+}
+
+/// `GET /workspaces/{wid}/api-client/history/{id}`
+pub async fn get_history(
+    Path((wid, id)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<ApiHistoryEntry>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
+    let entry = repo(&ctx).get_history(&id).await?;
+    ensure_in_workspace(&entry.workspace_id, &wid)?;
+    Ok(Json(entry))
 }
 
 /// `DELETE /workspaces/{wid}/api-client/history`
@@ -1060,6 +1279,434 @@ async fn resolve_marker_or_string(
 // Execute
 // ===========================================================================
 
+/// Insert a history row best-effort, stamp its source metadata, then notify
+/// workspace clients. A failed insert emits no event.
+async fn record_history(
+    ctx: &ServerCtx,
+    repo: &ApiClientRepo,
+    mut history: NewApiHistory,
+    source: &Value,
+    session_id: Option<Id>,
+    request_id: Option<Id>,
+) -> Option<Id> {
+    if !history.request.is_object() {
+        history.request = Value::Object(serde_json::Map::new());
+    }
+    let request = history
+        .request
+        .as_object_mut()
+        .expect("history request normalized to an object");
+    request.insert(
+        "request_id".into(),
+        request_id.clone().map_or(Value::Null, Value::String),
+    );
+    request.entry("name").or_insert(Value::Null);
+    request.insert("source".into(), source.clone());
+    let entry = repo.insert_history(history).await.ok()?;
+    let source_kind = source
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("human")
+        .to_string();
+    let _ = ctx.events.send(Event::ApiHistoryAppended {
+        workspace_id: entry.workspace_id,
+        entry_id: entry.id.clone(),
+        source: source_kind,
+        session_id,
+        request_id,
+    });
+    Some(entry.id)
+}
+
+/// Reject overrides that could recursively expand a workspace secret.
+pub(crate) fn check_override_vars(vars: &serde_json::Map<String, Value>) -> Result<(), String> {
+    for (key, value) in vars {
+        if value.as_str().is_some_and(|value| value.contains("{{")) {
+            return Err(format!(
+                "vars override '{key}' must not contain '{{{{' (no nested substitution)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Safe, read-only methods that need no explicit execute confirmation.
+pub(crate) fn is_safe_method(method: &str) -> bool {
+    matches!(
+        method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "OPTIONS"
+    )
+}
+
+/// Lower-cased host from an absolute HTTP URL.
+pub(crate) fn host_of(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()?
+        .host_str()
+        .map(str::to_ascii_lowercase)
+}
+
+/// Whether a saved request carries the server-owned agent authorship stamp.
+pub(crate) fn is_agent_authored(request: &ApiRequest) -> bool {
+    request
+        .extras
+        .as_ref()
+        .and_then(|extras| extras.get("agent"))
+        .is_some_and(Value::is_object)
+}
+
+/// Hosts established by human-authored saved requests or human/legacy runs.
+pub(crate) fn known_hosts(
+    requests: &[ApiRequest],
+    history: &[ApiHistoryEntry],
+    vars: &serde_json::Map<String, Value>,
+) -> BTreeSet<String> {
+    let mut hosts = BTreeSet::new();
+    for request in requests
+        .iter()
+        .filter(|request| !is_agent_authored(request))
+    {
+        if let Some(host) = host_of(&substitute(&request.url, vars)) {
+            hosts.insert(host);
+        }
+    }
+    for entry in history {
+        let agent = entry
+            .request
+            .pointer("/source/kind")
+            .and_then(Value::as_str)
+            == Some("agent");
+        if !agent {
+            if let Some(host) = host_of(&entry.url) {
+                hosts.insert(host);
+            }
+        }
+    }
+    hosts
+}
+
+/// Cap the response body for agent consumption and remove binary duplication.
+pub(crate) fn shape_agent(response: &mut ApiResponse) {
+    if response.body.len() > AGENT_BODY_MAX {
+        truncate_string(&mut response.body, AGENT_BODY_MAX);
+        response.truncated = true;
+    }
+    response.body_base64.clear();
+}
+
+/// Collect names and values of every secret resolved for one saved send.
+pub(crate) fn collect_secrets(
+    env_secret_blob: &BTreeMap<String, String>,
+    secret_keys: &[String],
+    resolved_auth: &Value,
+) -> (Vec<String>, Vec<String>) {
+    let mut names = Vec::new();
+    let mut values = Vec::new();
+    for key in secret_keys {
+        if let Some(value) = env_secret_blob.get(key) {
+            names.push(key.clone());
+            values.push(value.clone());
+        }
+    }
+    let auth_type = resolved_auth
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    for member in api_secrets::secret_members(auth_type) {
+        if let Some(value) = resolved_auth.get(*member).and_then(Value::as_str) {
+            if !value.is_empty() {
+                names.push(format!("auth.{member}"));
+                values.push(value.to_string());
+            }
+        }
+    }
+    (names, values)
+}
+
+/// `POST /workspaces/{wid}/api-client/requests/{id}/execute`
+pub async fn run_saved_request(
+    Path((wid, id)): Path<(Id, Id)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    headers: HeaderMap,
+    Json(req): Json<RunSavedRequestReq>,
+) -> ApiResult<Json<RunSavedRequestResp>> {
+    require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
+    let repo = repo(&ctx);
+    let request = repo.get_request(&id).await?;
+    ensure_in_workspace(&request.workspace_id, &wid)?;
+    let extras = request.extras.clone().unwrap_or(Value::Null);
+    let transport = extras
+        .get("transport")
+        .and_then(Value::as_str)
+        .unwrap_or("http");
+    if transport != "http" {
+        return Err(ApiError(Error::Invalid(format!(
+            "'{transport}' requests are not runnable through saved execute (HTTP only)"
+        ))));
+    }
+
+    let mut exec = request_to_execute(&request);
+    apply_extras_settings(&extras, &mut exec);
+    exec.timeout_ms = req
+        .timeout_ms
+        .or(exec.timeout_ms)
+        .map(|timeout| timeout.clamp(1, 60_000));
+    let (mut vars, environment, env_blob) =
+        resolve_environment(&ctx, &repo, &wid, req.environment_id.as_ref()).await?;
+    if let Some(overrides) = &req.vars {
+        let overrides = overrides
+            .as_object()
+            .ok_or_else(|| ApiError(Error::Invalid("vars must be a JSON object".into())))?;
+        check_override_vars(overrides).map_err(|message| ApiError(Error::Invalid(message)))?;
+        for (key, value) in overrides {
+            vars.insert(key.clone(), value.clone());
+        }
+    }
+
+    // Pre-request script: same mutable request + variables surface as automation steps.
+    let pre_code = extras
+        .pointer("/scripts/pre")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !pre_code.trim().is_empty() {
+        let script_req = ScriptRequest {
+            method: exec.method.clone(),
+            url: exec.url.clone(),
+            headers: exec.headers.clone(),
+            body: exec.body.clone(),
+        };
+        let svars = string_vars(&vars);
+        let out = api_scripts::run_pre_request(pre_code, &script_req, &svars);
+        if let Some(error) = out.error {
+            return Err(ApiError(Error::Invalid(format!(
+                "pre-request script failed: {error}"
+            ))));
+        }
+        if let Some(mutated) = out.request {
+            exec.method = mutated.method;
+            exec.url = mutated.url;
+            exec.headers = mutated.headers;
+            exec.body = mutated.body;
+        }
+        merge_string_vars(&mut vars, &out.vars);
+    }
+
+    if exec.body_mode == "graphql" {
+        let gql_vars = extras
+            .get("graphql_variables")
+            .and_then(Value::as_str)
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .unwrap_or_else(|| json!({}));
+        exec.body = json!({"query": exec.body, "variables": gql_vars}).to_string();
+    }
+
+    let env_secret_values: Vec<String> = env_blob.values().cloned().collect();
+    let resolved_url_before_auth =
+        api_secrets::scrub_str(&substitute(&exec.url, &vars), &env_secret_values);
+    let method = exec.method.to_ascii_uppercase();
+    if !is_safe_method(&method) && !req.confirm {
+        return Err(ApiError(Error::Conflict(format!(
+            "needs_confirm=method: {method} '{}' → {resolved_url_before_auth} is not a safe method; re-send with confirm:true",
+            request.name
+        ))));
+    }
+
+    if is_agent_authored(&request) && !req.confirm_new_host {
+        if let Some(host) = host_of(&substitute(&exec.url, &vars)) {
+            let requests = repo.list_requests(&wid, None).await?;
+            let history = repo
+                .list_history_filtered(
+                    &wid,
+                    &ApiHistoryQuery {
+                        limit: 500,
+                        q: None,
+                        status: None,
+                        request_id: None,
+                        source: Some("human".into()),
+                    },
+                )
+                .await?;
+            if !known_hosts(&requests, &history, &vars).contains(&host) {
+                return Err(ApiError(Error::Conflict(format!(
+                    "needs_confirm=new_host: host '{host}' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true"
+                ))));
+            }
+        }
+    }
+
+    exec = resolve_exec_auth(&repo, ctx.secrets.as_ref(), &wid, &exec)
+        .await
+        .map_err(|message| ApiError(Error::Invalid(message)))?;
+    let (secret_names, secret_values) = collect_secrets(
+        &env_blob,
+        environment
+            .as_ref()
+            .map(|env| env.secret_keys.as_slice())
+            .unwrap_or(&[]),
+        &exec.auth,
+    );
+    let resolved_url = api_secrets::scrub_str(&substitute(&exec.url, &vars), &secret_values);
+    let request_snapshot = json!({
+        "request_id": request.id,
+        "name": request.name,
+        "method": exec.method,
+        "url": api_secrets::scrub_str(&exec.url, &secret_values),
+        "headers": api_secrets::mask_kv_rows(&exec.headers),
+        "query": api_secrets::mask_kv_rows(&exec.query),
+        "body_mode": exec.body_mode,
+        "body": api_secrets::scrub_str(&exec.body, &secret_values),
+        "auth": api_secrets::redact_auth(&exec.auth),
+        "environment_id": req.environment_id,
+        "ssh_connection_id": exec.ssh_connection_id,
+    });
+    let (source, session_id) = caller_source(&headers);
+    let proxy = match resolve_socks_proxy(&ctx, &wid, exec.ssh_connection_id.as_ref()).await {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            let error = api_secrets::scrub_str(&error, &secret_values);
+            record_history(
+                &ctx,
+                &repo,
+                NewApiHistory {
+                    workspace_id: wid.clone(),
+                    method: method.clone(),
+                    url: resolved_url,
+                    status: None,
+                    duration_ms: None,
+                    request: request_snapshot,
+                    response: json!({"error": error}),
+                },
+                &source,
+                session_id,
+                Some(request.id.clone()),
+            )
+            .await;
+            return Err(ApiError(Error::Upstream(error)));
+        }
+    };
+    let allow_local = workspace_allows_local(&ctx, &wid).await;
+    let mut response = match build_and_send(&wid, &exec, &vars, proxy.as_deref(), allow_local).await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let error = api_secrets::scrub_str(&error, &secret_values);
+            record_history(
+                &ctx,
+                &repo,
+                NewApiHistory {
+                    workspace_id: wid.clone(),
+                    method: method.clone(),
+                    url: resolved_url,
+                    status: None,
+                    duration_ms: None,
+                    request: request_snapshot,
+                    response: json!({"error": error}),
+                },
+                &source,
+                session_id,
+                Some(request.id.clone()),
+            )
+            .await;
+            return Err(ApiError(Error::Upstream(error)));
+        }
+    };
+
+    let mut warnings = Vec::new();
+    let mut tests = Vec::new();
+    let post_code = extras
+        .pointer("/scripts/post")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !post_code.trim().is_empty() {
+        let mut response_headers = BTreeMap::new();
+        if let Some(headers) = response.headers.as_array() {
+            for header in headers {
+                let key = header.get("key").and_then(Value::as_str).unwrap_or("");
+                let value = header.get("value").and_then(Value::as_str).unwrap_or("");
+                if !key.is_empty() {
+                    response_headers.insert(key.to_ascii_lowercase(), value.to_string());
+                }
+            }
+        }
+        let script_response = ScriptResponse {
+            code: response.status,
+            status: response.status_text.clone(),
+            response_time: response.duration_ms,
+            headers: response_headers,
+            body_text: response.body.clone(),
+        };
+        let out = api_scripts::run_post_response(post_code, &script_response, &string_vars(&vars));
+        merge_string_vars(&mut vars, &out.vars);
+        tests.extend(
+            out.tests
+                .into_iter()
+                .map(|test| json!({"desc": test.name, "passed": test.passed})),
+        );
+        if let Some(error) = out.error {
+            warnings.push(format!("post-response script failed: {error}"));
+        }
+    }
+
+    api_secrets::scrub_secrets(&mut response, &secret_values);
+    if req.shape.as_deref() == Some("agent") {
+        shape_agent(&mut response);
+    }
+    let jwt_claims = if req.decode_jwt == Some(false) {
+        None
+    } else {
+        let claims = api_secrets::jwt_claims(&response.body);
+        if claims.is_some() {
+            response.body = api_secrets::mask_jwts(&response.body);
+            if let Some(headers) = response.headers.as_array_mut() {
+                for header in headers {
+                    if let Some(Value::String(value)) = header.get_mut("value") {
+                        *value = api_secrets::mask_jwts(value);
+                    }
+                }
+            }
+        }
+        claims
+    };
+    let mut history_response = response.clone();
+    history_response.body_base64.clear();
+    let history_id = record_history(
+        &ctx,
+        &repo,
+        NewApiHistory {
+            workspace_id: wid,
+            method: method.clone(),
+            url: resolved_url.clone(),
+            status: Some(response.status as i64),
+            duration_ms: Some(response.duration_ms),
+            request: request_snapshot,
+            response: serde_json::to_value(&history_response).unwrap_or(Value::Null),
+        },
+        &source,
+        session_id,
+        Some(request.id.clone()),
+    )
+    .await
+    .unwrap_or_default();
+
+    Ok(Json(RunSavedRequestResp {
+        history_id,
+        request_id: request.id,
+        name: request.name,
+        response,
+        resolved: ApiResolvedRequest {
+            method,
+            url: resolved_url,
+            environment_id: environment.as_ref().map(|env| env.id.clone()),
+            environment: environment.map(|env| env.name),
+            secrets_used: secret_names,
+        },
+        jwt_claims,
+        warnings,
+        script_tests: Value::Array(tests),
+    }))
+}
+
 /// `POST /workspaces/{wid}/api-client/execute`
 ///
 /// Resolves `{{var}}` placeholders from the selected (or active) environment,
@@ -1070,6 +1717,7 @@ pub async fn execute(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    headers: HeaderMap,
     Json(req): Json<ExecuteApiReq>,
 ) -> ApiResult<Json<ApiResponse>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
@@ -1077,7 +1725,8 @@ pub async fn execute(
 
     // Resolve the environment variable map (Keychain-backed secrets included),
     // then layer runtime overrides (from post-response scripts / chaining).
-    let mut vars = resolve_variables(&ctx, &repo, &wid, req.environment_id.as_ref()).await?;
+    let (mut vars, environment, env_blob) =
+        resolve_environment(&ctx, &repo, &wid, req.environment_id.as_ref()).await?;
     if let Some(Value::Object(overrides)) = &req.vars {
         for (k, v) in overrides {
             vars.insert(k.clone(), v.clone());
@@ -1086,11 +1735,12 @@ pub async fn execute(
 
     // Snapshot of the request as executed. Secret auth members are REDACTED —
     // history must never become the plaintext copy that defeats the Keychain.
+    let (source, session_id) = caller_source(&headers);
     let request_snapshot = json!({
         "method": req.method,
         "url": req.url,
-        "headers": req.headers,
-        "query": req.query,
+        "headers": api_secrets::mask_kv_rows(&req.headers),
+        "query": api_secrets::mask_kv_rows(&req.query),
         "body_mode": req.body_mode,
         "body": req.body,
         "auth": api_secrets::redact_auth(&req.auth),
@@ -1103,17 +1753,24 @@ pub async fn execute(
     let exec_req = match resolve_exec_auth(&repo, ctx.secrets.as_ref(), &wid, &req).await {
         Ok(r) => Some(r),
         Err(msg) => {
-            let _ = repo
-                .insert_history(NewApiHistory {
+            let secret_values: Vec<String> = env_blob.values().cloned().collect();
+            record_history(
+                &ctx,
+                &repo,
+                NewApiHistory {
                     workspace_id: wid.clone(),
                     method: req.method.to_uppercase(),
-                    url: substitute(&req.url, &vars),
+                    url: api_secrets::scrub_str(&substitute(&req.url, &vars), &secret_values),
                     status: None,
                     duration_ms: None,
                     request: request_snapshot.clone(),
                     response: json!({ "error": msg }),
-                })
-                .await;
+                },
+                &source,
+                session_id.clone(),
+                None,
+            )
+            .await;
             return Err(ApiError(Error::Invalid(msg)));
         }
     };
@@ -1130,33 +1787,65 @@ pub async fn execute(
     };
     match send {
         Ok(resp) => {
+            let (_, secret_values) = collect_secrets(
+                &env_blob,
+                environment
+                    .as_ref()
+                    .map(|env| env.secret_keys.as_slice())
+                    .unwrap_or(&[]),
+                &exec_req.auth,
+            );
+            let mut stored_resp = resp.clone();
+            api_secrets::scrub_secrets(&mut stored_resp, &secret_values);
+            stored_resp.body_base64.clear();
             // Record success in history (best-effort; do not fail the request).
-            let _ = repo
-                .insert_history(NewApiHistory {
+            record_history(
+                &ctx,
+                &repo,
+                NewApiHistory {
                     workspace_id: wid.clone(),
                     method: req.method.to_uppercase(),
-                    url: substitute(&req.url, &vars),
+                    url: api_secrets::scrub_str(&substitute(&req.url, &vars), &secret_values),
                     status: Some(resp.status as i64),
                     duration_ms: Some(resp.duration_ms),
                     request: request_snapshot,
-                    response: serde_json::to_value(&resp).unwrap_or(Value::Null),
-                })
-                .await;
+                    response: serde_json::to_value(&stored_resp).unwrap_or(Value::Null),
+                },
+                &source,
+                session_id,
+                None,
+            )
+            .await;
             Ok(Json(resp))
         }
         Err(err) => {
+            let (_, secret_values) = collect_secrets(
+                &env_blob,
+                environment
+                    .as_ref()
+                    .map(|env| env.secret_keys.as_slice())
+                    .unwrap_or(&[]),
+                &exec_req.auth,
+            );
+            let err = api_secrets::scrub_str(&err, &secret_values);
             // Record the failure too, then surface as a 502.
-            let _ = repo
-                .insert_history(NewApiHistory {
+            record_history(
+                &ctx,
+                &repo,
+                NewApiHistory {
                     workspace_id: wid.clone(),
                     method: req.method.to_uppercase(),
-                    url: substitute(&req.url, &vars),
+                    url: api_secrets::scrub_str(&substitute(&req.url, &vars), &secret_values),
                     status: None,
                     duration_ms: None,
                     request: request_snapshot,
                     response: json!({ "error": err }),
-                })
-                .await;
+                },
+                &source,
+                session_id,
+                None,
+            )
+            .await;
             Err(ApiError(Error::Upstream(err)))
         }
     }
@@ -1172,6 +1861,21 @@ async fn resolve_variables(
     wid: &Id,
     environment_id: Option<&Id>,
 ) -> ApiResult<serde_json::Map<String, Value>> {
+    Ok(resolve_environment(ctx, repo, wid, environment_id).await?.0)
+}
+
+/// Resolve variables together with the selected environment row and its
+/// Keychain blob. The latter two never leave the route layer.
+async fn resolve_environment(
+    ctx: &ServerCtx,
+    repo: &ApiClientRepo,
+    wid: &Id,
+    environment_id: Option<&Id>,
+) -> ApiResult<(
+    serde_json::Map<String, Value>,
+    Option<ApiEnvironment>,
+    BTreeMap<String, String>,
+)> {
     let env = match environment_id {
         Some(eid) => {
             let env = repo.get_environment(eid).await?;
@@ -1181,18 +1885,22 @@ async fn resolve_variables(
         None => repo.active_environment(wid).await?,
     };
     let Some(env) = env else {
-        return Ok(serde_json::Map::new());
+        return Ok((serde_json::Map::new(), None, BTreeMap::new()));
     };
     let mut vars = env.variables.as_object().cloned().unwrap_or_default();
+    let blob = if env.secret_keys.is_empty() {
+        BTreeMap::new()
+    } else {
+        api_secrets::load_blob(ctx.secrets.as_ref(), &api_secrets::env_ref(&env.id))
+    };
     if !env.secret_keys.is_empty() {
-        let blob = api_secrets::load_blob(ctx.secrets.as_ref(), &api_secrets::env_ref(&env.id));
         for key in &env.secret_keys {
             if let Some(v) = blob.get(key) {
                 vars.insert(key.clone(), Value::String(v.clone()));
             }
         }
     }
-    Ok(vars)
+    Ok((vars, Some(env), blob))
 }
 
 /// Clone `req` with every `{"$secret": …}` auth marker resolved from the
@@ -2235,6 +2943,56 @@ async fn secure_all_sweep(
 // shared helpers
 // ===========================================================================
 
+/// Audit source derived from the inward bridge's session header, or — for an
+/// outward MCP client, which has no Otto session — the executor's `X-Otto-Agent`
+/// marker. Either way the caller is an agent, and the new-host rule applies.
+pub(crate) fn caller_source(headers: &HeaderMap) -> (Value, Option<Id>) {
+    let hdr = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    match (hdr("x-otto-session"), hdr("x-otto-agent")) {
+        (Some(session_id), _) => (
+            json!({"kind": "agent", "session_id": session_id}),
+            Some(session_id),
+        ),
+        (None, Some(via)) => (json!({"kind": "agent", "session_id": null, "via": via}), None),
+        (None, None) => (json!({"kind": "human", "session_id": null}), None),
+    }
+}
+
+/// Merge the server-owned agent authorship stamp into request extras.
+/// `session_id` is `None` for an outward MCP caller (no Otto session).
+pub(crate) fn stamp_agent(extras: Option<Value>, session_id: Option<&str>) -> Value {
+    let mut extras = extras
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_else(|| serde_json::Map::from_iter([("v".into(), json!(1))]));
+    extras.insert(
+        "agent".into(),
+        json!({
+            "session_id": session_id,
+            "at": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+    Value::Object(extras)
+}
+
+/// Truncate UTF-8 text at a byte cap without splitting a character.
+fn truncate_string(value: &mut String, max: usize) {
+    if value.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+}
+
 /// 404 when an entity belongs to a different workspace than the path's `wid`.
 fn ensure_in_workspace(entity_ws: &Id, wid: &Id) -> Result<(), ApiError> {
     if entity_ws == wid {
@@ -2671,5 +3429,260 @@ mod tests {
             enabled_kv(&v),
             vec![("A".into(), "1".into()), ("C".into(), "3".into())]
         );
+    }
+
+    #[test]
+    fn check_override_vars_rejects_braces() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("safe".into(), json!("plain"));
+        assert!(check_override_vars(&vars).is_ok());
+        vars.insert(
+            "base_url".into(),
+            json!("https://evil.test/?t={{api_token}}"),
+        );
+        assert_eq!(
+            check_override_vars(&vars).unwrap_err(),
+            "vars override 'base_url' must not contain '{{' (no nested substitution)"
+        );
+    }
+
+    #[test]
+    fn safe_methods_need_no_confirm() {
+        for method in ["GET", "head", "Options"] {
+            assert!(is_safe_method(method), "{method}");
+        }
+        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+            assert!(!is_safe_method(method), "{method}");
+        }
+    }
+
+    fn domain_request(id: &str, url: &str, extras: Option<Value>) -> ApiRequest {
+        ApiRequest {
+            id: id.into(),
+            workspace_id: "ws1".into(),
+            collection_id: None,
+            name: id.into(),
+            method: "GET".into(),
+            url: url.into(),
+            headers: json!([]),
+            query: json!([]),
+            body_mode: "none".into(),
+            body: String::new(),
+            auth: json!({"type":"none"}),
+            ssh_connection_id: None,
+            extras,
+            position: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn history_entry(id: &str, url: &str, request: Value) -> ApiHistoryEntry {
+        ApiHistoryEntry {
+            id: id.into(),
+            workspace_id: "ws1".into(),
+            method: "GET".into(),
+            url: url.into(),
+            status: Some(200),
+            duration_ms: Some(1),
+            request,
+            response: json!({"status":200}),
+            executed_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn known_hosts_collects_human_requests_and_history() {
+        let requests = vec![
+            domain_request("human", "https://{{host}}/v1", None),
+            domain_request(
+                "agent",
+                "https://agent-only.test/v1",
+                Some(json!({"agent":{"session_id":"s1"}})),
+            ),
+        ];
+        let history = vec![
+            history_entry(
+                "human-run",
+                "https://human-run.test/x",
+                json!({"source":{"kind":"human"}}),
+            ),
+            history_entry(
+                "agent-run",
+                "https://agent-run.test/x",
+                json!({"source":{"kind":"agent"}}),
+            ),
+            history_entry("legacy-run", "https://legacy.test/x", json!({})),
+        ];
+        let vars = serde_json::Map::from_iter([("host".into(), json!("saved-human.test"))]);
+        let hosts = known_hosts(&requests, &history, &vars);
+        assert_eq!(
+            hosts,
+            BTreeSet::from_iter([
+                "human-run.test".into(),
+                "legacy.test".into(),
+                "saved-human.test".into(),
+            ])
+        );
+    }
+
+    fn api_response(body: String, body_base64: String) -> ApiResponse {
+        ApiResponse {
+            status: 200,
+            status_text: "OK".into(),
+            headers: json!([]),
+            body,
+            body_base64,
+            truncated: false,
+            too_large: false,
+            duration_ms: 1,
+            size_bytes: 1,
+            content_type: Some("text/plain".into()),
+            trace: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn shape_agent_caps_body_and_drops_base64() {
+        let mut response = api_response("é".repeat(AGENT_BODY_MAX), "binary".into());
+        shape_agent(&mut response);
+        assert!(response.body.len() <= AGENT_BODY_MAX);
+        assert!(response.truncated);
+        assert!(response.body_base64.is_empty());
+        assert!(response.body.is_char_boundary(response.body.len()));
+    }
+
+    #[test]
+    fn shape_request_agent_redacts_auth_headers_and_body() {
+        let mut request = domain_request("r1", "https://api.test", None);
+        request.auth = json!({"type":"bearer","token":"live-token"});
+        request.headers = json!([
+            {"key":"Authorization","value":"Bearer live-token","enabled":true},
+            {"key":"Accept","value":"application/json","enabled":true}
+        ]);
+        request.query = json!([{"key":"api_key","value":"live-token","enabled":true}]);
+        request.body = "a".repeat(AGENT_BODY_MAX + 10);
+        let shaped = shape_request_agent(request);
+        assert_eq!(shaped.auth["token"], api_secrets::MASK);
+        assert_eq!(shaped.headers[0]["value"], api_secrets::MASK);
+        assert_eq!(shaped.headers[1]["value"], "application/json");
+        assert_eq!(shaped.query[0]["value"], api_secrets::MASK);
+        assert_eq!(
+            shaped.body.len(),
+            AGENT_BODY_MAX + AGENT_BODY_TRUNCATED.len()
+        );
+        assert!(shaped.body.ends_with(AGENT_BODY_TRUNCATED));
+    }
+
+    #[test]
+    fn build_overview_filters_and_masks() {
+        let now = chrono::Utc::now();
+        let collections = vec![ApiCollection {
+            id: "c1".into(),
+            workspace_id: "ws1".into(),
+            name: "Payments".into(),
+            parent_id: None,
+            position: 0,
+            created_at: now,
+        }];
+        let mut request = domain_request("r1", "https://api.test/login", None);
+        request.name = "Login".into();
+        request.auth = json!({"type":"bearer","token":"never returned"});
+        let environments = vec![ApiEnvironment {
+            id: "e1".into(),
+            workspace_id: "ws1".into(),
+            name: "Staging".into(),
+            variables: json!({"base_url":"https://api.test","api_token":"legacy-secret"}),
+            secret_keys: vec!["client_secret".into()],
+            is_active: true,
+            created_at: now,
+        }];
+        let automations = vec![ApiAutomation {
+            id: "a1".into(),
+            workspace_id: "ws1".into(),
+            name: "Smoke".into(),
+            steps: json!([{"request_id":"r1"}]),
+            created_at: now,
+        }];
+        let overview = build_overview(
+            collections,
+            vec![request],
+            environments,
+            automations,
+            None,
+            "all",
+        );
+        assert_eq!(overview.requests[0].auth_type, "bearer");
+        assert_eq!(
+            overview.environments[0].variables["api_token"],
+            api_secrets::MASK
+        );
+        assert_eq!(
+            overview.environments[0].variables["base_url"],
+            "https://api.test"
+        );
+        assert_eq!(overview.automations[0].steps, 1);
+        assert_eq!(overview.collections.len(), 1);
+
+        let filtered = build_overview(
+            Vec::new(),
+            vec![domain_request("orders", "https://api.test/orders", None)],
+            Vec::new(),
+            Vec::new(),
+            Some("ORDERS"),
+            "requests",
+        );
+        assert_eq!(filtered.requests.len(), 1);
+        assert!(filtered.environments.is_empty());
+    }
+
+    #[test]
+    fn stamp_agent_merges_into_existing_extras() {
+        let stamped = stamp_agent(Some(json!({"v":2,"docs_md":"hello"})), Some("s1"));
+        assert_eq!(stamped["v"], 2);
+        assert_eq!(stamped["docs_md"], "hello");
+        assert_eq!(stamped["agent"]["session_id"], "s1");
+        assert!(stamped["agent"]["at"].as_str().is_some());
+        assert_eq!(stamp_agent(None, Some("s2"))["v"], 1);
+        // Outward MCP: no session, still agent-authored.
+        let outward = stamp_agent(None, None);
+        assert_eq!(outward["agent"]["session_id"], Value::Null);
+        assert!(outward["agent"].is_object());
+    }
+
+    #[test]
+    fn caller_source_reads_session_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-otto-session", " session-1 ".parse().unwrap());
+        let (source, session_id) = caller_source(&headers);
+        assert_eq!(source, json!({"kind":"agent","session_id":"session-1"}));
+        assert_eq!(session_id.as_deref(), Some("session-1"));
+
+        headers.insert("x-otto-session", "   ".parse().unwrap());
+        let (source, session_id) = caller_source(&headers);
+        assert_eq!(source, json!({"kind":"human","session_id":null}));
+        assert!(session_id.is_none());
+
+        // Outward MCP stamps only `X-Otto-Agent` — still an agent caller.
+        headers.insert("x-otto-agent", "mcp-outward".parse().unwrap());
+        let (source, session_id) = caller_source(&headers);
+        assert_eq!(
+            source,
+            json!({"kind":"agent","session_id":null,"via":"mcp-outward"})
+        );
+        assert!(session_id.is_none());
+
+        // A session header wins over the agent marker.
+        headers.insert("x-otto-session", "session-2".parse().unwrap());
+        let (source, session_id) = caller_source(&headers);
+        assert_eq!(source, json!({"kind":"agent","session_id":"session-2"}));
+        assert_eq!(session_id.as_deref(), Some("session-2"));
+    }
+
+    #[test]
+    fn merged_auth_for_update_keeps_when_absent() {
+        assert!(merged_auth_for_update(&Value::Null).is_none());
+        let incoming = json!({"type":"none"});
+        assert_eq!(merged_auth_for_update(&incoming), Some(incoming));
     }
 }

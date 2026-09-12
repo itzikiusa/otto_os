@@ -353,6 +353,12 @@ recorded per-workspace.
   body_mode/body/auth as executed.
 - **Clear history** empties the workspace's history (`DELETE …/history`, Editor).
 - History is bounded server-side: default **100**, max **500** entries returned.
+- Agent executions carry `request.source = {kind:"agent", session_id}` and show an
+  `agent` chip. Use the **Agent runs** filter to show only those rows.
+- New rows refresh live through the workspace-scoped `api_history_appended`
+  WebSocket event; no page reload is needed.
+- The history API also accepts `q`, `status`, `request_id`, and
+  `source=agent|human` filters, and a single row can be fetched by id.
 
 The compact panel also surfaces the last 15 history entries in its "Load…"
 dropdown.
@@ -418,9 +424,10 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 | `PATCH /collections/{id}` | Editor | `UpsertApiCollectionReq` → `Collection` |
 | `DELETE /collections/{id}` | Editor | → 204 (orphans its requests) |
 | `GET /collections/{id}/openapi` | Viewer | → OpenAPI 3 JSON |
+| `GET /overview` (`?q&collection_id&kind=all\|requests\|environments\|automations`) | Viewer | → `ApiOverview {collections, requests, environments, automations}`; request metadata and masked environment variables only |
 | `GET /requests` (`?collection_id`) | Viewer | → `Request[]` |
 | `POST /requests` | Editor | `UpsertApiRequestReq` → `Request` |
-| `GET /requests/{id}` | Viewer | → `Request` |
+| `GET /requests/{id}` (`?shape=agent`) | Viewer | → `Request`; agent shape redacts auth and sensitive header/query values and caps the body at 64 KiB |
 | `PATCH /requests/{id}` | Editor | `UpsertApiRequestReq` → `Request` |
 | `DELETE /requests/{id}` | Editor | → 204 |
 | `GET /environments` | Viewer | → `Environment[]` |
@@ -428,9 +435,11 @@ mutations and execution require Editor.** Cross-workspace IDs 404
 | `PATCH /environments/{id}` | Editor | `UpsertApiEnvironmentReq` → `Environment` |
 | `DELETE /environments/{id}` | Editor | → 204 |
 | `POST /environments/{id}/activate` | Editor | → `Environment` (sets active) |
-| `GET /history` (`?limit`, default 100, max 500) | Viewer | → `ApiHistoryEntry[]` |
+| `GET /history` (`?limit&q&status&request_id&source=agent\|human`) | Viewer | → filtered `ApiHistoryEntry[]` |
+| `GET /history/{id}` | Viewer | → `ApiHistoryEntry` |
 | `DELETE /history` | Editor | → 204 |
 | `POST /execute` | Editor | `ExecuteApiReq` → `ApiResponse` |
+| `POST /requests/{id}/execute` | Editor | `{environment_id?, vars?, timeout_ms?, confirm?, confirm_new_host?, shape?, decode_jwt?}` → `{history_id, request_id, name, response, resolved, jwt_claims?, warnings, script_tests}`; nested `{{` vars → 400, unsafe method/new host without its confirm flag → 409, send failure → 502 |
 | `POST /grpc/describe` | Editor | `{proto}` → service/method descriptors |
 | `POST /grpc/invoke` | Editor | `{url, proto, method, body, headers}` → `ApiResponse` |
 | `POST /grpc/reflect` | Editor | `{url, headers}` → service listing |
@@ -588,6 +597,17 @@ names (token/secret/password/api-key/…). The **cookie jar is per-workspace**
 replayed for another. Response **bodies** in history may still contain
 sensitive data your endpoints returned; clear history when appropriate.
 
+- **Agent response scrubbing.** The saved-request agent route replaces every
+  resolved secret found in the response body, headers, URL, or trace with `***`,
+  always masks `Set-Cookie`, and returns only secret names in
+  `resolved.secrets_used`. JWTs are exposed as selected decoded claims, never as
+  token strings.
+- **Agent-authored new-host rule.** A request stamped as agent-authored cannot be
+  sent to a host that has not appeared in a human-authored saved request or run
+  until `confirm_new_host:true` is supplied. This is an agent-side speed bump;
+  outward MCP execution is approval-gated unless the token carries an explicit
+  write grant (`mcp_trust_token_write_grant`, default on).
+
 ### Roles
 
 All workspace-scoped routes enforce workspace role: **Viewer** for reads,
@@ -597,7 +617,44 @@ counts as Editor). The Viewer/Editor split matches the contract; see
 
 ---
 
-## 12. Troubleshooting
+## 12. Agents (MCP tools)
+
+Otto exposes the saved-request workflow to its own sessions as six inward tools,
+with matching `otto.api_*` tools on the governed outward MCP server:
+
+| Inward tool | Purpose |
+|---|---|
+| `otto_api_list` | Discover collections, saved requests, environments, and automations; metadata and environment values are masked. |
+| `otto_api_get_request` | Read one saved request in the 64 KiB agent shape with auth and sensitive fields masked. |
+| `otto_api_history` | Filter past runs, or fetch one response by history id. |
+| `otto_api_execute` | Execute one saved request; unsafe methods and new hosts use explicit confirm flags. |
+| `otto_api_upsert_request` | Create or update a saved request. |
+| `otto_api_run_automation` | Run a saved automation and return its step report. |
+
+For example, *“call the login request against staging and show me the token
+expiry”* becomes `otto_api_list {q:"login"}`, followed by `otto_api_execute`
+against staging with `confirm:true` for a POST. The response exposes the expiry
+as `jwt_claims.…exp_iso`, never the token. Each call appears in the session's
+Activity trail; the durable History row gets an `agent` chip, participates in
+the **Agent runs** filter, and arrives live through `api_history_appended`.
+
+Execution is saved-requests-only: agents cannot provide an ad-hoc URL, and
+override values containing `{{` are rejected. Secrets resolve server-side and
+are scrubbed from every result, with names only in `resolved.secrets_used`.
+Confirm flags are agent-side speed bumps inward; the outward `api_execute`,
+`api_upsert_request`, and `api_run_automation` tools are DANGEROUS and
+human-approval-gated. Because a session still holds the owner's API token, the
+daemon applies these protections even when the route is called with raw curl.
+
+When an agent saves a request, its `X-Otto-Session` header stamps
+`extras.agent = {session_id, at}`. On `PATCH /requests/{id}`, omitted/null `auth`
+keeps the stored auth row and Keychain blob, and omitted `extras` keeps the
+stored extension data; an agent update therefore does not erase secrets or
+scripts it did not intend to change.
+
+---
+
+## 13. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
@@ -618,7 +675,7 @@ counts as Editor). The Viewer/Editor split matches the contract; see
 
 ---
 
-## 13. Related docs
+## 14. Related docs
 
 - [`./daemon-http-api.md`](./daemon-http-api.md) — the **ottod HTTP API** (the
   daemon's own control surface the Otto UI talks to). Distinct from this in-app

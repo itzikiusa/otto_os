@@ -2791,6 +2791,144 @@ pub struct ApiRunResult {
     pub passed: bool,
 }
 
+/// `GET /workspaces/{wid}/api-client/overview` — the agent-facing discovery view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiOverview {
+    /// Saved collection tree, without request contents.
+    pub collections: Vec<ApiOverviewCollection>,
+    /// Saved requests in a compact, secret-free shape.
+    pub requests: Vec<ApiOverviewRequest>,
+    /// Environments with secret values omitted or masked.
+    pub environments: Vec<ApiOverviewEnvironment>,
+    /// Saved automations in a compact shape.
+    pub automations: Vec<ApiOverviewAutomation>,
+}
+
+/// One collection in the agent-facing API-client overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiOverviewCollection {
+    /// Collection id.
+    pub id: Id,
+    /// Human-authored collection name.
+    pub name: String,
+    /// Parent collection for folder nesting; None = top-level.
+    pub parent_id: Option<Id>,
+}
+
+/// One saved request in the agent-facing API-client overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiOverviewRequest {
+    /// Saved request id.
+    pub id: Id,
+    /// Human-authored request name.
+    pub name: String,
+    /// HTTP method as saved.
+    pub method: String,
+    /// URL template as saved — `{{var}}` placeholders are not substituted.
+    pub url: String,
+    /// Parent collection, when assigned.
+    pub collection_id: Option<Id>,
+    /// `auth.type` (`none|bearer|basic|api_key|oauth2`); never a value.
+    pub auth_type: String,
+    /// Whether execution uses an SSH connection.
+    pub has_ssh: bool,
+    /// True when `extras.agent` is set (created/edited through an agent session).
+    pub agent_authored: bool,
+    /// Last saved timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One environment in the agent-facing API-client overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiOverviewEnvironment {
+    /// Environment id.
+    pub id: Id,
+    /// Human-authored environment name.
+    pub name: String,
+    /// Whether this is the workspace's active environment.
+    pub is_active: bool,
+    /// Non-secret variables; values whose key is secret-shaped are masked `***`.
+    pub variables: Value,
+    /// Names of Keychain-backed variables; never their values.
+    pub secret_keys: Vec<String>,
+}
+
+/// One automation in the agent-facing API-client overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiOverviewAutomation {
+    /// Automation id.
+    pub id: Id,
+    /// Human-authored automation name.
+    pub name: String,
+    /// Number of saved request steps.
+    pub steps: usize,
+}
+
+/// `POST /workspaces/{wid}/api-client/requests/{id}/execute`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSavedRequestReq {
+    /// Explicit environment; None uses the active environment.
+    #[serde(default)]
+    pub environment_id: Option<Id>,
+    /// Runtime variable overrides; string values must not contain `{{`.
+    #[serde(default)]
+    pub vars: Option<Value>,
+    /// Execution timeout, clamped to 1..=60000 milliseconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Required for methods other than GET, HEAD, and OPTIONS.
+    #[serde(default)]
+    pub confirm: bool,
+    /// Required for an agent-authored request targeting an unknown host.
+    #[serde(default)]
+    pub confirm_new_host: bool,
+    /// Response shape: `full` (default) or `agent`.
+    #[serde(default)]
+    pub shape: Option<String>,
+    /// Decode safe JWT timing/issuer/audience claims; defaults to true.
+    #[serde(default)]
+    pub decode_jwt: Option<bool>,
+}
+
+/// Secret-free description of the saved request that was resolved and sent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiResolvedRequest {
+    /// Final HTTP method after the pre-request script.
+    pub method: String,
+    /// Substituted URL with every resolved secret string replaced by `***`.
+    pub url: String,
+    /// Selected environment id, when any.
+    pub environment_id: Option<Id>,
+    /// Selected environment name, when any.
+    pub environment: Option<String>,
+    /// Names of resolved secrets (environment keys and auth members), never values.
+    pub secrets_used: Vec<String>,
+}
+
+/// Result of executing one saved API-client request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSavedRequestResp {
+    /// Persisted API history entry id.
+    pub history_id: Id,
+    /// Saved request id.
+    pub request_id: Id,
+    /// Saved request name.
+    pub name: String,
+    /// Scrubbed upstream response.
+    pub response: ApiResponse,
+    /// Secret-free resolved request metadata.
+    pub resolved: ApiResolvedRequest,
+    /// Safe JWT claims keyed by JSON pointer or `text#n`; never tokens/signatures.
+    #[serde(default)]
+    pub jwt_claims: Option<Value>,
+    /// Non-fatal post-response script errors.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Post-response script test results as `[{desc,passed}]`.
+    #[serde(default)]
+    pub script_tests: Value,
+}
+
 // ---------------------------------------------------------------------------
 // Skills Evaluator
 // ---------------------------------------------------------------------------

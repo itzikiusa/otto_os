@@ -10,13 +10,18 @@
 
 use std::collections::BTreeMap;
 
+use base64::Engine;
+use chrono::{DateTime, Utc};
+use otto_core::api::ApiResponse;
 use otto_core::secrets::SecretStore;
 use serde_json::{json, Map, Value};
 
 /// Marker field name inside a `{"$secret": "<ref>"}` object.
 pub const MARKER_KEY: &str = "$secret";
+/// Mask used in every API-client shape that must not expose credentials.
+pub const MASK: &str = "***";
 /// Redaction placeholder written into history snapshots.
-pub const REDACTED: &str = "***";
+pub const REDACTED: &str = MASK;
 
 pub fn request_ref(request_id: &str) -> String {
     format!("otto.api.request.{request_id}")
@@ -197,6 +202,221 @@ pub fn secret_shaped(key: &str) -> bool {
         || k.contains("credential")
 }
 
+/// Whether a header/query-row key commonly carries a credential.
+pub fn sensitive_header_key(key: &str) -> bool {
+    if secret_shaped(key) {
+        return true;
+    }
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-api-key"
+            | "x-auth-token"
+    )
+}
+
+/// Mask values in `[{key,value,enabled}]` rows whose keys are secret-shaped.
+pub fn mask_kv_rows(rows: &Value) -> Value {
+    let Some(items) = rows.as_array() else {
+        return rows.clone();
+    };
+    Value::Array(
+        items
+            .iter()
+            .map(|item| {
+                let mut item = item.clone();
+                if item
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .is_some_and(sensitive_header_key)
+                {
+                    if let Some(obj) = item.as_object_mut() {
+                        obj.insert("value".into(), Value::String(MASK.into()));
+                    }
+                }
+                item
+            })
+            .collect(),
+    )
+}
+
+/// Mask values in an environment-variable object whose keys are secret-shaped.
+pub fn mask_variables(vars: &Value) -> Value {
+    let Some(obj) = vars.as_object() else {
+        return vars.clone();
+    };
+    Value::Object(
+        obj.iter()
+            .map(|(key, value)| {
+                let value = if secret_shaped(key) {
+                    Value::String(MASK.into())
+                } else {
+                    value.clone()
+                };
+                (key.clone(), value)
+            })
+            .collect(),
+    )
+}
+
+/// Replace every resolved secret (four or more characters) in a string.
+pub fn scrub_str(input: &str, secrets: &[String]) -> String {
+    secrets
+        .iter()
+        .filter(|secret| secret.len() >= 4)
+        .fold(input.to_string(), |out, secret| out.replace(secret, MASK))
+}
+
+/// Remove resolved secrets from every response echo channel.
+pub fn scrub_secrets(resp: &mut ApiResponse, secrets: &[String]) {
+    resp.body = scrub_str(&resp.body, secrets);
+    if let Some(headers) = resp.headers.as_array_mut() {
+        for header in headers {
+            let set_cookie = header
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(|key| key.eq_ignore_ascii_case("set-cookie"));
+            if let Some(obj) = header.as_object_mut() {
+                if set_cookie {
+                    obj.insert("value".into(), Value::String(MASK.into()));
+                } else if let Some(Value::String(value)) = obj.get_mut("value") {
+                    *value = scrub_str(value, secrets);
+                }
+            }
+        }
+    }
+    for step in &mut resp.trace {
+        step.detail = scrub_str(&step.detail, secrets);
+    }
+}
+
+fn jwt_parts(token: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = token.split('.');
+    let header = parts.next()?;
+    let payload = parts.next()?;
+    let signature = parts.next()?;
+    if parts.next().is_some()
+        || !header.starts_with("eyJ")
+        || [header, payload, signature].iter().any(|part| {
+            part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+    {
+        return None;
+    }
+    Some((header, payload, signature))
+}
+
+fn safe_jwt_claims(token: &str) -> Option<Value> {
+    let (_, payload, _) = jwt_parts(token)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(payload))
+        .ok()?;
+    let decoded: Value = serde_json::from_slice(&bytes).ok()?;
+    let obj = decoded.as_object()?;
+    let mut safe = Map::new();
+    for key in ["exp", "iat", "nbf", "iss", "aud", "scope"] {
+        if let Some(value) = obj.get(key) {
+            safe.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(exp) = obj.get("exp").and_then(Value::as_i64) {
+        if let Some(dt) = DateTime::<Utc>::from_timestamp(exp, 0) {
+            safe.insert("exp_iso".into(), Value::String(dt.to_rfc3339()));
+        }
+        safe.insert(
+            "expires_in_s".into(),
+            Value::Number((exp - Utc::now().timestamp()).into()),
+        );
+    }
+    Some(Value::Object(safe))
+}
+
+fn pointer_segment(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+fn walk_json_jwts(value: &Value, path: &str, found: &mut Map<String, Value>) {
+    if found.len() >= 8 {
+        return;
+    }
+    match value {
+        Value::String(token) => {
+            if let Some(claims) = safe_jwt_claims(token) {
+                found.insert(path.to_string(), claims);
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                walk_json_jwts(item, &format!("{path}/{index}"), found);
+                if found.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        Value::Object(obj) => {
+            for (key, item) in obj {
+                walk_json_jwts(item, &format!("{path}/{}", pointer_segment(key)), found);
+                if found.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Decode a bounded, allow-listed view of JWT claims found in a response body.
+pub fn jwt_claims(body: &str) -> Option<Value> {
+    let mut found = Map::new();
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        walk_json_jwts(&value, "", &mut found);
+    } else {
+        let mut number = 0;
+        for token in
+            body.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')))
+        {
+            if let Some(claims) = safe_jwt_claims(token) {
+                number += 1;
+                found.insert(format!("text#{number}"), claims);
+                if number == 8 {
+                    break;
+                }
+            }
+        }
+    }
+    (!found.is_empty()).then_some(Value::Object(found))
+}
+
+/// Replace every JWT-shaped token (header.payload.signature, header starting `eyJ`)
+/// in `input` with [`MASK`]. Used after `jwt_claims` has captured the safe claims.
+pub fn mask_jwts(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(pos) = rest.find("eyJ") {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')))
+            .unwrap_or(tail.len());
+        let candidate = &tail[..end];
+        if jwt_parts(candidate).is_some() {
+            out.push_str(MASK);
+        } else {
+            out.push_str(candidate);
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Read a Keychain blob (`member → value`); absent/corrupt → empty.
 pub fn load_blob(secrets: &dyn SecretStore, r: &str) -> BTreeMap<String, String> {
     secrets
@@ -240,7 +460,24 @@ pub fn strip_secret_variables(variables: &Value, secret_keys: &[String]) -> Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use serde_json::json;
+
+    fn response() -> ApiResponse {
+        ApiResponse {
+            status: 200,
+            status_text: "OK".into(),
+            headers: json!([]),
+            body: String::new(),
+            body_base64: String::new(),
+            truncated: false,
+            too_large: false,
+            duration_ms: 1,
+            size_bytes: 0,
+            content_type: None,
+            trace: Vec::new(),
+        }
+    }
 
     #[test]
     fn split_moves_plaintext_and_keeps_markers() {
@@ -346,5 +583,106 @@ mod tests {
         let vars = json!({"base": "https://x", "api_token": "t"});
         let out = strip_secret_variables(&vars, &["api_token".to_string()]);
         assert_eq!(out, json!({"base": "https://x"}));
+    }
+
+    #[test]
+    fn scrub_secrets_masks_every_occurrence() {
+        let mut resp = response();
+        resp.body = "before long-secret after xyz".into();
+        resp.headers = json!([{"key":"x-echo","value":"long-secret/xyz"}]);
+        resp.trace.push(otto_core::api::TraceStep {
+            label: "Request".into(),
+            detail: "https://x.test/?token=long-secret&short=xyz".into(),
+            ms: None,
+            level: "info".into(),
+        });
+
+        scrub_secrets(&mut resp, &["long-secret".into(), "xyz".into()]);
+        assert_eq!(resp.body, "before *** after xyz");
+        assert_eq!(resp.headers[0]["value"], "***/xyz");
+        assert_eq!(resp.trace[0].detail, "https://x.test/?token=***&short=xyz");
+    }
+
+    #[test]
+    fn set_cookie_always_masked() {
+        let mut resp = response();
+        resp.headers = json!([
+            {"key":"Set-Cookie","value":"session=abc"},
+            {"key":"content-type","value":"text/plain"}
+        ]);
+        scrub_secrets(&mut resp, &[]);
+        assert_eq!(resp.headers[0]["value"], MASK);
+        assert_eq!(resp.headers[1]["value"], "text/plain");
+    }
+
+    fn test_jwt(payload: &Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).unwrap());
+        format!("{header}.{payload}.signature")
+    }
+
+    #[test]
+    fn jwt_claims_decodes_exp_never_returns_token() {
+        let token = test_jwt(&json!({
+            "exp": 1_893_456_000_i64,
+            "iat": 1_893_452_400_i64,
+            "iss": "issuer",
+            "sub": "private-subject",
+            "email": "private@example.test"
+        }));
+        let claims = jwt_claims(&json!({"access_token": token}).to_string()).unwrap();
+        assert_eq!(claims["/access_token"]["exp"], 1_893_456_000_i64);
+        assert_eq!(
+            claims["/access_token"]["exp_iso"],
+            "2030-01-01T00:00:00+00:00"
+        );
+        let serialized = claims.to_string();
+        assert!(!serialized.contains("eyJ"));
+        assert!(!serialized.contains("private-subject"));
+        assert!(!serialized.contains("private@example.test"));
+    }
+
+    #[test]
+    fn jwt_claims_scans_plain_text() {
+        let first = test_jwt(&json!({"scope":"read"}));
+        let second = test_jwt(&json!({"aud":["otto"]}));
+        let claims = jwt_claims(&format!("first={first}; second: {second}")).unwrap();
+        assert_eq!(claims["text#1"]["scope"], "read");
+        assert_eq!(claims["text#2"]["aud"], json!(["otto"]));
+    }
+
+    #[test]
+    fn mask_jwts_replaces_tokens_and_keeps_other_text() {
+        let token = test_jwt(&json!({"exp": 1_893_456_000_i64}));
+        assert_eq!(
+            mask_jwts(&format!("a={token}; b=eyJnot-a-jwt")),
+            "a=***; b=eyJnot-a-jwt"
+        );
+    }
+
+    #[test]
+    fn mask_kv_rows_masks_authorization_and_secret_shaped() {
+        let rows = json!([
+            {"key":"Authorization","value":"Bearer live","enabled":true},
+            {"key":"client_secret","value":"secret","enabled":true},
+            {"key":"Accept","value":"application/json","enabled":true}
+        ]);
+        let masked = mask_kv_rows(&rows);
+        assert_eq!(masked[0]["value"], MASK);
+        assert_eq!(masked[1]["value"], MASK);
+        assert_eq!(masked[2]["value"], "application/json");
+        assert_eq!(mask_kv_rows(&json!({"key":"x"})), json!({"key":"x"}));
+    }
+
+    #[test]
+    fn mask_variables_masks_secret_shaped_keys() {
+        let masked = mask_variables(&json!({
+            "base_url": "https://api.test",
+            "api_token": "live-token",
+            "passwordHint": "also-sensitive"
+        }));
+        assert_eq!(masked["base_url"], "https://api.test");
+        assert_eq!(masked["api_token"], MASK);
+        assert_eq!(masked["passwordHint"], MASK);
     }
 }

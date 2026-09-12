@@ -36,7 +36,11 @@
     return tokens.every((t) => hay.includes(t));
   }
   const filtered = $derived(
-    tokens.length ? apiClient.history.filter(entryMatches) : apiClient.history,
+    apiClient.history.filter(
+      (h) =>
+        (!apiClient.historyAgentOnly || apiClient.historySource(h)?.kind === 'agent') &&
+        (!tokens.length || entryMatches(h)),
+    ),
   );
 
   function reload(h: ApiHistoryEntry): void {
@@ -52,9 +56,19 @@
 <div class="hist-wrap">
   <div class="hist-head">
     <span class="hist-title">History</span>
-    {#if apiClient.history.length > 0}
-      <button class="icon-btn" title="Clear history" aria-label="Clear history" onclick={clear}><Icon name="trash" size={13} /></button>
-    {/if}
+    <div class="hist-actions">
+      <button
+        class="icon-btn"
+        class:on={apiClient.historyAgentOnly}
+        aria-label="Show only agent runs"
+        title="Agent runs"
+        aria-pressed={apiClient.historyAgentOnly}
+        onclick={() => (apiClient.historyAgentOnly = !apiClient.historyAgentOnly)}
+      ><Icon name="zap" size={13} /></button>
+      {#if apiClient.history.length > 0}
+        <button class="icon-btn" title="Clear history" aria-label="Clear history" onclick={clear}><Icon name="trash" size={13} /></button>
+      {/if}
+    </div>
   </div>
 
   {#if apiClient.history.length > 0}
@@ -73,17 +87,23 @@
   {/if}
 
   {#if apiClient.history.length === 0}
-    <div class="empty-mini">No requests yet.</div>
+    <div class="empty-mini">{apiClient.historyAgentOnly ? 'No agent runs yet.' : 'No requests yet.'}</div>
   {:else if filtered.length === 0}
-    <div class="empty-mini">No history matches “{search.trim()}”.</div>
+    <div class="empty-mini">
+      {apiClient.historyAgentOnly ? 'No agent runs yet.' : `No history matches “${search.trim()}”.`}
+    </div>
   {:else}
     <VirtualList items={filtered} estimateHeight={28} class="hist-vlist">
       {#snippet row(h: ApiHistoryEntry)}
+        {@const src = apiClient.historySource(h)}
         <button class="hist-row" onclick={() => reload(h)} title={h.url}>
           <span class="rm rm-{h.method.toLowerCase()}">{h.method}</span>
           <span class="hurl mono ellipsis grow">{h.url}</span>
           {#if h.status != null}
             <span class="status-dot {statusClass(h.status)}">{h.status}</span>
+          {/if}
+          {#if src?.kind === 'agent'}
+            <span class="src-chip agent" title={`Run by agent session ${src.session_id ?? ''}`}>agent</span>
           {/if}
           <span class="htime">{fmtTime(h.executed_at)}</span>
         </button>
@@ -114,6 +134,15 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
+  }
+  .hist-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .icon-btn.on {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .list-search {
     display: flex;
@@ -190,6 +219,17 @@
   .status-dot.redirect { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
   .status-dot.client { color: #d2691e; background: color-mix(in srgb, #d2691e 18%, transparent); }
   .status-dot.server { color: var(--status-exited); background: color-mix(in srgb, var(--status-exited) 16%, transparent); }
+  .src-chip {
+    height: 16px;
+    padding: 0 6px;
+    border-radius: 999px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 16px;
+    flex-shrink: 0;
+  }
   .htime {
     font-size: 10px;
     color: var(--text-dim);

@@ -91,6 +91,15 @@ pub enum Event {
         session_id: Id,
         tasks: Vec<AgentTask>,
     },
+    /// An API-client history row was written (a human Send or an agent tool run).
+    /// Carries ids only — never the request or response.
+    ApiHistoryAppended {
+        workspace_id: Id,
+        entry_id: Id,
+        source: String,
+        session_id: Option<Id>,
+        request_id: Option<Id>,
+    },
     /// A swarm run was created or changed. `run` is the serialized SwarmRun row
     /// (otto-core can't depend on otto-state, so it travels as JSON).
     SwarmRunUpdated {

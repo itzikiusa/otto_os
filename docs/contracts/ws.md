@@ -149,9 +149,10 @@ Delivery scope: **session-family events** (`session_status`, `session_created`,
 `session_meta_updated`, `session_renamed`, `session_removed`, `trail_appended`,
 `tasks_updated`, `transcript_appended`, `transcript_live`, `artifact_added`) reach only the session's owner (`created_by`), a workspace
 `admin`, or root — and only after the `viewer`+ membership gate on the event's
-`workspace_id`; other **workspace-scoped events** (improvement, swarm) reach
+`workspace_id`; other **workspace-scoped events** (improvement, swarm,
+`api_history_appended`) reach
 every member with `viewer`+ on the event's `workspace_id` (root receives all);
-**broadcast events** (`Notice`) reach every authenticated client. There are 48
+**broadcast events** (`Notice`) reach every authenticated client. There are 49
 variants (the sections below cover them; each `## …`/`### …` heading is one
 feature family).
 
@@ -717,6 +718,35 @@ the committed answer.
 - TypeScript types: in the `OttoEvent` union in `ui/src/lib/api/types.ts` as
   `{ type: 'db_assist_session_started'; workspace_id: Id; connection_id: Id; assist_id: Id; session_id: Id }`
   and `{ type: 'db_assist_updated'; workspace_id: Id; connection_id: Id; assist_id: Id; sql: string; note: string }`.
+
+---
+
+### `api_history_appended`
+
+Workspace-scoped. Emitted after a human Send or agent saved-request execution
+successfully appends an API-client history row. It carries identifiers and
+source metadata only — never request fields, responses, credentials, or other
+secret values.
+
+```json
+{
+  "type": "api_history_appended",
+  "workspace_id": "<Id>",
+  "entry_id": "<Id>",
+  "source": "agent|human",
+  "session_id": "<Id|null>",
+  "request_id": "<Id|null>"
+}
+```
+
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- `session_id` is present for an agent call identified by `X-Otto-Session`;
+  human sends use null, and so do outward MCP calls (`source: "agent"` with a
+  null `session_id`). `request_id` is set for saved-request execution and
+  null for the ad-hoc `/api-client/execute` route.
+- TypeScript mirror: `{ type: 'api_history_appended'; workspace_id: Id;
+  entry_id: Id; source: 'agent' | 'human'; session_id: Id | null;
+  request_id: Id | null }`.
 
 ---
 

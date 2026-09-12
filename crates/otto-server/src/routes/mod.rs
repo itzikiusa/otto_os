@@ -366,6 +366,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/client/errors", post(logs::client_error))
         // --- API client ("Postman") -------------------------------------
         .route(
+            "/workspaces/{wid}/api-client/overview",
+            get(api_client::overview),
+        )
+        .route(
             "/workspaces/{wid}/api-client/collections",
             get(api_client::list_collections).post(api_client::create_collection),
         )
@@ -388,6 +392,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
                 .delete(api_client::delete_request),
         )
         .route(
+            "/workspaces/{wid}/api-client/requests/{id}/execute",
+            post(api_client::run_saved_request),
+        )
+        .route(
             "/workspaces/{wid}/api-client/environments",
             get(api_client::list_environments).post(api_client::create_environment),
         )
@@ -402,6 +410,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/workspaces/{wid}/api-client/history",
             get(api_client::list_history).delete(api_client::clear_history),
+        )
+        .route(
+            "/workspaces/{wid}/api-client/history/{id}",
+            get(api_client::get_history),
         )
         .route(
             "/workspaces/{wid}/api-client/execute",

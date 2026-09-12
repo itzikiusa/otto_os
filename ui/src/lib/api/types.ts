@@ -924,6 +924,14 @@ export type OttoEvent =
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; title: string; body: string }
   | { type: 'notification'; notice: Notice; user_id?: string | null }
   | { type: 'trail_appended'; workspace_id: Id; session_id: Id; event: TrailEvent }
+  | {
+      type: 'api_history_appended';
+      workspace_id: Id;
+      entry_id: Id;
+      source: 'agent' | 'human';
+      session_id: Id | null;
+      request_id: Id | null;
+    }
   | { type: 'tasks_updated'; workspace_id: Id; session_id: Id; tasks: AgentTask[] }
   | { type: 'swarm_run_updated'; workspace_id: Id; swarm_id: Id; run: Record<string, unknown> }
   | {
@@ -4069,6 +4077,90 @@ export interface ApiHistoryEntry {
   request: unknown;
   response: unknown;
   executed_at: string;
+}
+
+export interface ApiOverviewCollection {
+  id: Id;
+  name: string;
+  parent_id: Id | null;
+}
+
+export interface ApiOverviewRequest {
+  id: Id;
+  name: string;
+  method: string;
+  /** URL template as saved — `{{var}}` placeholders are not substituted. */
+  url: string;
+  collection_id: Id | null;
+  /** `auth.type`; never an auth value. */
+  auth_type: string;
+  has_ssh: boolean;
+  /** True when the request was created or edited through an agent session. */
+  agent_authored: boolean;
+  updated_at: string;
+}
+
+export interface ApiOverviewEnvironment {
+  id: Id;
+  name: string;
+  is_active: boolean;
+  /** Non-secret variables; secret-shaped keys have masked values. */
+  variables: Record<string, string>;
+  secret_keys: string[];
+}
+
+export interface ApiOverviewAutomation {
+  id: Id;
+  name: string;
+  steps: number;
+}
+
+/** Agent-facing discovery view of the workspace API client. */
+export interface ApiOverview {
+  collections: ApiOverviewCollection[];
+  requests: ApiOverviewRequest[];
+  environments: ApiOverviewEnvironment[];
+  automations: ApiOverviewAutomation[];
+}
+
+/** Execute one saved API-client request. */
+export interface RunSavedRequestReq {
+  environment_id?: Id | null;
+  vars?: Record<string, string>;
+  timeout_ms?: number;
+  confirm?: boolean;
+  confirm_new_host?: boolean;
+  shape?: 'full' | 'agent';
+  decode_jwt?: boolean;
+}
+
+export interface ApiResolvedRequest {
+  method: string;
+  /** Substituted URL with every resolved secret value scrubbed. */
+  url: string;
+  environment_id: Id | null;
+  environment: string | null;
+  /** Names of secrets resolved for the send; never their values. */
+  secrets_used: string[];
+}
+
+export interface RunSavedRequestResp {
+  history_id: Id;
+  request_id: Id;
+  name: string;
+  response: ApiResponse;
+  resolved: ApiResolvedRequest;
+  jwt_claims?: Record<string, unknown> | null;
+  warnings: string[];
+  script_tests: unknown;
+}
+
+/** `request.source` inside an ApiHistoryEntry snapshot. */
+export interface ApiHistorySource {
+  kind: 'agent' | 'human';
+  session_id?: Id | null;
+  /** How an agent without an Otto session reached the route (e.g. `mcp-outward`). */
+  via?: string;
 }
 
 export interface UpsertApiCollectionReq {

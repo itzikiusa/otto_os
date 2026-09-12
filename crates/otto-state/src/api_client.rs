@@ -12,7 +12,7 @@ use otto_core::domain::{
     ApiAutomation, ApiCollection, ApiEnvironment, ApiHistoryEntry, ApiRequest,
 };
 use otto_core::{new_id, Id, Result};
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::convert::{dberr, fmt, json, ts};
 
@@ -80,6 +80,15 @@ pub struct NewApiHistory {
     pub duration_ms: Option<i64>,
     pub request: serde_json::Value,
     pub response: serde_json::Value,
+}
+
+/// Filters for an API-client history listing.
+pub struct ApiHistoryQuery {
+    pub limit: i64,
+    pub q: Option<String>,
+    pub status: Option<i64>,
+    pub request_id: Option<String>,
+    pub source: Option<String>,
 }
 
 // --- row mappers ------------------------------------------------------------
@@ -556,16 +565,74 @@ impl ApiClientRepo {
     // --- history ------------------------------------------------------------
 
     pub async fn list_history(&self, ws: &Id, limit: i64) -> Result<Vec<ApiHistoryEntry>> {
-        let rows = sqlx::query(
-            "SELECT * FROM api_history WHERE workspace_id = ?
-              ORDER BY executed_at DESC, id DESC LIMIT ?",
+        self.list_history_filtered(
+            ws,
+            &ApiHistoryQuery {
+                limit,
+                q: None,
+                status: None,
+                request_id: None,
+                source: None,
+            },
         )
-        .bind(ws)
-        .bind(limit)
-        .fetch_all(&self.pool)
         .await
-        .map_err(dberr("api history"))?;
+    }
+
+    /// List history newest-first with optional request/status/source filters.
+    pub async fn list_history_filtered(
+        &self,
+        ws: &Id,
+        f: &ApiHistoryQuery,
+    ) -> Result<Vec<ApiHistoryEntry>> {
+        let mut qb = QueryBuilder::<Sqlite>::new("SELECT * FROM api_history WHERE workspace_id = ");
+        qb.push_bind(ws);
+        if let Some(q) = &f.q {
+            // Escape the LIKE metacharacters so `a_b` matches `a_b`, not `a-b`.
+            let pattern = format!(
+                "%{}%",
+                q.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
+            qb.push(" AND (url LIKE ")
+                .push_bind(pattern.clone())
+                .push(" ESCAPE '\\' OR method LIKE ")
+                .push_bind(pattern)
+                .push(" ESCAPE '\\')");
+        }
+        if let Some(status) = f.status {
+            qb.push(" AND status = ").push_bind(status);
+        }
+        if let Some(request_id) = &f.request_id {
+            qb.push(" AND json_extract(request_json,'$.request_id') = ")
+                .push_bind(request_id);
+        }
+        if let Some(source) = &f.source {
+            if source == "human" {
+                qb.push(" AND COALESCE(json_extract(request_json,'$.source.kind'),'human') = ");
+            } else {
+                qb.push(" AND json_extract(request_json,'$.source.kind') = ");
+            }
+            qb.push_bind(source);
+        }
+        qb.push(" ORDER BY executed_at DESC, id DESC LIMIT ")
+            .push_bind(f.limit);
+        let rows = qb
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("api history"))?;
         rows.iter().map(row_to_history).collect()
+    }
+
+    /// Fetch one history entry by id.
+    pub async fn get_history(&self, id: &Id) -> Result<ApiHistoryEntry> {
+        let r = sqlx::query("SELECT * FROM api_history WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("api history"))?;
+        row_to_history(&r)
     }
 
     pub async fn insert_history(&self, h: NewApiHistory) -> Result<ApiHistoryEntry> {
@@ -894,6 +961,117 @@ mod tests {
 
         repo.clear_history(&ws).await.unwrap();
         assert!(repo.list_history(&ws, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_filter_by_q_status_source_and_request_id() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool);
+
+        let agent = repo
+            .insert_history(NewApiHistory {
+                workspace_id: ws.clone(),
+                method: "POST".into(),
+                url: "https://agent.test/login".into(),
+                status: Some(201),
+                duration_ms: Some(20),
+                request: jval!({
+                    "request_id": "req-agent",
+                    "source": {"kind": "agent", "session_id": "s1"},
+                }),
+                response: jval!({"status": 201}),
+            })
+            .await
+            .unwrap();
+        repo.insert_history(NewApiHistory {
+            workspace_id: ws.clone(),
+            method: "GET".into(),
+            url: "https://human.test/users".into(),
+            status: Some(200),
+            duration_ms: Some(10),
+            request: jval!({
+                "request_id": "req-human",
+                "source": {"kind": "human", "session_id": null},
+            }),
+            response: jval!({"status": 200}),
+        })
+        .await
+        .unwrap();
+        repo.insert_history(NewApiHistory {
+            workspace_id: ws.clone(),
+            method: "DELETE".into(),
+            url: "https://legacy.test/users/1".into(),
+            status: Some(204),
+            duration_ms: Some(11),
+            request: jval!({"method": "DELETE"}),
+            response: jval!({"status": 204}),
+        })
+        .await
+        .unwrap();
+
+        let filter = |q, status, request_id, source| ApiHistoryQuery {
+            limit: 10,
+            q,
+            status,
+            request_id,
+            source,
+        };
+        let by_q = repo
+            .list_history_filtered(&ws, &filter(Some("LOGIN".into()), None, None, None))
+            .await
+            .unwrap();
+        assert_eq!(by_q.len(), 1);
+        assert_eq!(by_q[0].id, agent.id);
+
+        let by_status = repo
+            .list_history_filtered(&ws, &filter(None, Some(201), None, None))
+            .await
+            .unwrap();
+        assert_eq!(by_status.len(), 1);
+        assert_eq!(by_status[0].id, agent.id);
+
+        let by_request = repo
+            .list_history_filtered(&ws, &filter(None, None, Some("req-agent".into()), None))
+            .await
+            .unwrap();
+        assert_eq!(by_request.len(), 1);
+        assert_eq!(by_request[0].id, agent.id);
+
+        let by_agent = repo
+            .list_history_filtered(&ws, &filter(None, None, None, Some("agent".into())))
+            .await
+            .unwrap();
+        assert_eq!(by_agent.len(), 1);
+        assert_eq!(by_agent[0].id, agent.id);
+
+        let by_human = repo
+            .list_history_filtered(&ws, &filter(None, None, None, Some("human".into())))
+            .await
+            .unwrap();
+        assert_eq!(by_human.len(), 2, "explicit human + legacy row");
+    }
+
+    #[tokio::test]
+    async fn get_history_round_trips() {
+        let (pool, ws) = setup().await;
+        let repo = ApiClientRepo::new(pool);
+        let inserted = repo
+            .insert_history(NewApiHistory {
+                workspace_id: ws,
+                method: "PATCH".into(),
+                url: "https://api.test/items/1".into(),
+                status: Some(202),
+                duration_ms: Some(42),
+                request: jval!({"name": "update item"}),
+                response: jval!({"status": 202, "body": "ok"}),
+            })
+            .await
+            .unwrap();
+
+        let fetched = repo.get_history(&inserted.id).await.unwrap();
+        assert_eq!(fetched.id, inserted.id);
+        assert_eq!(fetched.method, "PATCH");
+        assert_eq!(fetched.response["body"], "ok");
     }
 
     #[tokio::test]
