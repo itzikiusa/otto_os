@@ -33,6 +33,8 @@
     WorkflowTrigger,
     WorkflowVersion,
     FsRead,
+    ReviewMode,
+    RunWorkflowReq,
   } from '../../lib/api/types';
 
   let workflows = $state<Workflow[]>([]);
@@ -56,6 +58,9 @@
   // Prompt box shown above the JSON textarea in the run popover — merged into
   // the parsed input as `prompt` (non-empty only) on run.
   let runPromptText = $state('');
+  // Per-run review-mode override, posted as `review_mode` only when set. Wins
+  // over every review_run node's own `params.mode` for this run.
+  let runReviewMode = $state<'' | ReviewMode>('');
   let paletteOpen = $state(false);
   let templatesOpen = $state(false);
   let triggersOpen = $state(false);
@@ -537,7 +542,7 @@
     }
   }
 
-  async function execRun(body: Record<string, unknown>): Promise<void> {
+  async function execRun(body: RunWorkflowReq): Promise<void> {
     if (!current || running) return;
     if (dirty) await save();
     running = true;
@@ -632,14 +637,22 @@
     if (input === null) return; // invalid JSON; toast already shown
     const merged = mergeRunPrompt(input);
     runInputOpen = false;
-    await execRun(merged === undefined ? {} : { input: merged });
+    await execRun({
+      ...(merged !== undefined ? { input: merged } : {}),
+      ...(runReviewMode ? { review_mode: runReviewMode } : {}),
+    });
   }
 
   const runFrom = (nodeId: string, only: boolean): Promise<void> => {
     const input = parseRunInput();
     if (input === null) return Promise.resolve();
     const merged = mergeRunPrompt(input);
-    return execRun({ start_node: nodeId, only_node: only, ...(merged !== undefined ? { input: merged } : {}) });
+    return execRun({
+      start_node: nodeId,
+      only_node: only,
+      ...(merged !== undefined ? { input: merged } : {}),
+      ...(runReviewMode ? { review_mode: runReviewMode } : {}),
+    });
   };
 
   // Re-flow the graph into a few readable rows (topological order, snaking
@@ -1520,6 +1533,20 @@
             spellcheck="false"
             placeholder={'{\n  "repo_id": "…",\n  "goals": ["…"]\n}'}
           ></textarea>
+          <div class="ri-head">
+            <strong>Review mode</strong>
+            <span class="ri-hint">Overrides the execution mode of every review step in this run, including steps that set their own.</span>
+          </div>
+          <select
+            class="ri-select"
+            data-testid="run-review-mode"
+            bind:value={runReviewMode}
+            title="Overrides the execution mode of every review step in this run, including steps that set their own."
+          >
+            <option value="">Workflow default</option>
+            <option value="fan_out">Fan-out</option>
+            <option value="orchestrator">Orchestrator</option>
+          </select>
           <div class="ri-actions">
             <button class="btn primary small" disabled={running} onclick={confirmRun}>
               <Icon name="play" size={12} /> Run
@@ -2270,6 +2297,25 @@
                 value={paramNum('threshold', 80)}
                 oninput={(e) => onParam('threshold', Number(e.currentTarget.value))}
               />
+              <!-- How the lenses are spread over sessions. Empty value = no
+                   `mode` key at all, so the run override / stored config wins. -->
+              <label for="np-review-mode">Execution mode</label>
+              <select
+                id="np-review-mode"
+                data-testid="review-mode-select"
+                value={paramStr('mode')}
+                onchange={(e) => onParam('mode', e.currentTarget.value || undefined)}
+              >
+                <option value="">Default (fan-out unless the run overrides it)</option>
+                <option value="fan_out">Fan-out — one reviewer agent per lens × provider</option>
+                <option value="orchestrator">Orchestrator — one agent per provider runs every lens as its own sub-agents</option>
+              </select>
+              <p class="insp-note">
+                Both modes end with one summarizer. Orchestrator opens N sessions instead of
+                N × lenses; fan-out finishes sooner on a fast machine, orchestrator is easier on
+                file descriptors and CPU. A run started with an explicit review mode overrides
+                this setting.
+              </p>
               <div class="rv-h np-sec">
                 <span class="np-label">Reviewers — one per lens, each its own agents (like PR review)</span>
                 <button class="btn small ghost" type="button" onclick={addReviewer}>
@@ -3869,6 +3915,18 @@
     color: var(--text);
     font-size: 12px;
     line-height: 1.5;
+  }
+  /* Same tokens as .ri-text, but sized to its content — the popover is a
+     column flexbox, so an auto width needs the cross-axis opt-out too. */
+  .ri-select {
+    width: auto;
+    align-self: flex-start;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg, #0d0f13);
+    color: var(--text);
+    font-size: 12px;
   }
   .ri-actions {
     display: flex;
