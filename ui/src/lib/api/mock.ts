@@ -1547,6 +1547,42 @@ const routes: Route[] = [
     },
   },
   {
+    // Hunk / line staging. The real server rebuilds the patch from its own
+    // fresh diff and refuses a header that no longer matches; the mock echoes
+    // exactly that check against `sampleDiff` so the UI's 409 path is demoable.
+    method: 'POST',
+    re: /^\/repos\/([^/]+)\/stage-hunk$/,
+    handle: (m, body) => {
+      const st = repoStatus[m[1]];
+      if (!st) return problem(404, 'not_found', 'repo');
+      if (body.op === 'discard' && body.confirm !== true) {
+        return problem(400, 'invalid', 'discard requires confirm:true');
+      }
+      const file = sampleDiff.files.find((f) => f.path === body.path);
+      if (!file) return problem(404, 'not_found', `no diff for ${body.path}`);
+      const hunk = file.hunks[body.hunk_index as number];
+      if (!hunk || hunk.header.trim() !== String(body.hunk_header).trim()) {
+        return problem(
+          409,
+          'conflict',
+          'the file changed since the diff was shown — refresh and retry',
+        );
+      }
+      return {
+        json: {
+          status: st,
+          diff: sampleDiff,
+          backup_stash: body.op === 'discard' ? 'deadbeef' : null,
+        },
+      };
+    },
+  },
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/commit-config$/,
+    handle: () => ({ json: { gpgsign: false, format: null, signing_key: null } }),
+  },
+  {
     method: 'POST',
     re: /^\/repos\/([^/]+)\/commit$/,
     handle: (m, body) => {

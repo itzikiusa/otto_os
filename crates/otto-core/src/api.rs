@@ -1449,6 +1449,11 @@ pub struct CommitReq {
     pub message: String,
     #[serde(default)]
     pub amend: bool,
+    /// `true` → `-S`, `false` → `--no-gpg-sign`, absent → repo config
+    /// (`commit.gpgsign`). Lets the composer's Sign toggle override the repo
+    /// default per commit without writing config.
+    #[serde(default)]
+    pub sign: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
