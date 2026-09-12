@@ -3043,7 +3043,8 @@ export interface ReviewFinding {
   fingerprint?: string | null;
   /** Lifecycle state: open | fixing | resolved | regressed | declined (added A1). */
   state?: string | null;
-  /** Lens slug that produced the finding (orchestrator mode); absent for fan-out reviewers. */
+  /** Lens slug that produced the finding (orchestrator mode keeps it through the merge, so one
+   *  agent row's findings span several lenses); absent for fan-out reviewers and pre-field rows. */
   lens?: string | null;
 }
 
@@ -3134,7 +3135,8 @@ export interface ReviewConfig {
   max_attempts?: number | null;
   /** Per-agent timeout in seconds; overrides diff-size heuristic. */
   timeout_secs?: number | null;
-  /** Execution mode; absent/null ⇒ fan_out. */
+  /** Execution mode; absent/null ⇒ fan_out. A review_run step's `params.mode` and a run's
+   *  `review_mode` both override it. */
   mode?: ReviewMode | null;
 }
 
@@ -4610,7 +4612,9 @@ export interface SubagentActivity {
   finished_at?: string | null;
 }
 
-/** Live phase + sub-agent snapshot of a RUNNING agent step; cleared on finish. */
+/** Live phase + sub-agent snapshot of a RUNNING agent step; cleared on finish. Written at most
+ *  every 5s and bounded (≤ 40 sub-agents, descriptions ≤ 80 chars) so the WS `node` payload stays
+ *  under the 32 KiB inline limit. `phase` is the phase log text without its prefix glyph. */
 export interface NodeActivity {
   phase: string;
   updated_at: string;
@@ -4677,7 +4681,8 @@ export interface WorkflowRun {
 }
 
 /** `POST /workflows/{id}/run` body. `review_mode` seeds `input.review_mode` and overrides every
- *  review_run step's own `params.mode` for this run. */
+ *  review_run step's own `params.mode` for this run (400 on an unknown value, or on a non-object
+ *  `input` combined with it). */
 export interface RunWorkflowReq {
   input?: unknown;
   start_node?: string;

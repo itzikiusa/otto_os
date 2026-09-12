@@ -453,6 +453,29 @@ fn slug_title(description: &str) -> String {
     }
 }
 
+/// Fold a per-run `review_mode` into the run input so the engine reads it
+/// from `RunEnv.run_input` (node inputs lose keys hop by hop). `Null`
+/// becomes an object; a non-object input is a 400.
+pub(crate) fn seed_review_mode(
+    input: Value,
+    review_mode: Option<&str>,
+) -> otto_core::Result<Value> {
+    let Some(raw) = review_mode else { return Ok(input) };
+    let mode = otto_core::domain::ReviewMode::parse(raw).ok_or_else(|| {
+        otto_core::Error::Invalid("review_mode must be \"fan_out\" or \"orchestrator\"".into())
+    })?;
+    match input {
+        Value::Null => Ok(json!({ "review_mode": mode.as_str() })),
+        Value::Object(mut m) => {
+            m.insert("review_mode".into(), json!(mode.as_str()));
+            Ok(Value::Object(m))
+        }
+        _ => Err(otto_core::Error::Invalid(
+            "input must be a JSON object when review_mode is set".into(),
+        )),
+    }
+}
+
 /// `POST /workflows/{id}/run`
 pub async fn run_workflow(
     Path(id): Path<Id>,
@@ -464,7 +487,8 @@ pub async fn run_workflow(
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     let ws = ctx.workspaces.get(&wf.workspace_id).await.map_err(ApiError)?;
 
-    let input = req.input.unwrap_or(Value::Null);
+    let input = seed_review_mode(req.input.unwrap_or(Value::Null), req.review_mode.as_deref())
+        .map_err(ApiError)?;
     let run = repo(&ctx)
         .create_run(&wf.id, &wf.workspace_id, &input, Some(&user.id))
         .await
@@ -1649,5 +1673,47 @@ mod tests {
         let t = super::generate_webhook_token();
         assert_eq!(t.len(), 64, "token should be 32 bytes as 64 hex chars");
         assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn run_workflow_seeds_review_mode_into_input() {
+        // The engine reads the mode off the RUN input (node inputs lose keys hop
+        // by hop), so the route folds it in — overwriting a caller-supplied key.
+        let out =
+            seed_review_mode(json!({ "repo_id": "r1" }), Some("orchestrator")).expect("seeded");
+        assert_eq!(out["review_mode"], json!("orchestrator"));
+        assert_eq!(out["repo_id"], json!("r1"));
+
+        let out = seed_review_mode(json!({ "review_mode": "orchestrator" }), Some("fan_out"))
+            .expect("seeded");
+        assert_eq!(out["review_mode"], json!("fan_out"));
+    }
+
+    #[test]
+    fn run_workflow_null_input_becomes_object() {
+        let out = seed_review_mode(Value::Null, Some("fan_out")).expect("seeded");
+        assert_eq!(out, json!({ "review_mode": "fan_out" }));
+    }
+
+    #[test]
+    fn run_workflow_non_object_input_with_review_mode_is_400() {
+        let err = seed_review_mode(json!("just a string"), Some("fan_out")).unwrap_err();
+        let want = "input must be a JSON object when review_mode is set";
+        assert!(matches!(&err, Error::Invalid(m) if m == want), "unexpected error: {err:?}");
+    }
+
+    #[test]
+    fn run_workflow_rejects_unknown_review_mode_400() {
+        let err = seed_review_mode(Value::Null, Some("swarm")).unwrap_err();
+        let want = "review_mode must be \"fan_out\" or \"orchestrator\"";
+        assert!(matches!(&err, Error::Invalid(m) if m == want), "unexpected error: {err:?}");
+    }
+
+    #[test]
+    fn run_workflow_without_review_mode_leaves_input_untouched() {
+        // Every pre-field caller (UI, MCP, triggers) must keep posting bare inputs.
+        for input in [Value::Null, json!("scalar"), json!({ "repo_id": "r1" })] {
+            assert_eq!(seed_review_mode(input.clone(), None).expect("passthrough"), input);
+        }
     }
 }
