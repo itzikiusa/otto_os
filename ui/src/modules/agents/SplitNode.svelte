@@ -289,14 +289,20 @@
   .gutter:focus-visible {
     outline: none;
   }
-  .gutter:hover::after,
-  .gutter:focus-visible::after {
+  /* Always drawn, faintly, so the resize handle is discoverable without
+     hovering; hover / focus brighten it. */
+  .gutter::after {
     content: '';
     position: absolute;
     inset: 0;
     margin: auto;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--border);
     border-radius: 2px;
+    transition: background 120ms ease-out;
+  }
+  .gutter:hover::after,
+  .gutter:focus-visible::after {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .gutter:focus-visible::after {
     background: color-mix(in srgb, var(--accent) 65%, transparent);
