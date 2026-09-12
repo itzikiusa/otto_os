@@ -229,13 +229,15 @@
         >
           <Icon name="maximize" size={12} />
         </button>
-      </summary>
-      <div class="body">
         {#if ns.status === 'running' && ns.activity?.phase}
           <!-- What the engine is waiting for right now; `hold_reason` wins when
-               the step LOOKS idle but is deliberately being held. -->
+               the step LOOKS idle but is deliberately being held. It belongs to
+               the CARD, not the body (design §4 "muted line under the title") —
+               a collapsed running step must still say what it is waiting on. -->
           <div class="phase" data-testid="step-phase">{ns.activity.hold_reason ?? ns.activity.phase}</div>
         {/if}
+      </summary>
+      <div class="body">
         {#if ns.error}
           <div class="err">{ns.error}</div>
         {/if}
@@ -369,7 +371,11 @@
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   /* Live phase under the step title (or why it's being held). */
+  /* Its own row under the title line (the summary wraps), so the phase reads
+     as a caption of the step rather than an item in the header row. */
   .phase {
+    flex-basis: 100%;
+    margin-top: -2px;
     color: var(--text-dim);
     font-size: 11px;
   }
@@ -413,6 +419,7 @@
   summary {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 9px;
     padding: 9px 12px;
     cursor: pointer;

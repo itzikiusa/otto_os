@@ -1523,7 +1523,7 @@
             <span class="ri-hint">What you want done this run — merged into the JSON below as `prompt` (optional).</span>
           </div>
           <textarea
-            class="ri-text"
+            class="ri-prompt"
             rows="3"
             bind:value={runPromptText}
             placeholder="What you want done — instructions for the agents."
@@ -3201,6 +3201,10 @@
   .bar {
     display: flex;
     align-items: center;
+    /* The action row must WRAP, never overflow: `.main` doesn't clip, so an
+       unwrapped bar slides its last buttons (Dock / Panel / Run…) under the
+       context sidebar, where they are painted over and unclickable. */
+    flex-wrap: wrap;
     gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
@@ -3911,7 +3915,11 @@
     font-size: 11.5px;
     color: var(--text-dim, #9aa0aa);
   }
-  .ri-text {
+  /* `.ri-text` is the JSON run-input box; the prompt box above it is
+     `.ri-prompt` — same tokens, its own hook (a single `.ri-text` is what
+     identifies the run input, in the UI and in e2e). */
+  .ri-text,
+  .ri-prompt {
     width: 100%;
     min-height: 120px;
     resize: vertical;
