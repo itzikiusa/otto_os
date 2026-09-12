@@ -609,10 +609,7 @@ mod tests {
         let roots = sandbox::allowed_roots(&data_dir);
 
         // In-root: HOME itself, a nested project dir, and the data dir.
-        assert!(
-            sandbox::is_within_allowed(&home, &roots),
-            "HOME root allowed"
-        );
+        assert!(sandbox::is_within_allowed(&home, &roots), "HOME root allowed");
         assert!(
             sandbox::is_within_allowed(&proj, &roots),
             "nested project under HOME allowed"

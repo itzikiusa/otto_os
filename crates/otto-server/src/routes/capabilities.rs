@@ -195,9 +195,7 @@ async fn cap_sessions(ctx: &ServerCtx) -> ModuleCapability {
         let path = which_sync(binary).map(|p| p.to_string());
         if !found {
             reasons.push(format!("Agent CLI '{name}' ({binary}) not found on PATH."));
-            fixes.push(format!(
-                "Install '{name}' or update its PATH in Settings → Providers."
-            ));
+            fixes.push(format!("Install '{name}' or update its PATH in Settings → Providers."));
         }
         deps.push(CapabilityDep {
             kind: "provider".into(),
@@ -245,11 +243,7 @@ fn cap_lsp() -> ModuleCapability {
             kind: "lsp".into(),
             name: r.lang.clone(),
             ok: r.available,
-            detail: if r.available {
-                Some(r.command.clone())
-            } else {
-                None
-            },
+            detail: if r.available { Some(r.command.clone()) } else { None },
         });
     }
 
@@ -292,11 +286,11 @@ async fn cap_mcp(ctx: &ServerCtx) -> ModuleCapability {
                 detail: Some(format!("workspace:{}", ws.name)),
             });
             if !s.enabled {
-                reasons.push(format!(
-                    "MCP server '{}' is configured but disabled.",
+                reasons.push(format!("MCP server '{}' is configured but disabled.", s.name));
+                fixes.push(format!(
+                    "Enable '{}' in Settings → MCP Servers.",
                     s.name
                 ));
-                fixes.push(format!("Enable '{}' in Settings → MCP Servers.", s.name));
             }
         }
     }
@@ -401,7 +395,8 @@ async fn cap_git(ctx: &ServerCtx) -> ModuleCapability {
         if !has_token {
             reasons.push(format!(
                 "Git account '{}' ({:?}) is missing a token.",
-                acct.username, acct.provider
+                acct.username,
+                acct.provider
             ));
             fixes.push(format!(
                 "Re-authenticate '{}' in Settings → Git.",
@@ -433,11 +428,7 @@ async fn cap_git(ctx: &ServerCtx) -> ModuleCapability {
 
 /// **Issue trackers** (Jira / Confluence) — configured issue accounts.
 async fn cap_issues(ctx: &ServerCtx) -> ModuleCapability {
-    let accounts = ctx
-        .issues_store
-        .list_all_accounts()
-        .await
-        .unwrap_or_default();
+    let accounts = ctx.issues_store.list_all_accounts().await.unwrap_or_default();
     let mut deps: Vec<CapabilityDep> = Vec::new();
     let mut reasons = Vec::new();
     let mut fixes = Vec::new();
@@ -452,7 +443,8 @@ async fn cap_issues(ctx: &ServerCtx) -> ModuleCapability {
         if !has_token {
             reasons.push(format!(
                 "Issue account '{}' ({:?}) is missing a token.",
-                acct.base_url, acct.provider
+                acct.base_url,
+                acct.provider
             ));
             fixes.push(format!(
                 "Re-authenticate '{}' in Settings → Integrations.",
@@ -495,7 +487,10 @@ async fn cap_db(ctx: &ServerCtx) -> ModuleCapability {
         for c in conns {
             // Connections are "ok" when they exist (we don't ping each one).
             // Flag those missing a secret ref when the kind typically needs one.
-            let needs_secret = !matches!(c.kind, otto_core::domain::ConnectionKind::Custom);
+            let needs_secret = !matches!(
+                c.kind,
+                otto_core::domain::ConnectionKind::Custom
+            );
             let ok = !needs_secret || c.secret_ref.as_deref().is_some_and(|s| !s.is_empty());
             if !ok {
                 reasons.push(format!(
@@ -622,10 +617,7 @@ pub async fn get_capabilities(
     }
 
     let caps = build_capabilities(&ctx).await;
-    *guard = Some(CacheEntry {
-        value: caps.clone(),
-        born: Instant::now(),
-    });
+    *guard = Some(CacheEntry { value: caps.clone(), born: Instant::now() });
     Ok(Json(caps))
 }
 
@@ -673,11 +665,12 @@ pub async fn get_support_bundle(
 
     // ---- migration level ---------------------------------------------------
     // Count of applied migrations as a proxy for schema version.
-    let migration_level: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE")
-            .fetch_one(&ctx.pool)
-            .await
-            .unwrap_or(0);
+    let migration_level: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE",
+    )
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap_or(0);
 
     Ok(Json(SupportBundle {
         version: ctx.version.clone(),

@@ -131,8 +131,9 @@ fn parse_grant_entries(entries: &[GrantEntry]) -> OttoResult<Vec<(Feature, Capab
         .map(|e| {
             let feature = Feature::parse(&e.feature)
                 .ok_or_else(|| Error::Invalid(format!("unknown feature '{}'", e.feature)))?;
-            let capability = Capability::parse(&e.capability)
-                .ok_or_else(|| Error::Invalid(format!("unknown capability '{}'", e.capability)))?;
+            let capability = Capability::parse(&e.capability).ok_or_else(|| {
+                Error::Invalid(format!("unknown capability '{}'", e.capability))
+            })?;
             Ok((feature, capability))
         })
         .collect()
@@ -262,8 +263,9 @@ fn parse_plugin_grant_entries(entries: &[GrantEntry]) -> OttoResult<Vec<(String,
     entries
         .iter()
         .map(|e| {
-            let capability = Capability::parse(&e.capability)
-                .ok_or_else(|| Error::Invalid(format!("unknown capability '{}'", e.capability)))?;
+            let capability = Capability::parse(&e.capability).ok_or_else(|| {
+                Error::Invalid(format!("unknown capability '{}'", e.capability))
+            })?;
             Ok((e.feature.clone(), capability))
         })
         .collect()

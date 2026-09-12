@@ -51,18 +51,9 @@ pub async fn board_ingest(
     let (Some(swarm_id), Some(agent_id)) = (swarm_id, agent_id) else {
         return StatusCode::NO_CONTENT; // not a swarm session
     };
-    let project_id = meta
-        .get("project_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let task_id = meta
-        .get("task_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let run_id = meta
-        .get("run_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let project_id = meta.get("project_id").and_then(Value::as_str).map(str::to_string);
+    let task_id = meta.get("task_id").and_then(Value::as_str).map(str::to_string);
+    let run_id = meta.get("run_id").and_then(Value::as_str).map(str::to_string);
 
     let body = req.body.trim();
     if body.is_empty() {
@@ -146,12 +137,7 @@ pub async fn product_ingest(
         Err(_) => return StatusCode::NO_CONTENT,
     };
     // Only swarm sessions may write drafts.
-    if session
-        .meta
-        .get("swarm_id")
-        .and_then(Value::as_str)
-        .is_none()
-    {
+    if session.meta.get("swarm_id").and_then(Value::as_str).is_none() {
         return StatusCode::NO_CONTENT;
     }
     let body = req.body_md.trim();
@@ -168,9 +154,7 @@ pub async fn product_ingest(
         None => "doc",
         Some(k) => match otto_product::validate_tree_kind(k) {
             Ok("epic") => {
-                tracing::warn!(
-                    "swarm product ingest: --kind epic rejected (children nest one level)"
-                );
+                tracing::warn!("swarm product ingest: --kind epic rejected (children nest one level)");
                 return StatusCode::BAD_REQUEST;
             }
             Ok(k) => k,
@@ -180,16 +164,8 @@ pub async fn product_ingest(
             }
         },
     };
-    let project_id = session
-        .meta
-        .get("project_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let agent_id = session
-        .meta
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let project_id = session.meta.get("project_id").and_then(Value::as_str).map(str::to_string);
+    let agent_id = session.meta.get("agent_id").and_then(Value::as_str).map(str::to_string);
 
     // Epic resolution — `None` falls back to the legacy top-level draft.
     let epic_id = match project_id.as_deref() {
@@ -241,11 +217,7 @@ pub async fn product_ingest(
 
     // Title-dedupe under the epic: same normalized title → new `suggested`
     // version on the existing child (the story view picks it up), no new row.
-    let children = ctx
-        .product_repo
-        .get_children(&epic_id)
-        .await
-        .unwrap_or_default();
+    let children = ctx.product_repo.get_children(&epic_id).await.unwrap_or_default();
     let story_id = if let Some(existing) = find_child_by_title(&children, title) {
         let res = ctx
             .product_repo
@@ -353,9 +325,7 @@ async fn resolve_epic(ctx: &ServerCtx, project_id: &str, by: &Id) -> Option<Id> 
             .await
             .map(|_| true)
     } else {
-        ctx.swarm_repo
-            .link_story_if_unlinked(&pid, &detail.story.id)
-            .await
+        ctx.swarm_repo.link_story_if_unlinked(&pid, &detail.story.id).await
     };
     match linked {
         Ok(true) => {
@@ -388,19 +358,11 @@ async fn resolve_epic(ctx: &ServerCtx, project_id: &str, by: &Id) -> Option<Id> 
 /// the goal (markdown heading marks stripped), else the project name; capped.
 fn epic_title(project_name: &str, goal_md: Option<&str>) -> String {
     let from_goal = goal_md
-        .and_then(|g| {
-            g.lines()
-                .map(|l| l.trim().trim_start_matches('#').trim())
-                .find(|l| !l.is_empty())
-        })
+        .and_then(|g| g.lines().map(|l| l.trim().trim_start_matches('#').trim()).find(|l| !l.is_empty()))
         .map(str::to_string)
         .filter(|l| !l.is_empty());
     let raw = from_goal.unwrap_or_else(|| project_name.trim().to_string());
-    let raw = if raw.is_empty() {
-        "Swarm project".to_string()
-    } else {
-        raw
-    };
+    let raw = if raw.is_empty() { "Swarm project".to_string() } else { raw };
     let mut out: String = raw.chars().take(120).collect();
     if out.len() < raw.len() {
         out.push('…');
@@ -482,14 +444,13 @@ pub async fn ingest_mockup(
     if title.is_empty() || req.content.is_empty() {
         return StatusCode::BAD_REQUEST;
     }
-    let format =
-        match crate::design_format::parse_or_default(req.format.as_deref(), DesignFormat::Html) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!("swarm mockup ingest: {e}");
-                return StatusCode::BAD_REQUEST;
-            }
-        };
+    let format = match crate::design_format::parse_or_default(req.format.as_deref(), DesignFormat::Html) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("swarm mockup ingest: {e}");
+            return StatusCode::BAD_REQUEST;
+        }
+    };
     if format == DesignFormat::Scene3d {
         if let Err(e) = crate::design_scene3d::validate_bytes(req.content.as_bytes()) {
             tracing::warn!("swarm mockup ingest: {e}");
@@ -520,8 +481,7 @@ pub async fn ingest_mockup(
     // become a path component under the attachments root — confine the joins.
     let id = otto_core::new_id();
     let rel = format!("{ATTACH_ROOT}/{}/{}{}", story.id, id, format.ext());
-    let Some(dir) = otto_core::paths::confine_join(&ctx.data_dir.join(ATTACH_ROOT), &story.id)
-    else {
+    let Some(dir) = otto_core::paths::confine_join(&ctx.data_dir.join(ATTACH_ROOT), &story.id) else {
         tracing::warn!("swarm mockup ingest: unsafe story id {:?}", story.id);
         return StatusCode::NO_CONTENT;
     };
@@ -643,10 +603,7 @@ mod tests {
 
     #[test]
     fn epic_title_prefers_goal_heading_then_name() {
-        assert_eq!(
-            epic_title("proj", Some("# Loyalty programme\n\nDetails…")),
-            "Loyalty programme"
-        );
+        assert_eq!(epic_title("proj", Some("# Loyalty programme\n\nDetails…")), "Loyalty programme");
         assert_eq!(epic_title("proj", Some("\n\n  ")), "proj");
         assert_eq!(epic_title("proj", None), "proj");
         assert_eq!(epic_title("  ", None), "Swarm project");
@@ -657,14 +614,8 @@ mod tests {
 
     #[test]
     fn title_dedupe_is_normalized() {
-        assert_eq!(
-            normalize_title("  Tier   ladder screens. "),
-            "tier ladder screens"
-        );
-        assert_eq!(
-            normalize_title("TIER LADDER SCREENS"),
-            "tier ladder screens"
-        );
+        assert_eq!(normalize_title("  Tier   ladder screens. "), "tier ladder screens");
+        assert_eq!(normalize_title("TIER LADDER SCREENS"), "tier ladder screens");
         assert_eq!(normalize_title("..."), "");
         let mk = |title: &str| otto_state::ProductStory {
             id: otto_core::new_id(),
@@ -691,10 +642,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
         let kids = vec![mk("Tier ladder screens"), mk("Rewards kiosk")];
-        assert_eq!(
-            find_child_by_title(&kids, "tier ladder  screens.").map(|c| c.id.as_str()),
-            Some(kids[0].id.as_str())
-        );
+        assert_eq!(find_child_by_title(&kids, "tier ladder  screens.").map(|c| c.id.as_str()), Some(kids[0].id.as_str()));
         assert!(find_child_by_title(&kids, "Something new").is_none());
         assert!(find_child_by_title(&kids, "").is_none());
     }

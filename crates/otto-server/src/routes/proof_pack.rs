@@ -14,12 +14,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use otto_core::domain::WorkspaceRole;
 use otto_core::event::Event;
 use otto_core::finding::{
     Finding, FindingStatus, ReviewProofPack, ReviewProofPackEntry, ReviewProofPackExport,
     ReviewProofPackSummary,
 };
+use otto_core::domain::WorkspaceRole;
 use otto_state::memory::{NewMemory, Scope};
 
 use crate::auth::{require_ws_role, CurrentUser};
@@ -30,10 +30,7 @@ use crate::state::ServerCtx;
 pub fn routes() -> Router<ServerCtx> {
     Router::new()
         .route("/reviews/{review_id}/proof-pack", get(get_proof_pack))
-        .route(
-            "/reviews/{review_id}/proof-pack/export",
-            post(export_proof_pack),
-        )
+        .route("/reviews/{review_id}/proof-pack/export", post(export_proof_pack))
 }
 
 /// Resolve a review's workspace id (for the role check) via its repo.
@@ -53,11 +50,7 @@ async fn review_workspace(ctx: &ServerCtx, review_id: &str) -> ApiResult<String>
 
 /// Assemble the live Proof Pack: every finding with its full event timeline +
 /// artifacts, summary counts, and the repo rules generated for the workspace.
-pub async fn assemble(
-    ctx: &ServerCtx,
-    review_id: &str,
-    workspace_id: &str,
-) -> ApiResult<ReviewProofPack> {
+pub async fn assemble(ctx: &ServerCtx, review_id: &str, workspace_id: &str) -> ApiResult<ReviewProofPack> {
     let findings = ctx
         .findings_store
         .list_full_for_review(review_id)
@@ -67,25 +60,15 @@ pub async fn assemble(
     let mut entries: Vec<ReviewProofPackEntry> = Vec::with_capacity(findings.len());
     for f in findings {
         summary.total += 1;
-        *summary
-            .by_status
-            .entry(f.status.as_str().to_string())
-            .or_insert(0) += 1;
-        *summary
-            .by_severity
-            .entry(f.severity.as_str().to_string())
-            .or_insert(0) += 1;
+        *summary.by_status.entry(f.status.as_str().to_string()).or_insert(0) += 1;
+        *summary.by_severity.entry(f.severity.as_str().to_string()).or_insert(0) += 1;
         match f.status {
             FindingStatus::Verified => summary.verified += 1,
             FindingStatus::Fixed => summary.fixed += 1,
             FindingStatus::Open => summary.open += 1,
             _ => {}
         }
-        if f.linked_commit
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .is_some()
-        {
+        if f.linked_commit.as_deref().filter(|s| !s.is_empty()).is_some() {
             summary.with_commit += 1;
         }
         if f.linked_test.as_deref().filter(|s| !s.is_empty()).is_some() {
@@ -262,16 +245,10 @@ pub fn render_markdown(pack: &ReviewProofPack) -> String {
             md.push_str(&format!("- Jira: {j}\n"));
         }
         if !f.evidence.trim().is_empty() {
-            md.push_str(&format!(
-                "\n**Evidence**\n\n```\n{}\n```\n",
-                f.evidence.trim()
-            ));
+            md.push_str(&format!("\n**Evidence**\n\n```\n{}\n```\n", f.evidence.trim()));
         }
         if !f.agent_reasoning_summary.trim().is_empty() {
-            md.push_str(&format!(
-                "\n**Reasoning:** {}\n",
-                f.agent_reasoning_summary.trim()
-            ));
+            md.push_str(&format!("\n**Reasoning:** {}\n", f.agent_reasoning_summary.trim()));
         }
         if let Some(fix) = f.suggested_fix.as_deref().filter(|s| !s.trim().is_empty()) {
             md.push_str(&format!("\n**Suggested fix:** {}\n", fix.trim()));
@@ -280,10 +257,7 @@ pub fn render_markdown(pack: &ReviewProofPack) -> String {
         if !entry.events.is_empty() {
             md.push_str("\n**Timeline**\n\n");
             for ev in &entry.events {
-                md.push_str(&format!(
-                    "- `{}` {} by {}\n",
-                    ev.created_at, ev.kind, ev.actor
-                ));
+                md.push_str(&format!("- `{}` {} by {}\n", ev.created_at, ev.kind, ev.actor));
             }
         }
         md.push('\n');
@@ -302,12 +276,7 @@ mod tests {
     use super::*;
     use otto_core::finding::{FindingSeverity, ReviewProofPackEntry};
 
-    fn finding(
-        id: &str,
-        status: FindingStatus,
-        commit: Option<&str>,
-        test: Option<&str>,
-    ) -> Finding {
+    fn finding(id: &str, status: FindingStatus, commit: Option<&str>, test: Option<&str>) -> Finding {
         Finding {
             id: id.into(),
             review_id: "rev".into(),
@@ -351,10 +320,7 @@ mod tests {
         let mut entries = vec![];
         for f in findings {
             summary.total += 1;
-            *summary
-                .by_status
-                .entry(f.status.as_str().to_string())
-                .or_insert(0) += 1;
+            *summary.by_status.entry(f.status.as_str().to_string()).or_insert(0) += 1;
             match f.status {
                 FindingStatus::Verified => summary.verified += 1,
                 FindingStatus::Fixed => summary.fixed += 1,
@@ -367,10 +333,7 @@ mod tests {
             if f.linked_test.is_some() {
                 summary.with_test += 1;
             }
-            entries.push(ReviewProofPackEntry {
-                finding: f,
-                events: vec![],
-            });
+            entries.push(ReviewProofPackEntry { finding: f, events: vec![] });
         }
         ReviewProofPack {
             review_id: "rev".into(),
@@ -407,10 +370,7 @@ mod tests {
         let mem = finding_to_memory(&f);
         assert_eq!(mem.kind, "finding");
         assert_eq!(mem.refs.len(), 2);
-        assert!(mem
-            .refs
-            .iter()
-            .any(|r| r.kind == "commit" && r.reference == "abc123"));
+        assert!(mem.refs.iter().any(|r| r.kind == "commit" && r.reference == "abc123"));
         assert!(mem.refs.iter().any(|r| r.kind == "test"));
         assert!(mem.tags.contains(&"security".to_string()));
     }

@@ -24,7 +24,10 @@ use crate::state::ServerCtx;
 
 pub fn routes() -> Router<ServerCtx> {
     Router::new()
-        .route("/workspaces/{id}/goal-loops", get(list).post(create))
+        .route(
+            "/workspaces/{id}/goal-loops",
+            get(list).post(create),
+        )
         .route("/workspaces/{id}/goal-loops/define", post(define))
         .route("/goal-loops/{id}", get(detail).patch(patch).delete(remove))
         .route("/goal-loops/{id}/start", post(start))
@@ -189,12 +192,8 @@ async fn create(
 
     if req.autostart {
         budget_gate(crate::routes::usage::check_budget(&ctx, &ws, "").await)?;
-        goal_loop::start_loop(&ctx, &loop_.id)
-            .await
-            .map_err(ApiError)?;
-        return Ok(Json(
-            ctx.goal_loops_repo.get(&loop_.id).await.map_err(ApiError)?,
-        ));
+        goal_loop::start_loop(&ctx, &loop_.id).await.map_err(ApiError)?;
+        return Ok(Json(ctx.goal_loops_repo.get(&loop_.id).await.map_err(ApiError)?));
     }
     Ok(Json(loop_))
 }
@@ -227,10 +226,7 @@ async fn patch(
                 "cannot rename a finished loop".into(),
             )));
         }
-        ctx.goal_loops_repo
-            .set_name(&id, &name)
-            .await
-            .map_err(ApiError)?;
+        ctx.goal_loops_repo.set_name(&id, &name).await.map_err(ApiError)?;
     }
     if let Some(limits) = req.limits {
         // Limits may be raised while editable or paused/blocked/exhausted (to
@@ -240,10 +236,7 @@ async fn patch(
                 "pause the loop before changing limits".into(),
             )));
         }
-        ctx.goal_loops_repo
-            .set_limits(&id, &limits)
-            .await
-            .map_err(ApiError)?;
+        ctx.goal_loops_repo.set_limits(&id, &limits).await.map_err(ApiError)?;
     }
     if let Some(config) = req.config {
         // Reshaping the executor lineup mid-run would break live agent indices;
@@ -253,10 +246,7 @@ async fn patch(
                 "config can only be edited while the loop is a draft".into(),
             )));
         }
-        ctx.goal_loops_repo
-            .set_config(&id, &config)
-            .await
-            .map_err(ApiError)?;
+        ctx.goal_loops_repo.set_config(&id, &config).await.map_err(ApiError)?;
     }
     Ok(Json(ctx.goal_loops_repo.get(&id).await.map_err(ApiError)?))
 }

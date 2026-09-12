@@ -130,12 +130,11 @@ fn origin_from_headers(headers: &HeaderMap) -> String {
     // If the host already looks like a full URL (e.g. a forwarded `X-Forwarded-Proto`
     // is unavailable here) default to https as the safe assumption for a publicly-
     // exposed tunnel. For loopback (local dev / testing) use http.
-    let scheme =
-        if host.starts_with("127.") || host.starts_with("localhost") || host.starts_with("[::1]") {
-            "http"
-        } else {
-            "https"
-        };
+    let scheme = if host.starts_with("127.") || host.starts_with("localhost") || host.starts_with("[::1]") {
+        "http"
+    } else {
+        "https"
+    };
 
     format!("{scheme}://{host}")
 }
@@ -173,8 +172,9 @@ pub async fn mint_share(
     require_session_owner_or_admin(&ctx, &user, &session).await?;
 
     // Parse the requested role (reject "admin").
-    let role = WorkspaceRole::parse(&req.role)
-        .ok_or_else(|| ApiError(Error::Invalid(format!("unknown role '{}'", req.role))))?;
+    let role = WorkspaceRole::parse(&req.role).ok_or_else(|| {
+        ApiError(Error::Invalid(format!("unknown role '{}'", req.role)))
+    })?;
     if role == WorkspaceRole::Admin {
         return Err(ApiError(Error::Forbidden(
             "a share link cannot grant Admin role".into(),
@@ -315,14 +315,7 @@ pub async fn mint_otp_share(
     share_origin: &str,
 ) -> ApiResult<(String, otto_core::api::ShareInfo)> {
     let (token, otp, info) = repo
-        .issue_share_otp_token(
-            owner_id,
-            session_id,
-            role,
-            duration_secs,
-            label,
-            recipient_email,
-        )
+        .issue_share_otp_token(owner_id, session_id, role, duration_secs, label, recipient_email)
         .await?;
 
     // The ready-to-open link, emailed alongside the code so the guest can open the
@@ -363,11 +356,14 @@ pub async fn extend_otp_share(
 ) -> ApiResult<()> {
     // The repo reads the destination from the row — the caller cannot influence
     // WHERE the code goes. `None` ⇒ not an extendable OTP share ⇒ 400.
-    let (otp, recipient, owner_id) = repo.extend_share_otp(token).await?.ok_or_else(|| {
-        ApiError(Error::Invalid(
-            "this share is not extendable (only email-OTP shares can be extended)".into(),
-        ))
-    })?;
+    let (otp, recipient, owner_id) = repo
+        .extend_share_otp(token)
+        .await?
+        .ok_or_else(|| {
+            ApiError(Error::Invalid(
+                "this share is not extendable (only email-OTP shares can be extended)".into(),
+            ))
+        })?;
     // Defensive: the row's owner must be the owner we resolved the sender for, so
     // we never email via a different user's sender than the share belongs to.
     debug_assert_eq!(&owner_id, expected_owner);
@@ -581,9 +577,9 @@ pub async fn revoke_share(
         user_id: Some(user.id.clone()),
         action: "share.revoke".into(),
         target: Some(share_id.clone()),
-        detail: session_id_opt
-            .as_ref()
-            .map(|sid| serde_json::json!({ "session_id": sid })),
+        detail: session_id_opt.as_ref().map(|sid| {
+            serde_json::json!({ "session_id": sid })
+        }),
         ip: None,
     })
     .await;

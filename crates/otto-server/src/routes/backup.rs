@@ -18,9 +18,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use otto_state::{NewAuditEntry, SettingsRepo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use otto_state::{NewAuditEntry, SettingsRepo};
 
 use crate::auth::{require_root, CurrentUser};
 use crate::error::{ApiError, ApiResult};
@@ -254,11 +254,14 @@ pub async fn state_backup(
 
     // Workspace manifest: non-archived names + count (via direct SQL on ctx.pool
     // — avoids needing WorkspacesRepo::list which isn't yet publicly surfaced).
-    let ws_rows: Vec<(String, i64)> =
-        sqlx::query_as("SELECT name, archived FROM workspaces ORDER BY created_at ASC")
-            .fetch_all(&ctx.pool)
-            .await
-            .map_err(|e| ApiError(otto_core::Error::Internal(format!("list workspaces: {e}"))))?;
+    let ws_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT name, archived FROM workspaces ORDER BY created_at ASC",
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    .map_err(|e| {
+        ApiError(otto_core::Error::Internal(format!("list workspaces: {e}")))
+    })?;
 
     let workspace_names: Vec<String> = ws_rows
         .iter()

@@ -61,10 +61,7 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/personal-agents/{id}/runs", get(list_runs))
         .route("/personal-agents/runs/{run_id}/report", get(report))
         .route("/personal-agents/{id}/chat-session", post(chat_session))
-        .route(
-            "/workspaces/{id}/agent-rooms",
-            get(list_rooms).post(create_room),
-        )
+        .route("/workspaces/{id}/agent-rooms", get(list_rooms).post(create_room))
         .route(
             "/agent-rooms/{id}",
             get(get_room).patch(update_room).delete(delete_room),
@@ -189,15 +186,10 @@ struct MessagesQuery {
 /// Same slug rule as scheduled tasks — a non-empty custom provider is allowed.
 fn check_provider(p: &str) -> Result<(), ApiError> {
     let p = p.trim();
-    if p.is_empty()
-        || p.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if p.is_empty() || p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         Ok(())
     } else {
-        Err(ApiError(Error::Invalid(format!(
-            "provider '{p}' is not a valid provider name"
-        ))))
+        Err(ApiError(Error::Invalid(format!("provider '{p}' is not a valid provider name"))))
     }
 }
 
@@ -230,12 +222,7 @@ async fn list(
 ) -> ApiResult<Json<Vec<PersonalAgent>>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
     seed_presets(&ctx, &ws_id, &user).await;
-    Ok(Json(
-        agents(&ctx)
-            .list_by_workspace(&ws_id)
-            .await
-            .map_err(ApiError)?,
-    ))
+    Ok(Json(agents(&ctx).list_by_workspace(&ws_id).await.map_err(ApiError)?))
 }
 
 /// `POST /workspaces/{id}/personal-agents`
@@ -260,11 +247,7 @@ async fn create(
         .create(NewPersonalAgent {
             avatar: req.avatar.unwrap_or_default(),
             soul_md: req.soul_md.unwrap_or_default(),
-            provider: if provider.trim().is_empty() {
-                "claude".into()
-            } else {
-                provider
-            },
+            provider: if provider.trim().is_empty() { "claude".into() } else { provider },
             model: req.model.unwrap_or_default(),
             cwd: req.cwd.unwrap_or_default(),
             browser: req.browser.unwrap_or(false),
@@ -380,10 +363,7 @@ async fn create_schedule(
         .await
         .map_err(ApiError)?;
     refresh_next_run(&repo, &schedule).await;
-    repo.get_schedule(&schedule.id)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    repo.get_schedule(&schedule.id).await.map(Json).map_err(ApiError)
 }
 
 /// `PATCH /personal-agents/schedules/{schedule_id}`
@@ -419,10 +399,7 @@ async fn update_schedule(
     if cadence_changed {
         refresh_next_run(&repo, &updated).await;
     }
-    repo.get_schedule(&schedule_id)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    repo.get_schedule(&schedule_id).await.map(Json).map_err(ApiError)
 }
 
 /// `DELETE /personal-agents/schedules/{schedule_id}`
@@ -442,11 +419,8 @@ async fn delete_schedule(
 /// Recompute `next_run_at` for display (best-effort; cursor untouched).
 async fn refresh_next_run(repo: &PersonalAgentsRepo, schedule: &PersonalAgentSchedule) {
     let tz = cadence::task_tz(&schedule.timezone);
-    let next =
-        cadence::next_run(&schedule.schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
-    let _ = repo
-        .set_schedule_runtime(&schedule.id, None, next.as_deref())
-        .await;
+    let next = cadence::next_run(&schedule.schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
+    let _ = repo.set_schedule_runtime(&schedule.id, None, next.as_deref()).await;
 }
 
 // --- Run handlers -----------------------------------------------------------
@@ -466,9 +440,7 @@ async fn run_now(
         Some(sid) => {
             let s = repo.get_schedule(&sid).await.map_err(ApiError)?;
             if s.agent_id != agent.id {
-                return Err(ApiError(Error::Invalid(
-                    "schedule belongs to a different agent".into(),
-                )));
+                return Err(ApiError(Error::Invalid("schedule belongs to a different agent".into())));
             }
             Some(s)
         }
@@ -511,18 +483,12 @@ async fn report(
     let canon = std::fs::canonicalize(&candidate)
         .map_err(|_| ApiError(Error::NotFound("report file missing".into())))?;
     if !canon.starts_with(&canon_root) {
-        return Err(ApiError(Error::Forbidden(
-            "report path escapes the reports root".into(),
-        )));
+        return Err(ApiError(Error::Forbidden("report path escapes the reports root".into())));
     }
     let body = tokio::fs::read_to_string(&canon)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("read report: {e}"))))?;
-    Ok((
-        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-        body,
-    )
-        .into_response())
+    Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], body).into_response())
 }
 
 // --- Chat -------------------------------------------------------------------
@@ -559,11 +525,7 @@ async fn chat_session(
     if !agent.model.trim().is_empty() {
         meta["model"] = json!(agent.model.trim());
     }
-    let ws = ctx
-        .workspaces
-        .get(&agent.workspace_id)
-        .await
-        .map_err(ApiError)?;
+    let ws = ctx.workspaces.get(&agent.workspace_id).await.map_err(ApiError)?;
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(agent.provider.clone()),
@@ -578,9 +540,7 @@ async fn chat_session(
         .create(&ws, &user.id, req, None)
         .await
         .map_err(ApiError)?;
-    repo.set_chat_session(&agent.id, Some(&session.id))
-        .await
-        .map_err(ApiError)?;
+    repo.set_chat_session(&agent.id, Some(&session.id)).await.map_err(ApiError)?;
     Ok(Json(json!({"session_id": session.id, "created": true})))
 }
 
@@ -646,10 +606,7 @@ async fn update_room(
     if req.name.trim().is_empty() {
         return Err(ApiError(Error::Invalid("name is required".into())));
     }
-    repo.rename(&id, req.name.trim())
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    repo.rename(&id, req.name.trim()).await.map(Json).map_err(ApiError)
 }
 
 /// `DELETE /agent-rooms/{id}`
@@ -677,9 +634,7 @@ async fn add_member(
     require_ws_role(&ctx, &user, &room.workspace_id, WorkspaceRole::Editor).await?;
     let agent = agents(&ctx).get(&req.agent_id).await.map_err(ApiError)?;
     if agent.workspace_id != room.workspace_id {
-        return Err(ApiError(Error::Invalid(
-            "agent belongs to a different workspace".into(),
-        )));
+        return Err(ApiError(Error::Invalid("agent belongs to a different workspace".into())));
     }
     repo.add_member(&id, &agent.id).await.map_err(ApiError)?;
     Ok(Json(json!({"ok": true})))
@@ -712,20 +667,14 @@ async fn resolve_session_agent(
         .await
         .map_err(|_| ApiError(Error::Invalid("unknown session_id".into())))?;
     if !user.is_root && session.created_by != user.id {
-        return Err(ApiError(Error::Forbidden(
-            "session belongs to another user".into(),
-        )));
+        return Err(ApiError(Error::Forbidden("session belongs to another user".into())));
     }
     let agent_id = session
         .meta
         .get("personal_agent")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ApiError(Error::Invalid(
-                "session is not a personal-agent session".into(),
-            ))
-        })?;
+        .ok_or_else(|| ApiError(Error::Invalid("session is not a personal-agent session".into())))?;
     agents(ctx).get(agent_id).await.map_err(ApiError)
 }
 
@@ -744,9 +693,7 @@ async fn list_messages(
     if let Some(sid) = q.session_id.as_deref().filter(|s| !s.is_empty()) {
         let agent = resolve_session_agent(&ctx, &user, sid).await?;
         if !repo.is_member(&id, &agent.id).await.map_err(ApiError)? {
-            return Err(ApiError(Error::Forbidden(
-                "agent is not a member of this room".into(),
-            )));
+            return Err(ApiError(Error::Forbidden("agent is not a member of this room".into())));
         }
     }
     repo.list_messages(&id, q.after.as_deref(), q.limit.unwrap_or(100))
@@ -781,14 +728,10 @@ async fn post_message(
         Some(sid) => {
             let agent = resolve_session_agent(&ctx, &user, sid).await?;
             if agent.workspace_id != room.workspace_id {
-                return Err(ApiError(Error::Forbidden(
-                    "agent belongs to a different workspace".into(),
-                )));
+                return Err(ApiError(Error::Forbidden("agent belongs to a different workspace".into())));
             }
             if !repo.is_member(&id, &agent.id).await.map_err(ApiError)? {
-                return Err(ApiError(Error::Forbidden(
-                    "agent is not a member of this room".into(),
-                )));
+                return Err(ApiError(Error::Forbidden("agent is not a member of this room".into())));
             }
             ("agent".to_string(), agent.id)
         }
@@ -953,27 +896,15 @@ mod tests {
     fn presets_are_disabled_editable_rows() {
         let presets = preset_agents("ws1", "u1");
         assert_eq!(presets.len(), 4);
-        assert!(
-            presets.iter().all(|(a, _)| !a.enabled),
-            "presets seed disabled"
-        );
-        assert!(
-            presets.iter().all(|(a, _)| a.model.is_empty()),
-            "model empty = provider default"
-        );
+        assert!(presets.iter().all(|(a, _)| !a.enabled), "presets seed disabled");
+        assert!(presets.iter().all(|(a, _)| a.model.is_empty()), "model empty = provider default");
         // Daily Recap carries TWO schedules (daily + 15-min needs-attention).
-        let recap = presets
-            .iter()
-            .find(|(a, _)| a.name == "Daily Recap")
-            .unwrap();
+        let recap = presets.iter().find(|(a, _)| a.name == "Daily Recap").unwrap();
         assert_eq!(recap.1.len(), 2);
         assert_eq!(recap.1[0].schedule["cadence"], "daily");
         assert_eq!(recap.1[1].schedule["every_min"], 15);
         // The player reviewer's persona references Keychain, never credentials.
-        let player = presets
-            .iter()
-            .find(|(a, _)| a.name == "Casino Reviewer Player")
-            .unwrap();
+        let player = presets.iter().find(|(a, _)| a.name == "Casino Reviewer Player").unwrap();
         assert!(player.0.soul_md.contains("Keychain"));
         for (_, schedules) in &presets {
             for s in schedules {

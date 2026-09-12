@@ -181,16 +181,7 @@ async fn accept(
         .set_status(&id, FindingStatus::Accepted, &who)
         .await
         .map_err(ApiError)?;
-    audit(
-        &ctx,
-        &f,
-        "accepted",
-        &who,
-        Some(cur.status.as_str()),
-        Some("accepted"),
-        serde_json::json!({}),
-    )
-    .await;
+    audit(&ctx, &f, "accepted", &who, Some(cur.status.as_str()), Some("accepted"), serde_json::json!({})).await;
     emit_updated(&ctx, &f);
     Ok(Json(f))
 }
@@ -209,16 +200,8 @@ async fn waive(
         .set_status(&id, FindingStatus::Waived, &who)
         .await
         .map_err(ApiError)?;
-    audit(
-        &ctx,
-        &f,
-        "waived",
-        &who,
-        Some(cur.status.as_str()),
-        Some("waived"),
-        serde_json::json!({ "reason": body.reason }),
-    )
-    .await;
+    audit(&ctx, &f, "waived", &who, Some(cur.status.as_str()), Some("waived"),
+        serde_json::json!({ "reason": body.reason })).await;
     emit_updated(&ctx, &f);
     Ok(Json(f))
 }
@@ -237,16 +220,8 @@ async fn false_positive(
         .set_status(&id, FindingStatus::FalsePositive, &who)
         .await
         .map_err(ApiError)?;
-    audit(
-        &ctx,
-        &f,
-        "false_positive",
-        &who,
-        Some(cur.status.as_str()),
-        Some("false_positive"),
-        serde_json::json!({ "reason": body.reason }),
-    )
-    .await;
+    audit(&ctx, &f, "false_positive", &who, Some(cur.status.as_str()), Some("false_positive"),
+        serde_json::json!({ "reason": body.reason })).await;
     emit_updated(&ctx, &f);
     Ok(Json(f))
 }
@@ -262,25 +237,10 @@ async fn require_approval(
     let who = actor_label(&user);
     let f = ctx
         .findings_store
-        .set_fields(
-            &id,
-            &FindingPatch {
-                requires_human_approval: Some(true),
-                ..Default::default()
-            },
-        )
+        .set_fields(&id, &FindingPatch { requires_human_approval: Some(true), ..Default::default() })
         .await
         .map_err(ApiError)?;
-    audit(
-        &ctx,
-        &f,
-        "approval_required",
-        &who,
-        None,
-        None,
-        serde_json::json!({}),
-    )
-    .await;
+    audit(&ctx, &f, "approval_required", &who, None, None, serde_json::json!({})).await;
     emit_updated(&ctx, &f);
     Ok(Json(f))
 }
@@ -340,16 +300,8 @@ async fn approve(
             .await
             .map_err(ApiError)?;
     }
-    audit(
-        &ctx,
-        &f,
-        decision,
-        &who,
-        Some(cur.status.as_str()),
-        Some(f.status.as_str()),
-        serde_json::json!({ "note": body.note }),
-    )
-    .await;
+    audit(&ctx, &f, decision, &who, Some(cur.status.as_str()), Some(f.status.as_str()),
+        serde_json::json!({ "note": body.note })).await;
     emit_updated(&ctx, &f);
     Ok(Json(f))
 }
@@ -418,12 +370,7 @@ async fn to_jira(
     let client = otto_issues::JiraClient::new(&account.base_url, &account.email, &token);
     let issue_type = body.issue_type.clone().unwrap_or_else(|| "Bug".to_string());
     let created = client
-        .create_issue(
-            &body.project_key,
-            &issue_type,
-            &f.title,
-            &jira_description_md(&f),
-        )
+        .create_issue(&body.project_key, &issue_type, &f.title, &jira_description_md(&f))
         .await
         .map_err(ApiError)?;
 
@@ -440,16 +387,8 @@ async fn to_jira(
         )
         .await
         .map_err(ApiError)?;
-    audit(
-        &ctx,
-        &f,
-        "jira_created",
-        &who,
-        None,
-        None,
-        serde_json::json!({ "jira_key": created.key, "jira_url": created.url }),
-    )
-    .await;
+    audit(&ctx, &f, "jira_created", &who, None, None,
+        serde_json::json!({ "jira_key": created.key, "jira_url": created.url })).await;
     emit_updated(&ctx, &f);
     Ok(Json(f))
 }
@@ -483,15 +422,12 @@ async fn to_repo_rule(
         .title
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| f.title.clone());
-    let rule_body = body
-        .body
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            f.suggested_fix
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| f.agent_reasoning_summary.clone())
-        });
+    let rule_body = body.body.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
+        f.suggested_fix
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| f.agent_reasoning_summary.clone())
+    });
     let rule = ctx
         .repo_rules_store
         .create(
@@ -511,25 +447,11 @@ async fn to_repo_rule(
     // Link the rule to the finding + re-render the workspace context block.
     let _ = ctx
         .findings_store
-        .set_fields(
-            &id,
-            &FindingPatch {
-                repo_rule_id: Some(rule.id.clone()),
-                ..Default::default()
-            },
-        )
+        .set_fields(&id, &FindingPatch { repo_rule_id: Some(rule.id.clone()), ..Default::default() })
         .await;
     let _ = crate::finding_context::apply_repo_rules_to_context(&ctx, &f.workspace_id).await;
-    audit(
-        &ctx,
-        &f,
-        "repo_rule_added",
-        &who,
-        None,
-        None,
-        serde_json::json!({ "repo_rule_id": rule.id }),
-    )
-    .await;
+    audit(&ctx, &f, "repo_rule_added", &who, None, None,
+        serde_json::json!({ "repo_rule_id": rule.id })).await;
     if let Ok(updated) = ctx.findings_store.get_full(&id).await {
         emit_updated(&ctx, &updated);
     }
@@ -588,13 +510,7 @@ fn spawn_fix_watcher(ctx: ServerCtx, finding_id: String, worktree: String, base_
                     }
                     let _ = ctx
                         .findings_store
-                        .set_fields(
-                            &finding_id,
-                            &FindingPatch {
-                                linked_commit: Some(sha.clone()),
-                                ..Default::default()
-                            },
-                        )
+                        .set_fields(&finding_id, &FindingPatch { linked_commit: Some(sha.clone()), ..Default::default() })
                         .await;
                     if matches!(f.status, FindingStatus::Accepted | FindingStatus::Open) {
                         if let Ok(f2) = ctx
@@ -602,16 +518,8 @@ fn spawn_fix_watcher(ctx: ServerCtx, finding_id: String, worktree: String, base_
                             .set_status(&finding_id, FindingStatus::Fixed, "fix-agent")
                             .await
                         {
-                            audit(
-                                &ctx,
-                                &f2,
-                                "fix_applied",
-                                "fix-agent",
-                                Some(f.status.as_str()),
-                                Some("fixed"),
-                                serde_json::json!({ "commit": sha }),
-                            )
-                            .await;
+                            audit(&ctx, &f2, "fix_applied", "fix-agent", Some(f.status.as_str()), Some("fixed"),
+                                serde_json::json!({ "commit": sha })).await;
                             emit_updated(&ctx, &f2);
                         }
                     }
@@ -642,25 +550,11 @@ fn spawn_regression_watcher(
             if let Some(test) = finding_agent::detect_new_test(&before, &dir) {
                 let _ = ctx
                     .findings_store
-                    .set_fields(
-                        &finding_id,
-                        &FindingPatch {
-                            linked_test: Some(test.clone()),
-                            ..Default::default()
-                        },
-                    )
+                    .set_fields(&finding_id, &FindingPatch { linked_test: Some(test.clone()), ..Default::default() })
                     .await;
                 if let Ok(f) = ctx.findings_store.get_full(&finding_id).await {
-                    audit(
-                        &ctx,
-                        &f,
-                        "regression_test_added",
-                        "test-agent",
-                        None,
-                        None,
-                        serde_json::json!({ "test": test }),
-                    )
-                    .await;
+                    audit(&ctx, &f, "regression_test_added", "test-agent", None, None,
+                        serde_json::json!({ "test": test })).await;
                     emit_updated(&ctx, &f);
                 }
                 break;
@@ -696,26 +590,13 @@ async fn fix(
     let session_id = match finding_agent::provision_worktree(&repo.path, &f.id).await {
         Ok((wt, base)) => {
             let sid = finding_agent::spawn_session(
-                &ctx,
-                &f.workspace_id,
-                &user.id,
-                &provider,
-                &wt,
-                &f.id,
-                "fix",
-                fix_prompt(&f),
+                &ctx, &f.workspace_id, &user.id, &provider, &wt, &f.id, "fix", fix_prompt(&f),
             )
             .await;
             if let Some(ref s) = sid {
                 let _ = ctx
                     .findings_store
-                    .set_fields(
-                        &id,
-                        &FindingPatch {
-                            fix_session_id: Some(s.clone()),
-                            ..Default::default()
-                        },
-                    )
+                    .set_fields(&id, &FindingPatch { fix_session_id: Some(s.clone()), ..Default::default() })
                     .await;
                 spawn_fix_watcher(ctx.clone(), id.clone(), wt, base);
             }
@@ -726,16 +607,8 @@ async fn fix(
             None
         }
     };
-    audit(
-        &ctx,
-        &f,
-        "fix_requested",
-        &who,
-        Some(cur.status.as_str()),
-        Some(f.status.as_str()),
-        serde_json::json!({ "session_id": session_id }),
-    )
-    .await;
+    audit(&ctx, &f, "fix_requested", &who, Some(cur.status.as_str()), Some(f.status.as_str()),
+        serde_json::json!({ "session_id": session_id })).await;
     let _ = ctx.events.send(Event::FindingActionStarted {
         workspace_id: f.workspace_id.clone(),
         review_id: f.review_id.clone(),
@@ -745,10 +618,7 @@ async fn fix(
     });
     emit_updated(&ctx, &f);
     let finding = ctx.findings_store.get_full(&id).await.map_err(ApiError)?;
-    Ok(Json(FindingActionResp {
-        finding,
-        session_id,
-    }))
+    Ok(Json(FindingActionResp { finding, session_id }))
 }
 
 /// `POST /findings/{id}/verify` — verify the finding is resolved. On pass →
@@ -774,24 +644,13 @@ async fn verify(
             cur.status.as_str()
         ))));
     }
-    let repo = ctx
-        .git_store
-        .get_repo(&cur.repo_id)
-        .await
-        .map_err(ApiError)?;
+    let repo = ctx.git_store.get_repo(&cur.repo_id).await.map_err(ApiError)?;
     let provider = finding_agent_provider(&ctx, &cur.workspace_id).await;
     // Spawn an openable verify agent (best-effort) for the user to watch.
     let session_id = match finding_agent::provision_worktree(&repo.path, &cur.id).await {
         Ok((wt, _)) => {
             finding_agent::spawn_session(
-                &ctx,
-                &cur.workspace_id,
-                &user.id,
-                &provider,
-                &wt,
-                &cur.id,
-                "verify",
-                verify_prompt(&cur),
+                &ctx, &cur.workspace_id, &user.id, &provider, &wt, &cur.id, "verify", verify_prompt(&cur),
             )
             .await
         }
@@ -811,13 +670,7 @@ async fn verify(
             if let Some(head) = finding_agent::head_of(std::path::Path::new(&repo.path)) {
                 let _ = ctx
                     .findings_store
-                    .set_fields(
-                        &id,
-                        &FindingPatch {
-                            linked_commit: Some(head),
-                            ..Default::default()
-                        },
-                    )
+                    .set_fields(&id, &FindingPatch { linked_commit: Some(head), ..Default::default() })
                     .await;
             }
         }
@@ -826,37 +679,17 @@ async fn verify(
             .set_status(&id, FindingStatus::Verified, &who)
             .await
             .map_err(ApiError)?;
-        audit(
-            &ctx,
-            &f,
-            "verified",
-            &who,
-            Some(cur.status.as_str()),
-            Some("verified"),
-            serde_json::json!({ "commit": f.linked_commit }),
-        )
-        .await;
+        audit(&ctx, &f, "verified", &who, Some(cur.status.as_str()), Some("verified"),
+            serde_json::json!({ "commit": f.linked_commit })).await;
         emit_updated(&ctx, &f);
         f
     } else {
         let f = ctx.findings_store.get_full(&id).await.map_err(ApiError)?;
-        audit(
-            &ctx,
-            &f,
-            "verify_failed",
-            &who,
-            None,
-            None,
-            serde_json::json!({}),
-        )
-        .await;
+        audit(&ctx, &f, "verify_failed", &who, None, None, serde_json::json!({})).await;
         emit_updated(&ctx, &f);
         f
     };
-    Ok(Json(FindingActionResp {
-        finding,
-        session_id,
-    }))
+    Ok(Json(FindingActionResp { finding, session_id }))
 }
 
 /// `POST /findings/{id}/regression-test` — spawn an agent to add a guard test;
@@ -868,23 +701,13 @@ async fn regression_test(
 ) -> ApiResult<Json<FindingActionResp>> {
     let cur = load_for_role(&ctx, &user, &id, WorkspaceRole::Editor).await?;
     let who = actor_label(&user);
-    let repo = ctx
-        .git_store
-        .get_repo(&cur.repo_id)
-        .await
-        .map_err(ApiError)?;
+    let repo = ctx.git_store.get_repo(&cur.repo_id).await.map_err(ApiError)?;
     let provider = finding_agent_provider(&ctx, &cur.workspace_id).await;
     let session_id = match finding_agent::provision_worktree(&repo.path, &cur.id).await {
         Ok((wt, _)) => {
             let before = finding_agent::list_test_files(std::path::Path::new(&wt));
             let sid = finding_agent::spawn_session(
-                &ctx,
-                &cur.workspace_id,
-                &user.id,
-                &provider,
-                &wt,
-                &cur.id,
-                "regression_test",
+                &ctx, &cur.workspace_id, &user.id, &provider, &wt, &cur.id, "regression_test",
                 regression_prompt(&cur),
             )
             .await;
@@ -902,22 +725,11 @@ async fn regression_test(
         action: "regression_test".to_string(),
         session_id: session_id.clone(),
     });
-    audit(
-        &ctx,
-        &cur,
-        "regression_test_requested",
-        &who,
-        None,
-        None,
-        serde_json::json!({ "session_id": session_id }),
-    )
-    .await;
+    audit(&ctx, &cur, "regression_test_requested", &who, None, None,
+        serde_json::json!({ "session_id": session_id })).await;
     let finding = ctx.findings_store.get_full(&id).await.map_err(ApiError)?;
     emit_updated(&ctx, &finding);
-    Ok(Json(FindingActionResp {
-        finding,
-        session_id,
-    }))
+    Ok(Json(FindingActionResp { finding, session_id }))
 }
 
 // ---------------------------------------------------------------------------
@@ -930,12 +742,7 @@ fn e2e_enabled() -> bool {
 
 /// Drive a freshly-seeded (open) finding to a target status via legal transitions
 /// (every status is reachable from `open` in ≤2 legal steps — no machine bypass).
-async fn drive_to_status(
-    ctx: &ServerCtx,
-    id: &str,
-    target: FindingStatus,
-    who: &str,
-) -> ApiResult<Finding> {
+async fn drive_to_status(ctx: &ServerCtx, id: &str, target: FindingStatus, who: &str) -> ApiResult<Finding> {
     use FindingStatus::*;
     let steps: &[FindingStatus] = match target {
         Open => &[],
@@ -947,11 +754,7 @@ async fn drive_to_status(
     };
     let mut last = ctx.findings_store.get_full(id).await.map_err(ApiError)?;
     for s in steps {
-        last = ctx
-            .findings_store
-            .set_status(id, *s, who)
-            .await
-            .map_err(ApiError)?;
+        last = ctx.findings_store.set_status(id, *s, who).await.map_err(ApiError)?;
     }
     Ok(last)
 }
@@ -1010,11 +813,7 @@ async fn e2e_seed_review(
             .await
             .map_err(ApiError)?;
     }
-    let review = ctx
-        .reviews_store
-        .get_review(&review.id)
-        .await
-        .map_err(ApiError)?;
+    let review = ctx.reviews_store.get_review(&review.id).await.map_err(ApiError)?;
     Ok(Json(review))
 }
 
@@ -1053,21 +852,11 @@ struct SeedReq {
     #[serde(default)]
     requires_human_approval: Option<bool>,
 }
-fn default_seed_sev() -> String {
-    "high".into()
-}
-fn default_seed_title() -> String {
-    "Seeded finding".into()
-}
-fn default_seed_body() -> String {
-    "Seeded body".into()
-}
-fn default_seed_evidence() -> String {
-    "seeded evidence".into()
-}
-fn default_seed_reasoning() -> String {
-    "seeded reasoning".into()
-}
+fn default_seed_sev() -> String { "high".into() }
+fn default_seed_title() -> String { "Seeded finding".into() }
+fn default_seed_body() -> String { "Seeded body".into() }
+fn default_seed_evidence() -> String { "seeded evidence".into() }
+fn default_seed_reasoning() -> String { "seeded reasoning".into() }
 
 /// `POST /workspaces/{ws}/__e2e/findings` — insert a finding with arbitrary fields
 /// for deterministic E2E preconditions. 404 unless `OTTO_E2E` is set.
@@ -1114,15 +903,7 @@ async fn e2e_seed(
     // anchor a created event
     let _ = ctx
         .finding_events_store
-        .append(
-            &f.id,
-            &ws,
-            "created",
-            "e2e",
-            None,
-            Some("open"),
-            serde_json::json!({}),
-        )
+        .append(&f.id, &ws, "created", "e2e", None, Some("open"), serde_json::json!({}))
         .await;
     // patch artifact/gate fields
     if b.linked_commit.is_some() || b.linked_test.is_some() || b.requires_human_approval.is_some() {

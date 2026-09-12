@@ -137,12 +137,7 @@ pub async fn get_item(
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Viewer).await?;
     // Refresh this item's cost on-demand (session/external_trigger → one usage
     // query) so the detail shows live cost without a background ClickHouse sweep.
-    let item = ctx
-        .workgraph
-        .repo()
-        .get_item(&wid, &id)
-        .await
-        .map_err(ApiError)?;
+    let item = ctx.workgraph.repo().get_item(&wid, &id).await.map_err(ApiError)?;
     crate::workgraph_projector::refresh_item_cost(&ctx, &wid, &item).await;
     let d = ctx
         .workgraph
@@ -187,11 +182,7 @@ pub async fn add_edge(
     let relation = EdgeRelation::parse(&body.relation)
         .ok_or_else(|| ApiError(Error::Invalid(format!("bad relation '{}'", body.relation))))?;
     // Validate both endpoints live in this workspace.
-    ctx.workgraph
-        .repo()
-        .get_item(&wid, &id)
-        .await
-        .map_err(ApiError)?;
+    ctx.workgraph.repo().get_item(&wid, &id).await.map_err(ApiError)?;
     ctx.workgraph
         .repo()
         .get_item(&wid, &body.to_item_id)
@@ -214,11 +205,7 @@ pub async fn request_approval(
 ) -> ApiResult<Json<WorkApproval>> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
     // Ensure the item exists in this workspace before opening a gate.
-    ctx.workgraph
-        .repo()
-        .get_item(&wid, &id)
-        .await
-        .map_err(ApiError)?;
+    ctx.workgraph.repo().get_item(&wid, &id).await.map_err(ApiError)?;
     let ap = ctx
         .workgraph
         .request_approval(&wid, &id, body.reason, &user.id)

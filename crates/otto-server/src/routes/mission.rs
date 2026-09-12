@@ -331,7 +331,9 @@ async fn build_view(ctx: &ServerCtx, ws_id: &Id) -> MissionView {
             let started = started_raw
                 .as_deref()
                 .and_then(|s| otto_state::convert::ts(s).ok())
-                .unwrap_or_else(|| otto_state::convert::ts(&enqueued_raw).unwrap_or(now));
+                .unwrap_or_else(|| {
+                    otto_state::convert::ts(&enqueued_raw).unwrap_or(now)
+                });
             let age = (now - started).num_seconds().max(0);
             let title = error
                 .as_deref()
@@ -421,13 +423,7 @@ pub async fn get_mission(
 
     // Write back to the cache.
     let mut guard = cache().lock().await;
-    guard.insert(
-        ws_id,
-        CacheEntry {
-            view: view.clone(),
-            born: Instant::now(),
-        },
-    );
+    guard.insert(ws_id, CacheEntry { view: view.clone(), born: Instant::now() });
     drop(guard);
 
     Ok(Json(view))

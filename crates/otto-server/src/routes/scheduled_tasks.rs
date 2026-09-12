@@ -19,13 +19,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use otto_core::domain::{ScheduledTask, ScheduledTaskPreset, ScheduledTaskRun, WorkspaceRole};
-use otto_core::workflows::{
-    ConvertTaskReq, ConvertTaskResp, WorkflowEdge, WorkflowGraph, WorkflowNode,
-};
+use otto_core::workflows::{ConvertTaskReq, ConvertTaskResp, WorkflowEdge, WorkflowGraph, WorkflowNode};
 use otto_core::{Error, Id};
-use otto_state::{
-    NewScheduledTask, NewWorkflowTrigger, ScheduledTaskPatch, TriggersRepo, WorkflowsRepo,
-};
+use otto_state::{NewScheduledTask, NewWorkflowTrigger, ScheduledTaskPatch, TriggersRepo, WorkflowsRepo};
 
 use crate::auth::{require_ws_role, CurrentUser};
 use crate::cadence;
@@ -35,7 +31,10 @@ use crate::state::ServerCtx;
 
 pub fn routes() -> Router<ServerCtx> {
     Router::new()
-        .route("/workspaces/{id}/scheduled-tasks", get(list).post(create))
+        .route(
+            "/workspaces/{id}/scheduled-tasks",
+            get(list).post(create),
+        )
         .route("/scheduled-tasks/presets", get(presets))
         .route(
             "/scheduled-tasks/{id}",
@@ -116,11 +115,7 @@ async fn convert_to_workflow(
     }];
     // If the task delivers to a chat channel, mirror it with a channel_notify node
     // (channel_notify does {key} substitution from the agent output's `reply`).
-    let dest_type = task
-        .destination
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("none");
+    let dest_type = task.destination.get("type").and_then(Value::as_str).unwrap_or("none");
     if dest_type == "slack" || dest_type == "telegram" {
         nodes.push(node(
             "notify",
@@ -174,10 +169,7 @@ async fn convert_to_workflow(
             .scheduled_tasks
             .update(
                 &task.id,
-                ScheduledTaskPatch {
-                    enabled: Some(false),
-                    ..Default::default()
-                },
+                ScheduledTaskPatch { enabled: Some(false), ..Default::default() },
             )
             .await;
     }
@@ -271,32 +263,24 @@ fn check_provider(p: &str) -> Result<(), ApiError> {
         return Ok(()); // resolved to the default ("claude") downstream
     }
     // Slug-shaped (the provider registry key); reject obviously bad input.
-    if p.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         Ok(())
     } else {
-        Err(ApiError(Error::Invalid(format!(
-            "provider '{p}' is not a valid provider name"
-        ))))
+        Err(ApiError(Error::Invalid(format!("provider '{p}' is not a valid provider name"))))
     }
 }
 
 fn check_sandbox(s: &str) -> Result<(), ApiError> {
     match s {
         "none" | "worktree" => Ok(()),
-        other => Err(ApiError(Error::Invalid(format!(
-            "sandbox must be none|worktree (got '{other}')"
-        )))),
+        other => Err(ApiError(Error::Invalid(format!("sandbox must be none|worktree (got '{other}')")))),
     }
 }
 
 fn check_kind(k: &str) -> Result<(), ApiError> {
     match k {
         "agent_prompt" | "workflow" => Ok(()),
-        other => Err(ApiError(Error::Invalid(format!(
-            "kind must be agent_prompt|workflow (got '{other}')"
-        )))),
+        other => Err(ApiError(Error::Invalid(format!("kind must be agent_prompt|workflow (got '{other}')")))),
     }
 }
 
@@ -328,19 +312,14 @@ async fn validate_workflow(
     ws_id: &str,
     workflow_id: Option<&str>,
 ) -> Result<(), ApiError> {
-    let wf_id = workflow_id.ok_or_else(|| {
-        ApiError(Error::Invalid(
-            "kind=workflow requires a workflow_id".into(),
-        ))
-    })?;
+    let wf_id = workflow_id
+        .ok_or_else(|| ApiError(Error::Invalid("kind=workflow requires a workflow_id".into())))?;
     let wf = otto_state::WorkflowsRepo::new(ctx.pool.clone())
         .get(&wf_id.to_string())
         .await
         .map_err(|_| ApiError(Error::Invalid("workflow_id not found".into())))?;
     if wf.workspace_id != ws_id {
-        return Err(ApiError(Error::Invalid(
-            "workflow belongs to a different workspace".into(),
-        )));
+        return Err(ApiError(Error::Invalid("workflow belongs to a different workspace".into())));
     }
     Ok(())
 }
@@ -354,12 +333,7 @@ async fn list(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<ScheduledTask>>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(
-        ctx.scheduled_tasks
-            .list_by_workspace(&ws_id)
-            .await
-            .map_err(ApiError)?,
-    ))
+    Ok(Json(ctx.scheduled_tasks.list_by_workspace(&ws_id).await.map_err(ApiError)?))
 }
 
 /// `POST /workspaces/{id}/scheduled-tasks`
@@ -373,7 +347,8 @@ async fn create(
     if req.name.trim().is_empty() {
         return Err(ApiError(Error::Invalid("name is required".into())));
     }
-    let provider = resolve_task_provider(&ctx, &ws_id, req.provider.as_deref().unwrap_or("")).await;
+    let provider =
+        resolve_task_provider(&ctx, &ws_id, req.provider.as_deref().unwrap_or("")).await;
     check_provider(&provider)?;
     let kind = req.kind.unwrap_or_else(|| "agent_prompt".into());
     check_kind(&kind)?;
@@ -383,9 +358,7 @@ async fn create(
     check_retries(max_retries)?;
     let timezone = req.timezone.unwrap_or_else(|| "UTC".into());
     check_timezone(&timezone)?;
-    let schedule = req
-        .schedule
-        .unwrap_or_else(|| json!({"cadence":"interval","every_min":60}));
+    let schedule = req.schedule.unwrap_or_else(|| json!({"cadence":"interval","every_min":60}));
     validate_schedule(&schedule)?;
     let workflow_id = req.workflow_id.filter(|s| !s.is_empty());
     if kind == "workflow" {
@@ -421,18 +394,9 @@ async fn create(
     // Set next_run_at for immediate display.
     let _ = ctx
         .scheduled_tasks
-        .set_runtime(
-            &task.id,
-            None,
-            task.last_status.as_deref().unwrap_or(""),
-            next.as_deref(),
-        )
+        .set_runtime(&task.id, None, task.last_status.as_deref().unwrap_or(""), next.as_deref())
         .await;
-    ctx.scheduled_tasks
-        .get(&task.id)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    ctx.scheduled_tasks.get(&task.id).await.map(Json).map_err(ApiError)
 }
 
 /// `GET /scheduled-tasks/{id}`
@@ -509,23 +473,13 @@ async fn update(
     // If the cadence/timezone changed, refresh next_run_at for display.
     if recompute_next.is_some() || tz_changed {
         let tz = cadence::task_tz(&updated.timezone);
-        let next =
-            cadence::next_run(&updated.schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
+        let next = cadence::next_run(&updated.schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
         let _ = ctx
             .scheduled_tasks
-            .set_runtime(
-                &id,
-                None,
-                updated.last_status.as_deref().unwrap_or(""),
-                next.as_deref(),
-            )
+            .set_runtime(&id, None, updated.last_status.as_deref().unwrap_or(""), next.as_deref())
             .await;
     }
-    ctx.scheduled_tasks
-        .get(&id)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    ctx.scheduled_tasks.get(&id).await.map(Json).map_err(ApiError)
 }
 
 /// `DELETE /scheduled-tasks/{id}`
@@ -548,14 +502,8 @@ async fn run_now(
 ) -> ApiResult<Json<ScheduledTaskRun>> {
     let task = ctx.scheduled_tasks.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Editor).await?;
-    let run_id = scheduled_tasks_engine::run_task(&ctx, &task, "manual")
-        .await
-        .map_err(ApiError)?;
-    ctx.scheduled_tasks
-        .get_run(&run_id)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    let run_id = scheduled_tasks_engine::run_task(&ctx, &task, "manual").await.map_err(ApiError)?;
+    ctx.scheduled_tasks.get_run(&run_id).await.map(Json).map_err(ApiError)
 }
 
 /// `GET /scheduled-tasks/{id}/runs`
@@ -566,12 +514,7 @@ async fn list_runs(
 ) -> ApiResult<Json<Vec<ScheduledTaskRun>>> {
     let task = ctx.scheduled_tasks.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &task.workspace_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(
-        ctx.scheduled_tasks
-            .list_runs(&id, 100)
-            .await
-            .map_err(ApiError)?,
-    ))
+    Ok(Json(ctx.scheduled_tasks.list_runs(&id, 100).await.map_err(ApiError)?))
 }
 
 /// `GET /scheduled-tasks/runs/{run_id}/report` — the stored Markdown report.
@@ -580,11 +523,7 @@ async fn report(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<axum::response::Response> {
-    let run = ctx
-        .scheduled_tasks
-        .get_run(&run_id)
-        .await
-        .map_err(ApiError)?;
+    let run = ctx.scheduled_tasks.get_run(&run_id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Viewer).await?;
     let rel = run
         .report_rel
@@ -597,18 +536,12 @@ async fn report(
     let canon = std::fs::canonicalize(&candidate)
         .map_err(|_| ApiError(Error::NotFound("report file missing".into())))?;
     if !canon.starts_with(&canon_root) {
-        return Err(ApiError(Error::Forbidden(
-            "report path escapes the reports root".into(),
-        )));
+        return Err(ApiError(Error::Forbidden("report path escapes the reports root".into())));
     }
     let body = tokio::fs::read_to_string(&canon)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("read report: {e}"))))?;
-    Ok((
-        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-        body,
-    )
-        .into_response())
+    Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], body).into_response())
 }
 
 /// `GET /scheduled-tasks/presets` — built-in templates the UI offers.
@@ -706,10 +639,7 @@ mod tests {
     #[test]
     fn provider_check_allows_known_and_custom_slugs() {
         for p in ["claude", "codex", "agy", "shell", "", "my-custom-agent"] {
-            assert!(
-                check_provider(p).is_ok(),
-                "provider '{p}' should be accepted"
-            );
+            assert!(check_provider(p).is_ok(), "provider '{p}' should be accepted");
         }
         assert!(check_provider("bad provider!").is_err());
     }

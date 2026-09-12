@@ -41,11 +41,8 @@ async fn load_config(ctx: &ServerCtx) -> UsageConfig {
 }
 
 async fn save_config(ctx: &ServerCtx, cfg: &UsageConfig) -> Result<(), ApiError> {
-    let value = serde_json::to_value(cfg).map_err(|e| {
-        ApiError(otto_core::Error::Internal(format!(
-            "serialize usage config: {e}"
-        )))
-    })?;
+    let value = serde_json::to_value(cfg)
+        .map_err(|e| ApiError(otto_core::Error::Internal(format!("serialize usage config: {e}"))))?;
     SettingsRepo::new(ctx.pool.clone())
         .put(SETTINGS_KEY, &value)
         .await
@@ -284,10 +281,7 @@ pub(crate) async fn load_budgets_pub(ctx: &ServerCtx) -> UsageBudgetConfig {
 
 /// Crate-public accessor for the budget status computation; used by the budget
 /// sampler in `monitor.rs`.
-pub(crate) async fn budget_status_pub(
-    ctx: &ServerCtx,
-    cfg: UsageBudgetConfig,
-) -> otto_core::api::UsageBudgetStatus {
+pub(crate) async fn budget_status_pub(ctx: &ServerCtx, cfg: UsageBudgetConfig) -> otto_core::api::UsageBudgetStatus {
     budget_status(ctx, cfg).await
 }
 
@@ -328,11 +322,8 @@ pub async fn put_budgets(
     } else {
         cfg.window_days.clamp(1, 3650)
     };
-    let value = serde_json::to_value(&cfg).map_err(|e| {
-        ApiError(otto_core::Error::Internal(format!(
-            "serialize budgets: {e}"
-        )))
-    })?;
+    let value = serde_json::to_value(&cfg)
+        .map_err(|e| ApiError(otto_core::Error::Internal(format!("serialize budgets: {e}"))))?;
     SettingsRepo::new(ctx.pool.clone())
         .put(BUDGETS_KEY, &value)
         .await
@@ -372,19 +363,8 @@ async fn budget_status(ctx: &ServerCtx, mut cfg: UsageBudgetConfig) -> UsageBudg
             continue;
         }
         let spent = by_ws.get(&b.workspace_id).copied().unwrap_or(0.0);
-        let label = ctx
-            .workspaces
-            .get(&b.workspace_id)
-            .await
-            .ok()
-            .map(|w| w.name);
-        rows.push(make_row(
-            "workspace",
-            &b.workspace_id,
-            label,
-            b.monthly_usd,
-            spent,
-        ));
+        let label = ctx.workspaces.get(&b.workspace_id).await.ok().map(|w| w.name);
+        rows.push(make_row("workspace", &b.workspace_id, label, b.monthly_usd, spent));
     }
     for b in &cfg.providers {
         if b.monthly_usd <= 0.0 {
@@ -407,13 +387,7 @@ async fn budget_status(ctx: &ServerCtx, mut cfg: UsageBudgetConfig) -> UsageBudg
     }
 }
 
-fn make_row(
-    scope: &str,
-    key: &str,
-    label: Option<String>,
-    limit: f64,
-    spent: f64,
-) -> BudgetStatusRow {
+fn make_row(scope: &str, key: &str, label: Option<String>, limit: f64, spent: f64) -> BudgetStatusRow {
     let used = if limit > 0.0 { spent / limit } else { 0.0 };
     BudgetStatusRow {
         scope: scope.to_string(),
@@ -667,9 +641,7 @@ pub fn trail_to_usage_with_work(
     let detail = event.detail.as_ref();
     let usage = detail.and_then(|d| d.get("usage"));
     let num = |obj: Option<&Value>, key: &str| -> u64 {
-        obj.and_then(|o| o.get(key))
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
+        obj.and_then(|o| o.get(key)).and_then(Value::as_u64).unwrap_or(0)
     };
     let input = num(usage, "input_tokens");
     let output = num(usage, "output_tokens");

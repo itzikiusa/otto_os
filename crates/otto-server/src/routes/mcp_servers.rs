@@ -36,25 +36,10 @@ fn repo(ctx: &ServerCtx) -> McpServersRepo {
     McpServersRepo::new(ctx.pool.clone())
 }
 
-async fn resource_check(
-    ctx: &ServerCtx,
-    user: &otto_core::domain::User,
-    id: &Id,
-    operation: &str,
-) -> ApiResult<()> {
+async fn resource_check(ctx: &ServerCtx, user: &otto_core::domain::User, id: &Id, operation: &str) -> ApiResult<()> {
     let server = ctx.mcp.registry().get(id).await?;
-    if !ctx
-        .mcp
-        .resource_allowed(&server, user, "discover", None)
-        .await?
-    {
-        return Err(Error::NotFound("MCP server".into()).into());
-    }
-    if !ctx
-        .mcp
-        .resource_allowed(&server, user, operation, None)
-        .await?
-    {
+    if !ctx.mcp.resource_allowed(&server,user,"discover",None).await? { return Err(Error::NotFound("MCP server".into()).into()); }
+    if !ctx.mcp.resource_allowed(&server,user,operation,None).await? {
         return Err(Error::Forbidden("MCP resource operation denied".into()).into());
     }
     Ok(())
@@ -131,21 +116,9 @@ pub async fn list(
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
     let mut visible = Vec::new();
     for mut server in repo(&ctx).list_for_ws(&ws_id).await? {
-        if resource_check(&ctx, &user, &server.id, "discover")
-            .await
-            .is_err()
-        {
-            continue;
-        }
-        if resource_check(&ctx, &user, &server.id, "configure")
-            .await
-            .is_err()
-        {
-            server.command.clear();
-            server.args.clear();
-            server.env.clear();
-            server.secret_ref = None;
-            server.secret_env_keys.clear();
+        if resource_check(&ctx,&user,&server.id,"discover").await.is_err() { continue; }
+        if resource_check(&ctx,&user,&server.id,"configure").await.is_err() {
+            server.command.clear(); server.args.clear(); server.env.clear(); server.secret_ref=None; server.secret_env_keys.clear();
         }
         visible.push(server);
     }
@@ -161,12 +134,7 @@ pub async fn create(
     Json(req): Json<CreateMcpServerReq>,
 ) -> ApiResult<Json<McpServer>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    if !user.is_root {
-        return Err(Error::Forbidden(
-            "only the owner can attach MCP credentials or commands".into(),
-        )
-        .into());
-    }
+    if !user.is_root { return Err(Error::Forbidden("only the owner can attach MCP credentials or commands".into()).into()); }
     let name = req.name.trim();
     if name.is_empty() {
         return Err(Error::Invalid("mcp server name must not be empty".into()).into());
@@ -195,24 +163,10 @@ pub async fn create(
     if !req.secret_env.is_empty() {
         server = write_secret_env(ctx.secrets.as_ref(), &repo, &server.id, &req.secret_env).await?;
     }
-    let operations: Vec<String> =
-        otto_core::access::operations_for(otto_core::access::ResourceKind::McpServer)
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-    otto_state::ResourceAccessRepo::new(ctx.pool.clone())
-        .initialize_owner_policy(
-            otto_core::access::ResourceKind::McpServer,
-            &server.id,
-            &user.id,
-            &operations,
-            &[],
-            &otto_core::access::AccessActor {
-                real_user_id: user.id.clone(),
-                effective_user_id: None,
-            },
-        )
-        .await?;
+    let operations: Vec<String> = otto_core::access::operations_for(otto_core::access::ResourceKind::McpServer).iter().map(|s| s.to_string()).collect();
+    otto_state::ResourceAccessRepo::new(ctx.pool.clone()).initialize_owner_policy(
+        otto_core::access::ResourceKind::McpServer,&server.id,&user.id,&operations,&[],
+        &otto_core::access::AccessActor {real_user_id:user.id.clone(),effective_user_id:None}).await?;
     Ok(Json(server))
 }
 
@@ -225,18 +179,13 @@ pub async fn update(
 ) -> ApiResult<Json<McpServer>> {
     let repo = repo(&ctx);
     let existing = repo.get(&id).await?;
-    resource_check(&ctx, &user, &id, "configure").await?;
+    resource_check(&ctx,&user,&id,"configure").await?;
     require_ws_role(&ctx, &user, &existing.workspace_id, WorkspaceRole::Editor).await?;
-    if !user.is_root
-        && (req.command.as_ref().is_some_and(|v| v != &existing.command)
-            || req.args.as_ref().is_some_and(|v| v != &existing.args)
-            || req.env.as_ref().is_some_and(|v| v != &existing.env)
-            || req.secret_env.is_some())
-    {
-        return Err(Error::Forbidden(
-            "only the owner can change MCP credentials or commands".into(),
-        )
-        .into());
+    if !user.is_root && (req.command.as_ref().is_some_and(|v| v != &existing.command)
+        || req.args.as_ref().is_some_and(|v| v != &existing.args)
+        || req.env.as_ref().is_some_and(|v| v != &existing.env)
+        || req.secret_env.is_some()) {
+        return Err(Error::Forbidden("only the owner can change MCP credentials or commands".into()).into());
     }
     let name = match req.name.as_deref().map(str::trim) {
         Some("") => return Err(Error::Invalid("mcp server name must not be empty".into()).into()),
@@ -284,7 +233,7 @@ pub async fn delete(
 ) -> ApiResult<StatusCode> {
     let repo = repo(&ctx);
     let existing = repo.get(&id).await?;
-    resource_check(&ctx, &user, &id, "configure").await?;
+    resource_check(&ctx,&user,&id,"configure").await?;
     require_ws_role(&ctx, &user, &existing.workspace_id, WorkspaceRole::Editor).await?;
     repo.delete(&id).await?;
     // Best-effort: drop the server's Keychain blob with it.
@@ -418,23 +367,19 @@ mod tests {
         let ws = otto_core::new_id();
         let user = otto_core::new_id();
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, '', ?)",
-        )
-        .bind(&user)
-        .bind(format!("u-{user}"))
-        .bind(&now)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'ws', '/tmp', ?)",
-        )
-        .bind(&ws)
-        .bind(&now)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, '', ?)")
+            .bind(&user)
+            .bind(format!("u-{user}"))
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'ws', '/tmp', ?)")
+            .bind(&ws)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
         (pool.clone(), McpServersRepo::new(pool), ws, user)
     }
 
@@ -466,10 +411,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(s.secret_env_keys, vec!["API_TOKEN".to_string()]);
-        assert_eq!(
-            s.secret_ref.as_deref(),
-            Some(secret_ref(&server.id).as_str())
-        );
+        assert_eq!(s.secret_ref.as_deref(), Some(secret_ref(&server.id).as_str()));
         assert_eq!(s.env.get("REGION").map(String::as_str), Some("eu"));
         let blob = store.get(&secret_ref(&server.id)).unwrap().unwrap();
         assert!(blob.contains("tk-9"));
@@ -484,11 +426,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(s.secret_env_keys, vec!["API_TOKEN".to_string()]);
-        assert!(store
-            .get(&secret_ref(&server.id))
-            .unwrap()
-            .unwrap()
-            .contains("tk-9"));
+        assert!(store.get(&secret_ref(&server.id)).unwrap().unwrap().contains("tk-9"));
 
         // Clearing the set deletes the Keychain entry and the row's ref.
         let s = write_secret_env(&store, &repo, &server.id, &BTreeMap::new())
@@ -525,28 +463,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            repo.list_enabled(&ws).await.unwrap().is_empty(),
-            "governed servers never render raw credentials"
-        );
+        assert!(repo.list_enabled(&ws).await.unwrap().is_empty(), "governed servers never render raw credentials");
         let access = otto_state::ResourceAccessRepo::new(pool);
-        let old = access
-            .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)
-            .await
-            .unwrap();
-        let mut legacy = old.clone();
-        legacy.mode = otto_core::access::AccessMode::Legacy;
-        access
-            .put_policy(
-                &legacy,
-                old.revision,
-                &otto_core::access::AccessActor {
-                    real_user_id: user,
-                    effective_user_id: None,
-                },
-            )
-            .await
-            .unwrap();
+        let old=access.get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await.unwrap();
+        let mut legacy=old.clone(); legacy.mode=otto_core::access::AccessMode::Legacy;
+        access.put_policy(&legacy,old.revision,&otto_core::access::AccessActor {real_user_id:user,effective_user_id:None}).await.unwrap();
         // The legacy row (list_enabled) carries no secret value…
         let rows = repo.list_enabled(&ws).await.unwrap();
         assert_eq!(rows.len(), 1);

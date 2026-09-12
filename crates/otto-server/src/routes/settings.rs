@@ -83,12 +83,7 @@ pub async fn put_all(
     ctx.audit(NewAuditEntry {
         user_id: Some(user.id.clone()),
         action: "settings.change".into(),
-        target: Some(
-            keys.iter()
-                .map(|k| k.as_str())
-                .collect::<Vec<_>>()
-                .join(","),
-        ),
+        target: Some(keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(",")),
         detail: Some(serde_json::json!({ "keys": keys })),
         ip: None,
     })
