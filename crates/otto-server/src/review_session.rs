@@ -418,7 +418,14 @@ pub async fn run_agent_session(
 
     // Inject the prompt once the TUI has drawn + settled, then confirm it
     // dispatched (re-sending Enter once if the first submit was dropped).
-    submit_prompt(manager, &sid, &prompt).await;
+    if !submit_prompt(manager, &sid, &prompt).await {
+        // R5.3: a TUI that drew nothing in TUI_STARTUP_WAIT never received the
+        // prompt — fail this attempt so `run_agent_session_with_recovery` kills
+        // the session and retries, instead of watching a promptless session
+        // until the 15-min stuck trip.
+        tracing::warn!("review_session: agent TUI never drew in session {sid} — failing attempt");
+        return RunOutcome::failed(Some(sid), FailReason::Exited);
+    }
 
     // Watch via the shared runner (out-file / claude transcript; exit / stuck /
     // timeout). It persists the waiting↔running transition; we never kill the
@@ -671,22 +678,47 @@ pub async fn claude_prompt_landed(
     }
 }
 
-/// One poll of [`wait_for_tui`]: `Some(true)` ready to paste into, `Some(false)`
-/// give up, `None` keep polling. On the deadline a TUI that has drawn NOTHING
-/// is NOT ready — pasting into it loses the prompt, and the caller then waits
-/// out the agent's entire grace window for a turn that was never started. Pure
-/// so the deadline rule is testable without a PTY.
-fn tui_ready(scrollback_empty: bool, settled: bool, deadline_hit: bool) -> Option<bool> {
+/// One poll of the TUI wait: `Some(true)` ready to paste into, `Some(false)`
+/// give up, `None` keep polling. The two rules differ only on the DEADLINE: a
+/// `strict` caller treats a TUI that has drawn NOTHING as NOT ready — pasting
+/// into it loses the prompt, and the caller then waits out the agent's entire
+/// grace window for a turn that was never started — while the legacy rule
+/// pastes anyway. Pure so both deadline rules are testable without a PTY.
+fn tui_ready(
+    scrollback_empty: bool,
+    settled: bool,
+    deadline_hit: bool,
+    strict: bool,
+) -> Option<bool> {
     if !scrollback_empty && settled {
         return Some(true);
     }
     if deadline_hit {
-        return Some(!scrollback_empty);
+        return Some(!(strict && scrollback_empty));
     }
     None
 }
 
+/// Wait for the agent's TUI to draw and settle. LEGACY rule: on the deadline it
+/// reports ready even for a blank TUI, so its callers paste and fall back to
+/// their own watch loop — [`wait_for_tui_strict`] is for callers that have a
+/// fail-fast path for "the prompt never landed".
 pub async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
+    wait_for_tui_with(manager, sid, false).await
+}
+
+/// [`wait_for_tui`] under the R5.3 rule: a TUI that drew NOTHING by the
+/// deadline is not ready, and the caller must fail the attempt rather than
+/// watch a session the prompt never reached.
+pub async fn wait_for_tui_strict(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
+    wait_for_tui_with(manager, sid, true).await
+}
+
+async fn wait_for_tui_with(
+    manager: &Arc<SessionManager>,
+    sid: &otto_core::Id,
+    strict: bool,
+) -> bool {
     let deadline = Instant::now() + TUI_STARTUP_WAIT;
     loop {
         let Some(handle) = manager.live_handle(sid) else {
@@ -699,6 +731,7 @@ pub async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &otto_core::Id) ->
             handle.scrollback(1).is_empty(),
             handle.last_output_at().elapsed() >= TUI_SETTLE,
             Instant::now() >= deadline,
+            strict,
         );
         if let Some(ready) = verdict {
             if !ready {
@@ -820,7 +853,7 @@ pub async fn submit_prompt(
     sid: &otto_core::Id,
     prompt: &str,
 ) -> bool {
-    if !wait_for_tui(manager, sid).await {
+    if !wait_for_tui_strict(manager, sid).await {
         return false;
     }
     let probe = paste_probe(prompt);
@@ -1118,16 +1151,21 @@ mod tests {
     #[test]
     fn wait_for_tui_false_on_deadline_without_output() {
         // Drawn and settled ⇒ ready, whenever that happens.
-        assert_eq!(tui_ready(false, true, false), Some(true));
-        assert_eq!(tui_ready(false, true, true), Some(true));
+        assert_eq!(tui_ready(false, true, false, true), Some(true));
+        assert_eq!(tui_ready(false, true, true, true), Some(true));
         // Drawn but still repainting ⇒ keep polling until the deadline, then
         // accept it (there IS a TUI to paste into).
-        assert_eq!(tui_ready(false, false, false), None);
-        assert_eq!(tui_ready(false, false, true), Some(true));
+        assert_eq!(tui_ready(false, false, false, true), None);
+        assert_eq!(tui_ready(false, false, true, true), Some(true));
         // NOTHING drawn by the deadline ⇒ give up. Pasting into a blank TUI
         // loses the prompt and the reviewer then idles out its whole grace.
-        assert_eq!(tui_ready(true, false, true), Some(false));
-        assert_eq!(tui_ready(true, false, false), None);
+        assert_eq!(tui_ready(true, false, true, true), Some(false));
+        assert_eq!(tui_ready(true, false, false, true), None);
+        // The LEGACY rule (`wait_for_tui`, seven callers outside this batch)
+        // pastes into a blank TUI on the deadline rather than giving up — they
+        // have no fail-fast path and would otherwise never send their prompt.
+        assert_eq!(tui_ready(true, false, true, false), Some(true));
+        assert_eq!(tui_ready(true, false, false, false), None);
     }
 
     #[test]

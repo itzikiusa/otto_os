@@ -987,7 +987,7 @@ means the run is **queued** behind the parallel-run cap (the UI labels it
 
 ### Live progress over WebSocket (`workflow_run_updated`)
 The engine emits `Event::WorkflowRunUpdated` on the shared event bus at **every
-node transition** (start, finish/cached, skip, session spawn), on the
+node transition** (start, finish, skip, session spawn), on the
 **human-approval pause** and the **approve/reject decision**, on **cancel**,
 and at **run completion**:
 
@@ -1039,6 +1039,7 @@ final result). The vocabulary is fixed:
 | `🧩 sub-agents: 2 running · 1 done (Sweep diff chunk aa ✓)` | logged on every count change |
 | `⏸ agent idle — confirming completion (20s)` | the 20 s idle confirm — logged once, on entry |
 | `📄 handoff file written` | the step's `.md` appeared |
+| `📄 handoff written — waiting for the turn to end (up to 15m)` | the handoff is on disk and the agent is finishing its turn, with nothing pending — normal |
 | `✓ step complete (handoff + idle turn)` / `✓ step complete (codex task_complete + handoff)` | the oracle accepted the step |
 | `⚠ …` | a bounded fallback fired — see the table in §3 and §12 |
 | `↻ retry 2/5 in 23s (provider overloaded: 529)` | the step failed and is being retried |

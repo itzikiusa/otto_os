@@ -431,7 +431,7 @@ the user can watch them (and answer questions when `interactive`).
 ## Workflow run progress (A11)
 
 Workspace-scoped. Emitted by `crates/otto-server/src/workflow_engine.rs` at
-every node transition (start, finish/cached, error-skip, branch-skip — a not-taken
+every node transition (start, finish, error-skip, branch-skip — a not-taken
 edge), whenever a node spawns an openable session (so the run view can open it
 live), when a `human_approval` node pauses the run, and when the overall run
 reaches a terminal status. `routes/workflows.rs` additionally emits on the

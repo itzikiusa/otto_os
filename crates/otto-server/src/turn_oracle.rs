@@ -747,9 +747,14 @@ pub fn verdict(
     }
     clock.handoff_since = None;
 
-    // 6. Still working.
+    // 6. Still working. "Done" means the task actually COMPLETED — `subagents()`
+    // reports a failed/killed/stopped child as `Failed` and the run view's chip
+    // counts only the completed ones, so counting them here too would make the
+    // 🧩 line and the chip disagree.
     let running = claude.map(|c| c.pending.len()).unwrap_or(0);
-    let done = claude.map(|c| c.notified.len()).unwrap_or(0);
+    let done = claude
+        .map(|c| c.notified.values().filter(|s| s.as_str() == "completed").count())
+        .unwrap_or(0);
     if running > 0 || done > 0 {
         return Verdict::Working(Phase::Subagents { running, done });
     }
@@ -770,6 +775,14 @@ pub fn phase_line(p: &Phase, provider: &str) -> String {
         Phase::IdleConfirming { .. } => format!(
             "⏸ agent idle — confirming completion ({}s)",
             IDLE_CONFIRM.as_secs()
+        ),
+        // Nothing pending is the NORMAL tail of a step: the handoff is on disk
+        // and the model is still producing its closing text. Only a handoff
+        // written while tasks are still in flight is the protocol violation the
+        // ⚠ form (and the docs) describe.
+        Phase::HandoffWrittenWaiting { pending: 0 } => format!(
+            "📄 handoff written — waiting for the turn to end (up to {}m)",
+            HANDOFF_LINGER_CAP.as_secs() / 60
         ),
         Phase::HandoffWrittenWaiting { pending } => format!(
             "⚠ handoff written but {pending} tasks still pending — waiting (up to {}m)",
@@ -1442,6 +1455,11 @@ mod tests {
         assert_eq!(
             phase_line(&Phase::HandoffWrittenWaiting { pending: 3 }, "claude"),
             "⚠ handoff written but 3 tasks still pending — waiting (up to 15m)"
+        );
+        // …but a step simply finishing its turn is not a warning.
+        assert_eq!(
+            phase_line(&Phase::HandoffWrittenWaiting { pending: 0 }, "claude"),
+            "📄 handoff written — waiting for the turn to end (up to 15m)"
         );
         assert_eq!(
             phase_line(&Phase::HandoffMissingGrace { left: Duration::from_secs(5) }, "claude"),

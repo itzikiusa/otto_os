@@ -5006,6 +5006,15 @@ async fn stop_step_session(ctx: &ServerCtx, sid: &Id, run_id: &Id, logs: &mut Ve
     {
         return;
     }
+    // Already parked (by the idle sweep, or a step that outlived it): suspending
+    // again succeeds and writes a SECOND "Suspended" row into the user's session
+    // history. Same skip as `review_session::stop_review_sessions`.
+    if matches!(
+        s.status,
+        otto_core::domain::SessionStatus::Exited | otto_core::domain::SessionStatus::Reconnectable
+    ) {
+        return;
+    }
     let action = stop_action(ctx.manager.providers().supports_resume(&s.provider));
     let res = if action == "suspend" {
         ctx.manager.suspend(sid).await
@@ -5296,7 +5305,13 @@ impl PhaseFeed {
         }
         self.last_key = Some(key);
         // Refresh the sub-agent snapshot (one transcript read, ≤ once per 5s).
-        if self.last_probe.is_none_or(|t| t.elapsed() >= Duration::from_secs(5)) {
+        // A `Subagents` phase gets the read unconditionally: its identity only
+        // changes when a count changes (≤ 2 × pending ids over a step), and the
+        // snapshot it is annotated with — and the rows the run view shows —
+        // would otherwise describe the PREVIOUS count.
+        if matches!(p, Phase::Subagents { .. })
+            || self.last_probe.is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
+        {
             self.last_probe = Some(Instant::now());
             if let Some((subs, stamp)) = step_activity_probe(ctx, sid).await {
                 self.running_id = subs
@@ -5321,11 +5336,14 @@ impl PhaseFeed {
                 }
             }
         }
+        // `hold_reason` is for a step the engine is deliberately HOLDING while
+        // it looks idle. A handoff written with nothing pending is just the turn
+        // finishing, so it is not one of them.
         let holds = matches!(
             p,
             Phase::IdleConfirming { .. }
                 | Phase::HandoffMissingGrace { .. }
-                | Phase::HandoffWrittenWaiting { .. }
+                | Phase::HandoffWrittenWaiting { pending: 1.. }
                 | Phase::BashLinger { .. }
         );
         self.pending = match &p {
