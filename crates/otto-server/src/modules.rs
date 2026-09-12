@@ -2154,13 +2154,28 @@ async fn load_review_config_for_repo(ctx: &ServerCtx, repo_id: &Id) -> ReviewCon
 /// The review mode a `review_run` step runs with when neither the run
 /// input nor the node set one: the repo's effective stored config (or the
 /// global one when `repo_id` is `None`), tagged with its source for the
-/// step log. Seeded stub — WP2 implements the lookup.
-#[allow(dead_code)] // seed — called by WP1, implemented by WP2
+/// step log.
+#[allow(dead_code)] // until WP1's review_run arm calls this (workflows batch)
 pub(crate) async fn effective_review_mode(
-    _ctx: &ServerCtx,
-    _repo_id: Option<&Id>,
+    ctx: &ServerCtx,
+    repo_id: Option<&Id>,
 ) -> (otto_core::domain::ReviewMode, &'static str) {
-    (otto_core::domain::ReviewMode::FanOut, "default")
+    let cfg = match repo_id {
+        Some(id) => load_review_config_for_repo(ctx, id).await,
+        None => load_review_config(ctx).await,
+    };
+    mode_source(&cfg)
+}
+
+/// `(mode, source tag)` for a loaded review config: an explicitly stored mode
+/// keeps its tag so the step log can say WHERE the mode came from, which is the
+/// whole point of `ReviewConfig.mode` being an `Option`. Pure — the ctx-bound
+/// lookup above is the only I/O.
+pub(crate) fn mode_source(cfg: &ReviewConfig) -> (otto_core::domain::ReviewMode, &'static str) {
+    match cfg.mode {
+        Some(m) => (m, "stored config"),
+        None => (otto_core::domain::ReviewMode::default(), "default"),
+    }
 }
 
 /// Derive the model `Option<&str>` for `run_agent` from an agent's model field.
@@ -2199,6 +2214,212 @@ fn review_agent_timeout(diff_len: usize, override_secs: Option<u64>) -> Duration
     Duration::from_secs(secs)
 }
 
+/// Display name of the engine's synthesized CI-gate reviewer — the one lens
+/// that is ALLOWED to run commands. Must match `checks_review_agent` in
+/// `workflow_engine.rs`.
+pub(crate) const CHECKS_REVIEWER_NAME: &str = "Required checks";
+
+/// Gap between two reviewer spawns (R3). The JoinSet stays uncapped — the only
+/// thing being bounded is the cold-start storm: a dozen CLIs booting in the same
+/// second is what pushes a codex launch past two minutes.
+const REVIEW_SPAWN_STAGGER: Duration = Duration::from_millis(1_500);
+
+/// The order `run_review_core` does its per-agent work in: `(register step,
+/// spawn step)` per reviewer. EVERY cancel flag is registered before the first
+/// session is spawned, so a Stop landing during the stagger reaches reviewers
+/// that have not started yet. Pure, so the ordering guarantee is testable
+/// without a ctx.
+#[cfg(test)]
+fn spawn_plan(run_count: usize) -> Vec<(usize, usize)> {
+    (0..run_count).map(|i| (i, run_count + i)).collect()
+}
+
+/// Hard ceiling on an orchestrator reviewer's grace period. It runs every lens,
+/// so its budget scales with the lens count — but never past this.
+const ORCHESTRATOR_BUDGET_CAP: Duration = Duration::from_secs(18_000);
+
+/// One reviewer session to run: a single lens on a single provider (fan-out),
+/// or one provider's ORCHESTRATOR running every lens as its own sub-agents.
+pub(crate) struct AgentRun {
+    pub display_name: String,
+    /// The configured reviewer name — shared by every provider expansion of
+    /// the same `ReviewAgentCfg`, so siblings can find each other. EMPTY for an
+    /// orchestrator run, which covers every lens at once: `lens_covered_by`
+    /// must never retire it because one lens finished somewhere else.
+    pub lens: String,
+    pub provider: String,
+    pub model: String,
+    /// Fan-out: the composed lens prompt. Orchestrator: empty — the prompt
+    /// names per-lens output paths, which need the run's index, so it is
+    /// composed in the spawn loop from `lenses`.
+    pub prompt_lens: String,
+    /// Orchestrator only: every lens this run delegates to a sub-agent.
+    pub lenses: Vec<OrchestratorLens>,
+}
+
+impl AgentRun {
+    /// Lens slugs whose per-lens files the watch guard tracks for the row's
+    /// progress note. Empty for fan-out (one lens, no sub-agents).
+    fn lens_slugs(&self) -> Vec<String> {
+        self.lenses.iter().map(|l| l.slug.clone()).collect()
+    }
+}
+
+/// One lens an orchestrator reviewer hands to a sub-agent of its own.
+#[derive(Clone)]
+pub(crate) struct OrchestratorLens {
+    pub name: String,
+    /// Sanitised `[a-z0-9-]{1,40}` — a path component and the finding label.
+    pub slug: String,
+    /// The lens method, inlined. Empty when it could not be resolved (claude
+    /// can still load it by name from the `--add-dir` bundle).
+    pub skill_text: String,
+    /// The reviewer's own instructions from the config.
+    pub instructions: String,
+    /// False for the CI-gate lens, which must be allowed to RUN its commands.
+    pub read_only: bool,
+}
+
+/// The providers a reviewer runs on: its explicit list, else its single one.
+fn effective_providers(a: &ReviewAgentCfg) -> Vec<String> {
+    if a.providers.is_empty() {
+        vec![a.provider.clone()]
+    } else {
+        a.providers.clone()
+    }
+}
+
+/// The lens SKILL name for a reviewer: the explicit `skill` field, falling back
+/// to the slugified agent name ("Grill" -> grill, "Correctness review" ->
+/// correctness-review) since configs usually carry the lens in the name with
+/// `skill` empty.
+fn lens_of(a: &ReviewAgentCfg) -> String {
+    if a.skill.trim().is_empty() {
+        slug_skill_name(&a.name)
+    } else {
+        a.skill.clone()
+    }
+}
+
+/// An orchestrator reviewer's grace period: the fan-out budget stretched by
+/// half the lens count (its sub-agents run in parallel, so the lenses cost far
+/// less than serially), capped so a wedged one still fails.
+pub(crate) fn orchestrator_budget(base: Duration, n_lenses: usize) -> Duration {
+    let factor = n_lenses.div_ceil(2).max(1) as u32;
+    base.saturating_mul(factor).min(ORCHESTRATOR_BUDGET_CAP)
+}
+
+/// Expand a review config into the sessions to run.
+///
+/// `FanOut` (the default) is one session per lens × provider — byte-for-byte
+/// what reviews have always done. `Orchestrator` is one session per provider,
+/// each running EVERY lens as its own sub-agent and merging the per-lens files
+/// (§1.3): N sessions instead of N × lenses, which is what makes a 6-lens
+/// 2-provider review survivable on file descriptors and CPU.
+///
+/// Takes the library (not a ctx) so the expansion is testable on its own.
+pub(crate) fn expand_agent_runs(
+    cfg: &ReviewConfig,
+    mode: otto_core::domain::ReviewMode,
+    library: &otto_context::Library,
+) -> Vec<AgentRun> {
+    if mode == otto_core::domain::ReviewMode::Orchestrator {
+        return orchestrator_runs(cfg, library);
+    }
+    cfg.agents
+        .iter()
+        .flat_map(|a| {
+            let providers = effective_providers(a);
+            let multi = providers.len() > 1;
+            // Inline the agent's skill (body + references) ahead of its lens
+            // prompt so EVERY provider runs the full method, not just claude (which
+            // also gets it registered out-of-tree via `--add-dir`; codex/agy do
+            // not register `--add-dir` skills and would otherwise have to scavenge
+            // the bundle). Resolved once per agent, reused per provider.
+            let lens = lens_of(a);
+            let skill_text = resolve_skill_inline(library, &lens);
+            providers.into_iter().map(move |p| {
+                let display_name = if multi {
+                    format!("{} \u{00b7} {}", a.name, p)
+                } else {
+                    a.name.clone()
+                };
+                let prompt_lens = compose_review_lens_prompt(&lens, &skill_text, &a.prompt);
+                AgentRun {
+                    display_name,
+                    lens: a.name.clone(),
+                    provider: p,
+                    model: a.model.clone(),
+                    prompt_lens,
+                    lenses: Vec::new(),
+                }
+            })
+        })
+        .collect()
+}
+
+/// The orchestrator expansion: one run per DISTINCT provider (in first-seen
+/// order), each carrying every lens.
+fn orchestrator_runs(cfg: &ReviewConfig, library: &otto_context::Library) -> Vec<AgentRun> {
+    let lenses: Vec<OrchestratorLens> = cfg
+        .agents
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let lens = lens_of(a);
+            let slug = {
+                let s = crate::review_session::sanitize_lens_slug(&lens);
+                if s.is_empty() {
+                    format!("lens{i}")
+                } else {
+                    s
+                }
+            };
+            OrchestratorLens {
+                name: a.name.clone(),
+                slug,
+                skill_text: resolve_skill_inline(library, &lens),
+                instructions: a.prompt.clone(),
+                // The CI gate is the one lens told to RUN things; every other
+                // lens keeps the read-only contract.
+                read_only: a.name != CHECKS_REVIEWER_NAME,
+            }
+        })
+        .collect();
+
+    let mut providers: Vec<String> = Vec::new();
+    for a in &cfg.agents {
+        for p in effective_providers(a) {
+            if !providers.contains(&p) {
+                providers.push(p);
+            }
+        }
+    }
+
+    let n = lenses.len();
+    providers
+        .into_iter()
+        .map(|p| {
+            // The first configured model that actually applies to this provider
+            // (a per-lens model on another provider must not leak across).
+            let model = cfg
+                .agents
+                .iter()
+                .find(|a| !a.model.trim().is_empty() && effective_providers(a).contains(&p))
+                .map(|a| a.model.clone())
+                .unwrap_or_default();
+            AgentRun {
+                display_name: format!("{p} \u{00b7} orchestrator ({n} lenses)"),
+                lens: String::new(),
+                provider: p,
+                model,
+                prompt_lens: String::new(),
+                lenses: lenses.clone(),
+            }
+        })
+        .collect()
+}
+
 /// Background wrapper: runs `run_review_core` for a PR and sets the final
 /// status on the review row.
 #[allow(clippy::too_many_arguments)]
@@ -2225,6 +2446,9 @@ async fn run_review(
     pr_number: u64,
     branches: Option<ReviewBranches>,
     cfg_override: Option<ReviewConfig>,
+    // Per-run/per-node execution mode (`review_run`). `None` ⇒ the stored
+    // config decides, then `FanOut`.
+    mode_override: Option<otto_core::domain::ReviewMode>,
 ) {
     let result = run_review_core(
         &ctx,
@@ -2238,6 +2462,7 @@ async fn run_review(
         pr_number,
         branches.as_ref(),
         cfg_override,
+        mode_override,
     )
     .await;
     match result {
@@ -2259,6 +2484,13 @@ async fn run_review(
         }
         Err(e) => {
             tracing::warn!(review = %review_id, "review error: {e}");
+            // The core only reaches its own teardown on the summarize path; an
+            // error anywhere else would otherwise leave the reviewers' PTYs live.
+            if let Ok(review) = ctx.reviews_store.get_review(&review_id).await {
+                let ids: Vec<String> =
+                    review.agents.iter().filter_map(|a| a.session_id.clone()).collect();
+                crate::review_session::stop_review_sessions(&ctx.manager, &ids).await;
+            }
             let msg = e.to_string();
             let _ = ctx
                 .reviews_store
@@ -2291,6 +2523,7 @@ async fn run_review_core(
     pr_number: u64,
     branches: Option<&ReviewBranches>,
     cfg_override: Option<ReviewConfig>,
+    mode_override: Option<otto_core::domain::ReviewMode>,
 ) -> Result<()> {
     let jira_ctx = jira_context.unwrap_or_default();
     // Build the optional free-text guidance block (prepended to every agent
@@ -2331,64 +2564,13 @@ async fn run_review_core(
         Some(c) => c,
         None => load_review_config_for_repo(ctx, repo_id).await,
     };
+    // Execution mode: the caller's override (the run input, then the
+    // `review_run` node) wins over the stored config, which wins over fan-out.
+    let mode = mode_override.or(cfg.mode).unwrap_or_default();
+    tracing::info!(review = %review_id, mode = mode.as_str(), "review mode");
 
-    // 2. Expand agent×provider pairs.
-    fn effective_providers(a: &ReviewAgentCfg) -> Vec<String> {
-        if a.providers.is_empty() {
-            vec![a.provider.clone()]
-        } else {
-            a.providers.clone()
-        }
-    }
-
-    struct AgentRun {
-        display_name: String,
-        /// The configured reviewer name — shared by every provider expansion of
-        /// the same `ReviewAgentCfg`, so siblings can find each other.
-        lens: String,
-        provider: String,
-        model: String,
-        prompt_lens: String,
-    }
-
-    let agent_runs: Vec<AgentRun> = cfg
-        .agents
-        .iter()
-        .flat_map(|a| {
-            let providers = effective_providers(a);
-            let multi = providers.len() > 1;
-            // Inline the agent's skill (body + references) ahead of its lens
-            // prompt so EVERY provider runs the full method, not just claude (which
-            // also gets it registered out-of-tree via `--add-dir`; codex/agy do
-            // not register `--add-dir` skills and would otherwise have to scavenge
-            // the bundle). Resolve by the explicit `skill` field, falling back to
-            // the slugified agent name ("Grill" -> grill, "Correctness review" ->
-            // correctness-review) since configs usually carry the lens in the name
-            // with `skill` empty. Resolved once per agent, reused per provider.
-            let lens = if a.skill.trim().is_empty() {
-                slug_skill_name(&a.name)
-            } else {
-                a.skill.clone()
-            };
-            let skill_text = resolve_skill_inline(&ctx.context_library, &lens);
-            providers.into_iter().map(move |p| {
-                let display_name = if multi {
-                    format!("{} \u{00b7} {}", a.name, p)
-                } else {
-                    a.name.clone()
-                };
-                let prompt_lens = compose_review_lens_prompt(&lens, &skill_text, &a.prompt);
-                AgentRun {
-                    display_name,
-                    lens: a.name.clone(),
-                    provider: p,
-                    model: a.model.clone(),
-                    prompt_lens,
-                }
-            })
-        })
-        .collect();
-
+    // 2. Expand agent×provider pairs (fan-out) or one orchestrator per provider.
+    let agent_runs = expand_agent_runs(&cfg, mode, &ctx.context_library);
     let run_count = agent_runs.len();
 
     // Seed agent state rows.
@@ -2432,6 +2614,14 @@ async fn run_review_core(
         .and_then(|us| us.into_iter().find(|u| u.is_root))
         .ok_or_else(|| Error::Internal("no root user to run review agents".into()))?;
     let timeout = review_agent_timeout(diff_text.len(), cfg.timeout_secs);
+    // An orchestrator run carries every lens, so it needs more than one lens'
+    // budget — bounded, and still only a budget (`watch_for_result`'s deadline
+    // fires on an IDLE agent, never on a working one).
+    let timeout = if mode == otto_core::domain::ReviewMode::Orchestrator {
+        orchestrator_budget(timeout, cfg.agents.len())
+    } else {
+        timeout
+    };
 
     // Pre-trust the repo folder for every provider we'll run (reviewers + the
     // claude summarizer) so no agent stalls on the interactive "trust this
@@ -2515,21 +2705,35 @@ async fn run_review_core(
         stage_review_skills(&ctx.context_library, &names)
     };
 
+    // Each reviewer watches its OWN cancel flag (the per-agent Stop button).
+    // Whole-review cancel trips every per-agent flag too, so review-level
+    // semantics are unchanged; pre-tripping here closes the race where cancel
+    // lands between set_agents and this registration. EVERY flag is registered
+    // before the first spawn (R3): the spawns are staggered below, and a Stop
+    // during the stagger must still reach the reviewers not started yet.
+    let agent_cancels: Vec<Arc<std::sync::atomic::AtomicBool>> = (0..run_count)
+        .map(|i| {
+            let flag = register_review_agent_cancel(&ctx.review_agent_cancels, review_id, i);
+            if cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+            {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            flag
+        })
+        .collect();
+
     let mut set = tokio::task::JoinSet::new();
     for (i, run) in agent_runs.into_iter().enumerate() {
-        let manager = Arc::clone(&ctx.manager);
-        // Each reviewer watches its OWN cancel flag (the per-agent Stop button).
-        // Whole-review cancel trips every per-agent flag too, so review-level
-        // semantics are unchanged; pre-trip here closes the race where cancel
-        // lands between set_agents and this registration.
-        let agent_cancel =
-            register_review_agent_cancel(&ctx.review_agent_cancels, review_id, i);
-        if cancel_flag
-            .as_ref()
-            .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
-        {
-            agent_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Space the cold starts out (R3) — no cap, no semaphore: the JoinSet
+        // still runs every reviewer at once, they just don't all boot in the
+        // same second.
+        if i > 0 {
+            tokio::time::sleep(REVIEW_SPAWN_STAGGER).await;
         }
+        let manager = Arc::clone(&ctx.manager);
+        let agent_cancel = agent_cancels[i].clone();
         let reviews = ctx.reviews_store.clone();
         let states = Arc::clone(&states);
         let ws = workspace.clone();
@@ -2537,6 +2741,19 @@ async fn run_review_core(
         let cwd = repo_path.to_string();
         let review_id_s = review_id.to_string();
         let review_skills_dir = review_skills_dir.clone();
+        // An orchestrator run composes its lens block HERE: it names one output
+        // path per lens, and those are keyed on this run's index.
+        let prompt_lens = if run.lenses.is_empty() {
+            run.prompt_lens.clone()
+        } else {
+            compose_orchestrator_prompt(
+                &run.lenses,
+                &run.provider,
+                |slug| crate::review_session::lens_findings_path(&review_id_s, i, slug),
+                &crate::review_session::findings_path(&review_id_s, i),
+            )
+        };
+        let lens_slugs = run.lens_slugs();
         let prompt = format!(
             "CODE REVIEW — READ-ONLY, BUT VERIFY EVERY FINDING AGAINST THE REAL CODE.\n\
              You MUST NOT edit, create, write, rename, or delete any file, and MUST NOT run any \
@@ -2585,7 +2802,7 @@ async fn run_review_core(
              (no prose, no markdown fence, NO file edits). Every finding must be one you verified \
              against the actual code. Output [] ONLY if you swept every changed file and found no \
              real, verified defect — not as a shortcut when the diff is large.",
-            changed_files, changed_lines, run.prompt_lens, user_ctx, jira_ctx, diff_path_str
+            changed_files, changed_lines, prompt_lens, user_ctx, jira_ctx, diff_path_str
         );
         // Persist the prompt so a per-agent Retry can re-run exactly this agent:
         // temp file for the in-flight injection path, DB row (0100) so retry
@@ -2612,6 +2829,7 @@ async fn run_review_core(
                 max_attempts,
                 Some(&agent_cancel),
                 review_skills_dir.as_deref(),
+                &lens_slugs,
             )
             .await;
             (i, res)
@@ -2648,7 +2866,7 @@ async fn run_review_core(
     // 4–7. Summarize the per-agent findings and persist comments + workflow
     // findings. Shared with `retry_summarizer` (which re-runs ONLY this stage
     // from the stored per-agent findings, without re-running the reviewers).
-    summarize_and_persist(
+    let result = summarize_and_persist(
         ctx,
         review_id,
         repo_path,
@@ -2660,7 +2878,42 @@ async fn run_review_core(
         &agent_findings,
         &format!("{user_ctx}{jira_ctx}"),
     )
-    .await
+    .await;
+
+    // 8. The review is over: the reviewers' sessions are autonomous, nobody
+    //    types into them again, and each holds a PTY plus the CLI's whole fd
+    //    footprint. Suspend/kill them (and drop the per-lens scratch files)
+    //    whether the summarizer succeeded or not.
+    let session_ids: Vec<String> = {
+        let g = states.lock().await;
+        g.iter().filter_map(|s| s.session_id.clone()).collect()
+    };
+    crate::review_session::stop_review_sessions(&ctx.manager, &session_ids).await;
+    let rid = review_id.to_string();
+    for i in 0..run_count {
+        crate::review_session::remove_lens_findings_files(&rid, i);
+    }
+    result
+}
+
+/// Prefix each finding's body with its lens when it carries one. An
+/// orchestrator batch is one provider's SIX lenses merged into a single array,
+/// so without the label the summarizer cannot tell which method produced what
+/// (fan-out batches are one lens each and are unaffected — their findings have
+/// no `lens`).
+fn label_findings_with_lens(
+    findings: &[otto_core::domain::ReviewFinding],
+) -> Vec<otto_core::domain::ReviewFinding> {
+    findings
+        .iter()
+        .map(|f| match f.lens.as_deref() {
+            Some(lens) if !lens.is_empty() => otto_core::domain::ReviewFinding {
+                body: format!("[lens: {lens}] {}", f.body),
+                ..f.clone()
+            },
+            _ => f.clone(),
+        })
+        .collect()
 }
 
 /// A draft review comment as emitted by the summarizer.
@@ -2766,7 +3019,8 @@ async fn summarize_and_persist(
             format!(
                 "Batch {}:\n{}",
                 i + 1,
-                serde_json::to_string(f).unwrap_or_else(|_| "[]".to_string())
+                serde_json::to_string(&label_findings_with_lens(f))
+                    .unwrap_or_else(|_| "[]".to_string())
             )
         })
         .collect::<Vec<_>>()
@@ -3417,6 +3671,7 @@ async fn run_pr_review_inner(
         pr_number,
         branches.as_ref(),
         None,
+        None,
     )
     .await;
 
@@ -3860,6 +4115,77 @@ pub(crate) fn compose_review_lens_prompt(lens: &str, skill_text: &str, agent_pro
     format!("{directive}\n\n{skill_text}\n\n---\n\n{agent_prompt}")
 }
 
+/// The ORCHESTRATOR reviewer's prompt: one agent, every lens, each lens run as
+/// its own sub-agent writing its own file, then a single merge into the path
+/// the watch loop polls (design §1.3).
+///
+/// The merge — not the lenses — is what the watch loop keys on, so the prompt
+/// is explicit that the merged file is written LAST; the R1 guard in
+/// [`crate::agent_run::watch_for_result_guarded`] enforces the same rule from
+/// the outside. `per_lens_path` maps a lens slug to that lens's output path,
+/// and `merged_path` is the reviewer's own findings file.
+pub(crate) fn compose_orchestrator_prompt(
+    lenses: &[OrchestratorLens],
+    provider: &str,
+    per_lens_path: impl Fn(&str) -> std::path::PathBuf,
+    merged_path: &std::path::Path,
+) -> String {
+    let mut out = format!(
+        "MULTI-LENS CODE REVIEW \u{2014} you are the review ORCHESTRATOR for provider {provider}. \
+         READ-ONLY (same rules as below).\n\
+         Run EACH lens below as its own sub-agent, all in parallel where your CLI allows it \
+         (Claude Code: the Agent tool, one per lens, general-purpose; Codex: spawn sub-agents if \
+         available, otherwise run the lenses one after another yourself).\n\
+         Give every sub-agent: the lens method verbatim (below), the diff file path, the checkout \
+         path, the read-only rules, and its OWN output path (named in its section) \u{2014} a JSON \
+         array of {{path,line,severity,body,lens:\"<lens-slug>\"}}.\n\
+         Wait for ALL sub-agents to finish. Then read every per-lens file, drop exact duplicates, \
+         keep the `lens` field, and write the merged array to:\n  {}\n\
+         Writing that merged file is the LAST thing you do; never write it while a sub-agent is \
+         still running.\n",
+        merged_path.display()
+    );
+    for (i, l) in lenses.iter().enumerate() {
+        out.push_str(&format!(
+            "\n--- lens {}: {} ({}) ---\n",
+            i + 1,
+            l.name,
+            l.slug
+        ));
+        // claude loads the staged lens bundle via `--add-dir`, so an
+        // unresolvable method is still reachable there BY NAME; codex/agy have
+        // only what the prompt carries.
+        let method = if l.skill_text.trim().is_empty() {
+            if provider == "claude" {
+                format!("use the `{}` skill (registered via --add-dir)", l.slug)
+            } else {
+                String::new()
+            }
+        } else {
+            l.skill_text.trim().to_string()
+        };
+        if !method.is_empty() {
+            out.push_str(&method);
+            out.push_str("\n\n");
+        }
+        if !l.instructions.trim().is_empty() {
+            out.push_str(l.instructions.trim());
+            out.push('\n');
+        }
+        if !l.read_only {
+            out.push_str(
+                "This lens is the CI gate: you MAY run the listed check commands (and nothing \
+                 else that modifies the repo).\n",
+            );
+        }
+        out.push_str(&format!(
+            "Sub-agent output path: {}\n",
+            per_lens_path(&l.slug).display()
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod commit_pr_draft_tests {
     use super::{compose_draft_prompt, jira_key_from_branch};
@@ -3958,6 +4284,249 @@ mod review_lens_prompt_tests {
         assert!(lower.contains("do not search for"));
         assert!(out.contains("METHOD"));
         assert!(out.contains("TASK"));
+    }
+}
+
+#[cfg(test)]
+mod orchestrator_tests {
+    use super::*;
+    use otto_core::domain::{ReviewAgentCfg, ReviewMode};
+
+    fn agent(name: &str, providers: &[&str], model: &str) -> ReviewAgentCfg {
+        ReviewAgentCfg {
+            name: name.to_string(),
+            provider: providers.first().copied().unwrap_or("claude").to_string(),
+            providers: providers.iter().map(|p| p.to_string()).collect(),
+            model: model.to_string(),
+            prompt: format!("{name} instructions"),
+            skill: String::new(),
+        }
+    }
+
+    /// Lens names no bundled or user-installed skill answers to, so the prompt
+    /// text under test is the same everywhere.
+    const UNRESOLVED_A: &str = "Alpha lens";
+    const UNRESOLVED_B: &str = "Beta lens";
+
+    fn cfg_with(agents: Vec<ReviewAgentCfg>) -> ReviewConfig {
+        let mut cfg = default_review_config("claude");
+        cfg.agents = agents;
+        cfg
+    }
+
+    /// A library with nothing installed on disk. NOTE it does not mean "no
+    /// skill resolves": `resolve_skill_inline` falls through to the compiled-in
+    /// bundles and `~/.claude/skills`, so a REAL lens name (`security-review`)
+    /// still inlines its method here. Tests that assert on prompt text use
+    /// [`UNRESOLVED_A`]/[`UNRESOLVED_B`] instead, so they read the same on any
+    /// machine.
+    fn empty_library() -> (tempfile::TempDir, otto_context::Library) {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = otto_context::Library::new(tmp.path().join("library"));
+        (tmp, lib)
+    }
+
+    #[test]
+    fn effective_review_mode_tags_stored_vs_default() {
+        let mut cfg = default_review_config("claude");
+        // Nothing stored ⇒ fan-out, tagged as the default (so the step log can
+        // say the user never chose it).
+        assert_eq!(mode_source(&cfg), (ReviewMode::FanOut, "default"));
+        cfg.mode = Some(ReviewMode::Orchestrator);
+        assert_eq!(mode_source(&cfg), (ReviewMode::Orchestrator, "stored config"));
+        // An explicitly stored fan-out is still "stored", not "default".
+        cfg.mode = Some(ReviewMode::FanOut);
+        assert_eq!(mode_source(&cfg), (ReviewMode::FanOut, "stored config"));
+    }
+
+    #[test]
+    fn orchestrator_mode_expands_one_run_per_provider() {
+        let (_tmp, lib) = empty_library();
+        let cfg = cfg_with(vec![
+            agent("Correctness review", &["claude", "codex"], ""),
+            agent("Security review", &["claude", "codex"], "gpt-5"),
+            agent("Test review", &["claude"], ""),
+        ]);
+        let runs = expand_agent_runs(&cfg, ReviewMode::Orchestrator, &lib);
+        // One session per DISTINCT provider, in first-seen order — not per
+        // lens × provider (which would be five).
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].provider, "claude");
+        assert_eq!(runs[1].provider, "codex");
+        assert_eq!(runs[0].display_name, "claude \u{00b7} orchestrator (3 lenses)");
+        assert_eq!(runs[1].display_name, "codex \u{00b7} orchestrator (3 lenses)");
+        // Empty lens: `lens_covered_by` must never retire an orchestrator row
+        // because one lens finished on the other provider.
+        assert!(runs.iter().all(|r| r.lens.is_empty()));
+        // Every run carries every lens, slugified from the agent names.
+        assert_eq!(
+            runs[0].lens_slugs(),
+            vec!["correctness-review", "security-review", "test-review"]
+        );
+        // The model is the first configured one that applies to THIS provider.
+        assert_eq!(runs[0].model, "gpt-5");
+        assert_eq!(runs[1].model, "gpt-5");
+        // The prompt is composed per index in the spawn loop, not here.
+        assert!(runs.iter().all(|r| r.prompt_lens.is_empty()));
+    }
+
+    #[test]
+    fn orchestrator_prompt_lists_every_lens_and_per_lens_paths() {
+        let (_tmp, lib) = empty_library();
+        let cfg = cfg_with(vec![
+            agent(UNRESOLVED_A, &["claude"], ""),
+            agent(UNRESOLVED_B, &["claude"], ""),
+        ]);
+        let runs = expand_agent_runs(&cfg, ReviewMode::Orchestrator, &lib);
+        let dir = std::path::PathBuf::from("/tmp");
+        let compose = |provider: &str| {
+            compose_orchestrator_prompt(
+                &runs[0].lenses,
+                provider,
+                |slug| crate::review_session::lens_findings_path_in(&dir, "R1", 0, slug),
+                &crate::review_session::findings_path_in(&dir, "R1", 0),
+            )
+        };
+        let out = compose("claude");
+        assert!(out.starts_with("MULTI-LENS CODE REVIEW"));
+        assert!(out.contains("ORCHESTRATOR for provider claude"));
+        // Every lens gets its own numbered section AND its own output path.
+        assert!(out.contains("--- lens 1: Alpha lens (alpha-lens) ---"));
+        assert!(out.contains("--- lens 2: Beta lens (beta-lens) ---"));
+        assert!(out.contains("/tmp/otto-review-R1-0-alpha-lens.json"));
+        assert!(out.contains("/tmp/otto-review-R1-0-beta-lens.json"));
+        // The merged file is the one the watch loop polls, and it is written LAST.
+        assert!(out.contains("/tmp/otto-review-R1-0.json"));
+        assert!(out.contains("LAST thing you do"));
+        // Unresolvable method ⇒ claude is pointed at the `--add-dir` bundle it
+        // alone can load…
+        assert!(out.contains("use the `alpha-lens` skill (registered via --add-dir)"));
+        // …while codex/agy, which never register those skills, are not sent
+        // after a bundle they cannot open.
+        let codex = compose("codex");
+        assert!(!codex.contains("--add-dir"));
+        // The per-reviewer instructions travel with their lens either way.
+        assert!(out.contains("Beta lens instructions"));
+        assert!(codex.contains("Beta lens instructions"));
+    }
+
+    #[test]
+    fn orchestrator_prompt_inlines_a_resolved_lens_method() {
+        // A lens whose method resolved gets the METHOD verbatim, not a pointer
+        // to it — that is what lets codex/agy run the same review as claude.
+        let lenses = vec![OrchestratorLens {
+            name: "Alpha lens".into(),
+            slug: "alpha-lens".into(),
+            skill_text: "  ALPHA METHOD BODY  ".into(),
+            instructions: "alpha instructions".into(),
+            read_only: true,
+        }];
+        let dir = std::path::PathBuf::from("/tmp");
+        let out = compose_orchestrator_prompt(
+            &lenses,
+            "claude",
+            |slug| crate::review_session::lens_findings_path_in(&dir, "R1", 0, slug),
+            &crate::review_session::findings_path_in(&dir, "R1", 0),
+        );
+        assert!(out.contains("ALPHA METHOD BODY"));
+        assert!(!out.contains("registered via --add-dir"));
+        assert!(out.contains("alpha instructions"));
+    }
+
+    #[test]
+    fn checks_lens_is_not_read_only_in_orchestrator_prompt() {
+        let (_tmp, lib) = empty_library();
+        let cfg = cfg_with(vec![
+            agent(UNRESOLVED_A, &["claude"], ""),
+            agent(CHECKS_REVIEWER_NAME, &["claude"], ""),
+        ]);
+        let runs = expand_agent_runs(&cfg, ReviewMode::Orchestrator, &lib);
+        assert!(runs[0].lenses[0].read_only);
+        // The CI gate is the ONE lens that must be allowed to run commands.
+        assert!(!runs[0].lenses[1].read_only);
+        let dir = std::path::PathBuf::from("/tmp");
+        let out = compose_orchestrator_prompt(
+            &runs[0].lenses,
+            "claude",
+            |slug| crate::review_session::lens_findings_path_in(&dir, "R1", 0, slug),
+            &crate::review_session::findings_path_in(&dir, "R1", 0),
+        );
+        assert!(out.contains("you MAY run the listed check commands"));
+        // …and only once: the read-only lens must not inherit the licence.
+        assert_eq!(out.matches("you MAY run the listed check commands").count(), 1);
+    }
+
+    #[test]
+    fn orchestrator_budget_scales_with_lenses_and_caps() {
+        // 6 lenses ⇒ ceil(6/2) = 3 × the fan-out budget.
+        assert_eq!(
+            orchestrator_budget(Duration::from_secs(600), 6),
+            Duration::from_secs(1_800)
+        );
+        // Odd counts round up (5 lenses ⇒ 3×).
+        assert_eq!(
+            orchestrator_budget(Duration::from_secs(600), 5),
+            Duration::from_secs(1_800)
+        );
+        // A single lens still gets at least the fan-out budget.
+        assert_eq!(
+            orchestrator_budget(Duration::from_secs(600), 1),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            orchestrator_budget(Duration::from_secs(600), 0),
+            Duration::from_secs(600)
+        );
+        // Capped: a 5h base × 4 is still 5h.
+        assert_eq!(
+            orchestrator_budget(Duration::from_secs(18_000), 8),
+            Duration::from_secs(18_000)
+        );
+    }
+
+    #[test]
+    fn fan_out_is_default_and_unchanged() {
+        let (_tmp, lib) = empty_library();
+        let cfg = cfg_with(vec![
+            agent(UNRESOLVED_A, &["claude", "codex"], "sonnet"),
+            agent(UNRESOLVED_B, &["claude"], ""),
+        ]);
+        let runs = expand_agent_runs(&cfg, ReviewMode::default(), &lib);
+        // One run per lens × provider, with the provider suffixed only on the
+        // multi-provider lens — exactly the pre-batch expansion.
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].display_name, "Alpha lens \u{00b7} claude");
+        assert_eq!(runs[1].display_name, "Alpha lens \u{00b7} codex");
+        assert_eq!(runs[2].display_name, "Beta lens");
+        // `lens` is the CONFIGURED name (shared by the provider expansions) so
+        // siblings can cover for each other.
+        assert_eq!(runs[0].lens, "Alpha lens");
+        assert_eq!(runs[1].lens, "Alpha lens");
+        assert_eq!(runs[0].model, "sonnet");
+        assert_eq!(runs[2].model, "");
+        // No sub-agent lenses, and the lens prompt is composed up front — with
+        // an unresolvable method that is the reviewer's own instructions alone,
+        // exactly as `compose_review_lens_prompt` has always returned.
+        assert!(runs.iter().all(|r| r.lenses.is_empty()));
+        assert!(runs.iter().all(|r| r.lens_slugs().is_empty()));
+        assert_eq!(runs[2].prompt_lens, "Beta lens instructions");
+    }
+
+    #[test]
+    fn cancel_flags_registered_before_staggered_spawns() {
+        for n in [1usize, 2, 7] {
+            let plan = spawn_plan(n);
+            assert_eq!(plan.len(), n);
+            let last_register = plan.iter().map(|(r, _)| *r).max().unwrap();
+            let first_spawn = plan.iter().map(|(_, s)| *s).min().unwrap();
+            // R3: a Stop that lands mid-stagger must reach every reviewer, so
+            // no flag may be registered after the first spawn.
+            assert!(last_register < first_spawn, "register must precede every spawn");
+            // One stagger sleep between consecutive spawns, none before the first.
+            assert_eq!(plan.iter().filter(|(_, s)| *s > first_spawn).count(), n - 1);
+        }
+        // No cap and no semaphore — the stagger is the only pacing (R3).
+        assert_eq!(REVIEW_SPAWN_STAGGER, Duration::from_millis(1_500));
     }
 }
 
@@ -4305,7 +4874,6 @@ pub(crate) async fn run_review_for_branch(
     run_context: Option<String>,
     mode_override: Option<otto_core::domain::ReviewMode>,
 ) -> Result<(Id, otto_git::ResolvedBase, bool)> {
-    let _ = mode_override; // seeded — threaded into run_review_core by WP2
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
     let git = otto_git::LocalGit::new(worktree_path);
@@ -4368,6 +4936,7 @@ pub(crate) async fn run_review_for_branch(
                 0,
                 branches,
                 cfg_override,
+                mode_override,
             )
             .await;
         });
@@ -4677,6 +5246,9 @@ async fn retry_review_agent(
             None,
             Some(&agent_cancel), // per-agent Stop works on retried agents too
             review_skills_dir.as_deref(),
+            // The persisted prompt carries the lens list, but the retry route
+            // does not parse it — the guard's note falls back to today's text.
+            &[],
         )
         .await;
         unregister_review_agent_cancel(&agent_cancels_reg, &review_id_bg, index);
@@ -5358,7 +5930,7 @@ async fn start_local_review(
             // accommodates pr 0).
             run_review(
                 ctx_bg, review_id, repo_path, diff_text, None, None, workspace, repo_id_bg, 0,
-                local_branches, None,
+                local_branches, None, None,
             )
             .await;
         });

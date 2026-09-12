@@ -12,17 +12,22 @@
 //! state (running → waiting → done/error) so the UI's poll surfaces progress;
 //! "waiting" means it looks blocked on input and the user should Open it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use otto_core::api::CreateSessionReq;
-use otto_core::domain::{ReviewAgentState, ReviewFinding, SessionKind, User, Workspace};
+use otto_core::domain::{
+    ReviewAgentState, ReviewFinding, SessionKind, SessionStatus, User, Workspace,
+};
 use otto_sessions::SessionManager;
 use otto_state::ReviewsRepo;
 use tokio::sync::Mutex;
 
-use crate::agent_run::{run_with_recovery_until, watch_for_result, FailReason, RunOutcome, WatchStatus};
+use crate::agent_run::{
+    run_with_recovery_until, watch_for_result_guarded, FailReason, RunOutcome, WatchGuard,
+    WatchStatus,
+};
 
 // Generous: several CLIs cold-start concurrently for one review, so claude can
 // take >30s to draw its TUI; injecting before it's ready loses the prompt.
@@ -60,10 +65,80 @@ pub fn effective_max_attempts(max_attempts: Option<u32>) -> u32 {
     max_attempts.unwrap_or(MAX_REVIEW_ATTEMPTS)
 }
 
+/// Directory every review artifact (findings, per-lens files, prompts) lives
+/// in — `$TMPDIR`, `/tmp` when unset.
+fn findings_dir() -> PathBuf {
+    PathBuf::from(std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string()))
+}
+
 /// Absolute temp path an agent writes its findings JSON to (unique per run).
 pub fn findings_path(review_id: &str, agent_index: usize) -> PathBuf {
-    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(dir).join(format!("otto-review-{review_id}-{agent_index}.json"))
+    findings_path_in(&findings_dir(), review_id, agent_index)
+}
+
+/// [`findings_path`] rooted at an explicit directory (tests hand it a tempdir
+/// instead of mutating the process-wide `TMPDIR`).
+pub fn findings_path_in(dir: &Path, review_id: &str, agent_index: usize) -> PathBuf {
+    dir.join(format!("otto-review-{review_id}-{agent_index}.json"))
+}
+
+/// Absolute temp path ONE LENS of an orchestrator reviewer writes to. Distinct
+/// from [`findings_path`] (which is the MERGED array the reviewer writes last)
+/// by the extra `-<slug>` segment, so the glob below never eats the merged file.
+pub fn lens_findings_path(review_id: &str, agent_index: usize, slug: &str) -> PathBuf {
+    lens_findings_path_in(&findings_dir(), review_id, agent_index, slug)
+}
+
+/// [`lens_findings_path`] rooted at an explicit directory.
+pub fn lens_findings_path_in(
+    dir: &Path,
+    review_id: &str,
+    agent_index: usize,
+    slug: &str,
+) -> PathBuf {
+    dir.join(format!("otto-review-{review_id}-{agent_index}-{slug}.json"))
+}
+
+/// Delete every per-lens file of one orchestrator run. Called before each
+/// attempt (which does not know the lens slugs — hence the prefix scan) and
+/// once the review is summarized.
+pub fn remove_lens_findings_files(review_id: &str, agent_index: usize) {
+    remove_lens_findings_files_in(&findings_dir(), review_id, agent_index);
+}
+
+/// [`remove_lens_findings_files`] rooted at an explicit directory.
+pub fn remove_lens_findings_files_in(dir: &Path, review_id: &str, agent_index: usize) {
+    let prefix = format!("otto-review-{review_id}-{agent_index}-");
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".json") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Sanitize a lens name into a `[a-z0-9-]{0,40}` slug safe to use as a path
+/// component and as the `lens` label on a finding. Empty when nothing survives
+/// (callers substitute a positional fallback).
+pub fn sanitize_lens_slug(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(40));
+    let mut prev_dash = false;
+    for ch in raw.trim().chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            prev_dash = false;
+        } else if !out.is_empty() && !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+        if out.len() >= 40 {
+            break;
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 /// Absolute temp path the (already-built) prompt for one agent is saved to, so
@@ -126,6 +201,10 @@ struct RawFinding {
     suggested_fix: Option<String>,
     #[serde(default)]
     fix: Option<String>,
+    /// Lens slug, written by orchestrator-mode sub-agents into their per-lens
+    /// file and kept through the parent's merge. Absent for fan-out reviewers.
+    #[serde(default)]
+    lens: Option<String>,
 }
 
 fn default_severity() -> String {
@@ -145,6 +224,13 @@ fn normalize_severity(raw: &str) -> String {
 
 impl RawFinding {
     fn into_finding(self) -> ReviewFinding {
+        // Read before `self` is partially moved below; a slug that sanitizes to
+        // nothing carries no information, so it reads as absent.
+        let lens = self
+            .lens
+            .as_deref()
+            .map(sanitize_lens_slug)
+            .filter(|l| !l.is_empty());
         let mut body = if self.body.trim().is_empty() {
             // Longest-form candidates first; `title` (a one-liner) is the floor.
             [
@@ -181,7 +267,7 @@ impl RawFinding {
             line: self.line,
             severity: normalize_severity(&self.severity),
             body,
-            lens: None,
+            lens,
         }
     }
 }
@@ -272,9 +358,16 @@ pub async fn run_agent_session(
     // `review_skills_extra_dirs`). codex/agy can't load it and rely on the lens
     // method inlined in the prompt. None → inline only.
     skills_add_dir: Option<&str>,
+    // Orchestrator mode: the lens slugs this reviewer delegates to sub-agents,
+    // each writing its own per-lens file. Empty for fan-out (one lens, no
+    // sub-agents) — which also leaves the watch guard's note on today's text.
+    lens_slugs: &[String],
 ) -> RunOutcome {
     let path = findings_path(review_id, agent_index);
     let _ = std::fs::remove_file(&path); // clear any stale file
+    // …and any per-lens file a previous attempt left behind: the orchestrator
+    // merges every file it finds, so a stale one would re-import dead findings.
+    remove_lens_findings_files(review_id, agent_index);
     let prompt = augment_prompt(base_prompt, &path.to_string_lossy());
 
     let mut meta = serde_json::json!({
@@ -329,8 +422,17 @@ pub async fn run_agent_session(
 
     // Watch via the shared runner (out-file / claude transcript; exit / stuck /
     // timeout). It persists the waiting↔running transition; we never kill the
-    // session here so it stays openable.
-    watch_for_result(
+    // session here so it stays openable. The guard is armed for EVERY reviewer:
+    // a findings file written while the agent still has sub-agents in flight is
+    // a partial result, whatever mode produced it.
+    let guard = WatchGuard {
+        pending_aware: true,
+        lens_files: lens_slugs
+            .iter()
+            .map(|slug| (slug.clone(), lens_findings_path(review_id, agent_index, slug)))
+            .collect(),
+    };
+    watch_for_result_guarded(
         manager,
         &sid,
         provider,
@@ -341,6 +443,7 @@ pub async fn run_agent_session(
         WAITING_IDLE,
         STUCK_IDLE,
         |t| parse_findings_array(t).is_some(),
+        guard,
         |st| async move {
             let (status, note) = match st {
                 WatchStatus::Waiting => {
@@ -350,6 +453,14 @@ pub async fn run_agent_session(
             };
             persist_agent(states, reviews, review_id, agent_index, move |s: &mut ReviewAgentState| {
                 s.status = status.into();
+                s.note = note;
+            })
+            .await;
+        },
+        |note: String| async move {
+            // Progress only — never touches `status`, so a "waiting" row set by
+            // the hook above keeps its state while the note advances.
+            persist_agent(states, reviews, review_id, agent_index, move |s: &mut ReviewAgentState| {
                 s.note = note;
             })
             .await;
@@ -440,6 +551,8 @@ pub async fn run_agent_session_with_recovery(
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     // Shared out-of-tree skills bundle for `--add-dir` (see `run_agent_session`).
     skills_add_dir: Option<&str>,
+    // Orchestrator lens slugs (see `run_agent_session`); empty for fan-out.
+    lens_slugs: &[String],
 ) -> AgentRunResult {
     let attempts = effective_max_attempts(max_attempts);
     // Shared retry loop (kills the prior session + backs off between attempts).
@@ -461,7 +574,7 @@ pub async fn run_agent_session_with_recovery(
         |_attempt| {
             run_agent_session(
                 manager, reviews, states, ws, user, provider, model, cwd, review_id, agent_index,
-                base_prompt, timeout, skills_add_dir,
+                base_prompt, timeout, skills_add_dir, lens_slugs,
             )
         },
     )
@@ -558,6 +671,21 @@ pub async fn claude_prompt_landed(
     }
 }
 
+/// One poll of [`wait_for_tui`]: `Some(true)` ready to paste into, `Some(false)`
+/// give up, `None` keep polling. On the deadline a TUI that has drawn NOTHING
+/// is NOT ready — pasting into it loses the prompt, and the caller then waits
+/// out the agent's entire grace window for a turn that was never started. Pure
+/// so the deadline rule is testable without a PTY.
+fn tui_ready(scrollback_empty: bool, settled: bool, deadline_hit: bool) -> Option<bool> {
+    if !scrollback_empty && settled {
+        return Some(true);
+    }
+    if deadline_hit {
+        return Some(!scrollback_empty);
+    }
+    None
+}
+
 pub async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &otto_core::Id) -> bool {
     let deadline = Instant::now() + TUI_STARTUP_WAIT;
     loop {
@@ -567,13 +695,60 @@ pub async fn wait_for_tui(manager: &Arc<SessionManager>, sid: &otto_core::Id) ->
         if handle.on_exit().borrow().is_some() {
             return false;
         }
-        if !handle.scrollback(1).is_empty() && handle.last_output_at().elapsed() >= TUI_SETTLE {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return true;
+        let verdict = tui_ready(
+            handle.scrollback(1).is_empty(),
+            handle.last_output_at().elapsed() >= TUI_SETTLE,
+            Instant::now() >= deadline,
+        );
+        if let Some(ready) = verdict {
+            if !ready {
+                tracing::warn!("review_session: agent TUI never drew in session {sid}");
+            }
+            return ready;
         }
         tokio::time::sleep(TUI_POLL).await;
+    }
+}
+
+/// Which teardown a finished reviewer's session gets: `suspend` when the
+/// provider can resume the transcript later (so "Open session" on a finished
+/// review still replays it), `kill` otherwise. Pure so the mapping is testable.
+pub(crate) fn stop_action(supports_resume: bool) -> &'static str {
+    if supports_resume {
+        "suspend"
+    } else {
+        "kill"
+    }
+}
+
+/// Stop every reviewer session of a finished review. Reviewers are autonomous
+/// sessions nobody types into again, and each holds a PTY plus the CLI's whole
+/// file-descriptor footprint — leaving them live after the summarizer ran is
+/// what walks `lsof` up over a day of reviews. Best-effort: a failure is a log
+/// line, never a review error.
+pub(crate) async fn stop_review_sessions(manager: &Arc<SessionManager>, session_ids: &[String]) {
+    for sid in session_ids {
+        let Ok(session) = manager.get(sid).await else {
+            continue;
+        };
+        // Already torn down (a Stop, a crashed CLI, or the caller's own second
+        // pass on an error path) — re-suspending it would only add a duplicate
+        // lifecycle row to the user's session history.
+        if matches!(
+            session.status,
+            SessionStatus::Exited | SessionStatus::Reconnectable
+        ) {
+            continue;
+        }
+        let action = stop_action(manager.providers().supports_resume(&session.provider));
+        let res = if action == "suspend" {
+            manager.suspend(sid).await
+        } else {
+            manager.kill_session(sid).await
+        };
+        if let Err(e) = res {
+            tracing::warn!("review teardown: could not {action} session {sid}: {e}");
+        }
     }
 }
 
@@ -868,5 +1043,99 @@ mod tests {
         assert_eq!(f[1].path.as_deref(), Some("z.rs"));
         assert_eq!(f[1].severity, "info"); // nit → info
         assert_eq!(f[1].body, "via description");
+    }
+
+    #[test]
+    fn parse_findings_keeps_lens_and_slug_is_sanitised() {
+        // Orchestrator sub-agents label their findings; the parent merges the
+        // per-lens files and the label must survive into the summarizer batch.
+        let raw = r#"[
+          {"path":"a.rs","severity":"bug","body":"x","lens":"Correctness Review"},
+          {"path":"b.rs","severity":"info","body":"y","lens":"  "},
+          {"path":"c.rs","severity":"info","body":"z"}
+        ]"#;
+        let f = parse_findings(raw);
+        assert_eq!(f.len(), 3);
+        assert_eq!(f[0].lens.as_deref(), Some("correctness-review"));
+        // A slug that sanitizes away carries nothing — read as absent.
+        assert_eq!(f[1].lens, None);
+        // Fan-out findings have no lens at all (and pre-field rows deserialize).
+        assert_eq!(f[2].lens, None);
+
+        // The sanitizer is what keeps a lens name out of the filesystem: it is
+        // used both as a path component and as this label.
+        assert_eq!(sanitize_lens_slug("Correctness/../review"), "correctness-review");
+        assert_eq!(sanitize_lens_slug("  Go  Code   Review "), "go-code-review");
+        assert_eq!(sanitize_lens_slug("--grill--"), "grill");
+        assert_eq!(sanitize_lens_slug("***"), "");
+        assert_eq!(sanitize_lens_slug("Ünïcödé"), "n-c-d");
+        assert!(sanitize_lens_slug(&"a".repeat(80)).len() <= 40);
+    }
+
+    #[test]
+    fn per_lens_files_glob_deleted_per_attempt() {
+        // An explicit dir, never `set_var`: TMPDIR is process-wide and the test
+        // binary runs these in parallel with everything else.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let merged = findings_path_in(dir, "R1", 0);
+        let mine = ["correctness", "security"]
+            .map(|s| lens_findings_path_in(dir, "R1", 0, s));
+        let other_agent = lens_findings_path_in(dir, "R1", 1, "correctness");
+        let other_review = lens_findings_path_in(dir, "R2", 0, "correctness");
+        for p in [&merged, &mine[0], &mine[1], &other_agent, &other_review] {
+            std::fs::write(p, "[]").unwrap();
+        }
+
+        remove_lens_findings_files_in(dir, "R1", 0);
+
+        // Only THIS run's per-lens files go.
+        assert!(!mine[0].exists());
+        assert!(!mine[1].exists());
+        // The merged file is the watch loop's signal and is removed separately —
+        // the glob must not eat it (its name has no `-<slug>` segment).
+        assert!(merged.exists());
+        // Siblings and other reviews are untouched.
+        assert!(other_agent.exists());
+        assert!(other_review.exists());
+        // Idempotent on a directory with nothing left to delete.
+        remove_lens_findings_files_in(dir, "R1", 0);
+    }
+
+    #[test]
+    fn lens_covered_by_ignores_orchestrator_rows() {
+        // Orchestrator rows carry an EMPTY lens (they run every lens), so a
+        // sibling provider finishing must never retire one as "covered".
+        let states = vec![
+            st("claude · orchestrator (3 lenses)", "", "claude", "error"),
+            st("codex · orchestrator (3 lenses)", "", "codex", "done"),
+            st("Summarizer", "", "claude", "pending"),
+        ];
+        assert_eq!(lens_covered_by(&states, 0), None);
+        assert_eq!(lens_covered_by(&states, 1), None);
+    }
+
+    #[test]
+    fn wait_for_tui_false_on_deadline_without_output() {
+        // Drawn and settled ⇒ ready, whenever that happens.
+        assert_eq!(tui_ready(false, true, false), Some(true));
+        assert_eq!(tui_ready(false, true, true), Some(true));
+        // Drawn but still repainting ⇒ keep polling until the deadline, then
+        // accept it (there IS a TUI to paste into).
+        assert_eq!(tui_ready(false, false, false), None);
+        assert_eq!(tui_ready(false, false, true), Some(true));
+        // NOTHING drawn by the deadline ⇒ give up. Pasting into a blank TUI
+        // loses the prompt and the reviewer then idles out its whole grace.
+        assert_eq!(tui_ready(true, false, true), Some(false));
+        assert_eq!(tui_ready(true, false, false), None);
+    }
+
+    #[test]
+    fn review_done_suspends_reviewer_sessions() {
+        // Resumable providers are SUSPENDED, so "Open session" on a finished
+        // review still replays the reviewer's transcript…
+        assert_eq!(stop_action(true), "suspend");
+        // …and everything else is killed outright.
+        assert_eq!(stop_action(false), "kill");
     }
 }

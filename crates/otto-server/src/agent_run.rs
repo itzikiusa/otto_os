@@ -10,6 +10,9 @@
 //!   claude transcript as a fallback), and classifies exit / **stuck** (idle too
 //!   long) / timeout. Emits `Waiting`/`Resumed` transitions via an async hook so
 //!   each module can persist them however it likes.
+//! - [`watch_for_result_guarded`]: the same loop with the R1 pending-task guard
+//!   armed — for agents that delegate to sub-agents (the orchestrator reviewer),
+//!   where the out-file appearing does NOT mean the work is finished.
 //! - [`run_with_recovery`]: the bounded retry loop. Runs an attempt closure up to
 //!   `max_attempts`, killing the prior (stuck/failed) session and backing off
 //!   between tries, honoring an optional cancel flag (manual Stop).
@@ -19,17 +22,26 @@
 //! callers deal with trust/continue prompts.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use otto_core::Id;
 use otto_sessions::SessionManager;
 use tracing::warn;
 
+use crate::turn_oracle::{self, ClaudeScan};
+
 /// Poll cadence while waiting for an agent's result file.
 const POLL: Duration = Duration::from_millis(1000);
+/// How long a written-but-held out-file may be held before it is adopted
+/// anyway. Bounded like every other R1 hold: a sub-agent that never reports
+/// back must not park the reviewer forever.
+pub const HOLD_LINGER_CAP: Duration = Duration::from_secs(15 * 60);
+/// Floor between two `on_note` calls (the orchestrator row's progress note is
+/// persisted, so it must not write once a second).
+const NOTE_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Why an agent run failed (`None` reason ⇒ success). Stable string forms feed
 /// notifications and per-agent error notes.
@@ -101,6 +113,83 @@ pub enum WatchStatus {
     Resumed,
 }
 
+/// Extra R1 awareness for [`watch_for_result_guarded`]. `Default` (every field
+/// off) is the LEGACY behaviour byte-for-byte — [`watch_for_result`] passes it.
+#[derive(Debug, Clone, Default)]
+pub struct WatchGuard {
+    /// Hold the out-file (and any accepted transcript turn) while the claude
+    /// parent has launched/resumed tasks that have not reported back.
+    pub pending_aware: bool,
+    /// `(lens_slug, per-lens findings path)` — for the progress note only.
+    pub lens_files: Vec<(String, PathBuf)>,
+}
+
+/// What the watch loop does with an out-file that already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuardDecision {
+    /// Read + remove it and finish (today's behaviour).
+    Adopt,
+    /// The parent still has launched/resumed tasks in flight — the file is a
+    /// PARTIAL result; leave it on disk and keep watching.
+    Hold,
+    /// Held past [`HOLD_LINGER_CAP`]; adopt it anyway and say so.
+    AdoptAfterCap,
+}
+
+/// Decide what to do with an existing out-file this tick. Pure so the
+/// hold/cap policy is testable without a PTY or a live transcript.
+pub(crate) fn guard_decision(
+    out_exists: bool,
+    scan: &ClaudeScan,
+    held_since: Option<SystemTime>,
+    now: SystemTime,
+) -> GuardDecision {
+    if !out_exists || scan.pending.is_empty() {
+        return GuardDecision::Adopt;
+    }
+    let held = held_since
+        .and_then(|s| now.duration_since(s).ok())
+        .unwrap_or_default();
+    if held >= HOLD_LINGER_CAP {
+        GuardDecision::AdoptAfterCap
+    } else {
+        GuardDecision::Hold
+    }
+}
+
+/// Whether the stuck trip fires. A result already sitting on disk is never
+/// "stuck" — the agent did the work; whatever it is still doing (merging its
+/// sub-agents' files) is progress the PTY clock cannot see.
+pub(crate) fn stuck_fires(idle: Duration, stuck_idle: Duration, out_exists: bool) -> bool {
+    !out_exists && idle >= stuck_idle
+}
+
+/// The orchestrator row's progress note: which lenses have written their file,
+/// and how many sub-agents the parent is still waiting on.
+pub(crate) fn lens_progress_note(done: &[String], total: usize, running: usize) -> String {
+    let mut s = format!("lenses {}/{total} done", done.len());
+    if !done.is_empty() {
+        let ticks: Vec<String> = done.iter().map(|d| format!("{d} \u{2713}")).collect();
+        s.push_str(&format!(" \u{00b7} {}", ticks.join(" ")));
+    }
+    s.push_str(&format!(" \u{00b7} {running} sub-agents running"));
+    s
+}
+
+/// Idle measured from the newest artifact the agent (or any of its sub-agents)
+/// touched, rather than from its own PTY: a parent waiting on four sub-agents
+/// prints nothing while they write megabytes. `None` ⇒ no signal, caller falls
+/// back to the PTY clock.
+fn progress_idle(cwd: &str, provider_session_id: Option<&str>) -> Option<Duration> {
+    let psid = provider_session_id?;
+    let jsonl = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
+    let subagents = otto_orchestrator::claude_pty::project_dir(cwd)
+        .join(psid)
+        .join("subagents");
+    let stamp = turn_oracle::progress_stamp(&jsonl, Some(&subagents), None)?;
+    SystemTime::now().duration_since(stamp).ok()
+}
+
 /// Watch a freshly-spawned, already-prompted session for its result.
 ///
 /// Returns success when the out-file appears (or — for claude — a transcript
@@ -119,33 +208,172 @@ pub async fn watch_for_result<F, Fut>(
     waiting_idle: Duration,
     stuck_idle: Duration,
     transcript_ok: fn(&str) -> bool,
-    mut on_status: F,
+    on_status: F,
 ) -> RunOutcome
 where
     F: FnMut(WatchStatus) -> Fut,
     Fut: Future<Output = ()>,
 {
+    watch_for_result_guarded(
+        manager,
+        sid,
+        provider,
+        provider_session_id,
+        cwd,
+        out_path,
+        timeout,
+        waiting_idle,
+        stuck_idle,
+        transcript_ok,
+        WatchGuard::default(),
+        on_status,
+        |_note: String| async {},
+    )
+    .await
+}
+
+/// [`watch_for_result`] with the R1 guard. With `guard.pending_aware` the loop
+/// reads the claude transcript once per tick and:
+///
+/// - HOLDS an existing out-file while the parent has launched/resumed tasks
+///   that never reported back (the orchestrator reviewer writes its merged file
+///   last, but a sub-agent that writes the parent's path early would otherwise
+///   end the watch with a partial result), bounded by [`HOLD_LINGER_CAP`];
+/// - accepts a transcript turn only when the tail really is a native end-turn
+///   with nothing pending (an `end_turn` emitted right after launching
+///   sub-agents is not a finished turn);
+/// - measures the stuck clock from the newest transcript/sub-agent artifact
+///   instead of the parent's own silent PTY, and suspends it entirely while a
+///   result is already on disk.
+///
+/// `on_note` carries the human progress note (rate-limited to one per
+/// [`NOTE_MIN_INTERVAL`], and only when it changed).
+#[allow(clippy::too_many_arguments)]
+pub async fn watch_for_result_guarded<F, Fut, G, GFut>(
+    manager: &Arc<SessionManager>,
+    sid: &Id,
+    provider: &str,
+    provider_session_id: Option<&str>,
+    cwd: &str,
+    out_path: &Path,
+    timeout: Duration,
+    waiting_idle: Duration,
+    stuck_idle: Duration,
+    transcript_ok: fn(&str) -> bool,
+    guard: WatchGuard,
+    mut on_status: F,
+    mut on_note: G,
+) -> RunOutcome
+where
+    F: FnMut(WatchStatus) -> Fut,
+    Fut: Future<Output = ()>,
+    G: FnMut(String) -> GFut,
+    GFut: Future<Output = ()>,
+{
     let deadline = Instant::now() + timeout;
+    let guarded = guard.pending_aware && provider == "claude";
     let mut flagged_waiting = false;
     let mut flagged_over_budget = false;
+    // When the out-file first appeared while tasks were still pending (its own
+    // mtime, so a restarted watch inherits the real age).
+    let mut held_since: Option<SystemTime> = None;
+    let mut last_note: Option<String> = None;
+    let mut last_note_at: Option<Instant> = None;
     loop {
-        if let Ok(text) = std::fs::read_to_string(out_path) {
-            let _ = std::fs::remove_file(out_path);
-            return RunOutcome::ok(text, sid.clone());
+        // One transcript read per tick feeds BOTH guards below. Unguarded, this
+        // stays exactly where it was — after the out-file check.
+        let scan = if guarded {
+            provider_session_id
+                .map(|psid| otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid))
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|raw| turn_oracle::scan_claude(&raw))
+        } else {
+            None
+        };
+        // Unguarded this stat never happens — the legacy path is untouched.
+        let out_exists = guarded && out_path.exists();
+        let pending = scan.as_ref().map(|s| s.pending.len()).unwrap_or(0);
+        let decision = match scan.as_ref() {
+            Some(s) if out_exists => {
+                if !s.pending.is_empty() && held_since.is_none() {
+                    held_since = std::fs::metadata(out_path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .or_else(|| Some(SystemTime::now()));
+                }
+                guard_decision(true, s, held_since, SystemTime::now())
+            }
+            _ => GuardDecision::Adopt,
+        };
+
+        if decision != GuardDecision::Hold {
+            if let Ok(text) = std::fs::read_to_string(out_path) {
+                let _ = std::fs::remove_file(out_path);
+                if decision == GuardDecision::AdoptAfterCap {
+                    warn!(
+                        "agent_run: adopting findings after {}m with {pending} task(s) still pending",
+                        HOLD_LINGER_CAP.as_secs() / 60
+                    );
+                    on_note(format!(
+                        "\u{26a0} merged after {}m with {pending} sub-agents still pending",
+                        HOLD_LINGER_CAP.as_secs() / 60
+                    ))
+                    .await;
+                }
+                return RunOutcome::ok(text, sid.clone());
+            }
         }
 
         // claude writes a JSONL transcript; codex/agy don't, so the out-file is
         // their only signal. The caller decides what counts as a complete turn.
-        if provider == "claude" {
+        if provider == "claude" && decision != GuardDecision::Hold {
             if let Some(psid) = provider_session_id {
-                let jsonl = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
-                if let Ok(raw) = std::fs::read_to_string(&jsonl) {
-                    if let Some(turn) = otto_orchestrator::claude_pty::completed_turn_text(&raw) {
-                        if transcript_ok(&turn) {
-                            return RunOutcome::ok(turn, sid.clone());
+                // Guarded: an end-turn is only a FINISHED turn when nothing the
+                // parent launched is still outstanding (it ends one every time a
+                // sub-agent reports back, and one right after launching them).
+                let settled = scan
+                    .as_ref()
+                    .map(|s| s.tail_is_assistant_end_turn && s.pending.is_empty())
+                    .unwrap_or(true);
+                if settled {
+                    let jsonl = otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid);
+                    if let Ok(raw) = std::fs::read_to_string(&jsonl) {
+                        if let Some(turn) = otto_orchestrator::claude_pty::completed_turn_text(&raw)
+                        {
+                            if transcript_ok(&turn) {
+                                return RunOutcome::ok(turn, sid.clone());
+                            }
                         }
                     }
                 }
+            }
+        }
+
+        // Progress note (orchestrator rows / a held result). Rate-limited and
+        // only on change, since the caller persists it.
+        let note = if decision == GuardDecision::Hold {
+            Some(format!("findings written — {pending} sub-agents still running"))
+        } else if !guard.lens_files.is_empty() {
+            let done: Vec<String> = guard
+                .lens_files
+                .iter()
+                .filter(|(_, p)| p.exists())
+                .map(|(slug, _)| slug.clone())
+                .collect();
+            Some(lens_progress_note(&done, guard.lens_files.len(), pending))
+        } else {
+            None
+        };
+        if let Some(note) = note {
+            let changed = last_note.as_deref() != Some(note.as_str());
+            let due = match last_note_at {
+                Some(t) => t.elapsed() >= NOTE_MIN_INTERVAL,
+                None => true,
+            };
+            if changed && due {
+                on_note(note.clone()).await;
+                last_note = Some(note);
+                last_note_at = Some(Instant::now());
             }
         }
 
@@ -155,8 +383,15 @@ where
                     return RunOutcome::failed(Some(sid.clone()), FailReason::Exited);
                 }
                 let idle = handle.last_output_at().elapsed();
+                // Guarded, the stuck clock follows the artifacts (sub-agents
+                // write their own transcripts while the parent's PTY is mute).
+                let quiet_for = if guarded {
+                    progress_idle(cwd, provider_session_id).unwrap_or(idle)
+                } else {
+                    idle
+                };
                 // Fail fast once truly silent for stuck_idle so recovery can retry.
-                if idle >= stuck_idle {
+                if stuck_fires(quiet_for, stuck_idle, out_exists) {
                     warn!("agent_run: session ({provider}) stuck — no output for {}s", stuck_idle.as_secs());
                     return RunOutcome::failed(Some(sid.clone()), FailReason::Stuck);
                 }
@@ -312,5 +547,87 @@ mod tests {
     #[test]
     fn superseded_has_a_stable_string_form() {
         assert_eq!(FailReason::Superseded.as_str(), "superseded");
+    }
+
+    /// A scan with `n` outstanding `Agent` launches. Built field-by-field on
+    /// top of `Default` — `ClaudeScan` grows fields, and an exhaustive literal
+    /// here would break every time it does.
+    fn scan_with_pending(n: usize) -> ClaudeScan {
+        ClaudeScan {
+            pending: (0..n)
+                .map(|i| turn_oracle::PendingTask {
+                    id: format!("task-{i}"),
+                    kind: turn_oracle::TaskKind::Agent,
+                    description: format!("sweep {i}"),
+                    since_line: i,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn findings_file_held_while_async_children_pending() {
+        let now = SystemTime::now();
+        let held = now - Duration::from_secs(60);
+        // Written while two sub-agents are still running ⇒ partial, hold it.
+        assert_eq!(
+            guard_decision(true, &scan_with_pending(2), Some(held), now),
+            GuardDecision::Hold
+        );
+        // The last notification landed ⇒ the merged file is final, adopt it.
+        assert_eq!(
+            guard_decision(true, &scan_with_pending(0), Some(held), now),
+            GuardDecision::Adopt
+        );
+        // Held past the cap ⇒ adopt anyway rather than park the reviewer.
+        let stale = now - (HOLD_LINGER_CAP + Duration::from_secs(1));
+        assert_eq!(
+            guard_decision(true, &scan_with_pending(1), Some(stale), now),
+            GuardDecision::AdoptAfterCap
+        );
+        // No file yet ⇒ nothing to decide, pending or not.
+        assert_eq!(
+            guard_decision(false, &scan_with_pending(3), None, now),
+            GuardDecision::Adopt
+        );
+    }
+
+    #[test]
+    fn stuck_clock_suspended_while_out_file_exists() {
+        let stuck = Duration::from_secs(900);
+        // No result on disk: the trip works exactly as before.
+        assert!(stuck_fires(Duration::from_secs(900), stuck, false));
+        assert!(!stuck_fires(Duration::from_secs(899), stuck, false));
+        // A result IS on disk (held for its sub-agents) — never stuck, however
+        // long the parent's own PTY has been silent.
+        assert!(!stuck_fires(Duration::from_secs(10_000), stuck, true));
+    }
+
+    #[test]
+    fn watch_for_result_wrapper_has_no_guard() {
+        // `watch_for_result` forwards `WatchGuard::default()`, so the legacy
+        // callers keep the pre-R1 behaviour: no transcript pre-read, no hold,
+        // no progress notes.
+        let g = WatchGuard::default();
+        assert!(!g.pending_aware);
+        assert!(g.lens_files.is_empty());
+    }
+
+    #[test]
+    fn lens_progress_note_reads_like_the_design_row() {
+        assert_eq!(
+            lens_progress_note(
+                &["correctness".into(), "security".into(), "test".into()],
+                6,
+                2
+            ),
+            "lenses 3/6 done \u{00b7} correctness \u{2713} security \u{2713} test \u{2713} \u{00b7} 2 sub-agents running"
+        );
+        // Nothing done yet ⇒ no empty tick list in the middle.
+        assert_eq!(
+            lens_progress_note(&[], 4, 4),
+            "lenses 0/4 done \u{00b7} 4 sub-agents running"
+        );
     }
 }
