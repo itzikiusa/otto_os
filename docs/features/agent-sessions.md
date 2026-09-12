@@ -499,6 +499,33 @@ when **all** of these hold:
 3. **Unattached** — no WS viewer is currently watching (tracked by an
    `AttachGuard` reference count that decrements on every WS teardown path).
 4. **Not pinned** — `meta.keep_alive` is not `true`.
+5. **Engine-owned** — the session was started by a background origin
+   (`meta.work.origin` = `workflow` / `channel` / `review` / `swarm` /
+   `delegation` / …, or a background `meta.source`). **Sessions you started
+   yourself from the Agents page are never auto-suspended** — `work.origin` is
+   `manual`, or the row pre-dates that stamp and carries no work ref at all.
+6. **No open agent turn** — the provider's own on-disk record says the last
+   turn finished. For `claude` the tail of the transcript JSONL must end in an
+   assistant message with `stop_reason: "end_turn"` and carry no later
+   `<task-notification>` line (a pending harness wake-up means the agent is
+   about to speak again); for `codex` the rollout's latest `task_started` must
+   have its matching `task_complete` / `turn_aborted`. Only the last ~256 KiB
+   is read, and an unreadable or unparseable file is "unknown" — never
+   "suspend".
+
+> **Why 5 and 6 exist.** "Idle" here means *no PTY output*, which is not the
+> same as *done*. An agent that hands work to background watchers and
+> `sleep`-polls them prints nothing, burns no descendant CPU and is squarely
+> mid-turn; the sweep used to suspend exactly that, yanking the PTY out from
+> under a live interactive session three times in one afternoon. Every guard
+> that holds a session now logs at `info` with its name — `keep_alive`,
+> `origin=manual`, `turn open`, `descendant CPU` — so the daemon log says why
+> a session was spared.
+
+One older guard rides alongside those: the sweep compares each candidate's
+**descendant-process CPU** against the previous pass and skips any session
+whose tree accrued >200 ms (a quiet build or test run). Descendants only — the
+agent CLI's own idle TUI redraws accrue CPU forever.
 
 On suspend the daemon kills and drops the live PTY (freeing memory), **keeps the
 row** with its `provider_session_id` intact, sets status `reconnectable`, and
@@ -524,7 +551,7 @@ to hold its PTY (~3 fds), agent process and MCP sidecar forever; review fleets
 accumulated hundreds of descriptors and pushed the daemon over launchd's
 256-fd soft cap ("Too many open files", failing `accept()`, seconds-long
 keystrokes). The same sweep now **kills** such a session — same unattached /
-CPU-quiet / not-pinned guards — once it has been idle for
+CPU-quiet / not-pinned / no-open-turn guards — once it has been idle for
 `REAP_UNRESUMABLE_GRACE` (**30 minutes**, far beyond every engine's stall
 window), but **only engine-owned (background) sessions**: the owning engine
 already consumed the turn output, so nothing is lost. The user's own

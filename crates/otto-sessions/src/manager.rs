@@ -980,6 +980,174 @@ fn should_reap_unresumable(session: &Session, idle_for: Duration) -> bool {
         && idle_for >= REAP_UNRESUMABLE_GRACE
 }
 
+/// Did the USER start this session by hand — the Agents page — as opposed to
+/// an engine starting it in the background?
+///
+/// The idle sweep never auto-suspends a user-started session. "No PTY output
+/// for 5 minutes" is NOT "done": an agent that hands work to background
+/// watchers and `sleep`-polls them is silent, burns no descendant CPU and is
+/// very much mid-turn — and yanking its PTY away mid-turn is exactly the bug
+/// this guard exists for (observed three times in one afternoon on the user's
+/// own interactive claude session). Engine-owned sessions (workflow, channel,
+/// review, swarm, delegation, …) keep the old behaviour: their owning engine
+/// has already consumed the turn output, so reclaiming their RAM loses nothing.
+///
+/// Two independent signals mark a session as engine-owned — a background
+/// `meta.source` (see [`Session::is_foreground_agent`], which also excludes
+/// connection terminals) or a `meta.work.origin` other than `"manual"`. A
+/// session with no work ref AT ALL is the plain-create path (older rows,
+/// pre-dating the `origin` stamp), i.e. the user's own.
+fn is_user_started(session: &Session) -> bool {
+    if !session.is_foreground_agent() {
+        return false;
+    }
+    match session
+        .meta
+        .get("work")
+        .and_then(|w| w.get("origin"))
+        .and_then(|o| o.as_str())
+    {
+        Some(origin) => origin == "manual",
+        None => true,
+    }
+}
+
+/// How much of a provider activity artifact the turn probe reads. Only the
+/// TAIL matters (the last few lines decide), and these files run to hundreds
+/// of MB on a long conversation.
+const TURN_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The harness wake-up marker claude writes when a sub-agent or background
+/// task reports back. It lands AFTER the parent's `end_turn`, and the parent
+/// will resume on it — so a transcript that ends with one is mid-turn.
+const TASK_NOTIFICATION: &str = "<task-notification>";
+
+/// Last [`TURN_TAIL_BYTES`] of `path` as lossy UTF-8, with the (necessarily
+/// partial) first line of the window dropped when the file was bigger than it.
+/// Blocking I/O — call from the blocking pool.
+fn read_tail(path: &std::path::Path, max: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(max);
+    if start > 0 {
+        f.seek(SeekFrom::Start(start))?;
+    }
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    f.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Ok(match (start > 0, text.find('\n')) {
+        (true, Some(i)) => text[i + 1..].to_string(),
+        (true, None) => String::new(), // one >256 KiB line: nothing parseable
+        (false, _) => text,
+    })
+}
+
+/// Is the agent in the MIDDLE OF A TURN according to the provider's own
+/// on-disk record? `Some(true)` = open turn (treat as ACTIVE even with zero
+/// PTY output and zero CPU), `Some(false)` = the last turn closed,
+/// `None` = unknown (unreadable/unparseable file, provider without a rule) —
+/// callers must fall back to their previous decision and never read `None` as
+/// "idle".
+///
+/// A compact local mirror of `otto_server::turn_oracle::{scan_claude,
+/// scan_codex}` — otto-sessions cannot depend on otto-server, and the sweep
+/// needs only the tail verdict, not the full pending/notified bookkeeping.
+///
+/// - **claude**: the last MESSAGE-bearing line (a JSON line whose
+///   `message.role` is `user` or `assistant`) must be an assistant message
+///   with `stop_reason == "end_turn"` for the turn to be closed — and any
+///   later line carrying a [`TASK_NOTIFICATION`] re-opens it (a harness
+///   wake-up is pending, the parent is about to speak again).
+/// - **codex**: the latest `event_msg` `task_started` with no matching
+///   `task_complete` / `turn_aborted` for the same `turn_id`.
+fn agent_turn_open(provider: &str, artifact: &std::path::Path) -> Option<bool> {
+    let tail = read_tail(artifact, TURN_TAIL_BYTES).ok()?;
+    match provider {
+        "claude" => claude_turn_open(&tail),
+        "codex" => codex_turn_open(&tail),
+        _ => None,
+    }
+}
+
+/// claude transcript rule — see [`agent_turn_open`]. `None` when the window
+/// holds no message line at all (a fresh or unparseable transcript says
+/// nothing about the turn).
+fn claude_turn_open(jsonl: &str) -> Option<bool> {
+    let mut saw_message = false;
+    let mut tail_end_turn = false;
+    for line in jsonl.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // A partial line (window edge, or claude mid-append) parses as nothing
+        // and contributes nothing — same rule as the oracle's scan.
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        // Legacy in-file sub-agent lines are never a PARENT turn.
+        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
+            continue;
+        }
+        let msg = v.get("message");
+        let role = msg
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+        if matches!(role, "user" | "assistant") {
+            saw_message = true;
+            tail_end_turn = role == "assistant"
+                && msg
+                    .and_then(|m| m.get("stop_reason"))
+                    .and_then(|r| r.as_str())
+                    == Some("end_turn");
+        }
+        // Matched on the RAW line: a notification rides a queue-operation
+        // line, a plain user line or a `tool_result` block indifferently.
+        if line.contains(TASK_NOTIFICATION) {
+            tail_end_turn = false;
+        }
+    }
+    saw_message.then_some(!tail_end_turn)
+}
+
+/// codex rollout rule — see [`agent_turn_open`]. `None` when the window holds
+/// no `task_started` (nothing to say about a turn).
+fn codex_turn_open(rollout: &str) -> Option<bool> {
+    let mut latest: Option<String> = None;
+    let mut open: Option<bool> = None;
+    for line in rollout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = v.get("payload") else {
+            continue;
+        };
+        let turn_id = payload.get("turn_id").and_then(|t| t.as_str());
+        match payload.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+            "task_started" => {
+                latest = turn_id.map(str::to_string);
+                open = Some(true);
+            }
+            // Only the LATEST turn's own completion/abort closes it; a stale
+            // one belongs to a turn that already ended.
+            "task_complete" | "turn_aborted" if turn_id == latest.as_deref() => {
+                open = Some(false);
+            }
+            _ => {}
+        }
+    }
+    open
+}
+
 /// Hook that inspects live PTY output for a session, used by otto-server's
 /// credential monitor to detect mid-session re-auth prompts (e.g. "run
 /// `claude login`", "session expired").
@@ -3136,8 +3304,24 @@ impl SessionManager {
     /// non-resumable sessions are never touched. Returns the number reclaimed
     /// (suspended + killed).
     ///
-    /// Resilient: a failure on one session is logged and skipped; the loop
-    /// never panics or aborts.
+    /// **"Idle" means "no PTY output", which is not "done".** An agent that
+    /// delegates work and then `sleep`-polls its watchers prints nothing, burns
+    /// no descendant CPU and is squarely mid-turn; this sweep used to suspend
+    /// exactly that. Four guards now hold a session, each logged at `info` with
+    /// its name so the daemon log explains itself:
+    ///
+    /// - `keep_alive`     — the user pinned it (`meta.keep_alive`).
+    /// - `origin=manual`  — the user started it from the Agents page
+    ///   ([`is_user_started`]); only engine-owned sessions are ever
+    ///   auto-suspended.
+    /// - `turn open`      — the provider's own transcript says a turn is still
+    ///   open ([`agent_turn_open`]), whatever the PTY and the CPU say.
+    /// - `descendant CPU` — the process tree accrued CPU since the last sweep
+    ///   (a quiet build/test run).
+    ///
+    /// Resilient: a failure on one session is logged and skipped; an unreadable
+    /// transcript falls back to the pre-existing decision (never "suspend on
+    /// error"); the loop never panics or aborts.
     pub async fn suspend_idle_unattached(&self) -> usize {
         // Read the configurable grace period from settings; fall back to the
         // compiled-in default when not set or when the key is absent.
@@ -3186,9 +3370,10 @@ impl SessionManager {
                 match prev {
                     // Tree accrued >200ms CPU since the last sweep → in-flight work.
                     Some(prev_cpu) if cpu > prev_cpu.saturating_add(200) => {
-                        tracing::debug!(
+                        tracing::info!(
                             session = %id,
-                            "idle-suspend: descendants accrued CPU ({prev_cpu}→{cpu}ms) — skipping"
+                            guard = "descendant CPU",
+                            "idle-suspend: keeping session alive (descendants accrued {prev_cpu}→{cpu}ms)"
                         );
                         continue;
                     }
@@ -3196,7 +3381,11 @@ impl SessionManager {
                     // No baseline yet and descendants exist: measure this sweep,
                     // decide on the next one (60s later).
                     None if cpu > 0 => {
-                        tracing::debug!(session = %id, "idle-suspend: baselining descendant CPU — skipping");
+                        tracing::info!(
+                            session = %id,
+                            guard = "descendant CPU",
+                            "idle-suspend: keeping session alive (baselining descendant CPU)"
+                        );
                         continue;
                     }
                     None => {}
@@ -3216,7 +3405,42 @@ impl SessionManager {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
             {
+                tracing::info!(
+                    session = %id,
+                    guard = "keep_alive",
+                    "idle-suspend: keeping session alive"
+                );
                 continue;
+            }
+            // The user's OWN sessions (Agents page) are never auto-suspended:
+            // silence is not doneness, and the PTY is the thing they are
+            // looking at. Engine-owned origins keep the old behaviour.
+            if is_user_started(&session) {
+                tracing::info!(
+                    session = %id,
+                    guard = "origin=manual",
+                    "idle-suspend: keeping session alive"
+                );
+                continue;
+            }
+            // An OPEN AGENT TURN is activity even at zero output and zero CPU
+            // (the agent is `sleep`-polling a background watcher). Ask the
+            // provider's own transcript; unknown/unreadable → decide as before.
+            if let Some(artifact) = self.activity_artifact(&id).await {
+                let provider = session.provider.clone();
+                let open =
+                    tokio::task::spawn_blocking(move || agent_turn_open(&provider, &artifact))
+                        .await
+                        .ok()
+                        .flatten();
+                if open == Some(true) {
+                    tracing::info!(
+                        session = %id,
+                        guard = "turn open",
+                        "idle-suspend: keeping session alive"
+                    );
+                    continue;
+                }
             }
             // Only resumable agent sessions — never lose work for a provider
             // that can't be resumed (shell, or a self-id provider whose id we
@@ -4795,6 +5019,198 @@ mod tests {
             &mk(SessionKind::Connection, bg),
             past
         ));
+    }
+
+    /// Build a bare session row for the pure sweep-guard decisions.
+    fn guard_session(meta: serde_json::Value) -> Session {
+        Session {
+            id: "s".into(),
+            workspace_id: "ws".into(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: SessionStatus::Idle,
+            cwd: "/tmp".into(),
+            provider_session_id: Some("psid".into()),
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta,
+        }
+    }
+
+    /// THE BUG: the sweep suspended the user's own interactive claude session
+    /// three times in one afternoon while it was mid-turn, waiting on quiet
+    /// background watchers. A session the user started from the Agents page is
+    /// now off limits to the sweep no matter how quiet it looks.
+    #[test]
+    fn manual_origin_sessions_are_never_auto_suspended() {
+        // The plain-create path stamps `work.origin = "manual"`.
+        assert!(is_user_started(&guard_session(
+            serde_json::json!({ "work": { "origin": "manual" } })
+        )));
+        // Older rows pre-date the stamp entirely — still the user's own.
+        assert!(is_user_started(&guard_session(serde_json::json!({}))));
+        // A work ref without an origin (repo/branch only) — still the user's.
+        assert!(is_user_started(&guard_session(
+            serde_json::json!({ "work": { "repo_id": "r1", "branch": "main" } })
+        )));
+        // A pinned manual session is doubly held (keep_alive guard + this one).
+        assert!(is_user_started(&guard_session(
+            serde_json::json!({ "keep_alive": true, "work": { "origin": "manual" } })
+        )));
+    }
+
+    /// …while engine-owned sessions keep the old behaviour: their owner has
+    /// already consumed the turn output, so reclaiming their RAM loses nothing.
+    #[test]
+    fn background_origin_sessions_still_suspend_when_idle() {
+        for origin in ["workflow", "channel", "review", "swarm", "delegation"] {
+            assert!(
+                !is_user_started(&guard_session(
+                    serde_json::json!({ "work": { "origin": origin } })
+                )),
+                "origin={origin} must stay auto-suspendable"
+            );
+        }
+        // A background `meta.source` marks an engine session even when no work
+        // ref was stamped at all (most engine create paths set only `source`).
+        assert!(!is_user_started(&guard_session(
+            serde_json::json!({ "source": "review" })
+        )));
+        assert!(!is_user_started(&guard_session(
+            serde_json::json!({ "source": "swarm", "work": { "origin": "manual" } })
+        )));
+        // Connection terminals are not agent sessions → not "user-started"
+        // agent work; the resumable check already excludes them.
+        let mut conn = guard_session(serde_json::json!({}));
+        conn.kind = SessionKind::Connection;
+        assert!(!is_user_started(&conn));
+    }
+
+    /// An `end_turn` followed by a `<task-notification>` is a PENDING harness
+    /// wake-up: the parent is about to speak again, so the turn is still open
+    /// even though the transcript (and the PTY, and the CPU) have gone quiet.
+    #[test]
+    fn claude_open_turn_keeps_session_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let user = r#"{"type":"user","message":{"role":"user","content":"go"}}"#;
+        let end_turn = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#;
+        let notif = r#"{"type":"user","message":{"role":"user","content":"<task-notification>id=1 status=completed</task-notification>"}}"#;
+        let thinking = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}"#;
+
+        // Tail = a plain end_turn → the turn is closed.
+        std::fs::write(&path, format!("{user}\n{end_turn}\n")).unwrap();
+        assert_eq!(agent_turn_open("claude", &path), Some(false));
+
+        // …but an end_turn followed by a wake-up line → still open.
+        std::fs::write(&path, format!("{user}\n{end_turn}\n{notif}\n")).unwrap();
+        assert_eq!(agent_turn_open("claude", &path), Some(true));
+
+        // A non-end_turn tail (mid tool call) → open.
+        std::fs::write(&path, format!("{user}\n{thinking}\n")).unwrap();
+        assert_eq!(agent_turn_open("claude", &path), Some(true));
+
+        // Sidechain (sub-agent) lines never decide the PARENT's turn.
+        let side = r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","stop_reason":"tool_use","content":[]}}"#;
+        std::fs::write(&path, format!("{user}\n{end_turn}\n{side}\n")).unwrap();
+        assert_eq!(agent_turn_open("claude", &path), Some(false));
+
+        // A partially-written trailing line is skipped, not read as a verdict.
+        std::fs::write(&path, format!("{user}\n{end_turn}\n{{\"type\":\"assi")).unwrap();
+        assert_eq!(agent_turn_open("claude", &path), Some(false));
+
+        // Only the TAIL is read (these files reach hundreds of MB): a transcript
+        // far larger than the window still answers from its last lines.
+        let filler = format!(
+            "{}\n",
+            r#"{"type":"filler","pad":"0123456789012345678901234567890123456789012345678901234567890123456789"}"#
+        );
+        let mut big = filler.repeat(4096); // ~400 KiB, well past TURN_TAIL_BYTES
+        big.push_str(&format!("{end_turn}\n{notif}\n"));
+        std::fs::write(&path, &big).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > TURN_TAIL_BYTES);
+        assert_eq!(agent_turn_open("claude", &path), Some(true));
+    }
+
+    /// codex: the latest `task_started` with no matching `task_complete` /
+    /// `turn_aborted` is an in-flight turn.
+    #[test]
+    fn codex_open_task_keeps_session_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-x-psid.jsonl");
+        let started = |t: &str| {
+            format!(
+                r#"{{"type":"event_msg","ordinal":1,"payload":{{"type":"task_started","turn_id":"{t}"}}}}"#
+            )
+        };
+        let complete = |t: &str| {
+            format!(
+                r#"{{"type":"event_msg","ordinal":2,"payload":{{"type":"task_complete","turn_id":"{t}","last_agent_message":"ok"}}}}"#
+            )
+        };
+        let aborted = |t: &str| {
+            format!(
+                r#"{{"type":"event_msg","ordinal":3,"payload":{{"type":"turn_aborted","turn_id":"{t}"}}}}"#
+            )
+        };
+
+        // Started, never completed → open.
+        std::fs::write(&path, format!("{}\n", started("t1"))).unwrap();
+        assert_eq!(agent_turn_open("codex", &path), Some(true));
+
+        // Completed → closed.
+        std::fs::write(&path, format!("{}\n{}\n", started("t1"), complete("t1"))).unwrap();
+        assert_eq!(agent_turn_open("codex", &path), Some(false));
+
+        // Aborted → closed.
+        std::fs::write(&path, format!("{}\n{}\n", started("t1"), aborted("t1"))).unwrap();
+        assert_eq!(agent_turn_open("codex", &path), Some(false));
+
+        // A NEW turn after a completed one re-opens it…
+        std::fs::write(
+            &path,
+            format!("{}\n{}\n{}\n", started("t1"), complete("t1"), started("t2")),
+        )
+        .unwrap();
+        assert_eq!(agent_turn_open("codex", &path), Some(true));
+
+        // …and a stale turn's completion does not close the live one.
+        std::fs::write(
+            &path,
+            format!("{}\n{}\n{}\n", started("t1"), started("t2"), complete("t1")),
+        )
+        .unwrap();
+        assert_eq!(agent_turn_open("codex", &path), Some(true));
+    }
+
+    /// Never suspend on error: an unreadable, empty or foreign artifact yields
+    /// `None` (unknown), and the sweep keeps its pre-existing decision.
+    #[test]
+    fn unreadable_transcript_falls_back_to_legacy_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.jsonl");
+        assert_eq!(agent_turn_open("claude", &missing), None);
+        assert_eq!(agent_turn_open("codex", &missing), None);
+
+        // Present but useless: empty, garbage, or message-less.
+        let path = dir.path().join("t.jsonl");
+        for body in ["", "not json at all\n", "{\"type\":\"summary\"}\n"] {
+            std::fs::write(&path, body).unwrap();
+            assert_eq!(agent_turn_open("claude", &path), None, "body={body:?}");
+            assert_eq!(agent_turn_open("codex", &path), None, "body={body:?}");
+        }
+
+        // A provider with no transcript rule is always unknown.
+        std::fs::write(&path, "{}\n").unwrap();
+        assert_eq!(agent_turn_open("agy", &path), None);
+        assert_eq!(agent_turn_open("shell", &path), None);
+
+        // A directory is not readable as a file → unknown, not "idle".
+        assert_eq!(agent_turn_open("claude", dir.path()), None);
     }
 
     #[tokio::test]
