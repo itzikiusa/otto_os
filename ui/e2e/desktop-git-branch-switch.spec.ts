@@ -160,16 +160,21 @@ test('a switch stashes and restores, never pulls — and drag is still the only 
   await expect(menu).toBeVisible();
   await expect(menu).not.toContainText('stash · pull · pop');
   await expect(menu.getByRole('menuitem', { name: 'Pull develop' })).toBeVisible();
-  await page.keyboard.press('Escape');
+  // The menu closes through its own backdrop (a page-level Escape never reaches
+  // it — the handler lives on the backdrop element).
+  await page.locator('.ctx-backdrop').click({ position: { x: 5, y: 5 } });
   await expect(menu).toHaveCount(0);
 
   // ── 3. A remote-only row checks out as a LOCAL TRACKING branch from the same
   //       dirty tree (this used to dead-end: the offer was `create:false` only).
   await page.locator('.ref-row.remote', { hasText: 'feature' }).first().dblclick();
-  if (await stashDialog.isVisible().catch(() => false)) {
-    await stashDialog.getByRole('button', { name: 'Stash & switch' }).click();
-  }
-  await expect(page.locator('.toast', { hasText: 'feature' })).toBeVisible({ timeout: 20_000 });
+  // The tree is still dirty (the change restored in step 1) and shared.txt
+  // differs between develop and feature, so git refuses this one too.
+  await expect(stashDialog).toBeVisible({ timeout: 20_000 });
+  await stashDialog.getByRole('button', { name: 'Stash & switch' }).click();
+  await expect(page.locator('.toast', { hasText: 'Switched to feature' })).toBeVisible({
+    timeout: 20_000,
+  });
   expect(git(repoDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('feature');
   expect(git(repoDir, 'rev-parse', '--abbrev-ref', 'feature@{u}')).toBe('origin/feature');
 
