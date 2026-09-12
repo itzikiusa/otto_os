@@ -63,6 +63,10 @@
     if (status !== 'idle') return null;
     if (!session?.kind || session.kind !== 'agent') return null;
     if (session.meta?.keep_alive === true) return null; // pinned — won't be suspended
+    // Sessions the user started from the Agents page (manual origin, no engine
+    // `source`) are exempt from the daemon's idle sweep — no countdown to show.
+    const origin = (session.meta?.work as { origin?: string } | undefined)?.origin;
+    if ((origin === undefined || origin === 'manual') && !session.meta?.source) return null;
     const _tick = now(); // reactive dependency: re-computes every second
     const idleMs = Date.now() - Date.parse(session.last_active_at);
     if (idleMs < 0) return null;
