@@ -10,10 +10,11 @@
 //!     snappy live UI. NEVER calls the usage engine (a `clickhouse local`
 //!     process spawn) inline, so it can't back the broadcast buffer up into
 //!     `Lagged`.
-//!   * **reconcile (60 s) + boot backfill** — enumerate the authoritative repos
-//!     and re-derive every item (idempotent, self-healing for missed/lagged
-//!     events) AND refresh per-session cost via the usage engine, off the hot
-//!     path. The boot backfill is `tokio::spawn`ed so it never delays startup.
+//!   * **reconcile (5 min, `OTTO_WORKGRAPH_RECONCILE_SECS`) + boot backfill** —
+//!     enumerate the authoritative repos and re-derive every item (idempotent,
+//!     self-healing for missed/lagged events) AND refresh per-session cost via
+//!     the usage engine, off the hot path. The boot backfill is `tokio::spawn`ed
+//!     so it never delays startup.
 
 use std::time::Duration;
 
@@ -37,6 +38,16 @@ use crate::state::ServerCtx;
 // workspace is real work, so run it sparingly (5 min) to avoid recurring write
 // load competing with the rest of the daemon.
 const RECONCILE_SECS: u64 = 300;
+/// Reconcile cadence, overridable with `OTTO_WORKGRAPH_RECONCILE_SECS` (seconds;
+/// `0` disables the periodic sweep entirely — the live event loop and the boot
+/// backfill still run, so the graph stays current, it just stops self-healing on
+/// a timer). An escape hatch for "is the reconcile what's stalling my daemon?".
+fn reconcile_secs() -> u64 {
+    std::env::var("OTTO_WORKGRAPH_RECONCILE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(RECONCILE_SECS)
+}
 /// Per-workflow run cap when backfilling (a workflow can have many historical
 /// runs; the recent ones are what Mission Control cares about).
 const RUNS_PER_WORKFLOW: usize = 5;
@@ -101,17 +112,22 @@ pub fn spawn(ctx: ServerCtx) -> tokio::task::JoinHandle<()> {
             tracing::info!("workgraph: boot backfill complete");
         });
     }
-    // Reconcile loop.
-    {
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(RECONCILE_SECS));
-            tick.tick().await; // consume the immediate first tick
-            loop {
-                tick.tick().await;
-                backfill_all(&ctx).await;
-            }
-        });
+    // Reconcile loop (skipped entirely when the operator sets the cadence to 0).
+    match reconcile_secs() {
+        0 => tracing::info!(
+            "workgraph: periodic reconcile disabled (OTTO_WORKGRAPH_RECONCILE_SECS=0)"
+        ),
+        secs => {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(secs));
+                tick.tick().await; // consume the immediate first tick
+                loop {
+                    tick.tick().await;
+                    backfill_all(&ctx).await;
+                }
+            });
+        }
     }
     // Live event loop.
     tokio::spawn(async move {
@@ -126,6 +142,26 @@ pub fn spawn(ctx: ServerCtx) -> tokio::task::JoinHandle<()> {
             }
         }
     })
+}
+
+/// Attach an artifact only when it isn't already there.
+///
+/// Every projection below runs once per live event AND once per reconcile
+/// sweep, i.e. hundreds of times over a work item's life. `add_artifact` itself
+/// is idempotent, but the service wrapper appends an `artifact_added` audit
+/// event on every call — so re-attaching a row that already exists is pure
+/// write amplification on `work_events`. One indexed `SELECT 1` first (on a
+/// lookup error we still try the insert, which is the safe direction).
+async fn add_artifact_if_absent(ctx: &ServerCtx, a: NewArtifact) {
+    let present = ctx
+        .workgraph
+        .repo()
+        .has_artifact(&a.work_item_id, a.kind, a.reference.as_deref())
+        .await
+        .unwrap_or(false);
+    if !present {
+        let _ = ctx.workgraph.add_artifact(a).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -259,17 +295,18 @@ async fn upsert_session(ctx: &ServerCtx, session: &Session) {
         tracing::debug!("workgraph upsert_session: {e}");
     } else {
         // A session links to itself in the UI via a deep-link artifact (evidence).
-        let _ = ctx
-            .workgraph
-            .add_artifact(NewArtifact {
+        add_artifact_if_absent(
+            ctx,
+            NewArtifact {
                 work_item_id: session.id.clone(),
                 workspace_id: session.workspace_id.clone(),
                 kind: ArtifactKind::Session,
                 title: "Open session".into(),
                 reference: Some(session.id.clone()),
                 payload: json!({ "session_id": session.id }),
-            })
-            .await;
+            },
+        )
+        .await;
     }
 }
 
@@ -346,17 +383,20 @@ async fn upsert_goal_loop(ctx: &ServerCtx, loop_id: &Id) {
     };
     if ctx.workgraph.record(up).await.is_ok() {
         if let Some(branch) = &gl.branch {
-            let _ = ctx
-                .workgraph
-                .add_artifact(NewArtifact {
+            add_artifact_if_absent(
+                ctx,
+                NewArtifact {
                     work_item_id: gl.id.clone(),
                     workspace_id: gl.workspace_id.clone(),
                     kind: ArtifactKind::Link,
                     title: format!("Branch {branch}"),
+                    // May be NULL (a loop with no worktree) — 0126's partial
+                    // unique index keeps that to one row per (item, kind).
                     reference: gl.worktree_path.clone(),
                     payload: json!({ "branch": branch, "worktree": gl.worktree_path }),
-                })
-                .await;
+                },
+            )
+            .await;
         }
     }
 }
@@ -395,6 +435,15 @@ async fn upsert_workflow_run(ctx: &ServerCtx, run_id: &Id) {
     if let Err(e) = ctx.workgraph.record(up).await {
         tracing::debug!("workgraph upsert_workflow_run: {e}");
     }
+}
+
+/// The `repo:pr` source key of the `pr` item a review reviews — `None` when the
+/// review has no pull request (`pr_number == 0`, a LOCAL review of the working
+/// tree). Without that guard every PR-less review of a repo projects onto ONE
+/// synthetic "PR #0 · repo" item, which is how a single item ended up owning
+/// ~99k artifact rows.
+fn pr_source_key(repo_id: &str, pr_number: u64) -> Option<String> {
+    (pr_number != 0).then(|| format!("{repo_id}:{pr_number}"))
 }
 
 async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
@@ -438,8 +487,33 @@ async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
         return;
     }
 
-    // A `pr` work item the review reviews (R2.7), keyed `repo:pr`.
-    let pr_source = format!("{}:{}", review.repo_id, review.pr_number);
+    // Evidence: the review report artifact. Keyed by the review id — one verdict
+    // per review — so re-deriving it never grows a second row.
+    if review.summary_md.is_some() || review.verdict.is_some() {
+        add_artifact_if_absent(
+            ctx,
+            NewArtifact {
+                work_item_id: review.id.clone(),
+                workspace_id: workspace_id.clone(),
+                kind: ArtifactKind::Report,
+                title: "Review verdict".into(),
+                reference: Some(review.id.clone()),
+                payload: json!({
+                    "verdict": review.verdict,
+                    "blocker_count": review.blocker_count,
+                    "summary_md": review.summary_md,
+                }),
+            },
+        )
+        .await;
+    }
+
+    // A `pr` work item the review reviews (R2.7), keyed `repo:pr` — absent for a
+    // LOCAL review, which has no pull request at all.
+    let pr_source = match pr_source_key(&review.repo_id, review.pr_number) {
+        Some(k) => k,
+        None => return,
+    };
     let pr_up = WorkItemUpsert {
         workspace_id: workspace_id.clone(),
         kind: WorkKind::Pr,
@@ -468,35 +542,20 @@ async fn upsert_review(ctx: &ServerCtx, workspace_id: &Id, review_id: &Id) {
         .add_edge(workspace_id, &review.id, &pr_item.id, EdgeRelation::Reviews)
         .await;
 
-    // Evidence: a review report artifact + the PR link artifact.
-    if review.summary_md.is_some() || review.verdict.is_some() {
-        let _ = ctx
-            .workgraph
-            .add_artifact(NewArtifact {
-                work_item_id: review.id.clone(),
-                workspace_id: workspace_id.clone(),
-                kind: ArtifactKind::Report,
-                title: "Review verdict".into(),
-                reference: None,
-                payload: json!({
-                    "verdict": review.verdict,
-                    "blocker_count": review.blocker_count,
-                    "summary_md": review.summary_md,
-                }),
-            })
-            .await;
-    }
-    let _ = ctx
-        .workgraph
-        .add_artifact(NewArtifact {
+    // Evidence: the PR link artifact, keyed by the same `repo:pr` identity as the
+    // item it hangs off.
+    add_artifact_if_absent(
+        ctx,
+        NewArtifact {
             work_item_id: pr_item.id.clone(),
             workspace_id: workspace_id.clone(),
             kind: ArtifactKind::Pr,
             title: format!("PR #{}", review.pr_number),
-            reference: None,
+            reference: Some(pr_source),
             payload: json!({ "repo_id": review.repo_id, "pr_number": review.pr_number }),
-        })
-        .await;
+        },
+    )
+    .await;
 }
 
 async fn upsert_product_story(ctx: &ServerCtx, story_id: &Id) {
@@ -653,5 +712,40 @@ pub async fn refresh_session_costs(ctx: &ServerCtx, workspace_id: &Id) {
         .unwrap_or_default();
     for it in &items {
         refresh_item_cost(ctx, workspace_id, it).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reconcile cadence knob (`spawn`): default 5 min, an operator override
+    /// in seconds, `0` to switch the periodic sweep off entirely.
+    #[test]
+    fn reconcile_secs_honours_the_env_override() {
+        const VAR: &str = "OTTO_WORKGRAPH_RECONCILE_SECS";
+        let restore = std::env::var(VAR).ok();
+        std::env::remove_var(VAR);
+        assert_eq!(reconcile_secs(), RECONCILE_SECS);
+        std::env::set_var(VAR, " 30 ");
+        assert_eq!(reconcile_secs(), 30);
+        std::env::set_var(VAR, "0");
+        assert_eq!(reconcile_secs(), 0, "0 disables the periodic reconcile");
+        // Garbage keeps the default rather than silently killing the sweep.
+        std::env::set_var(VAR, "soon");
+        assert_eq!(reconcile_secs(), RECONCILE_SECS);
+        match restore {
+            Some(v) => std::env::set_var(VAR, v),
+            None => std::env::remove_var(VAR),
+        }
+    }
+
+    /// A local (PR-less) review must NOT project a `pr` item — otherwise every
+    /// one of them lands on the same `repo:0` key.
+    #[test]
+    fn pr_source_key_skips_pr_less_reviews() {
+        assert_eq!(pr_source_key("repo1", 42).as_deref(), Some("repo1:42"));
+        assert_eq!(pr_source_key("repo1", 1).as_deref(), Some("repo1:1"));
+        assert_eq!(pr_source_key("repo1", 0), None);
     }
 }
