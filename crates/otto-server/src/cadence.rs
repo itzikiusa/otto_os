@@ -52,7 +52,9 @@ fn every_min(spec: &Value) -> i64 {
 }
 
 fn cadence(spec: &Value) -> &str {
-    spec.get("cadence").and_then(Value::as_str).unwrap_or("interval")
+    spec.get("cadence")
+        .and_then(Value::as_str)
+        .unwrap_or("interval")
 }
 
 /// The `at` time on `now`'s LOCAL day (in `tz`), as a UTC instant. DST-safe: a
@@ -119,11 +121,19 @@ pub fn next_run(spec: &Value, from: DateTime<Utc>, tz: Tz) -> Option<DateTime<Ut
         "daily" => {
             let (h, m) = parse_at(spec);
             let today = scheduled_today(from, tz, h, m)?;
-            Some(if from < today { today } else { today + Duration::days(1) })
+            Some(if from < today {
+                today
+            } else {
+                today + Duration::days(1)
+            })
         }
         "weekly" => {
             let (h, m) = parse_at(spec);
-            let wd = spec.get("weekday").and_then(Value::as_i64).unwrap_or(0).clamp(0, 6) as u32;
+            let wd = spec
+                .get("weekday")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .clamp(0, 6) as u32;
             let today = scheduled_today(from, tz, h, m)?;
             let cur = from.with_timezone(&tz).weekday().num_days_from_monday() as i64;
             let mut delta = (wd as i64 - cur).rem_euclid(7);
@@ -132,7 +142,9 @@ pub fn next_run(spec: &Value, from: DateTime<Utc>, tz: Tz) -> Option<DateTime<Ut
             }
             Some(today + Duration::days(delta))
         }
-        "cron" => cron::Schedule::parse(cron_expr(spec)).ok()?.next_after(from, tz),
+        "cron" => cron::Schedule::parse(cron_expr(spec))
+            .ok()?
+            .next_after(from, tz),
         _ => None,
     }
 }
@@ -157,7 +169,9 @@ pub fn validate(spec: &Value) -> Result<()> {
             check_at(spec)?;
             let wd = spec.get("weekday").and_then(Value::as_i64).unwrap_or(0);
             if !(0..=6).contains(&wd) {
-                return Err(Error::Invalid("schedule.weekday must be 0..=6 (Mon..Sun)".into()));
+                return Err(Error::Invalid(
+                    "schedule.weekday must be 0..=6 (Mon..Sun)".into(),
+                ));
             }
         }
         "cron" => {
@@ -185,7 +199,11 @@ pub fn describe(spec: &Value, tz: Tz) -> String {
         }
         "weekly" => {
             let (h, m) = parse_at(spec);
-            let wd = spec.get("weekday").and_then(Value::as_i64).unwrap_or(0).clamp(0, 6) as usize;
+            let wd = spec
+                .get("weekday")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .clamp(0, 6) as usize;
             let names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
             format!("weekly {} at {h:02}:{m:02} {tz}", names[wd])
         }
@@ -237,7 +255,10 @@ pub mod cron {
             let months = parse_field(fields[3], 1, 12)?;
             // Normalise dow 7 → 0 (both are Sunday).
             let dows_raw = parse_field(fields[4], 0, 7)?;
-            let mut dows: Vec<u32> = dows_raw.into_iter().map(|d| if d == 7 { 0 } else { d }).collect();
+            let mut dows: Vec<u32> = dows_raw
+                .into_iter()
+                .map(|d| if d == 7 { 0 } else { d })
+                .collect();
             dows.sort_unstable();
             dows.dedup();
             Ok(Schedule {
@@ -285,7 +306,10 @@ pub mod cron {
                 if !self.months.contains(&date.month()) || !self.day_matches(date) {
                     // Skip to 00:00 of the next day (in local tz).
                     let next_day = date.checked_add_signed(Duration::days(1))?;
-                    cand = match tz.from_local_datetime(&next_day.and_hms_opt(0, 0, 0)?).earliest() {
+                    cand = match tz
+                        .from_local_datetime(&next_day.and_hms_opt(0, 0, 0)?)
+                        .earliest()
+                    {
                         Some(dt) => dt,
                         None => cand.checked_add_signed(Duration::hours(1))?,
                     };
@@ -330,11 +354,17 @@ pub mod cron {
             let (start, end) = if base == "*" {
                 (lo, hi)
             } else if let Some((a, b)) = base.split_once('-') {
-                let a = a.parse::<u32>().map_err(|_| format!("bad range start '{a}'"))?;
-                let b = b.parse::<u32>().map_err(|_| format!("bad range end '{b}'"))?;
+                let a = a
+                    .parse::<u32>()
+                    .map_err(|_| format!("bad range start '{a}'"))?;
+                let b = b
+                    .parse::<u32>()
+                    .map_err(|_| format!("bad range end '{b}'"))?;
                 (a, b)
             } else {
-                let v = base.parse::<u32>().map_err(|_| format!("bad value '{base}'"))?;
+                let v = base
+                    .parse::<u32>()
+                    .map_err(|_| format!("bad value '{base}'"))?;
                 (v, v)
             };
             if start < lo || end > hi || start > end {
@@ -390,7 +420,12 @@ mod tests {
         let s = json!({"cadence":"daily","at":"03:00"});
         assert!(!is_due(&s, None, utc(2026, 6, 26, 2, 30), Tz::UTC));
         assert!(is_due(&s, None, utc(2026, 6, 26, 9, 0), Tz::UTC));
-        assert!(!is_due(&s, Some(utc(2026, 6, 26, 3, 1)), utc(2026, 6, 26, 9, 0), Tz::UTC));
+        assert!(!is_due(
+            &s,
+            Some(utc(2026, 6, 26, 3, 1)),
+            utc(2026, 6, 26, 9, 0),
+            Tz::UTC
+        ));
     }
 
     #[test]
@@ -437,7 +472,8 @@ mod tests {
         assert!(validate(&json!({"cadence":"cron","expr":"*/15 * * * *"})).is_ok());
         assert!(validate(&json!({"cadence":"cron","expr":"0 9 * *"})).is_err()); // 4 fields
         assert!(validate(&json!({"cadence":"cron","expr":"99 9 * * 1"})).is_err()); // minute > 59
-        assert!(validate(&json!({"cadence":"cron","expr":"0 9 * * 9"})).is_err()); // dow > 7
+        assert!(validate(&json!({"cadence":"cron","expr":"0 9 * * 9"})).is_err());
+        // dow > 7
     }
 
     #[test]
@@ -470,9 +506,19 @@ mod tests {
     fn cron_due_when_passed() {
         let s = json!({"cadence":"cron","expr":"0 9 * * *"});
         // Last ran yesterday 09:00; now today 09:01 → due.
-        assert!(is_due(&s, Some(utc(2026, 6, 25, 9, 0)), utc(2026, 6, 26, 9, 1), Tz::UTC));
+        assert!(is_due(
+            &s,
+            Some(utc(2026, 6, 25, 9, 0)),
+            utc(2026, 6, 26, 9, 1),
+            Tz::UTC
+        ));
         // Now today 08:59 → not yet.
-        assert!(!is_due(&s, Some(utc(2026, 6, 25, 9, 0)), utc(2026, 6, 26, 8, 59), Tz::UTC));
+        assert!(!is_due(
+            &s,
+            Some(utc(2026, 6, 25, 9, 0)),
+            utc(2026, 6, 26, 8, 59),
+            Tz::UTC
+        ));
     }
 
     #[test]
@@ -488,6 +534,9 @@ mod tests {
     fn cron_list_and_range() {
         let sched = cron::Schedule::parse("0 9,17 * * 1-5").unwrap();
         // Friday 2026-06-26: next after 10:00 is 17:00.
-        assert_eq!(sched.next_after(utc(2026, 6, 26, 10, 0), Tz::UTC).unwrap(), utc(2026, 6, 26, 17, 0));
+        assert_eq!(
+            sched.next_after(utc(2026, 6, 26, 10, 0), Tz::UTC).unwrap(),
+            utc(2026, 6, 26, 17, 0)
+        );
     }
 }

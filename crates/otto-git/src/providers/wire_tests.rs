@@ -54,8 +54,11 @@ mod github {
                 ResponseTemplate::new(200)
                     .insert_header(
                         "link",
-                        format!(r#"<{}/repos/acme/app/pulls?page=2>; rel="next""#, server.uri())
-                            .as_str(),
+                        format!(
+                            r#"<{}/repos/acme/app/pulls?page=2>; rel="next""#,
+                            server.uri()
+                        )
+                        .as_str(),
                     )
                     .set_body_json(json!([pr(1), pr(2)])),
             )
@@ -136,7 +139,11 @@ mod github {
 
         let detail = gh.get_pr(&rr(), 7).await.unwrap();
         let bodies: Vec<&str> = detail.comments.iter().map(|c| c.body.as_str()).collect();
-        assert_eq!(bodies, vec!["first", "second"], "both pages must be present");
+        assert_eq!(
+            bodies,
+            vec!["first", "second"],
+            "both pages must be present"
+        );
     }
 
     #[tokio::test]
@@ -287,7 +294,9 @@ mod gitlab {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path_regex(r"^/api/v4/projects/.+/merge_requests/7/discussions$"))
+            .and(path_regex(
+                r"^/api/v4/projects/.+/merge_requests/7/discussions$",
+            ))
             .and(query_param("page", "2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
                 "id": "d2",
@@ -411,12 +420,16 @@ mod bitbucket {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/repositories/acme/app/pullrequests/7/request-changes"))
+            .and(path(
+                "/repositories/acme/app/pullrequests/7/request-changes",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
             .mount(&server)
             .await;
 
-        bb.request_changes(&rr(), 7, Some("please fix")).await.unwrap();
+        bb.request_changes(&rr(), 7, Some("please fix"))
+            .await
+            .unwrap();
 
         let reqs = server.received_requests().await.unwrap();
         let paths: Vec<&str> = reqs.iter().map(|r| r.url.path()).collect();
@@ -436,7 +449,9 @@ mod bitbucket {
         let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
 
         Mock::given(method("POST"))
-            .and(path("/repositories/acme/app/pullrequests/7/request-changes"))
+            .and(path(
+                "/repositories/acme/app/pullrequests/7/request-changes",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
             .mount(&server)
             .await;
@@ -447,7 +462,9 @@ mod bitbucket {
 
         let reqs = server.received_requests().await.unwrap();
         assert_eq!(reqs.len(), 2);
-        assert!(reqs.iter().all(|r| r.url.path().ends_with("/request-changes")));
+        assert!(reqs
+            .iter()
+            .all(|r| r.url.path().ends_with("/request-changes")));
     }
 }
 

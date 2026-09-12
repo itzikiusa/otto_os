@@ -359,13 +359,12 @@ impl ApiClientRepo {
     // --- environments -------------------------------------------------------
 
     pub async fn list_environments(&self, ws: &Id) -> Result<Vec<ApiEnvironment>> {
-        let rows = sqlx::query(
-            "SELECT * FROM api_environments WHERE workspace_id = ? ORDER BY name",
-        )
-        .bind(ws)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("api environments"))?;
+        let rows =
+            sqlx::query("SELECT * FROM api_environments WHERE workspace_id = ? ORDER BY name")
+                .bind(ws)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("api environments"))?;
         rows.iter().map(row_to_environment).collect()
     }
 
@@ -468,14 +467,12 @@ impl ApiClientRepo {
             .execute(&mut *tx)
             .await
             .map_err(dberr("deactivate api environments"))?;
-        sqlx::query(
-            "UPDATE api_environments SET is_active = 1 WHERE id = ? AND workspace_id = ?",
-        )
-        .bind(id)
-        .bind(ws)
-        .execute(&mut *tx)
-        .await
-        .map_err(dberr("activate api environment"))?;
+        sqlx::query("UPDATE api_environments SET is_active = 1 WHERE id = ? AND workspace_id = ?")
+            .bind(id)
+            .bind(ws)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("activate api environment"))?;
         tx.commit()
             .await
             .map_err(dberr("activate api environment"))?;
@@ -687,13 +684,15 @@ mod tests {
         let ws = new_id();
         let user = new_id();
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query("INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, '', ?)")
-            .bind(&user)
-            .bind(format!("u-{user}"))
-            .bind(&now)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, '', ?)",
+        )
+        .bind(&user)
+        .bind(format!("u-{user}"))
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'ws', '/tmp', ?)",
         )
@@ -751,10 +750,7 @@ mod tests {
         assert_eq!(req.headers[0]["key"], "Accept");
 
         // filter by collection
-        let in_col = repo
-            .list_requests(&ws, Some(&col.id))
-            .await
-            .unwrap();
+        let in_col = repo.list_requests(&ws, Some(&col.id)).await.unwrap();
         assert_eq!(in_col.len(), 1);
 
         // update
@@ -819,7 +815,10 @@ mod tests {
         assert!(repo.active_environment(&ws).await.unwrap().is_none());
 
         repo.set_active(&ws, &a.id).await.unwrap();
-        assert_eq!(repo.active_environment(&ws).await.unwrap().unwrap().id, a.id);
+        assert_eq!(
+            repo.active_environment(&ws).await.unwrap().unwrap().id,
+            a.id
+        );
 
         // activating b deactivates a — only one active per workspace
         repo.set_active(&ws, &b.id).await.unwrap();
@@ -872,7 +871,10 @@ mod tests {
 
         // list round-trips too
         let listed = repo.list_requests(&ws, None).await.unwrap();
-        assert_eq!(listed[0].extras.as_ref().unwrap()["docs_md"], "# Users\nList them.");
+        assert_eq!(
+            listed[0].extras.as_ref().unwrap()["docs_md"],
+            "# Users\nList them."
+        );
 
         // update to None clears the column
         let cleared = repo

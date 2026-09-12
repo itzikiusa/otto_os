@@ -33,7 +33,9 @@ impl SecretStore for NullSecrets {
 }
 
 async fn mem_pool() -> SqlitePool {
-    let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
+    let opts = SqliteConnectOptions::new()
+        .in_memory(true)
+        .foreign_keys(true);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)
@@ -96,11 +98,23 @@ async fn seed_conn(pool: &SqlitePool, ws: Option<Id>, user: &Id, kind: Connectio
         .await
         .expect("seed connection");
     let repo = otto_state::resource_access::ResourceAccessRepo::new(pool.clone());
-    let mut policy = repo.get_policy(otto_core::access::ResourceKind::Connection, &conn.id).await.unwrap();
+    let mut policy = repo
+        .get_policy(otto_core::access::ResourceKind::Connection, &conn.id)
+        .await
+        .unwrap();
     let revision = policy.revision;
     policy.mode = otto_core::access::AccessMode::Legacy;
     policy.rules.clear();
-    repo.put_policy(&policy, revision, &otto_core::access::AccessActor { real_user_id: user.clone(), effective_user_id: None }).await.unwrap();
+    repo.put_policy(
+        &policy,
+        revision,
+        &otto_core::access::AccessActor {
+            real_user_id: user.clone(),
+            effective_user_id: None,
+        },
+    )
+    .await
+    .unwrap();
     conn.id
 }
 

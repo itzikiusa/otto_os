@@ -106,7 +106,13 @@ impl BuiltinTheme {
                 }
             }
         }
-        numeric_fallback(self.head.first().map(|e| e.handle.as_str()).unwrap_or("Agent"), used)
+        numeric_fallback(
+            self.head
+                .first()
+                .map(|e| e.handle.as_str())
+                .unwrap_or("Agent"),
+            used,
+        )
     }
 }
 
@@ -203,14 +209,42 @@ fn builtins() -> &'static [BuiltinTheme] {
     static THEMES: OnceLock<Vec<BuiltinTheme>> = OnceLock::new();
     THEMES.get_or_init(|| {
         vec![
-            load("footballers", "Footballers", include_str!("names/data/footballers.txt")),
-            load("basketball", "Basketball Stars", include_str!("names/data/basketball.txt")),
-            load("movie_stars", "Movie Stars", include_str!("names/data/movie_stars.txt")),
-            load("scientists", "Scientists", include_str!("names/data/scientists.txt")),
-            load("musicians", "Musicians", include_str!("names/data/musicians.txt")),
+            load(
+                "footballers",
+                "Footballers",
+                include_str!("names/data/footballers.txt"),
+            ),
+            load(
+                "basketball",
+                "Basketball Stars",
+                include_str!("names/data/basketball.txt"),
+            ),
+            load(
+                "movie_stars",
+                "Movie Stars",
+                include_str!("names/data/movie_stars.txt"),
+            ),
+            load(
+                "scientists",
+                "Scientists",
+                include_str!("names/data/scientists.txt"),
+            ),
+            load(
+                "musicians",
+                "Musicians",
+                include_str!("names/data/musicians.txt"),
+            ),
             load("authors", "Authors", include_str!("names/data/authors.txt")),
-            load("painters", "Painters", include_str!("names/data/painters.txt")),
-            load("f1_drivers", "F1 Drivers", include_str!("names/data/f1_drivers.txt")),
+            load(
+                "painters",
+                "Painters",
+                include_str!("names/data/painters.txt"),
+            ),
+            load(
+                "f1_drivers",
+                "F1 Drivers",
+                include_str!("names/data/f1_drivers.txt"),
+            ),
         ]
     })
 }
@@ -345,7 +379,8 @@ fn answer_tokens(a: &Addressable) -> HashSet<String> {
 
 /// Strip a single leading `@` and trailing address punctuation from a raw token.
 fn clean_token(tok: &str) -> &str {
-    tok.trim_start_matches('@').trim_end_matches([',', ':', ';'])
+    tok.trim_start_matches('@')
+        .trim_end_matches([',', ':', ';'])
 }
 
 /// Resolve a leading name address on `text` against the live `sessions`.
@@ -373,7 +408,10 @@ pub fn resolve_address(text: &str, sessions: &[Addressable]) -> Addressed {
 
     // Explicit broadcast keyword (only as the very first token).
     let first = clean_token(words[0]).to_lowercase();
-    if matches!(first.as_str(), "all" | "everyone" | "broadcast" | "everybody") {
+    if matches!(
+        first.as_str(),
+        "all" | "everyone" | "broadcast" | "everybody"
+    ) {
         let rest = strip_leading_words(trimmed, 1);
         return Addressed {
             targets: sessions.iter().map(|s| s.id.clone()).collect(),

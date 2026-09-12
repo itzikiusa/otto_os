@@ -325,5 +325,8 @@ async fn normal_root_token_unaffected() {
         status(&app, Method::GET, "/api/v1/workspaces/W1/sessions").await,
         StatusCode::OK,
     );
-    assert_eq!(status(&app, Method::GET, "/api/v1/users").await, StatusCode::OK);
+    assert_eq!(
+        status(&app, Method::GET, "/api/v1/users").await,
+        StatusCode::OK
+    );
 }

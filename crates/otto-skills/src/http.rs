@@ -201,8 +201,14 @@ async fn get_bundled_skill<C: ContextCtx>(
     let files = bundled_files(&name)
         .into_iter()
         .map(|path| {
-            let size = bundled_file(&name, &path).map(|c| c.len() as u64).unwrap_or(0);
-            SkillFileEntry { path, size, binary: false }
+            let size = bundled_file(&name, &path)
+                .map(|c| c.len() as u64)
+                .unwrap_or(0);
+            SkillFileEntry {
+                path,
+                size,
+                binary: false,
+            }
         })
         .collect();
     Ok(Json(BundledSkillContent {
@@ -254,7 +260,10 @@ async fn install_all<C: ContextCtx>(
             backed_up.push(r.name);
         }
     }
-    Ok(Json(InstallAllResult { installed, backed_up }))
+    Ok(Json(InstallAllResult {
+        installed,
+        backed_up,
+    }))
 }
 
 // ---------------------------------------------------------------------------

@@ -173,48 +173,42 @@ impl GoalLoopsRepo {
     }
 
     pub async fn list_by_workspace(&self, ws: &Id) -> Result<Vec<GoalLoop>> {
-        let rows = sqlx::query(
-            "SELECT * FROM goal_loops WHERE workspace_id = ? ORDER BY created_at DESC",
-        )
-        .bind(ws)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list goal loops"))?;
+        let rows =
+            sqlx::query("SELECT * FROM goal_loops WHERE workspace_id = ? ORDER BY created_at DESC")
+                .bind(ws)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list goal loops"))?;
         rows.iter().map(row_to_loop).collect()
     }
 
     /// Loops the controller may currently own (running/paused/blocked) — used by
     /// the boot sweep.
     pub async fn list_running(&self) -> Result<Vec<GoalLoop>> {
-        let rows = sqlx::query(
-            "SELECT * FROM goal_loops WHERE status IN ('running','paused','blocked')",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("list running goal loops"))?;
+        let rows =
+            sqlx::query("SELECT * FROM goal_loops WHERE status IN ('running','paused','blocked')")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list running goal loops"))?;
         rows.iter().map(row_to_loop).collect()
     }
 
     async fn iterations_for(&self, loop_id: &Id) -> Result<Vec<GoalLoopIteration>> {
-        let rows = sqlx::query(
-            "SELECT * FROM goal_loop_iterations WHERE loop_id = ? ORDER BY idx",
-        )
-        .bind(loop_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(dberr("goal loop iterations"))?;
+        let rows = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? ORDER BY idx")
+            .bind(loop_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("goal loop iterations"))?;
         rows.iter().map(row_to_iter).collect()
     }
 
     pub async fn get_iteration(&self, loop_id: &Id, idx: u32) -> Result<GoalLoopIteration> {
-        let row = sqlx::query(
-            "SELECT * FROM goal_loop_iterations WHERE loop_id = ? AND idx = ?",
-        )
-        .bind(loop_id)
-        .bind(idx as i64)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(dberr("goal loop iteration"))?;
+        let row = sqlx::query("SELECT * FROM goal_loop_iterations WHERE loop_id = ? AND idx = ?")
+            .bind(loop_id)
+            .bind(idx as i64)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("goal loop iteration"))?;
         row_to_iter(&row)
     }
 
@@ -339,15 +333,13 @@ impl GoalLoopsRepo {
     }
 
     pub async fn add_cost(&self, id: &Id, usd: f64) -> Result<()> {
-        sqlx::query(
-            "UPDATE goal_loops SET cost_usd = cost_usd + ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(usd)
-        .bind(self.touch())
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("add cost"))?;
+        sqlx::query("UPDATE goal_loops SET cost_usd = cost_usd + ?, updated_at = ? WHERE id = ?")
+            .bind(usd)
+            .bind(self.touch())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("add cost"))?;
         Ok(())
     }
 
@@ -495,7 +487,11 @@ impl GoalLoopsRepo {
         status: &str,
         finished: bool,
     ) -> Result<()> {
-        let fin = if finished { Some(fmt(Utc::now())) } else { None };
+        let fin = if finished {
+            Some(fmt(Utc::now()))
+        } else {
+            None
+        };
         sqlx::query(
             "UPDATE goal_loop_iterations SET status = ?, finished_at = COALESCE(?, finished_at)
              WHERE id = ?",
@@ -544,11 +540,7 @@ impl GoalLoopsRepo {
         Ok(())
     }
 
-    pub async fn set_iter_evaluation(
-        &self,
-        iter_id: &Id,
-        eval: &GoalLoopEvaluation,
-    ) -> Result<()> {
+    pub async fn set_iter_evaluation(&self, iter_id: &Id, eval: &GoalLoopEvaluation) -> Result<()> {
         let json = serde_json::to_string(eval)
             .map_err(|e| Error::Internal(format!("serialize evaluation: {e}")))?;
         sqlx::query("UPDATE goal_loop_iterations SET evaluation_json = ? WHERE id = ?")
@@ -698,9 +690,15 @@ mod tests {
         let pool = mem_pool().await;
         let repo = GoalLoopsRepo::new(pool.clone());
         let l = repo.create(new_loop()).await.unwrap();
-        repo.update_runtime(&l.id, GoalLoopStatus::Running, GoalLoopPhase::Planning, 1, 0)
-            .await
-            .unwrap();
+        repo.update_runtime(
+            &l.id,
+            GoalLoopStatus::Running,
+            GoalLoopPhase::Planning,
+            1,
+            0,
+        )
+        .await
+        .unwrap();
 
         let failed = repo.fail_running("interrupted").await.unwrap();
         assert_eq!(failed.len(), 1);

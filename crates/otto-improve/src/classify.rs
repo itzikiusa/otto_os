@@ -125,27 +125,42 @@ mod tests {
             evidence: vec![],
             dedup_checked: true,
             dedup_quote: None,
-            patch: EditPatch { before: None, after: "x".into() },
+            patch: EditPatch {
+                before: None,
+                after: "x".into(),
+            },
         }
     }
 
     #[test]
     fn non_allowlisted_skill_always_queues_even_on_auto() {
-        let e = edit(ImprovementTarget::Skill, "other-skill", ImprovementRisk::Low);
+        let e = edit(
+            ImprovementTarget::Skill,
+            "other-skill",
+            ImprovementRisk::Low,
+        );
         assert_eq!(decide(&e, &[], Autonomy::Auto), Disposition::Queue);
     }
 
     #[test]
     fn allowlisted_low_skill_applies_on_tiered() {
         let list = vec!["support-triage-router".to_string()];
-        let e = edit(ImprovementTarget::Skill, "support-triage-router", ImprovementRisk::Low);
+        let e = edit(
+            ImprovementTarget::Skill,
+            "support-triage-router",
+            ImprovementRisk::Low,
+        );
         assert_eq!(decide(&e, &list, Autonomy::Tiered), Disposition::Apply);
     }
 
     #[test]
     fn allowlisted_structural_skill_queues_on_tiered() {
         let list = vec!["support-triage-router".to_string()];
-        let e = edit(ImprovementTarget::Skill, "support-triage-router", ImprovementRisk::Structural);
+        let e = edit(
+            ImprovementTarget::Skill,
+            "support-triage-router",
+            ImprovementRisk::Structural,
+        );
         assert_eq!(decide(&e, &list, Autonomy::Tiered), Disposition::Queue);
     }
 
@@ -158,7 +173,11 @@ mod tests {
     #[test]
     fn propose_queues_everything() {
         let list = vec!["support-triage-router".to_string()];
-        let e = edit(ImprovementTarget::Skill, "support-triage-router", ImprovementRisk::Low);
+        let e = edit(
+            ImprovementTarget::Skill,
+            "support-triage-router",
+            ImprovementRisk::Low,
+        );
         assert_eq!(decide(&e, &list, Autonomy::Propose), Disposition::Queue);
     }
 
@@ -173,7 +192,10 @@ mod tests {
 
     #[test]
     fn clean_memory_passes_gate() {
-        let e = mem_edit("# notes\n- learned X about routing\n", ImprovementEditKind::Add);
+        let e = mem_edit(
+            "# notes\n- learned X about routing\n",
+            ImprovementEditKind::Add,
+        );
         assert!(memory_content_gate(&e).is_ok());
     }
 

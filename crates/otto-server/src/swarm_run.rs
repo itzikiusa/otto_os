@@ -34,7 +34,9 @@ pub fn new_cancel_registry() -> CancelRegistry {
 
 pub fn register_cancel(reg: &CancelRegistry, run_id: &str) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
-    reg.lock().unwrap().insert(run_id.to_string(), Arc::clone(&flag));
+    reg.lock()
+        .unwrap()
+        .insert(run_id.to_string(), Arc::clone(&flag));
     flag
 }
 
@@ -255,14 +257,25 @@ async fn run_turn_inner(
         Some(tid) => repo.get_task(tid).await.ok(),
         None => None,
     };
-    let project: Option<SwarmProject> = match task.as_ref().map(|t| t.project_id.clone()).or_else(|| run.project_id.clone()) {
+    let project: Option<SwarmProject> = match task
+        .as_ref()
+        .map(|t| t.project_id.clone())
+        .or_else(|| run.project_id.clone())
+    {
         Some(pid) => repo.get_project(&pid).await.ok(),
         None => None,
     };
     let ws = swarm.workspace_id.clone();
 
     // Prepare cwd + per-agent context (skills/soul/identity) + otto-post helper.
-    let cwd_info = match crate::swarm_workspace::ensure_cwd_info(ctx, &swarm, &agent, project.as_ref()).await {
+    let cwd_info = match crate::swarm_workspace::ensure_cwd_info(
+        ctx,
+        &swarm,
+        &agent,
+        project.as_ref(),
+    )
+    .await
+    {
         Ok(c) => c,
         Err(e) => {
             mark_run_error(ctx, run, &format!("prepare cwd: {e}")).await;
@@ -333,12 +346,17 @@ async fn run_turn_inner(
     let directive = run
         .result
         .as_ref()
-        .and_then(|v| v.get("directive").and_then(|d| d.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("directive")
+                .and_then(|d| d.as_str())
+                .map(str::to_string)
+        })
         .or_else(|| {
-            agent
-                .schedule
-                .as_ref()
-                .and_then(|s| s.get("directive").and_then(|d| d.as_str()).map(str::to_string))
+            agent.schedule.as_ref().and_then(|s| {
+                s.get("directive")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string)
+            })
         });
 
     let out = out_path(&run.id);
@@ -379,15 +397,15 @@ async fn run_turn_inner(
             let ctx = ctx.clone();
             let ws = ws.clone();
             // Stamp the work-graph ref so the usage layer can attribute cost to the
-    // originating swarm task. story_id is included when the project was created
-    // from a Product story (Plan → Swarm link; project.story_id is Some).
-    let work_ref = otto_core::workref::WorkRef {
-                    swarm_task_id: task.as_ref().map(|t| t.id.clone()),
-                    story_id: project.as_ref().and_then(|p| p.story_id.clone()),
-                    origin: Some("swarm".into()),
-                    ..Default::default()
-                };
-    let mut swarm_meta = json!({
+            // originating swarm task. story_id is included when the project was created
+            // from a Product story (Plan → Swarm link; project.story_id is Some).
+            let work_ref = otto_core::workref::WorkRef {
+                swarm_task_id: task.as_ref().map(|t| t.id.clone()),
+                story_id: project.as_ref().and_then(|p| p.story_id.clone()),
+                origin: Some("swarm".into()),
+                ..Default::default()
+            };
+            let mut swarm_meta = json!({
                 "source": "swarm",
                 "swarm_id": swarm.id,
                 "agent_id": agent.id,
@@ -396,10 +414,15 @@ async fn run_turn_inner(
                 "run_id": run.id,
                 "work": serde_json::to_value(&work_ref).unwrap_or_default(),
             });
-    // Carry the agent's model into meta so SessionManager can inject
-    // `--model <name>` for providers that support it (claude/codex); for others
-    // it is attribution-only. Mirrors insights.rs / product_run.rs.
-    if let Some(m) = agent.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            // Carry the agent's model into meta so SessionManager can inject
+            // `--model <name>` for providers that support it (claude/codex); for others
+            // it is attribution-only. Mirrors insights.rs / product_run.rs.
+            if let Some(m) = agent
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 swarm_meta["model"] = json!(m);
             }
             let provider = provider.clone();
@@ -408,9 +431,27 @@ async fn run_turn_inner(
             let out = out.clone();
             let run_id = run.id.clone();
             let agent_id = agent.id.clone();
-            let title = format!("{} · {}", agent.name, task.as_ref().map(|t| t.title.clone()).unwrap_or_else(|| agent.title.clone()));
+            let title = format!(
+                "{} · {}",
+                agent.name,
+                task.as_ref()
+                    .map(|t| t.title.clone())
+                    .unwrap_or_else(|| agent.title.clone())
+            );
             async move {
-                run_attempt(&ctx, &ws, &agent_id, &provider, &cwd, &title, &swarm_meta, &prompt, &out, &run_id).await
+                run_attempt(
+                    &ctx,
+                    &ws,
+                    &agent_id,
+                    &provider,
+                    &cwd,
+                    &title,
+                    &swarm_meta,
+                    &prompt,
+                    &out,
+                    &run_id,
+                )
+                .await
             }
         },
     )
@@ -432,18 +473,34 @@ async fn run_turn_inner(
     // Persist terminal state.
     if let Some(raw) = outcome.raw.as_deref() {
         let parsed = parse_turn_result(raw);
-        let status = parsed.as_ref().map(|r| r.status.clone()).unwrap_or_else(|| "done".into());
-        let summary = parsed.as_ref().map(|r| r.summary.clone()).unwrap_or_default();
+        let status = parsed
+            .as_ref()
+            .map(|r| r.status.clone())
+            .unwrap_or_else(|| "done".into());
+        let summary = parsed
+            .as_ref()
+            .map(|r| r.summary.clone())
+            .unwrap_or_default();
         // Persist the parsed result plus the turn's `cwd`/`brief` so the Run
         // Inspector can show what was sent and where it ran without a new route.
-        let result = enrich_result(parsed.as_ref().map(|r| serde_json::to_value(r).unwrap_or_default()), &cwd, &prompt);
+        let result = enrich_result(
+            parsed
+                .as_ref()
+                .map(|r| serde_json::to_value(r).unwrap_or_default()),
+            &cwd,
+            &prompt,
+        );
         let _ = repo
             .update_run(
                 &run.id,
                 RunPatch {
                     status: Some("done".into()),
                     session_id: Some(outcome.session_id.clone()),
-                    summary: Some(Some(if summary.is_empty() { format!("turn {status}") } else { summary })),
+                    summary: Some(Some(if summary.is_empty() {
+                        format!("turn {status}")
+                    } else {
+                        summary
+                    })),
                     result: Some(Some(result)),
                     tokens_input: Some(toks_in),
                     tokens_output: Some(toks_out),
@@ -464,7 +521,11 @@ async fn run_turn_inner(
             .update_run(
                 &run.id,
                 RunPatch {
-                    status: Some(if stopped { "stopped".into() } else { "error".into() }),
+                    status: Some(if stopped {
+                        "stopped".into()
+                    } else {
+                        "error".into()
+                    }),
                     session_id: Some(outcome.session_id.clone()),
                     error: Some(Some(reason.to_string())),
                     result: Some(Some(result)),
@@ -506,7 +567,9 @@ pub(crate) async fn session_usage(
     session_id: Option<&str>,
     since: chrono::DateTime<Utc>,
 ) -> (Option<i64>, Option<i64>, Option<f64>) {
-    let Some(sid) = session_id else { return (None, None, None) };
+    let Some(sid) = session_id else {
+        return (None, None, None);
+    };
     match ctx.usage.session_totals_for(sid, Some(since)).await {
         Some(t) => (
             Some(t.input_tokens as i64),
@@ -604,7 +667,13 @@ async fn run_attempt(
     // Persist session_id on the run immediately so the UI can Open it live.
     let _ = ctx
         .swarm_repo
-        .update_run(&run_id.to_string(), RunPatch { session_id: Some(Some(sid.clone())), ..Default::default() })
+        .update_run(
+            &run_id.to_string(),
+            RunPatch {
+                session_id: Some(Some(sid.clone())),
+                ..Default::default()
+            },
+        )
         .await;
     emit_run(ctx, run_id).await;
 
@@ -615,7 +684,13 @@ async fn run_attempt(
     // (the operator sees "a session opened but nothing was sent to it").
     // Transcript length BEFORE injection: claude_prompt_landed only scans what
     // this turn appends (a reused session has older user records).
-    let transcript_offset = match ctx.manager.get(&sid).await.ok().and_then(|s| s.provider_session_id) {
+    let transcript_offset = match ctx
+        .manager
+        .get(&sid)
+        .await
+        .ok()
+        .and_then(|s| s.provider_session_id)
+    {
         Some(psid) => crate::review_session::transcript_len(cwd, &psid),
         None => 0,
     };
@@ -637,7 +712,11 @@ async fn run_attempt(
     // — a live-but-promptless session used to sit until someone stopped it by hand.
     if provider == "claude"
         && !crate::review_session::claude_prompt_landed(
-            &ctx.manager, &sid, cwd, transcript_offset, crate::review_session::PROMPT_LAND_WAIT,
+            &ctx.manager,
+            &sid,
+            cwd,
+            transcript_offset,
+            crate::review_session::PROMPT_LAND_WAIT,
         )
         .await
     {
@@ -646,7 +725,11 @@ async fn run_attempt(
         tokio::time::sleep(PASTE_TO_ENTER).await;
         let _ = ctx.manager.input(&sid, b"\r").await;
         if !crate::review_session::claude_prompt_landed(
-            &ctx.manager, &sid, cwd, transcript_offset, crate::review_session::PROMPT_LAND_WAIT,
+            &ctx.manager,
+            &sid,
+            cwd,
+            transcript_offset,
+            crate::review_session::PROMPT_LAND_WAIT,
         )
         .await
         {
@@ -757,7 +840,8 @@ async fn detect_shared_files(
     };
     // Files this agent's branch changed relative to the integration branch.
     let git = otto_git::LocalGit::new(&cwd_info.path);
-    let files: std::collections::HashSet<String> = match git.changed_files(integration_branch).await {
+    let files: std::collections::HashSet<String> = match git.changed_files(integration_branch).await
+    {
         Ok(f) => f.into_iter().collect(),
         Err(_) => return,
     };
@@ -798,7 +882,10 @@ async fn detect_shared_files(
         }
         st.by_branch.insert(
             branch.clone(),
-            BranchFiles { agent_name: agent.name.clone(), files },
+            BranchFiles {
+                agent_name: agent.name.clone(),
+                files,
+            },
         );
     }
 

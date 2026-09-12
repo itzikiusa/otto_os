@@ -50,8 +50,15 @@ async fn postgres_connect() {
     }
     let d = PostgresDriver::default();
     let test = d.test(&cfg()).await.expect("test() should not error");
-    assert!(test.ok, "test().ok should be true; message: {}", test.message);
-    assert!(test.server_version.is_some(), "server_version should be Some");
+    assert!(
+        test.ok,
+        "test().ok should be true; message: {}",
+        test.message
+    );
+    assert!(
+        test.server_version.is_some(),
+        "server_version should be Some"
+    );
     eprintln!("server_version = {:?}", test.server_version);
 }
 
@@ -137,7 +144,10 @@ async fn postgres_object_detail() {
         detail.primary_key
     );
     assert!(
-        detail.foreign_keys.iter().any(|fk| fk.ref_table == "customers"),
+        detail
+            .foreign_keys
+            .iter()
+            .any(|fk| fk.ref_table == "customers"),
         "orders should have an FK referencing 'customers'; got: {:?}",
         detail
             .foreign_keys
@@ -161,10 +171,17 @@ async fn postgres_run_select() {
     }
     let d = PostgresDriver::default();
     let res = d
-        .run(&cfg(), &query("SELECT id, email FROM customers ORDER BY id"))
+        .run(
+            &cfg(),
+            &query("SELECT id, email FROM customers ORDER BY id"),
+        )
         .await
         .expect("run(SELECT)");
-    assert!(res.rows.len() >= 4, "expected >= 4 rows; got {}", res.rows.len());
+    assert!(
+        res.rows.len() >= 4,
+        "expected >= 4 rows; got {}",
+        res.rows.len()
+    );
     let email_idx = res
         .columns
         .iter()
@@ -195,7 +212,10 @@ async fn postgres_run_multi_statement_batch() {
     assert_eq!(res.statement.as_deref(), Some("SELECT 1 AS a"));
     assert_eq!(res.more_results.len(), 1, "one trailing result");
     assert_eq!(res.more_results[0].rows[0][0].as_i64(), Some(2));
-    assert_eq!(res.more_results[0].statement.as_deref(), Some("SELECT 2 AS b"));
+    assert_eq!(
+        res.more_results[0].statement.as_deref(),
+        Some("SELECT 2 AS b")
+    );
 }
 
 /// After `FROM`, completion offers the tables ranked above keywords; in a WHERE
@@ -215,7 +235,10 @@ async fn postgres_completion_index_first() {
         suffix: String::new(),
         node: None,
     };
-    let comp = d.completion(&cfg, &from_ctx).await.expect("completion(FROM)");
+    let comp = d
+        .completion(&cfg, &from_ctx)
+        .await
+        .expect("completion(FROM)");
     let orders = comp
         .items
         .iter()
@@ -237,7 +260,10 @@ async fn postgres_completion_index_first() {
         suffix: String::new(),
         node: None,
     };
-    let comp = d.completion(&cfg, &where_ctx).await.expect("completion(WHERE)");
+    let comp = d
+        .completion(&cfg, &where_ctx)
+        .await
+        .expect("completion(WHERE)");
     let score = |label: &str| {
         comp.items
             .iter()
@@ -260,7 +286,10 @@ async fn postgres_explain_format_json() {
     }
     let d = PostgresDriver::default();
     let res = d
-        .run(&cfg(), &query("EXPLAIN (FORMAT JSON) SELECT * FROM customers"))
+        .run(
+            &cfg(),
+            &query("EXPLAIN (FORMAT JSON) SELECT * FROM customers"),
+        )
         .await
         .expect("run(EXPLAIN FORMAT JSON)");
     assert!(!res.rows.is_empty(), "EXPLAIN should return a plan row");
@@ -318,7 +347,9 @@ async fn postgres_cancel() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let handle = handle.expect("backend pid should be captured");
-    d.cancel(&cfg(), &handle).await.expect("cancel should be Ok");
+    d.cancel(&cfg(), &handle)
+        .await
+        .expect("cancel should be Ok");
 
     let res = tokio::time::timeout(Duration::from_secs(4), run)
         .await
@@ -362,10 +393,15 @@ async fn postgres_import_inserts_rows() {
     }
     let d = PostgresDriver::default();
     let cfg = cfg();
-    d.run(&cfg, &query("DROP TABLE IF EXISTS e2e_import_scratch")).await.ok();
-    d.run(&cfg, &query("CREATE TABLE e2e_import_scratch (id INT, name TEXT)"))
+    d.run(&cfg, &query("DROP TABLE IF EXISTS e2e_import_scratch"))
         .await
-        .expect("create scratch table");
+        .ok();
+    d.run(
+        &cfg,
+        &query("CREATE TABLE e2e_import_scratch (id INT, name TEXT)"),
+    )
+    .await
+    .expect("create scratch table");
 
     let parsed = otto_dbviewer::parse_rows(
         otto_dbviewer::ImportFormat::Csv,
@@ -393,5 +429,7 @@ async fn postgres_import_inserts_rows() {
         .or_else(|| res.rows[0][0].as_str().and_then(|s| s.parse().ok()));
     assert_eq!(count, Some(3), "3 rows imported; got {:?}", res.rows[0][0]);
 
-    d.run(&cfg, &query("DROP TABLE e2e_import_scratch")).await.ok();
+    d.run(&cfg, &query("DROP TABLE e2e_import_scratch"))
+        .await
+        .ok();
 }

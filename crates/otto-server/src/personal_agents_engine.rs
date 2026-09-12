@@ -388,7 +388,12 @@ async fn execute_agent(
             .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
             .await?;
         let summary = extract_summary(&report);
-        return Ok(ExecOutcome { report, summary, session_id: None, attempts: 1 });
+        return Ok(ExecOutcome {
+            report,
+            summary,
+            session_id: None,
+            attempts: 1,
+        });
     }
 
     // A personal agent needs an owner to open a visible session under; the
@@ -408,7 +413,12 @@ async fn execute_agent(
                 .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
                 .await?;
             let summary = extract_summary(&report);
-            return Ok(ExecOutcome { report, summary, session_id: None, attempts: 1 });
+            return Ok(ExecOutcome {
+                report,
+                summary,
+                session_id: None,
+                attempts: 1,
+            });
         }
     };
     let ws = ctx.workspaces.get(&agent.workspace_id).await?;
@@ -428,23 +438,34 @@ async fn execute_agent(
     let captured_sid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let attempts = Arc::new(std::sync::atomic::AtomicI64::new(0));
 
-    let outcome = run_with_recovery(&ctx.manager, MAX_ATTEMPTS, &RETRY_BACKOFF, None, |_attempt| {
-        let captured = captured_sid.clone();
-        let attempts = attempts.clone();
-        let ws = ws.clone();
-        let owner = owner.clone();
-        let cwd = cwd.clone();
-        let augmented = augmented.clone();
-        let out_path = out_path.clone();
-        async move {
-            attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            run_one_session(ctx, &ws, &owner, agent, run_id, &cwd, &augmented, &out_path, &captured)
+    let outcome = run_with_recovery(
+        &ctx.manager,
+        MAX_ATTEMPTS,
+        &RETRY_BACKOFF,
+        None,
+        |_attempt| {
+            let captured = captured_sid.clone();
+            let attempts = attempts.clone();
+            let ws = ws.clone();
+            let owner = owner.clone();
+            let cwd = cwd.clone();
+            let augmented = augmented.clone();
+            let out_path = out_path.clone();
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                run_one_session(
+                    ctx, &ws, &owner, agent, run_id, &cwd, &augmented, &out_path, &captured,
+                )
                 .await
-        }
-    })
+            }
+        },
+    )
     .await;
 
-    let session_id = captured_sid.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let session_id = captured_sid
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     if outcome.errored() {
         return Err(Error::Internal(format!(
             "agent run failed: {}",
@@ -634,7 +655,10 @@ mod cwd_tests {
     #[test]
     fn relative_parent_and_nul_are_rejected() {
         for bad in ["agents/x", "./x", "/tmp/../etc", "~/../../etc", "/tmp/a\0b"] {
-            assert!(validate_agent_cwd(bad).is_err(), "{bad:?} should be rejected");
+            assert!(
+                validate_agent_cwd(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 }

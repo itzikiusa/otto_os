@@ -76,7 +76,10 @@ mod tests {
         for _ in 0..MAX_ATTEMPTS_PER_WINDOW {
             assert!(store.try_acquire("example.com"));
         }
-        assert!(!store.try_acquire("example.com"), "must reject the attempt over the cap");
+        assert!(
+            !store.try_acquire("example.com"),
+            "must reject the attempt over the cap"
+        );
     }
 
     #[test]

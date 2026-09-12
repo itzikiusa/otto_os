@@ -66,7 +66,12 @@ impl Folded {
     /// The API page: the last `limit` turns whose first record index is
     /// `< before` (all turns when `before` is `None`). `has_earlier` says
     /// whether another page exists.
-    pub fn page(&self, before: Option<usize>, limit: usize, subagents: Vec<SubagentMeta>) -> Transcript {
+    pub fn page(
+        &self,
+        before: Option<usize>,
+        limit: usize,
+        subagents: Vec<SubagentMeta>,
+    ) -> Transcript {
         let limit = limit.max(1);
         let eligible: Vec<&FoldedTurn> = self
             .turns
@@ -203,7 +208,14 @@ impl<'a> Fold<'a> {
     }
 
     /// Start a turn; drains pending notes/blocks into it. Returns its index.
-    pub fn new_turn(&mut self, id: String, role: Role, ts: Option<String>, model: Option<String>, idx: usize) -> usize {
+    pub fn new_turn(
+        &mut self,
+        id: String,
+        role: Role,
+        ts: Option<String>,
+        model: Option<String>,
+        idx: usize,
+    ) -> usize {
         let blocks = std::mem::take(&mut self.pending_blocks);
         let turn = Turn {
             id,
@@ -245,13 +257,33 @@ impl<'a> Fold<'a> {
         // Size discipline (design §6): prose, queued text, tool input and
         // results are all capped so one record cannot dominate a page.
         let block = match block {
-            Block::Text { md } => Block::Text { md: cap_text(&md).0 },
-            Block::Queued { op, text, injected } => Block::Queued { op, text: cap_text(&text).0, injected },
-            Block::ToolCall { id, name, tool, title, input, mut result } => {
+            Block::Text { md } => Block::Text {
+                md: cap_text(&md).0,
+            },
+            Block::Queued { op, text, injected } => Block::Queued {
+                op,
+                text: cap_text(&text).0,
+                injected,
+            },
+            Block::ToolCall {
+                id,
+                name,
+                tool,
+                title,
+                input,
+                mut result,
+            } => {
                 if let Some(r) = result.as_mut() {
                     r.cap();
                 }
-                Block::ToolCall { id, name, tool, title, input: clip_input(input), result }
+                Block::ToolCall {
+                    id,
+                    name,
+                    tool,
+                    title,
+                    input: clip_input(input),
+                    result,
+                }
             }
             other => other,
         };
@@ -298,7 +330,9 @@ impl<'a> Fold<'a> {
     /// (so the caller can add sibling blocks) or `None` for an orphan.
     pub fn attach_result(&mut self, id: &str, result: ToolResult, idx: usize) -> Option<BlockRef> {
         let r = *self.tool_calls.get(id)?;
-        if let Some(Block::ToolCall { result: slot, .. }) = self.turns[r.turn].turn.blocks.get_mut(r.block) {
+        if let Some(Block::ToolCall { result: slot, .. }) =
+            self.turns[r.turn].turn.blocks.get_mut(r.block)
+        {
             // A structured enrichment (Codex `patch_apply_end`) may land before
             // the plain output for the same call: keep what only it knew.
             let mut result = result;
@@ -411,7 +445,14 @@ impl<'a> Fold<'a> {
     }
 
     /// Register an artifact (dedup PER PATH; the last producing turn wins).
-    pub fn artifact(&mut self, kind: ArtifactKind, path: Option<String>, url: Option<String>, turn_id: &str, produced_at: Option<String>) -> Option<Artifact> {
+    pub fn artifact(
+        &mut self,
+        kind: ArtifactKind,
+        path: Option<String>,
+        url: Option<String>,
+        turn_id: &str,
+        produced_at: Option<String>,
+    ) -> Option<Artifact> {
         let key = path.clone().or_else(|| url.clone())?;
         let id = Artifact::id_for(kind, &key);
         let label = match (&path, &url) {
@@ -447,7 +488,14 @@ impl<'a> Fold<'a> {
     }
 
     /// Accumulate one deduped usage sample.
-    pub fn usage(&mut self, model: &str, input: u64, output: u64, cache_read: u64, cache_write: u64) {
+    pub fn usage(
+        &mut self,
+        model: &str,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) {
         self.usage_seen = true;
         self.input_tokens = self.input_tokens.saturating_add(input);
         self.output_tokens = self.output_tokens.saturating_add(output);
@@ -490,9 +538,11 @@ impl<'a> Fold<'a> {
             let _ = t;
         }
         self.attach_subagents();
-        self.stats.input_tokens = self
-            .usage_seen
-            .then_some(self.input_tokens.saturating_add(self.cache_read).saturating_add(self.cache_write));
+        self.stats.input_tokens = self.usage_seen.then_some(
+            self.input_tokens
+                .saturating_add(self.cache_read)
+                .saturating_add(self.cache_write),
+        );
         self.stats.output_tokens = self.usage_seen.then_some(self.output_tokens);
         self.stats.cost_usd = if self.usage_seen && self.opts.price.is_some() {
             Some(self.cost_usd)
@@ -523,8 +573,12 @@ impl<'a> Fold<'a> {
         let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
         let metas = self.opts.subagents.clone();
         for meta in &metas {
-            let Some(tid) = meta.tool_use_id.as_deref() else { continue };
-            let Some(&r) = self.tool_calls.get(tid) else { continue };
+            let Some(tid) = meta.tool_use_id.as_deref() else {
+                continue;
+            };
+            let Some(&r) = self.tool_calls.get(tid) else {
+                continue;
+            };
             let status = self.subagent_status(r);
             covered.insert(tid.to_string());
             placements.push((
@@ -545,9 +599,19 @@ impl<'a> Fold<'a> {
             .filter_map(|(tid, agent_id)| self.tool_calls.get(tid).map(|r| (agent_id.clone(), *r)))
             .collect();
         for (agent_id, r) in orphans {
-            let Some(input) = self.call_input(r).cloned() else { continue };
-            let description = input.get("description").and_then(Value::as_str).unwrap_or("").to_string();
-            let agent_type = input.get("subagent_type").and_then(Value::as_str).unwrap_or("agent").to_string();
+            let Some(input) = self.call_input(r).cloned() else {
+                continue;
+            };
+            let description = input
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let agent_type = input
+                .get("subagent_type")
+                .and_then(Value::as_str)
+                .unwrap_or("agent")
+                .to_string();
             let status = self.subagent_status(r);
             placements.push((
                 r,
@@ -572,7 +636,9 @@ impl<'a> Fold<'a> {
     fn subagent_status(&self, r: BlockRef) -> Option<SubagentStatus> {
         match self.turns.get(r.turn)?.turn.blocks.get(r.block)? {
             Block::ToolCall { result: None, .. } => Some(SubagentStatus::Running),
-            Block::ToolCall { result: Some(res), .. } => Some(if res.ok {
+            Block::ToolCall {
+                result: Some(res), ..
+            } => Some(if res.ok {
                 SubagentStatus::Done
             } else {
                 SubagentStatus::Error
@@ -591,7 +657,13 @@ mod tests {
         let mut f = Fold::new(Provider::Claude, FoldOpts::default());
         for i in 0..n {
             let t = f.new_turn(format!("t{i}"), Role::User, None, None, i * 2);
-            f.push_block(t, Block::Text { md: format!("m{i}") }, i * 2 + 1);
+            f.push_block(
+                t,
+                Block::Text {
+                    md: format!("m{i}"),
+                },
+                i * 2 + 1,
+            );
         }
         f.finish(n * 2)
     }
@@ -600,11 +672,17 @@ mod tests {
     fn paging_walks_backwards_by_cursor() {
         let f = folded(5);
         let p = f.page(None, 2, vec![]);
-        assert_eq!(p.turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t3", "t4"]);
+        assert_eq!(
+            p.turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["t3", "t4"]
+        );
         assert!(p.has_earlier);
         assert_eq!(p.cursor, "6"); // first record of t3
         let p2 = f.page(Some(6), 2, vec![]);
-        assert_eq!(p2.turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t1", "t2"]);
+        assert_eq!(
+            p2.turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["t1", "t2"]
+        );
         assert!(p2.has_earlier);
         let p3 = f.page(Some(2), 2, vec![]);
         assert_eq!(p3.turns.len(), 1);
@@ -621,7 +699,13 @@ mod tests {
         let mut f = Fold::new(Provider::Claude, FoldOpts::default());
         for i in 0..4 {
             let t = f.new_turn(format!("t{i}"), Role::User, None, None, i);
-            f.push_block(t, Block::Text { md: "x".repeat(60 * 1024) }, i);
+            f.push_block(
+                t,
+                Block::Text {
+                    md: "x".repeat(60 * 1024),
+                },
+                i,
+            );
         }
         let out = f.finish(4);
         // 4 × 60 KB fits in 2 MB → all four.
@@ -631,12 +715,22 @@ mod tests {
         for i in 0..3 {
             let t = g.new_turn(format!("t{i}"), Role::User, None, None, i);
             for _ in 0..20 {
-                g.push_block(t, Block::Text { md: "y".repeat(TOOL_TEXT_CAP) }, i);
+                g.push_block(
+                    t,
+                    Block::Text {
+                        md: "y".repeat(TOOL_TEXT_CAP),
+                    },
+                    i,
+                );
             }
         }
         let out = g.finish(3);
         let p = out.page(None, 10, vec![]);
-        assert_eq!(p.turns.len(), 1, "each turn is ~1.3 MB; only the newest fits");
+        assert_eq!(
+            p.turns.len(),
+            1,
+            "each turn is ~1.3 MB; only the newest fits"
+        );
         assert!(p.has_earlier);
         assert_eq!(p.turns[0].id, "t2");
     }
@@ -644,8 +738,24 @@ mod tests {
     #[test]
     fn artifacts_dedup_per_path_last_turn_wins() {
         let mut f = Fold::new(Provider::Claude, FoldOpts::default());
-        let a = f.artifact(ArtifactKind::File, Some("/repo/a.md".into()), None, "t1", None).unwrap();
-        let b = f.artifact(ArtifactKind::File, Some("/repo/a.md".into()), None, "t2", Some("2026".into())).unwrap();
+        let a = f
+            .artifact(
+                ArtifactKind::File,
+                Some("/repo/a.md".into()),
+                None,
+                "t1",
+                None,
+            )
+            .unwrap();
+        let b = f
+            .artifact(
+                ArtifactKind::File,
+                Some("/repo/a.md".into()),
+                None,
+                "t2",
+                Some("2026".into()),
+            )
+            .unwrap();
         assert_eq!(a.id, b.id);
         let out = f.finish(0);
         assert_eq!(out.artifacts.len(), 1);
@@ -657,10 +767,26 @@ mod tests {
     #[test]
     fn pending_notes_land_on_the_next_turn_and_leftovers_on_the_last() {
         let mut f = Fold::new(Provider::Claude, FoldOpts::default());
-        f.note(None, SystemNote { kind: SystemNoteKind::Other, title: "early".into(), body: None }, 0);
+        f.note(
+            None,
+            SystemNote {
+                kind: SystemNoteKind::Other,
+                title: "early".into(),
+                body: None,
+            },
+            0,
+        );
         let t = f.new_turn("u".into(), Role::User, None, None, 1);
         assert_eq!(f.turns[t].turn.system.len(), 1);
-        f.note(Some(99), SystemNote { kind: SystemNoteKind::Other, title: "late".into(), body: None }, 2);
+        f.note(
+            Some(99),
+            SystemNote {
+                kind: SystemNoteKind::Other,
+                title: "late".into(),
+                body: None,
+            },
+            2,
+        );
         let out = f.finish(3);
         assert_eq!(out.turns[0].turn.system.len(), 2);
     }

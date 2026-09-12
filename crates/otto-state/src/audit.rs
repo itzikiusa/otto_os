@@ -98,7 +98,12 @@ impl AuditRepo {
 
     /// Append the shared `WHERE` predicates of [`AuditLogQuery`] to `qb`. Shared
     /// by [`Self::list`] and [`Self::count`] so they always filter identically.
-    fn push_filters<'a>(qb: &mut QueryBuilder<'a, Sqlite>, q: &'a AuditLogQuery, from: &'a str, to: &'a str) {
+    fn push_filters<'a>(
+        qb: &mut QueryBuilder<'a, Sqlite>,
+        q: &'a AuditLogQuery,
+        from: &'a str,
+        to: &'a str,
+    ) {
         qb.push(" WHERE 1=1");
         if q.from.is_some() {
             qb.push(" AND ts >= ").push_bind(from);

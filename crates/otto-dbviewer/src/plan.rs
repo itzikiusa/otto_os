@@ -138,7 +138,11 @@ pub fn from_pg_json(v: &Value) -> PlanNode {
 }
 
 fn pg_node(v: &Value) -> PlanNode {
-    let op = v.get("Node Type").and_then(Value::as_str).unwrap_or("Plan").to_string();
+    let op = v
+        .get("Node Type")
+        .and_then(Value::as_str)
+        .unwrap_or("Plan")
+        .to_string();
     let mut n = PlanNode::op(&op);
     n.object = v
         .get("Relation Name")
@@ -178,9 +182,16 @@ pub fn from_clickhouse_json(v: &Value) -> PlanNode {
 }
 
 fn ch_node(v: &Value) -> PlanNode {
-    let op = v.get("Node Type").and_then(Value::as_str).unwrap_or("Plan").to_string();
+    let op = v
+        .get("Node Type")
+        .and_then(Value::as_str)
+        .unwrap_or("Plan")
+        .to_string();
     let mut n = PlanNode::op(&op);
-    n.object = v.get("Description").and_then(Value::as_str).map(str::to_string);
+    n.object = v
+        .get("Description")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if let Some(kids) = v.get("Plans").and_then(Value::as_array) {
         n.children = kids.iter().map(ch_node).collect();
     }
@@ -206,18 +217,23 @@ pub fn from_clickhouse_text(lines: &[String]) -> PlanNode {
 /// (Mongo 7+ nests the classic plan under `queryPlan`) via `inputStage(s)`.
 /// `COLLSCAN` is flagged as a collection scan.
 pub fn from_mongo_queryplanner(v: &Value) -> PlanNode {
-    let wp = v
-        .pointer("/queryPlanner/winningPlan")
-        .unwrap_or(v);
+    let wp = v.pointer("/queryPlanner/winningPlan").unwrap_or(v);
     // Mongo 7+ slot-based execution nests the classic stage tree under `queryPlan`.
     let wp = wp.get("queryPlan").unwrap_or(wp);
     mongo_stage(wp)
 }
 
 fn mongo_stage(v: &Value) -> PlanNode {
-    let stage = v.get("stage").and_then(Value::as_str).unwrap_or("stage").to_string();
+    let stage = v
+        .get("stage")
+        .and_then(Value::as_str)
+        .unwrap_or("stage")
+        .to_string();
     let mut n = PlanNode::op(&stage);
-    n.object = v.get("indexName").and_then(Value::as_str).map(str::to_string);
+    n.object = v
+        .get("indexName")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if n.object.is_none() {
         if let Some(kp) = v.get("keyPattern") {
             n.detail = Some(short(&kp.to_string()));
@@ -341,7 +357,9 @@ mod tests {
         assert_eq!(scan.op, "Seq Scan");
         assert_eq!(scan.object.as_deref(), Some("orders"));
         assert_eq!(scan.est_rows, Some(5000.0));
-        assert!(scan.warnings.contains(&"sequential scan (full table)".to_string()));
+        assert!(scan
+            .warnings
+            .contains(&"sequential scan (full table)".to_string()));
     }
 
     #[test]
@@ -391,7 +409,9 @@ mod tests {
         });
         let root = from_mongo_queryplanner(&v);
         assert_eq!(root.op, "COLLSCAN");
-        assert!(root.warnings.contains(&"collection scan (COLLSCAN)".to_string()));
+        assert!(root
+            .warnings
+            .contains(&"collection scan (COLLSCAN)".to_string()));
     }
 
     #[test]

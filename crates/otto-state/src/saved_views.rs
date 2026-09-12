@@ -206,14 +206,20 @@ mod tests {
         repo.create(
             &"ws1".into(),
             &uid,
-            NewSavedView { name: "A".into(), filter: Value::Null },
+            NewSavedView {
+                name: "A".into(),
+                filter: Value::Null,
+            },
         )
         .await
         .unwrap();
         repo.create(
             &"ws2".into(),
             &uid,
-            NewSavedView { name: "B".into(), filter: Value::Null },
+            NewSavedView {
+                name: "B".into(),
+                filter: Value::Null,
+            },
         )
         .await
         .unwrap();

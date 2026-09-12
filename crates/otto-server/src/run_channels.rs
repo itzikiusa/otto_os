@@ -79,21 +79,23 @@ impl RunTrigger for ChannelRunTrigger {
                         decision: decision.to_string(),
                         note: None,
                     };
-                    return Some(match run_service::approve(&self.ctx, &run.id, &req, user).await {
-                        Ok(updated) => {
-                            let emoji = if decision == "approve" { "✅" } else { "🛑" };
-                            RunAck {
-                                reply: format!(
-                                    "{emoji} *{}* — {}.",
-                                    run.title,
-                                    updated.status.as_str()
-                                ),
+                    return Some(
+                        match run_service::approve(&self.ctx, &run.id, &req, user).await {
+                            Ok(updated) => {
+                                let emoji = if decision == "approve" { "✅" } else { "🛑" };
+                                RunAck {
+                                    reply: format!(
+                                        "{emoji} *{}* — {}.",
+                                        run.title,
+                                        updated.status.as_str()
+                                    ),
+                                }
                             }
-                        }
-                        Err(e) => RunAck {
-                            reply: format!("Couldn't {decision} the run: {e}"),
+                            Err(e) => RunAck {
+                                reply: format!("Couldn't {decision} the run: {e}"),
+                            },
                         },
-                    });
+                    );
                 }
                 // No awaiting run here → not for us; let the message route normally.
                 _ => return None,

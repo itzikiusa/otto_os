@@ -139,9 +139,7 @@ fn build_app(pool: SqlitePool, actor: User) -> Router {
         }
     }));
 
-    Router::new()
-        .nest("/api/v1", protected)
-        .with_state(state)
+    Router::new().nest("/api/v1", protected).with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +300,9 @@ async fn capabilities_reflects_grant() {
     let (st, body) = do_req(&app, Method::GET, "/api/v1/auth/capabilities", None).await;
     assert_eq!(st, StatusCode::OK, "capabilities call failed: {body}");
 
-    let caps = body["capabilities"].as_object().expect("capabilities object");
+    let caps = body["capabilities"]
+        .as_object()
+        .expect("capabilities object");
     assert_eq!(
         caps.get("database").and_then(|v| v.as_str()),
         Some("view"),
@@ -329,7 +329,9 @@ async fn capabilities_root_gets_all_admin() {
     let (st, body) = do_req(&app, Method::GET, "/api/v1/auth/capabilities", None).await;
     assert_eq!(st, StatusCode::OK, "capabilities call failed: {body}");
 
-    let caps = body["capabilities"].as_object().expect("capabilities object");
+    let caps = body["capabilities"]
+        .as_object()
+        .expect("capabilities object");
     // At least the 22 built-in features are present. Installed custom plugins add
     // their own slug-keyed capabilities too (string-keyed RBAC axis), so the map
     // may be larger than 22 — assert a lower bound, not an exact count.

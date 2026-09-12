@@ -66,8 +66,15 @@ pub type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> +
 pub trait MonitorSink: Send + Sync {
     fn available(&self) -> bool;
     fn exec<'a>(&'a self, sql: &'a str) -> BoxFut<'a, otto_core::Result<()>>;
-    fn insert_ndjson<'a>(&'a self, table: &'a str, ndjson: &'a str) -> BoxFut<'a, otto_core::Result<()>>;
-    fn query_rows<'a>(&'a self, sql: &'a str) -> BoxFut<'a, otto_core::Result<Vec<serde_json::Value>>>;
+    fn insert_ndjson<'a>(
+        &'a self,
+        table: &'a str,
+        ndjson: &'a str,
+    ) -> BoxFut<'a, otto_core::Result<()>>;
+    fn query_rows<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> BoxFut<'a, otto_core::Result<Vec<serde_json::Value>>>;
 }
 
 /// All `/k8s/*` routes (handler-relative templates; nested under `/api/v1`).

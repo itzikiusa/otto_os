@@ -235,11 +235,21 @@ impl otto_k8s::MonitorSink for FakeSink {
         self.execs.lock().unwrap().push(sql.to_string());
         Box::pin(async { Ok(()) })
     }
-    fn insert_ndjson<'a>(&'a self, table: &'a str, ndjson: &'a str) -> otto_k8s::BoxFut<'a, Result<()>> {
-        self.inserts.lock().unwrap().push((table.to_string(), ndjson.to_string()));
+    fn insert_ndjson<'a>(
+        &'a self,
+        table: &'a str,
+        ndjson: &'a str,
+    ) -> otto_k8s::BoxFut<'a, Result<()>> {
+        self.inserts
+            .lock()
+            .unwrap()
+            .push((table.to_string(), ndjson.to_string()));
         Box::pin(async { Ok(()) })
     }
-    fn query_rows<'a>(&'a self, sql: &'a str) -> otto_k8s::BoxFut<'a, Result<Vec<serde_json::Value>>> {
+    fn query_rows<'a>(
+        &'a self,
+        sql: &'a str,
+    ) -> otto_k8s::BoxFut<'a, Result<Vec<serde_json::Value>>> {
         let rows = self
             .canned
             .lock()
@@ -599,7 +609,10 @@ async fn test_endpoint_uses_base_args_and_reports_server_version() {
         "--kubeconfig {} --context kind-kind version -o json --request-timeout=8s",
         c["kubeconfig_path"].as_str().unwrap()
     );
-    assert!(argv_log().contains(&expected), "missing test command: {expected}");
+    assert!(
+        argv_log().contains(&expected),
+        "missing test command: {expected}"
+    );
     let (_, got, _) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}"), None).await;
     assert!(
         got.get("last_used_at").is_some(),
@@ -987,7 +1000,14 @@ async fn monitor_put_validates_and_persists() {
     let c = create_cluster(&ctx, &user).await;
     let id = c["id"].as_str().unwrap();
 
-    let (st, body, text) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}/monitor"), None).await;
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor"),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(body["config"]["enabled"], false);
     assert!(body["status"].is_null());
@@ -1015,10 +1035,20 @@ async fn monitor_put_validates_and_persists() {
     .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(body["config"]["enabled"], true);
-    assert_eq!(body["config"]["probes"][0]["mappings"][0]["unit"], "bytes_human");
+    assert_eq!(
+        body["config"]["probes"][0]["mappings"][0]["unit"],
+        "bytes_human"
+    );
     assert_eq!(body["config"]["exclusions"][0]["kind"], "pod");
 
-    let (st, body, _) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}/monitor"), None).await;
+    let (st, body, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor"),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["config"]["enabled"], true);
     assert_eq!(body["config"]["retention_days"], 7);
@@ -1085,7 +1115,9 @@ async fn monitor_series_rejects_bad_ident() {
         &ctx,
         &user,
         "GET",
-        &format!("/k8s/clusters/{id}/monitor/series?metric=http_requests_total&workload=web&window=1h"),
+        &format!(
+            "/k8s/clusters/{id}/monitor/series?metric=http_requests_total&workload=web&window=1h"
+        ),
         None,
     )
     .await;
@@ -1109,7 +1141,14 @@ async fn monitor_run_now_sweeps_pods_and_writes_samples() {
     .await;
     assert_eq!(st, StatusCode::OK, "{text}");
 
-    let (st, body, text) = call(&ctx, &user, "POST", &format!("/k8s/clusters/{id}/monitor/run"), None).await;
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/monitor/run"),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(body["pods_seen"], 7, "{body}");
     assert!(body["last_ok_at"].is_string(), "{body}");
@@ -1117,7 +1156,10 @@ async fn monitor_run_now_sweeps_pods_and_writes_samples() {
     // The fake kubectl answers every unknown argv with `{}` and exit 0, so the
     // proxy probe "succeeds" and the auto transport picks it.
     assert_eq!(body["transport_used"], "proxy");
-    assert!(body.get("snapshot").is_none(), "snapshot is never serialised");
+    assert!(
+        body.get("snapshot").is_none(),
+        "snapshot is never serialised"
+    );
 
     let inserts = ctx.sink.inserts.lock().unwrap().clone();
     let samples: Vec<&str> = inserts
@@ -1125,21 +1167,51 @@ async fn monitor_run_now_sweeps_pods_and_writes_samples() {
         .filter(|(t, _)| t == "k8s_samples")
         .flat_map(|(_, nd)| nd.lines())
         .collect();
-    assert!(samples.iter().any(|l| l.contains("\"metric\":\"restarts_total\"")));
-    assert!(samples.iter().any(|l| l.contains("\"metric\":\"cpu_millis\"")), "metrics-server merged");
-    assert!(samples.iter().any(|l| l.contains("\"metric\":\"up\"")), "health probe");
-    assert!(samples.iter().all(|l| l.contains(&format!("\"cluster_id\":\"{id}\""))));
+    assert!(samples
+        .iter()
+        .any(|l| l.contains("\"metric\":\"restarts_total\"")));
+    assert!(
+        samples
+            .iter()
+            .any(|l| l.contains("\"metric\":\"cpu_millis\"")),
+        "metrics-server merged"
+    );
+    assert!(
+        samples.iter().any(|l| l.contains("\"metric\":\"up\"")),
+        "health probe"
+    );
+    assert!(samples
+        .iter()
+        .all(|l| l.contains(&format!("\"cluster_id\":\"{id}\""))));
     // Excluded pod (old-*) is swept but never scraped.
-    assert!(!samples.iter().any(|l| l.contains("old-terminating") && l.contains("\"metric\":\"up\"")));
+    assert!(!samples
+        .iter()
+        .any(|l| l.contains("old-terminating") && l.contains("\"metric\":\"up\"")));
     let execs = ctx.sink.execs.lock().unwrap().clone();
-    assert!(execs.iter().any(|q| q.contains("CREATE TABLE IF NOT EXISTS k8s_samples")));
+    assert!(execs
+        .iter()
+        .any(|q| q.contains("CREATE TABLE IF NOT EXISTS k8s_samples")));
 
-    let (st, body, _) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}/monitor"), None).await;
+    let (st, body, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor"),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["status"]["pods_seen"], 7);
 
     // Second run diffs against the stored snapshot: no restarts, no churn.
-    let (st, _, _) = call(&ctx, &user, "POST", &format!("/k8s/clusters/{id}/monitor/run"), None).await;
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/monitor/run"),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     let inserts = ctx.sink.inserts.lock().unwrap().clone();
     let churn = inserts
@@ -1181,9 +1253,16 @@ async fn monitor_test_probes_reports_per_probe_parse() {
     assert_eq!(probes.len(), 2);
     let info = probes.iter().find(|p| p["name"] == "info").unwrap();
     assert_eq!(info["ok"], true);
-    assert_eq!(info["parse_errors"], 1, "mapping path missing in the `{{}}` body");
+    assert_eq!(
+        info["parse_errors"], 1,
+        "mapping path missing in the `{{}}` body"
+    );
     let health = probes.iter().find(|p| p["name"] == "health").unwrap();
-    assert!(health["samples"].as_array().unwrap().iter().any(|s| s["metric"] == "up" && s["value"] == 1.0));
+    assert!(health["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["metric"] == "up" && s["value"] == 1.0));
 
     let (st, _, _) = call(
         &ctx,
@@ -1219,7 +1298,10 @@ async fn monitor_events_parse_detail_and_filter() {
     .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(body[0]["class"], "oom");
-    assert_eq!(body[0]["detail"]["next_restarts"], 1, "detail JSON is parsed");
+    assert_eq!(
+        body[0]["detail"]["next_restarts"], 1,
+        "detail JSON is parsed"
+    );
     let (st, _, _) = call(
         &ctx,
         &user,
@@ -1237,15 +1319,50 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
     let c = create_cluster(&ctx, &user).await;
     let id = c["id"].as_str().unwrap().to_string();
     // Identifier / allow-list validation happens before ClickHouse is consulted.
-    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/table?ns=a%20b", None).await;
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/table?ns=a%20b",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
-    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/table?sort=detail", None).await;
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/table?sort=detail",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
-    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/series?metric=cpu", None).await;
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/series?metric=cpu",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
-    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/events?sort=x;drop", None).await;
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/events?sort=x;drop",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
-    let (st, _, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/filters?window=1y", None).await;
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/filters?window=1y",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 
     // Canned ClickHouse answers, keyed by SQL substrings unique to each builder.
@@ -1293,7 +1410,10 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
                 serde_json::json!({"g": "crash", "t": "2026-09-11T08:00:00Z", "v": 1}),
             ],
         ));
-        canned.push(("SELECT count() AS n FROM k8s_events".into(), vec![serde_json::json!({"n": 7})]));
+        canned.push((
+            "SELECT count() AS n FROM k8s_events".into(),
+            vec![serde_json::json!({"n": 7})],
+        ));
         canned.push((
             "OFFSET".into(),
             vec![serde_json::json!({
@@ -1308,7 +1428,14 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
     }
 
     // filters: registered cluster is named, an unregistered id survives under its id, rows are counted.
-    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/filters?window=6h", None).await;
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/filters?window=6h",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     let clusters = body["clusters"].as_array().unwrap();
     assert_eq!(clusters.len(), 2);
@@ -1318,10 +1445,20 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
     let gone = clusters.iter().find(|c| c["id"] == "gone").unwrap();
     assert_eq!(gone["name"], "gone");
     assert_eq!(body["workloads"].as_array().unwrap().len(), 2);
-    assert!(body["pods"].as_array().unwrap().is_empty(), "pods are only listed for a narrowed selection");
+    assert!(
+        body["pods"].as_array().unwrap().is_empty(),
+        "pods are only listed for a narrowed selection"
+    );
 
     // table: best memory gauge per pod, pods summed, restarts by class, err % and p95 derived.
-    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/table?window=1h&sort=restarts", None).await;
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/table?window=1h&sort=restarts",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(body["total"], 2);
     let rows = body["rows"].as_array().unwrap();
@@ -1330,21 +1467,41 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
     assert_eq!(rows[0]["pods"], 2);
     assert_eq!(rows[0]["restarts"]["oom"], 3);
     assert_eq!(rows[0]["churn"], 2);
-    assert_eq!(rows[0]["mem_last"], 600.0, "working-set wins over sys for web-1, plus web-2");
+    assert_eq!(
+        rows[0]["mem_last"], 600.0,
+        "working-set wins over sys for web-1, plus web-2"
+    );
     assert_eq!(rows[0]["mem_max"], 600.0);
     assert_eq!(rows[0]["err_pct"], 10.0);
     assert_eq!(rows[0]["latency_kind"], "p95");
-    assert_eq!(rows[0]["latency_ms"], 100.0, "p95 lands in the +Inf bucket → previous bound");
+    assert_eq!(
+        rows[0]["latency_ms"], 100.0,
+        "p95 lands in the +Inf bucket → previous bound"
+    );
     assert_eq!(rows[1]["cluster_id"], "gone");
     assert_eq!(rows[1]["restarts"]["crash"], 1);
     // Ascending textual sort + paging.
-    let (st, body, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/table?sort=workload&dir=asc&limit=1&offset=1", None).await;
+    let (st, body, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/table?sort=workload&dir=asc&limit=1&offset=1",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["rows"].as_array().unwrap().len(), 1);
     assert_eq!(body["rows"][0]["workload"], "web");
 
     // series: restarts come back per class, labelled as the class.
-    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/series?metric=restarts&window=24h", None).await;
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/series?metric=restarts&window=24h",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(body["by"], "class");
     assert_eq!(body["unit"], "count");
@@ -1354,7 +1511,14 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
     assert_eq!(series[1]["points"].as_array().unwrap().len(), 2);
 
     // events: detail parsed, cluster resolved, total from the count query.
-    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/events?window=24h&class=oom&sort=class&dir=asc", None).await;
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/events?window=24h&class=oom&sort=class&dir=asc",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(body["total"], 7);
     assert_eq!(body["sort"], "class");
@@ -1362,7 +1526,14 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
     assert_eq!(body["rows"][0]["detail"]["prev_restarts"], 0);
 
     // requests: rows plus which clusters keep request labels (none yet).
-    let (st, body, text) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/requests?window=1h", None).await;
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/requests?window=1h",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(body["rows"][0]["path"], "/api/x");
     assert_eq!(body["rows"][0]["err_pct"], 25.0);
@@ -1371,10 +1542,24 @@ async fn fleet_routes_validate_and_aggregate_from_clickhouse_only() {
     // Turning request_labels on round-trips through the config and shows up here.
     let mut cfg = monitor_cfg(false, 60);
     cfg["request_labels"] = serde_json::json!(true);
-    let (st, body, text) = call(&ctx, &user, "PUT", &format!("/k8s/clusters/{id}/monitor"), Some(cfg)).await;
+    let (st, body, text) = call(
+        &ctx,
+        &user,
+        "PUT",
+        &format!("/k8s/clusters/{id}/monitor"),
+        Some(cfg),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert_eq!(body["config"]["request_labels"], true);
-    let (_, body, _) = call(&ctx, &user, "GET", "/k8s/monitor/fleet/requests?window=1h", None).await;
+    let (_, body, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        "/k8s/monitor/fleet/requests?window=1h",
+        None,
+    )
+    .await;
     assert_eq!(body["enabled_on"][0]["id"], id);
 }
 
@@ -1391,7 +1576,14 @@ async fn monitor_health_digest_reports_disabled_then_stats() {
     let (ctx, user) = TestCtx::new().await;
     let c = create_cluster(&ctx, &user).await;
     let id = c["id"].as_str().unwrap();
-    let (st, body, _) = call(&ctx, &user, "GET", &format!("/k8s/clusters/{id}/monitor/health"), None).await;
+    let (st, body, _) = call(
+        &ctx,
+        &user,
+        "GET",
+        &format!("/k8s/clusters/{id}/monitor/health"),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["collector"]["enabled"], false);
 
@@ -1404,7 +1596,14 @@ async fn monitor_health_digest_reports_disabled_then_stats() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    let (st, _, _) = call(&ctx, &user, "POST", &format!("/k8s/clusters/{id}/monitor/run"), None).await;
+    let (st, _, _) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/monitor/run"),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     ctx.sink.canned.lock().unwrap().push((
         "argMax(value, ts) AS mem".into(),
@@ -1434,7 +1633,10 @@ async fn monitor_health_digest_reports_disabled_then_stats() {
     .await;
     assert_eq!(st, StatusCode::OK, "{text}");
     let wls = body["workloads"].as_array().unwrap();
-    let web = wls.iter().find(|w| w["workload"] == "web-5d4c-abcde").expect("web workload from snapshot");
+    let web = wls
+        .iter()
+        .find(|w| w["workload"] == "web-5d4c-abcde")
+        .expect("web workload from snapshot");
     assert_eq!(web["mem_bytes"], 900.0);
     assert!(web["spark"]["mem"].is_array());
 }
@@ -1701,7 +1903,14 @@ async fn delegated_cluster_admin_cannot_attach_repoint_or_read_hidden_configurat
         assert!(body["default_namespace"].is_null());
         assert_eq!(body["params"], serde_json::json!({}));
     }
-    let (st, probe, _) = call(&ctx, &user, "POST", &format!("/k8s/clusters/{id}/test"), None).await;
+    let (st, probe, _) = call(
+        &ctx,
+        &user,
+        "POST",
+        &format!("/k8s/clusters/{id}/test"),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(probe["message"], "Connection succeeded");
     sqlx::query("DELETE FROM user_feature_grants WHERE user_id = ?")

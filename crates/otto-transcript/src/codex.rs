@@ -217,7 +217,9 @@ impl CodexState<'_> {
             self.f.touch(t, idx);
             return t;
         }
-        let model = (role == Role::Assistant).then(|| self.f.model.clone()).flatten();
+        let model = (role == Role::Assistant)
+            .then(|| self.f.model.clone())
+            .flatten();
         let t = self.f.new_turn(key.clone(), role, ts, model, idx);
         self.turns_by_id.insert(key, t);
         t
@@ -231,28 +233,45 @@ impl CodexState<'_> {
             return t;
         }
         let model = self.f.model.clone();
-        let t = self.f.new_turn(format!("r{idx}"), Role::Assistant, ts, model, idx);
+        let t = self
+            .f
+            .new_turn(format!("r{idx}"), Role::Assistant, ts, model, idx);
         self.cur_asst = Some(t);
         t
     }
 
     fn user_turn_old(&mut self, text: &str, ts: Option<String>, idx: usize) {
-        let t = self.f.new_turn(format!("r{idx}"), Role::User, ts, None, idx);
+        let t = self
+            .f
+            .new_turn(format!("r{idx}"), Role::User, ts, None, idx);
         self.cur_asst = None;
         if self.f.first_prompt.is_none() {
             self.f.first_prompt = Some(clip(text, 300));
         }
-        self.f.push_block(t, Block::Text { md: text.to_string() }, idx);
+        self.f.push_block(
+            t,
+            Block::Text {
+                md: text.to_string(),
+            },
+            idx,
+        );
     }
 
     fn text_block(&mut self, t: usize, text: &str, ts: &Option<String>, idx: usize) {
         if text.trim().is_empty() {
             return;
         }
-        self.f.push_block(t, Block::Text { md: text.to_string() }, idx);
+        self.f.push_block(
+            t,
+            Block::Text {
+                md: text.to_string(),
+            },
+            idx,
+        );
         let turn_id = self.f.turns[t].turn.id.clone();
         for url in pr_urls(text) {
-            self.f.artifact(ArtifactKind::Pr, None, Some(url), &turn_id, ts.clone());
+            self.f
+                .artifact(ArtifactKind::Pr, None, Some(url), &turn_id, ts.clone());
         }
     }
 
@@ -263,7 +282,11 @@ impl CodexState<'_> {
         match str_of(p, "type") {
             Some("item_completed") => self.item(idx, v, p),
             Some("token_count") => {
-                let total = p.get("info").and_then(|i| i.get("total_token_usage")).cloned().unwrap_or(Value::Null);
+                let total = p
+                    .get("info")
+                    .and_then(|i| i.get("total_token_usage"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 self.tokens(&total);
             }
             Some("task_started") => {
@@ -275,14 +298,20 @@ impl CodexState<'_> {
             Some("task_complete") | Some("turn_aborted") => {
                 let ms = u64_of(p, "duration_ms");
                 let t = if self.new_era {
-                    str_of(p, "turn_id").and_then(|tid| self.turns_by_id.get(&format!("{tid}:a")).copied())
+                    str_of(p, "turn_id")
+                        .and_then(|tid| self.turns_by_id.get(&format!("{tid}:a")).copied())
                 } else {
-                    self.cur_asst.or_else(|| self.f.last_turn_with_role(Role::Assistant))
+                    self.cur_asst
+                        .or_else(|| self.f.last_turn_with_role(Role::Assistant))
                 };
                 // Old era fallback: a turn that ended with no agent_message at all
                 // still gets its final text.
                 if let (Some(t), Some(last)) = (t, str_of(p, "last_agent_message")) {
-                    let has_text = self.f.turns[t].turn.blocks.iter().any(|b| matches!(b, Block::Text { .. }));
+                    let has_text = self.f.turns[t]
+                        .turn
+                        .blocks
+                        .iter()
+                        .any(|b| matches!(b, Block::Text { .. }));
                     if !has_text && !last.trim().is_empty() {
                         self.text_block(t, last, &ts, idx);
                     }
@@ -363,7 +392,10 @@ impl CodexState<'_> {
                         self.f.touch(r.turn, idx);
                     }
                     None => {
-                        let title = first_path.as_deref().map(|p| basename(p).to_string()).unwrap_or_else(|| "apply_patch".into());
+                        let title = first_path
+                            .as_deref()
+                            .map(|p| basename(p).to_string())
+                            .unwrap_or_else(|| "apply_patch".into());
                         self.f.push_tool_call(
                             t,
                             call_id,
@@ -509,7 +541,8 @@ impl CodexState<'_> {
                 }
                 None => {
                     let model = self.f.model.clone();
-                    self.f.new_turn(format!("r{idx}"), Role::Assistant, ts, model, idx)
+                    self.f
+                        .new_turn(format!("r{idx}"), Role::Assistant, ts, model, idx)
                 }
             }
         } else {
@@ -539,7 +572,13 @@ impl CodexState<'_> {
                         let turn_key = self.f.turns[t].turn.id.clone();
                         for img in arr {
                             if let Some(pth) = img.as_str().or_else(|| str_of(img, "path")) {
-                                self.f.artifact(ArtifactKind::Image, Some(pth.to_string()), None, &turn_key, ts.clone());
+                                self.f.artifact(
+                                    ArtifactKind::Image,
+                                    Some(pth.to_string()),
+                                    None,
+                                    &turn_key,
+                                    ts.clone(),
+                                );
                             }
                         }
                     }
@@ -595,16 +634,35 @@ impl CodexState<'_> {
                     for (n, (path, ch)) in obj.iter().enumerate() {
                         any = true;
                         let ctype = str_of(ch, "type").unwrap_or("update");
-                        let kind = if ctype == "add" { ToolKind::Write } else { ToolKind::Edit };
+                        let kind = if ctype == "add" {
+                            ToolKind::Write
+                        } else {
+                            ToolKind::Edit
+                        };
                         let patch = str_of(ch, "unified_diff")
                             .map(|d| format!("--- a/{path}\n+++ b/{path}\n{d}"))
-                            .or_else(|| str_of(ch, "content").map(|c| c.lines().map(|l| format!("+{l}")).collect::<Vec<_>>().join("\n")));
-                        let mut result = Fold::result_from_text(ok, if n == 0 { stdout } else { "" }, Vec::new());
+                            .or_else(|| {
+                                str_of(ch, "content").map(|c| {
+                                    c.lines()
+                                        .map(|l| format!("+{l}"))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                })
+                            });
+                        let mut result = Fold::result_from_text(
+                            ok,
+                            if n == 0 { stdout } else { "" },
+                            Vec::new(),
+                        );
                         result.patch = patch;
                         result.file_path = Some(path.clone());
                         self.f.push_tool_call(
                             t,
-                            if n == 0 { item_id.clone() } else { format!("{item_id}:{n}") },
+                            if n == 0 {
+                                item_id.clone()
+                            } else {
+                                format!("{item_id}:{n}")
+                            },
                             "apply_patch".into(),
                             kind,
                             format!("{} {}", ctype, basename(path)),
@@ -661,22 +719,41 @@ impl CodexState<'_> {
             Some("Extension") => {
                 let kind = str_of(&item, "kind").unwrap_or("extension");
                 let q = str_of(&item, "query").unwrap_or("").to_string();
-                let n = item.get("results").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+                let n = item
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
                 let t = self.turn_for(&turn_id, Role::Assistant, ts, idx);
-                let tool = if kind.starts_with("web") { ToolKind::Web } else { ToolKind::Other };
+                let tool = if kind.starts_with("web") {
+                    ToolKind::Web
+                } else {
+                    ToolKind::Other
+                };
                 self.f.push_tool_call(
                     t,
                     item_id,
                     kind.to_string(),
                     tool,
-                    if q.is_empty() { kind.to_string() } else { clip(&q, 120) },
+                    if q.is_empty() {
+                        kind.to_string()
+                    } else {
+                        clip(&q, 120)
+                    },
                     item.get("action").cloned().unwrap_or(Value::Null),
-                    Some(Fold::result_from_text(true, &format!("{n} result(s)"), Vec::new())),
+                    Some(Fold::result_from_text(
+                        true,
+                        &format!("{n} result(s)"),
+                        Vec::new(),
+                    )),
                     idx,
                 );
             }
             Some("ImageView") => {
-                let path = str_of(&item, "path").unwrap_or("").trim_start_matches("file://").to_string();
+                let path = str_of(&item, "path")
+                    .unwrap_or("")
+                    .trim_start_matches("file://")
+                    .to_string();
                 let t = self.turn_for(&turn_id, Role::Assistant, ts, idx);
                 self.f.push_tool_call(
                     t,
@@ -750,14 +827,18 @@ impl CodexState<'_> {
                             idx,
                         );
                     }
-                    other => self.f.unknown(&format!("message/{}", other.unwrap_or("?")), idx),
+                    other => self
+                        .f
+                        .unknown(&format!("message/{}", other.unwrap_or("?")), idx),
                 }
             }
             Some("function_call") => {
                 let name = str_of(p, "name").unwrap_or("tool").to_string();
                 let args_raw = p.get("arguments").cloned().unwrap_or(Value::Null);
                 let args = match &args_raw {
-                    Value::String(s) => serde_json::from_str::<Value>(s).unwrap_or(args_raw.clone()),
+                    Value::String(s) => {
+                        serde_json::from_str::<Value>(s).unwrap_or(args_raw.clone())
+                    }
                     other => other.clone(),
                 };
                 let kind = tool_kind_for_codex_function(&name);
@@ -808,7 +889,11 @@ impl CodexState<'_> {
                     t,
                     str_of(p, "call_id").unwrap_or("").to_string(),
                     name.clone(),
-                    if name == "exec" { ToolKind::Shell } else { tool_kind_for_codex_function(&name) },
+                    if name == "exec" {
+                        ToolKind::Shell
+                    } else {
+                        tool_kind_for_codex_function(&name)
+                    },
                     title,
                     serde_json::json!({ "script": clip(&input, 4000) }),
                     None,
@@ -846,12 +931,14 @@ impl CodexState<'_> {
                 if str_of(ch, "type") == Some("delete") {
                     continue;
                 }
-                let kind = if crate::util::mime_for_path(path).is_some_and(|m| m.starts_with("image/")) {
-                    ArtifactKind::Image
-                } else {
-                    ArtifactKind::File
-                };
-                self.f.artifact(kind, Some(path.clone()), None, turn_id, ts.clone());
+                let kind =
+                    if crate::util::mime_for_path(path).is_some_and(|m| m.starts_with("image/")) {
+                        ArtifactKind::Image
+                    } else {
+                        ArtifactKind::File
+                    };
+                self.f
+                    .artifact(kind, Some(path.clone()), None, turn_id, ts.clone());
             }
         }
     }
@@ -861,7 +948,9 @@ impl CodexState<'_> {
 fn model_of(v: &Value) -> Option<String> {
     match v.get("model")? {
         Value::String(s) if !s.is_empty() => Some(s.clone()),
-        Value::Object(_) => ["name", "id", "slug"].iter().find_map(|k| string_of(v.get("model")?, k)),
+        Value::Object(_) => ["name", "id", "slug"]
+            .iter()
+            .find_map(|k| string_of(v.get("model")?, k)),
         _ => None,
     }
 }
@@ -897,7 +986,12 @@ fn output_text(o: Option<&Value>) -> String {
     match o {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(_)) => content_text(o),
-        Some(Value::Object(obj)) => obj.get("text").or_else(|| obj.get("output")).and_then(Value::as_str).unwrap_or("").to_string(),
+        Some(Value::Object(obj)) => obj
+            .get("text")
+            .or_else(|| obj.get("output"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         _ => String::new(),
     }
 }
@@ -959,7 +1053,10 @@ fn mcp_result(r: &Value) -> (bool, String) {
         return (false, clip(&err.to_string(), 2000));
     }
     let inner = r.get("Ok").unwrap_or(r);
-    let ok = !inner.get("isError").and_then(Value::as_bool).unwrap_or(false);
+    let ok = !inner
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     (ok, content_text(inner.get("content")))
 }
 
@@ -1002,7 +1099,11 @@ fn injected_title(text: &str) -> String {
 fn codex_function_title(name: &str, args: &Value) -> String {
     match name {
         "shell" | "exec_command" | "shell_command" | "container.exec" => {
-            let cmd = args.get("cmd").or_else(|| args.get("command")).cloned().unwrap_or(Value::Null);
+            let cmd = args
+                .get("cmd")
+                .or_else(|| args.get("command"))
+                .cloned()
+                .unwrap_or(Value::Null);
             let line = command_line(Some(&cmd));
             if line.is_empty() {
                 name.to_string()
@@ -1011,9 +1112,14 @@ fn codex_function_title(name: &str, args: &Value) -> String {
             }
         }
         "apply_patch" => {
-            let body = str_of(args, "input").or_else(|| str_of(args, "patch")).unwrap_or("");
+            let body = str_of(args, "input")
+                .or_else(|| str_of(args, "patch"))
+                .unwrap_or("");
             body.lines()
-                .find_map(|l| l.strip_prefix("*** Update File: ").or_else(|| l.strip_prefix("*** Add File: ")))
+                .find_map(|l| {
+                    l.strip_prefix("*** Update File: ")
+                        .or_else(|| l.strip_prefix("*** Add File: "))
+                })
                 .map(|p| basename(p.trim()).to_string())
                 .unwrap_or_else(|| "apply_patch".into())
         }
@@ -1051,18 +1157,41 @@ mod tests {
         let f = fold(NEW);
         assert_eq!(f.session_id.as_deref(), Some("sid-1"));
         assert_eq!(f.model.as_deref(), Some("gpt-5"));
-        assert_eq!(f.turns.len(), 2, "response_item message/user must not add a turn");
+        assert_eq!(
+            f.turns.len(),
+            2,
+            "response_item message/user must not add a turn"
+        );
         assert_eq!(f.turns[0].turn.id, "T1:u");
         assert_eq!(f.turns[1].turn.id, "T1:a");
         let a = &f.turns[1].turn;
         assert_eq!(a.duration_ms, Some(6000));
-        let calls: Vec<&Block> = a.blocks.iter().filter(|b| matches!(b, Block::ToolCall { .. })).collect();
+        let calls: Vec<&Block> = a
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::ToolCall { .. }))
+            .collect();
         assert_eq!(calls.len(), 2);
-        assert!(matches!(calls[0], Block::ToolCall { tool: ToolKind::Shell, title, .. } if title == "ls"));
-        assert!(matches!(calls[1], Block::ToolCall { tool: ToolKind::Edit, result: Some(r), .. } if r.patch.as_deref().unwrap().contains("+b")));
-        let texts: Vec<&Block> = a.blocks.iter().filter(|b| matches!(b, Block::Text { .. })).collect();
-        assert_eq!(texts.len(), 1, "response_item message/assistant must not duplicate the AgentMessage");
-        assert_eq!(f.stats.reasoning_steps, 1, "response_item reasoning is not double counted");
+        assert!(
+            matches!(calls[0], Block::ToolCall { tool: ToolKind::Shell, title, .. } if title == "ls")
+        );
+        assert!(
+            matches!(calls[1], Block::ToolCall { tool: ToolKind::Edit, result: Some(r), .. } if r.patch.as_deref().unwrap().contains("+b"))
+        );
+        let texts: Vec<&Block> = a
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Text { .. }))
+            .collect();
+        assert_eq!(
+            texts.len(),
+            1,
+            "response_item message/assistant must not duplicate the AgentMessage"
+        );
+        assert_eq!(
+            f.stats.reasoning_steps, 1,
+            "response_item reasoning is not double counted"
+        );
         assert_eq!(a.reasoning_steps, 1);
         assert_eq!(f.stats.tool_calls, 2);
         assert_eq!(f.stats.input_tokens, Some(1000));
@@ -1103,19 +1232,58 @@ mod tests {
         assert_eq!(u.system.len(), 2);
         assert!(u.system.iter().any(|n| n.title == "AGENTS.md instructions"));
         let a = &f.turns[1].turn;
-        let texts: Vec<&Block> = a.blocks.iter().filter(|b| matches!(b, Block::Text { .. })).collect();
-        assert_eq!(texts.len(), 1, "agent_message wins over response_item message/assistant");
-        let calls: Vec<&Block> = a.blocks.iter().filter(|b| matches!(b, Block::ToolCall { .. })).collect();
-        assert_eq!(calls.len(), 3, "exec_command, apply_patch (enriched by patch_apply_end), exec");
-        let Block::ToolCall { result: Some(r1), title, .. } = calls[0] else { panic!() };
+        let texts: Vec<&Block> = a
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Text { .. }))
+            .collect();
+        assert_eq!(
+            texts.len(),
+            1,
+            "agent_message wins over response_item message/assistant"
+        );
+        let calls: Vec<&Block> = a
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::ToolCall { .. }))
+            .collect();
+        assert_eq!(
+            calls.len(),
+            3,
+            "exec_command, apply_patch (enriched by patch_apply_end), exec"
+        );
+        let Block::ToolCall {
+            result: Some(r1),
+            title,
+            ..
+        } = calls[0]
+        else {
+            panic!()
+        };
         assert_eq!(title, "rg --files");
         assert!(r1.ok);
-        let Block::ToolCall { result: Some(r2), tool, .. } = calls[1] else { panic!() };
+        let Block::ToolCall {
+            result: Some(r2),
+            tool,
+            ..
+        } = calls[1]
+        else {
+            panic!()
+        };
         assert_eq!(*tool, ToolKind::Edit);
         assert_eq!(r2.file_path.as_deref(), Some("/repo/a.md"));
         assert!(r2.patch.as_deref().unwrap().contains("+y"));
-        assert_eq!(r2.text.as_deref(), Some("Success"), "function output text kept");
-        let Block::ToolCall { result: Some(r3), .. } = calls[2] else { panic!() };
+        assert_eq!(
+            r2.text.as_deref(),
+            Some("Success"),
+            "function output text kept"
+        );
+        let Block::ToolCall {
+            result: Some(r3), ..
+        } = calls[2]
+        else {
+            panic!()
+        };
         assert!(r3.text.as_deref().unwrap().contains("on main"));
         assert_eq!(a.duration_ms, Some(100));
         assert_eq!(f.stats.reasoning_steps, 1);
@@ -1155,14 +1323,23 @@ mod tests {
     fn unknown_records_are_counted_not_dropped() {
         let f = fold("{\"type\":\"brand_new\"}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"never_seen\"}}\n");
         assert_eq!(f.stats.unknown_records, 2);
-        assert_eq!(f.turns.len(), 1, "system-only file keeps its notices visible");
+        assert_eq!(
+            f.turns.len(),
+            1,
+            "system-only file keeps its notices visible"
+        );
     }
 
     #[test]
     fn exit_code_detection() {
-        assert!(exit_code_failed("Chunk ID: x\nProcess exited with code 1\nOutput:"));
+        assert!(exit_code_failed(
+            "Chunk ID: x\nProcess exited with code 1\nOutput:"
+        ));
         assert!(!exit_code_failed("Process exited with code 0\nfoo"));
         assert!(!exit_code_failed("plain"));
-        assert_eq!(command_line(Some(&serde_json::json!(["/bin/zsh", "-lc", "ls -la"]))), "ls -la");
+        assert_eq!(
+            command_line(Some(&serde_json::json!(["/bin/zsh", "-lc", "ls -la"]))),
+            "ls -la"
+        );
     }
 }

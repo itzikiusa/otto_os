@@ -37,12 +37,26 @@ async fn private_memory_is_hidden_from_other_members() {
     let (pool, ws, _seed) = otto_memory::test_support::mem_pool().await;
     let svc = MemoryService::with_defaults(pool);
 
-    svc.save(&ws, "alice", vec![mk("shared", "shared settlement runbook")]).await.unwrap();
-    svc.save(&ws, "alice", vec![mk("private", "alice secret settlement note")]).await.unwrap();
+    svc.save(
+        &ws,
+        "alice",
+        vec![mk("shared", "shared settlement runbook")],
+    )
+    .await
+    .unwrap();
+    svc.save(
+        &ws,
+        "alice",
+        vec![mk("private", "alice secret settlement note")],
+    )
+    .await
+    .unwrap();
 
     // Bob (another team member) sees the shared one, not Alice's private one.
     let bob = svc.search(&ws, query("bob")).await.unwrap();
-    assert!(bob.iter().any(|h| h.memory.body.contains("shared settlement runbook")));
+    assert!(bob
+        .iter()
+        .any(|h| h.memory.body.contains("shared settlement runbook")));
     assert!(
         !bob.iter().any(|h| h.memory.body.contains("secret")),
         "bob must not see alice's private memory"
@@ -50,6 +64,11 @@ async fn private_memory_is_hidden_from_other_members() {
 
     // Alice sees both (her own private + the shared one).
     let alice = svc.search(&ws, query("alice")).await.unwrap();
-    assert!(alice.iter().any(|h| h.memory.body.contains("secret")), "alice sees her own private");
-    assert!(alice.iter().any(|h| h.memory.body.contains("shared settlement runbook")));
+    assert!(
+        alice.iter().any(|h| h.memory.body.contains("secret")),
+        "alice sees her own private"
+    );
+    assert!(alice
+        .iter()
+        .any(|h| h.memory.body.contains("shared settlement runbook")));
 }

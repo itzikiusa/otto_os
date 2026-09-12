@@ -32,10 +32,7 @@ use crate::state::ServerCtx;
 
 pub fn routes() -> Router<ServerCtx> {
     Router::new()
-        .route(
-            "/workspaces/{id}/proof-packs",
-            get(list).post(create),
-        )
+        .route("/workspaces/{id}/proof-packs", get(list).post(create))
         .route("/workspaces/{id}/proof-summary", get(summary))
         .route(
             "/proof-packs/{id}",
@@ -58,7 +55,10 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/proof-packs/{id}/pr-check", post(pr_check))
         .route("/proof-packs/{id}/ci-refresh", post(ci_refresh))
         .route("/proof-packs/{id}/report", get(report))
-        .route("/repos/{id}/proof-config", get(get_repo_config).put(put_repo_config))
+        .route(
+            "/repos/{id}/proof-config",
+            get(get_repo_config).put(put_repo_config),
+        )
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -310,7 +310,10 @@ async fn remove(
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Value>> {
     let pack = pack_for(&ctx, &user, &id, WorkspaceRole::Editor).await?;
-    ctx.proof_repo.delete_pack(&pack.id).await.map_err(ApiError)?;
+    ctx.proof_repo
+        .delete_pack(&pack.id)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -408,7 +411,10 @@ async fn waive(
         &pack,
         ProofArtifactKind::Approval,
         "Proof waived",
-        Some(&format!("Proof requirement waived by {}: {}", user.0.id, reason)),
+        Some(&format!(
+            "Proof requirement waived by {}: {}",
+            user.0.id, reason
+        )),
         None,
         ProofArtifactStatus::Passed,
         json!({"kind": "waiver", "approver": user.0.id, "reason": reason}),
@@ -428,7 +434,10 @@ async fn remove_artifact(
 ) -> ApiResult<Json<Value>> {
     let art = ctx.proof_repo.get_artifact(&id).await.map_err(ApiError)?;
     let pack = pack_for(&ctx, &user, &art.proof_pack_id, WorkspaceRole::Editor).await?;
-    ctx.proof_repo.delete_artifact(&id).await.map_err(ApiError)?;
+    ctx.proof_repo
+        .delete_artifact(&id)
+        .await
+        .map_err(ApiError)?;
     let _ = engine::recompute_and_emit(&ctx, &pack.id).await;
     Ok(Json(json!({ "ok": true })))
 }
@@ -749,7 +758,10 @@ async fn get_repo_config(
         .get_proof_config(&id)
         .await
         .map_err(ApiError)?;
-    Ok(Json(RepoProofConfigResp { repo_id: id, config }))
+    Ok(Json(RepoProofConfigResp {
+        repo_id: id,
+        config,
+    }))
 }
 
 async fn put_repo_config(
@@ -764,5 +776,8 @@ async fn put_repo_config(
         .set_proof_config(&id, &config)
         .await
         .map_err(ApiError)?;
-    Ok(Json(RepoProofConfigResp { repo_id: id, config }))
+    Ok(Json(RepoProofConfigResp {
+        repo_id: id,
+        config,
+    }))
 }

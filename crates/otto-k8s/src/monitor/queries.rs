@@ -14,13 +14,27 @@ use otto_core::{Error, Result};
 use super::schema::sql_str;
 
 /// Request-counter series recognised for rps / error-rate (Go + Spring).
-pub const REQUEST_COUNTERS: [&str; 2] = ["http_requests_total", "http_server_requests_seconds_count"];
+pub const REQUEST_COUNTERS: [&str; 2] =
+    ["http_requests_total", "http_server_requests_seconds_count"];
 /// Latency histogram bucket series (Go + Spring).
-pub const LATENCY_BUCKETS: [&str; 2] = ["http_request_duration_seconds_bucket", "http_server_requests_seconds_bucket"];
-pub const LATENCY_SUMS: [&str; 2] = ["http_request_duration_seconds_sum", "http_server_requests_seconds_sum"];
-pub const LATENCY_COUNTS: [&str; 2] = ["http_request_duration_seconds_count", "http_server_requests_seconds_count"];
+pub const LATENCY_BUCKETS: [&str; 2] = [
+    "http_request_duration_seconds_bucket",
+    "http_server_requests_seconds_bucket",
+];
+pub const LATENCY_SUMS: [&str; 2] = [
+    "http_request_duration_seconds_sum",
+    "http_server_requests_seconds_sum",
+];
+pub const LATENCY_COUNTS: [&str; 2] = [
+    "http_request_duration_seconds_count",
+    "http_server_requests_seconds_count",
+];
 /// Memory gauges, most authoritative first.
-pub const MEMORY_GAUGES: [&str; 3] = ["mem_working_set_bytes", "mem_sys_bytes", "jvm_memory_used_bytes"];
+pub const MEMORY_GAUGES: [&str; 3] = [
+    "mem_working_set_bytes",
+    "mem_sys_bytes",
+    "jvm_memory_used_bytes",
+];
 
 /// `1h` | `6h` | `24h` | `7d` | `<n>m|h|d`; max 90 d.
 pub fn parse_window(s: &str) -> Result<Duration> {
@@ -51,8 +65,7 @@ pub fn parse_window(s: &str) -> Result<Duration> {
 pub fn ident_ok(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
-        && s
-            .chars()
+        && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'))
 }
 
@@ -65,11 +78,19 @@ pub fn is_counter(metric: &str) -> bool {
 }
 
 fn in_list(items: &[&str]) -> String {
-    items.iter().map(|s| sql_str(s)).collect::<Vec<_>>().join(", ")
+    items
+        .iter()
+        .map(|s| sql_str(s))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn in_list_owned(items: &[String]) -> String {
-    items.iter().map(|s| sql_str(s)).collect::<Vec<_>>().join(", ")
+    items
+        .iter()
+        .map(|s| sql_str(s))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `ts >= now() - INTERVAL n SECOND AND ts < now() - INTERVAL m SECOND`.
@@ -111,7 +132,12 @@ pub fn latest_memory_sql(cluster_ids: &[String], ns: Option<&str>, lookback_secs
 }
 
 /// Last memory gauge per pod inside `[now-back, now-until)` (trend baseline).
-pub fn memory_between_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
+pub fn memory_between_sql(
+    cluster_ids: &[String],
+    ns: Option<&str>,
+    back_secs: i64,
+    until_secs: i64,
+) -> String {
     format!(
         "SELECT cluster_id, namespace, workload, pod, argMax(value, ts) AS mem, argMax(metric, ts) AS metric
          FROM k8s_samples
@@ -139,7 +165,12 @@ pub fn restart_counts_sql(cluster_ids: &[String], ns: Option<&str>, window: Dura
 
 /// Request rate + 5xx rate per workload over `[now-back, now-until)` →
 /// `(cluster_id, namespace, workload, rps, err_rps)`.
-pub fn request_rates_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
+pub fn request_rates_sql(
+    cluster_ids: &[String],
+    ns: Option<&str>,
+    back_secs: i64,
+    until_secs: i64,
+) -> String {
     let secs = (back_secs - until_secs).max(1);
     format!(
         "SELECT cluster_id, namespace, workload, sum(delta) / {secs} AS rps, sumIf(delta, is5xx) / {secs} AS err_rps
@@ -160,7 +191,12 @@ pub fn request_rates_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i6
 
 /// Histogram bucket deltas per workload → `(cluster_id, namespace, workload, le, delta)`;
 /// p95 is derived in Rust ([`p95_from_buckets`]).
-pub fn latency_buckets_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
+pub fn latency_buckets_sql(
+    cluster_ids: &[String],
+    ns: Option<&str>,
+    back_secs: i64,
+    until_secs: i64,
+) -> String {
     format!(
         "SELECT cluster_id, namespace, workload, le, sum(delta) AS delta
          FROM (
@@ -177,7 +213,12 @@ pub fn latency_buckets_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: 
 }
 
 /// Mean latency fallback (`_sum` / `_count` deltas) → `(cluster_id, namespace, workload, avg_ms)`.
-pub fn latency_avg_sql(cluster_ids: &[String], ns: Option<&str>, back_secs: i64, until_secs: i64) -> String {
+pub fn latency_avg_sql(
+    cluster_ids: &[String],
+    ns: Option<&str>,
+    back_secs: i64,
+    until_secs: i64,
+) -> String {
     format!(
         "SELECT cluster_id, namespace, workload,
                 if(sumIf(delta, is_count) > 0, 1000 * sumIf(delta, NOT is_count) / sumIf(delta, is_count), 0) AS avg_ms
@@ -248,7 +289,14 @@ pub fn series_sql(
 }
 
 /// Sparkline buckets for every workload at once → `(workload, t, v)`.
-pub fn workload_spark_sql(cluster_id: &str, ns: Option<&str>, metrics: &[&str], window: Duration, step_secs: u32, is_counter: bool) -> String {
+pub fn workload_spark_sql(
+    cluster_id: &str,
+    ns: Option<&str>,
+    metrics: &[&str],
+    window: Duration,
+    step_secs: u32,
+    is_counter: bool,
+) -> String {
     let step = step_secs.max(10);
     let inner_agg = if is_counter {
         format!("greatest(0, max(value) - min(value)) / {step}")
@@ -270,11 +318,20 @@ pub fn workload_spark_sql(cluster_id: &str, ns: Option<&str>, metrics: &[&str], 
 }
 
 /// Classified restarts / churn (+ raw k8s events when `class` is `k8s_event`).
-pub fn events_sql(cluster_id: &str, window: Duration, class: Option<&str>, workload: Option<&str>, limit: u32) -> String {
+pub fn events_sql(
+    cluster_id: &str,
+    window: Duration,
+    class: Option<&str>,
+    workload: Option<&str>,
+    limit: u32,
+) -> String {
     let kind_f = match class.filter(|c| !c.is_empty()) {
         Some("k8s_event") => " AND kind = 'k8s_event'".to_string(),
         Some("version") => " AND kind = 'version'".to_string(),
-        Some(c) => format!(" AND kind IN ('restart', 'churn') AND class = {}", sql_str(c)),
+        Some(c) => format!(
+            " AND kind IN ('restart', 'churn') AND class = {}",
+            sql_str(c)
+        ),
         None => " AND kind IN ('restart', 'churn', 'version')".to_string(),
     };
     format!(
@@ -327,13 +384,23 @@ pub fn p95_from_buckets(rows: &[(String, f64)]) -> Option<f64> {
             }
             // Linear interpolation inside the bucket.
             let span = cum - prev_count;
-            let frac = if span > 0.0 { (target - prev_count) / span } else { 1.0 };
+            let frac = if span > 0.0 {
+                (target - prev_count) / span
+            } else {
+                1.0
+            };
             return Some((prev_bound + (bound - prev_bound) * frac) * 1000.0);
         }
         prev_bound = *bound;
         prev_count = *cum;
     }
-    b.last().map(|(bound, _)| if bound.is_infinite() { prev_bound * 1000.0 } else { bound * 1000.0 })
+    b.last().map(|(bound, _)| {
+        if bound.is_infinite() {
+            prev_bound * 1000.0
+        } else {
+            bound * 1000.0
+        }
+    })
 }
 
 #[cfg(test)]
@@ -358,13 +425,29 @@ mod tests {
 
     #[test]
     fn series_counter_uses_rate() {
-        let q = series_sql("c1", "http_requests_total", Some("auditlog"), None, Duration::hours(1), 60, true);
+        let q = series_sql(
+            "c1",
+            "http_requests_total",
+            Some("auditlog"),
+            None,
+            Duration::hours(1),
+            60,
+            true,
+        );
         assert!(q.contains("greatest(0, max(value) - min(value)) / 60"));
         assert!(q.contains("cluster_id = 'c1'"));
         assert!(q.contains("workload = 'auditlog'"));
         assert!(q.contains("toStartOfInterval(ts, INTERVAL 60 SECOND)"));
         assert!(!q.contains("pod ="));
-        let g = series_sql("c1", "mem_sys_bytes", None, Some("p-1"), Duration::hours(1), 60, false);
+        let g = series_sql(
+            "c1",
+            "mem_sys_bytes",
+            None,
+            Some("p-1"),
+            Duration::hours(1),
+            60,
+            false,
+        );
         assert!(g.contains("avg(value)"));
         assert!(g.contains("pod = 'p-1'"));
     }
@@ -375,9 +458,18 @@ mod tests {
         assert!(q.contains("class = 'oom'"));
         assert!(q.contains("kind IN ('restart', 'churn')"));
         assert!(events_sql("c1", Duration::hours(1), None, None, 10).contains("'version'"));
-        assert!(events_sql("c1", Duration::hours(1), Some("version"), None, 10).contains("kind = 'version'"));
+        assert!(
+            events_sql("c1", Duration::hours(1), Some("version"), None, 10)
+                .contains("kind = 'version'")
+        );
         assert!(q.contains("LIMIT 100"));
-        let raw = events_sql("c1", Duration::hours(1), Some("k8s_event"), Some("frb"), 5000);
+        let raw = events_sql(
+            "c1",
+            Duration::hours(1),
+            Some("k8s_event"),
+            Some("frb"),
+            5000,
+        );
         assert!(raw.contains("kind = 'k8s_event'"));
         assert!(raw.contains("workload = 'frb'"));
         assert!(raw.contains("LIMIT 1000"));

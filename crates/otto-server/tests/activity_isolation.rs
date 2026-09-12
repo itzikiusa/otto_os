@@ -34,9 +34,9 @@ use otto_rbac::RbacRoleChecker;
 use otto_server::ServerCtx;
 use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore,
-    IntegrationsRepo, IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo,
-    SqlitePool, SwarmRepo, WorkspacesRepo,
+    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, GitStore, IntegrationsRepo,
+    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SqlitePool,
+    SwarmRepo, WorkspacesRepo,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::broadcast;
@@ -137,15 +137,13 @@ async fn seed_workspace(pool: &SqlitePool, ws_id: &str) {
 }
 
 async fn set_member(pool: &SqlitePool, ws_id: &str, user_id: &str, role: &str) {
-    sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)",
-    )
-    .bind(ws_id)
-    .bind(user_id)
-    .bind(role)
-    .execute(pool)
-    .await
-    .expect("set member");
+    sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)")
+        .bind(ws_id)
+        .bind(user_id)
+        .bind(role)
+        .execute(pool)
+        .await
+        .expect("set member");
 }
 
 /// Insert a session row owned by `created_by` and return its id.
@@ -202,7 +200,9 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         improvements: otto_state::ImprovementsRepo::new(pool.clone()),
         sessions: SessionsRepo::new(pool.clone()),
         workspaces: WorkspacesRepo::new(pool.clone()),
-        producer: Arc::new(otto_improve::RealProposalProducer::new(orchestrator.clone())),
+        producer: Arc::new(otto_improve::RealProposalProducer::new(
+            orchestrator.clone(),
+        )),
         events: events.clone(),
         library_root: PathBuf::from("/tmp/otto-test-lib"),
     });
@@ -277,7 +277,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
         skill_review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         orchestrator,
         improve_engine,
@@ -338,10 +338,7 @@ fn activity_router(ctx: ServerCtx) -> Router {
             "/workspaces/{wid}/sessions/{sid}/tasks",
             get(list_tasks).put(put_tasks),
         )
-        .route(
-            "/workspaces/{wid}/activity/summary",
-            get(workspace_summary),
-        )
+        .route("/workspaces/{wid}/activity/summary", get(workspace_summary))
         .with_state(ctx)
 }
 
@@ -375,11 +372,7 @@ async fn get_as(app: &Router, caller: &User, uri: &str) -> StatusCode {
 }
 
 /// GET the summary endpoint and deserialize the body (for non-403 callers).
-async fn get_summary(
-    app: &Router,
-    caller: &User,
-    ws: &str,
-) -> Vec<serde_json::Value> {
+async fn get_summary(app: &Router, caller: &User, ws: &str) -> Vec<serde_json::Value> {
     let mut req = Request::builder()
         .method(Method::GET)
         .uri(format!("/workspaces/{ws}/activity/summary"))

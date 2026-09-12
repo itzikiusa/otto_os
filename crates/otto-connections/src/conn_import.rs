@@ -187,7 +187,10 @@ pub fn parse_jdbc_url(url: &str) -> Option<JdbcParts> {
     let auth_end = after.find(['/', '?']).unwrap_or(after.len());
     let authority = &after[..auth_end];
     // Drop any userinfo (`user:pass@`).
-    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     // A JDBC authority may list several hosts (mongo replica sets) — take the
     // first for host/port; the full URL is preserved by callers that need it.
     let first = host_port.split(',').next().unwrap_or(host_port);
@@ -323,9 +326,10 @@ pub fn parse_mysql_workbench(content: &str) -> (Vec<ParsedConnection>, Vec<Strin
         }
     };
 
-    for node in doc.descendants().filter(|n| {
-        n.attribute("struct-name") == Some("db.mgmt.Connection")
-    }) {
+    for node in doc
+        .descendants()
+        .filter(|n| n.attribute("struct-name") == Some("db.mgmt.Connection"))
+    {
         // <value type="string" key="name">…</value>
         let name = child_value(&node, "name").unwrap_or_default();
         let name = if name.trim().is_empty() {
@@ -334,13 +338,19 @@ pub fn parse_mysql_workbench(content: &str) -> (Vec<ParsedConnection>, Vec<Strin
             name
         };
         // <value type="dict" key="parameterValues"> { hostName, port, userName, schema, useSSL, ssl* }
-        let params_node = node.children().find(|c| c.attribute("key") == Some("parameterValues"));
+        let params_node = node
+            .children()
+            .find(|c| c.attribute("key") == Some("parameterValues"));
         let pv = params_node.as_ref();
-        let host = pv.and_then(|n| dict_value(n, "hostName")).unwrap_or_default();
+        let host = pv
+            .and_then(|n| dict_value(n, "hostName"))
+            .unwrap_or_default();
         let port = pv
             .and_then(|n| dict_value(n, "port"))
             .and_then(|s| s.trim().parse::<u16>().ok());
-        let user = pv.and_then(|n| dict_value(n, "userName")).unwrap_or_default();
+        let user = pv
+            .and_then(|n| dict_value(n, "userName"))
+            .unwrap_or_default();
         let schema = pv.and_then(|n| dict_value(n, "schema")).unwrap_or_default();
         let use_ssl = pv
             .and_then(|n| dict_value(n, "useSSL"))
@@ -467,8 +477,7 @@ pub fn parse_dbeaver(content: &str) -> (Vec<ParsedConnection>, Vec<String>) {
             .filter(|s| !s.is_empty());
         // DBeaver does not store the username in the clear here (it lives in the
         // encrypted credentials store), but the JDBC URL sometimes carries it.
-        let url_user = parse_jdbc_url(url)
-            .and_then(|_| user_from_jdbc(url));
+        let url_user = parse_jdbc_url(url).and_then(|_| user_from_jdbc(url));
 
         // SSH tunnel handler.
         let ssh = dbeaver_ssh_tunnel(&cfg);
@@ -560,9 +569,9 @@ fn dbeaver_ssl(cfg: &Value) -> bool {
         Some(h) => h,
         None => return false,
     };
-    handlers.iter().any(|(k, v)| {
-        k.contains("ssl") && v.get("enabled").and_then(Value::as_bool) != Some(false)
-    })
+    handlers
+        .iter()
+        .any(|(k, v)| k.contains("ssl") && v.get("enabled").and_then(Value::as_bool) != Some(false))
 }
 
 // ---------------------------------------------------------------------------
@@ -586,10 +595,7 @@ pub fn parse_datagrip_local(content: &str) -> DatagripLocal {
         Ok(d) => d,
         Err(_) => return local,
     };
-    for ds in doc
-        .descendants()
-        .filter(|n| n.has_tag_name("data-source"))
-    {
+    for ds in doc.descendants().filter(|n| n.has_tag_name("data-source")) {
         let uuid = match ds.attribute("uuid") {
             Some(u) => u.to_string(),
             None => continue,
@@ -808,8 +814,7 @@ pub fn parse_nosqlbooster(content: &str) -> (Vec<ParsedConnection>, Vec<String>)
             })
             .unwrap_or_default();
 
-        let conn_string =
-            build_mongo_conn_string(scheme, username, &hosts, database, &options);
+        let conn_string = build_mongo_conn_string(scheme, username, &hosts, database, &options);
 
         out.push(ParsedConnection {
             source: ImportSource::Nosqlbooster,
@@ -959,8 +964,7 @@ pub fn source_status(source: ImportSource) -> SourceStatus {
 }
 
 fn scan_mysql_workbench() -> ImportScanResult {
-    let path = home()
-        .join("Library/Application Support/MySQL/Workbench/connections.xml");
+    let path = home().join("Library/Application Support/MySQL/Workbench/connections.xml");
     match std::fs::read_to_string(&path) {
         Ok(content) => {
             let (connections, warnings) = parse_mysql_workbench(&content);
@@ -1064,8 +1068,7 @@ fn scan_datagrip() -> ImportScanResult {
 }
 
 fn scan_nosqlbooster() -> ImportScanResult {
-    let path = home()
-        .join("Library/Application Support/NoSQLBooster for MongoDB/app.json");
+    let path = home().join("Library/Application Support/NoSQLBooster for MongoDB/app.json");
     match std::fs::read_to_string(&path) {
         Ok(content) => {
             let (connections, warnings) = parse_nosqlbooster(&content);
@@ -1132,8 +1135,7 @@ fn find_idea_datasources() -> Vec<PathBuf> {
     let root = home();
     let mut found = Vec::new();
     // (dir, depth)
-    let mut queue: std::collections::VecDeque<(PathBuf, usize)> =
-        std::collections::VecDeque::new();
+    let mut queue: std::collections::VecDeque<(PathBuf, usize)> = std::collections::VecDeque::new();
     queue.push_back((root, 0));
     while let Some((dir, depth)) = queue.pop_front() {
         if found.len() >= MAX_IDEA_FILES || depth > 4 {

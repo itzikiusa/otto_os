@@ -333,7 +333,7 @@ async fn postgres_native_credentials_isolate_schema_and_writes() {
     native_fixture(ConnectionKind::Postgres, "OTTO_RESOURCE_PG_PORT").await;
 }
 
-async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial:bool) {
+async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial: bool) {
     use otto_state::database_changes::{
         ChangeInput, ChangeTarget, DatabaseChangesRepo, TargetSnapshot,
     };
@@ -345,7 +345,11 @@ async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial:bool) 
     let repo = DatabaseChangesRepo::new(f.pool.clone());
     let table = format!("change_{}", otto_core::new_id().replace('-', ""));
     let create = format!("CREATE TABLE shop.{table} (id INT)");
-    let script=if partial{format!("{create}; {create}")}else{create};
+    let script = if partial {
+        format!("{create}; {create}")
+    } else {
+        create
+    };
     let target = ChangeTarget {
         connection_id: f.conn.clone(),
         node: "shop".into(),
@@ -439,19 +443,51 @@ async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial:bool) 
         .execute(&f.pool)
         .await
         .unwrap();
-    let result=f.service
+    let result = f
+        .service
         .execute_approved_change(&change.id, &attempts[0].id, &f.root.id)
         .await
         .unwrap();
     if partial {
-        assert!(!result.errored,"first DDL succeeded");
-        assert_eq!(result.more_results.len(),1);
-        assert!(result.more_results[0].errored,"second duplicate DDL must surface an error inside Ok(batch)");
-        repo.finish_attempt_progress(&attempts[0].id,false,Some(1)).await.unwrap();
-        assert_eq!(repo.finish(&change.id,&f.root.id,&f.root.id).await.unwrap().status,"outcome_unknown");
-        let locked:i64=sqlx::query_scalar("SELECT count(*) FROM database_change_attempts WHERE connection_id=? AND state='outcome_unknown'").bind(&f.conn).fetch_one(&f.pool).await.unwrap();assert_eq!(locked,1);
-        let native=f.service.run(&f.conn,&f.root.id,&f.req(&format!("SELECT count(*) FROM shop.{table}"))).await.unwrap();assert_eq!(native.rows[0][0],serde_json::json!(0),"first CREATE actually committed");
-        assert!(f.service.execute_approved_change(&change.id,&attempts[0].id,&f.root.id).await.is_err(),"unknown attempts never replay");
+        assert!(!result.errored, "first DDL succeeded");
+        assert_eq!(result.more_results.len(), 1);
+        assert!(
+            result.more_results[0].errored,
+            "second duplicate DDL must surface an error inside Ok(batch)"
+        );
+        repo.finish_attempt_progress(&attempts[0].id, false, Some(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.finish(&change.id, &f.root.id, &f.root.id)
+                .await
+                .unwrap()
+                .status,
+            "outcome_unknown"
+        );
+        let locked:i64=sqlx::query_scalar("SELECT count(*) FROM database_change_attempts WHERE connection_id=? AND state='outcome_unknown'").bind(&f.conn).fetch_one(&f.pool).await.unwrap();
+        assert_eq!(locked, 1);
+        let native = f
+            .service
+            .run(
+                &f.conn,
+                &f.root.id,
+                &f.req(&format!("SELECT count(*) FROM shop.{table}")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            native.rows[0][0],
+            serde_json::json!(0),
+            "first CREATE actually committed"
+        );
+        assert!(
+            f.service
+                .execute_approved_change(&change.id, &attempts[0].id, &f.root.id)
+                .await
+                .is_err(),
+            "unknown attempts never replay"
+        );
         return;
     }
     repo.finish_attempt(&attempts[0].id, true).await.unwrap();
@@ -484,51 +520,126 @@ async fn approved_native_fixture(kind: ConnectionKind, env: &str, partial:bool) 
 #[tokio::test]
 #[ignore = "requires explicitly provisioned disposable MySQL fixture"]
 async fn mysql_reviewed_artifact_executes_once_and_rejects_mismatch() {
-    approved_native_fixture(ConnectionKind::Mysql, "OTTO_RESOURCE_MYSQL_PORT",false).await;
+    approved_native_fixture(ConnectionKind::Mysql, "OTTO_RESOURCE_MYSQL_PORT", false).await;
 }
 #[tokio::test]
 #[ignore = "requires explicitly provisioned disposable PostgreSQL fixture"]
 async fn postgres_reviewed_artifact_executes_once_and_rejects_mismatch() {
-    approved_native_fixture(ConnectionKind::Postgres, "OTTO_RESOURCE_PG_PORT",false).await;
+    approved_native_fixture(ConnectionKind::Postgres, "OTTO_RESOURCE_PG_PORT", false).await;
 }
 
 #[tokio::test]
 #[ignore = "requires explicitly provisioned disposable PostgreSQL fixture"]
 async fn governed_root_reads_cannot_call_a_mutating_builtin_overload() {
-    let port:u16=std::env::var("OTTO_RESOURCE_PG_PORT").unwrap().parse().unwrap();
-    let f=Fixture::new(ConnectionKind::Postgres,port).await;
-    let native=sqlx::PgPool::connect(&format!("postgres://postgres:otto_fixture_only@127.0.0.1:{port}/resourcefixture")).await.unwrap();
+    let port: u16 = std::env::var("OTTO_RESOURCE_PG_PORT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let f = Fixture::new(ConnectionKind::Postgres, port).await;
+    let native = sqlx::PgPool::connect(&format!(
+        "postgres://postgres:otto_fixture_only@127.0.0.1:{port}/resourcefixture"
+    ))
+    .await
+    .unwrap();
     // Fixture-only schema keeps this malicious overload away from other tests.
-    let schema=format!("readonly_{}",otto_core::new_id().to_ascii_lowercase());
+    let schema = format!("readonly_{}", otto_core::new_id().to_ascii_lowercase());
     sqlx::raw_sql(&format!("CREATE SCHEMA {schema}; CREATE TABLE {schema}.effects (n integer); CREATE FUNCTION {schema}.lower(integer) RETURNS integer LANGUAGE plpgsql AS $$ BEGIN INSERT INTO {schema}.effects VALUES ($1); RETURN $1; END $$; REVOKE ALL ON FUNCTION {schema}.lower(integer) FROM PUBLIC;")).execute(&native).await.unwrap();
     sqlx::query("UPDATE connections SET environment='prod',params_json=json_set(params_json,'$.__read_only_execution',0) WHERE id=?").bind(&f.conn).execute(&f.pool).await.unwrap();
-    for statement in ["SELECT lower(1)","SELECT 1; SELECT lower(1)"] {
-        let req=QueryRequest{statement:statement.into(),node:Some(schema.clone()),confirm_write:true,..Default::default()};
-        let result=f.service.run(&f.conn,&f.root.id,&req).await;
-        let error=result.expect_err("native read-only must reject hidden writes for root").to_string();
-        assert!(error.contains("read-only transaction"),"must reach the native readonly gate, got: {error}");
+    for statement in ["SELECT lower(1)", "SELECT 1; SELECT lower(1)"] {
+        let req = QueryRequest {
+            statement: statement.into(),
+            node: Some(schema.clone()),
+            confirm_write: true,
+            ..Default::default()
+        };
+        let result = f.service.run(&f.conn, &f.root.id, &req).await;
+        let error = result
+            .expect_err("native read-only must reject hidden writes for root")
+            .to_string();
+        assert!(
+            error.contains("read-only transaction"),
+            "must reach the native readonly gate, got: {error}"
+        );
     }
     // Streaming exports use the same native protection, including early errors.
-    let export_error=f.service.export_to_writer(&f.conn,&f.root.id,"SELECT lower(1)",Some(&schema),otto_dbviewer::export::ExportFormat::Csv,None,Box::new(Vec::<u8>::new())).await.expect_err("export must refuse hidden writes").to_string();
-    assert!(export_error.contains("read-only transaction"),"export must reach native readonly gate, got: {export_error}");
-    let count:i64=sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}.effects")).fetch_one(&native).await.unwrap();assert_eq!(count,0);
+    let export_error = f
+        .service
+        .export_to_writer(
+            &f.conn,
+            &f.root.id,
+            "SELECT lower(1)",
+            Some(&schema),
+            otto_dbviewer::export::ExportFormat::Csv,
+            None,
+            Box::new(Vec::<u8>::new()),
+        )
+        .await
+        .expect_err("export must refuse hidden writes")
+        .to_string();
+    assert!(
+        export_error.contains("read-only transaction"),
+        "export must reach native readonly gate, got: {export_error}"
+    );
+    let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}.effects"))
+        .fetch_one(&native)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
     // Failed read-only execution returns a clean connection for another read.
-    let result=f.service.run(&f.conn,&f.root.id,&QueryRequest{statement:"SELECT 1".into(),node:Some(schema.clone()),..Default::default()}).await.unwrap();assert_eq!(result.rows[0][0],serde_json::json!(1));
-    sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE")).execute(&native).await.unwrap();
+    let result = f
+        .service
+        .run(
+            &f.conn,
+            &f.root.id,
+            &QueryRequest {
+                statement: "SELECT 1".into(),
+                node: Some(schema.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.rows[0][0], serde_json::json!(1));
+    sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&native)
+        .await
+        .unwrap();
     native.close().await;
 }
 
 #[tokio::test]
 #[ignore = "requires explicitly provisioned disposable MySQL fixture"]
-async fn mysql_partial_reviewed_batch_retains_unknown_lock() {approved_native_fixture(ConnectionKind::Mysql,"OTTO_RESOURCE_MYSQL_PORT",true).await;}
+async fn mysql_partial_reviewed_batch_retains_unknown_lock() {
+    approved_native_fixture(ConnectionKind::Mysql, "OTTO_RESOURCE_MYSQL_PORT", true).await;
+}
 #[tokio::test]
 #[ignore = "requires explicitly provisioned disposable PostgreSQL fixture"]
-async fn postgres_partial_reviewed_batch_retains_unknown_lock() {approved_native_fixture(ConnectionKind::Postgres,"OTTO_RESOURCE_PG_PORT",true).await;}
+async fn postgres_partial_reviewed_batch_retains_unknown_lock() {
+    approved_native_fixture(ConnectionKind::Postgres, "OTTO_RESOURCE_PG_PORT", true).await;
+}
 
 #[tokio::test]
 async fn governed_readonly_profile_rejects_confirmed_root_write_before_network() {
-    let f=Fixture::new(ConnectionKind::Mysql,9).await;
-    sqlx::query("UPDATE connections SET read_only=1 WHERE id=?").bind(&f.conn).execute(&f.pool).await.unwrap();
-    let result=f.service.run(&f.conn,&f.root.id,&QueryRequest{statement:"UPDATE shop.orders SET total=0".into(),node:Some("shop".into()),confirm_write:true,..Default::default()}).await;
-    assert!(matches!(result,Err(Error::Forbidden(ref reason)) if reason.contains("read-only connection")));
+    let f = Fixture::new(ConnectionKind::Mysql, 9).await;
+    sqlx::query("UPDATE connections SET read_only=1 WHERE id=?")
+        .bind(&f.conn)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let result = f
+        .service
+        .run(
+            &f.conn,
+            &f.root.id,
+            &QueryRequest {
+                statement: "UPDATE shop.orders SET total=0".into(),
+                node: Some("shop".into()),
+                confirm_write: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(result,Err(Error::Forbidden(ref reason)) if reason.contains("read-only connection"))
+    );
 }

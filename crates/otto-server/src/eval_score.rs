@@ -11,7 +11,9 @@
 use otto_core::domain::{
     DiffScore, EvalIteration, EvalScore, GoldenTask, ScoreWeights, SignalScore, SkillEval,
 };
-use otto_core::eval_score::{compute_composite, diff_score, human_score, signal_from_cmd, signal_score};
+use otto_core::eval_score::{
+    compute_composite, diff_score, human_score, signal_from_cmd, signal_score,
+};
 use otto_core::proof::{
     compute_risk, ProofArtifact, ProofArtifactKind, ProofArtifactStatus, WorkItemKind,
 };
@@ -53,18 +55,39 @@ pub async fn score_iteration(
     let ws = &eval.workspace_id;
     let Some(worktree) = iter.worktree_path.clone() else {
         // Nothing on disk to score — return an empty score, no pack.
-        return Ok((EvalScore { weights: weights.clone(), ..Default::default() }, String::new()));
+        return Ok((
+            EvalScore {
+                weights: weights.clone(),
+                ..Default::default()
+            },
+            String::new(),
+        ));
     };
 
     // 1. Ensure the proof pack (idempotent) + link it to the resolved repo.
-    let pack = proof::gate(ctx, WorkItemKind::Task, &iter.id, ws, &pack_title(eval), "otto").await?;
+    let pack = proof::gate(
+        ctx,
+        WorkItemKind::Task,
+        &iter.id,
+        ws,
+        &pack_title(eval),
+        "otto",
+    )
+    .await?;
     if let Some(repo_id) = proof::resolve_repo_for_cwd(ctx, ws, &worktree).await {
-        let _ = ctx.proof_repo.set_repo_link(&pack.id, Some(&repo_id), None).await;
+        let _ = ctx
+            .proof_repo
+            .set_repo_link(&pack.id, Some(&repo_id), None)
+            .await;
     }
 
     // 2. Diff artifact → diff-quality signal.
     let _ = proof::assemble_diff(ctx, &pack, &worktree, diff_base).await;
-    let arts = ctx.proof_repo.list_artifacts(&pack.id).await.unwrap_or_default();
+    let arts = ctx
+        .proof_repo
+        .list_artifacts(&pack.id)
+        .await
+        .unwrap_or_default();
     let diff: DiffScore = match arts.iter().find(|a| a.kind == ProofArtifactKind::Diff) {
         Some(d) => {
             let files = meta_u32(d, "files_changed");
@@ -95,7 +118,11 @@ pub async fn score_iteration(
     let human = human_score(iter.human_rating, &iter.human_note, &iter.human_rater);
     if let Some(r) = iter.human_rating {
         let body = format!("rating: {r}/5\n{}", iter.human_note);
-        let by = if iter.human_rater.is_empty() { "otto" } else { &iter.human_rater };
+        let by = if iter.human_rater.is_empty() {
+            "otto"
+        } else {
+            &iter.human_rater
+        };
         let _ = proof::upsert_content_artifact(
             ctx,
             &pack,
@@ -187,7 +214,11 @@ async fn run_cmd_signal(
         Some(c) if !c.trim().is_empty() => {
             let st = proof::run_command_artifact(ctx, pack, cwd, c, Some(kind_hint)).await?;
             let ok = st == ProofArtifactStatus::Passed;
-            Ok(signal_from_cmd(true, ok, format!("`{c}` → {}", st.as_str())))
+            Ok(signal_from_cmd(
+                true,
+                ok,
+                format!("`{c}` → {}", st.as_str()),
+            ))
         }
         _ => Ok(SignalScore::default()),
     }
@@ -219,7 +250,10 @@ async fn review_signal(
             "- [{}] {}{}\n",
             f.severity,
             f.issue,
-            f.location.as_deref().map(|l| format!(" ({l})")).unwrap_or_default()
+            f.location
+                .as_deref()
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default()
         ));
     }
     let _ = proof::upsert_content_artifact(
@@ -233,5 +267,9 @@ async fn review_signal(
         "otto",
     )
     .await;
-    Ok(signal_score(true, score, format!("{} finding(s)", findings.len())))
+    Ok(signal_score(
+        true,
+        score,
+        format!("{} finding(s)", findings.len()),
+    ))
 }

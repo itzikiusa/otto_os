@@ -100,7 +100,9 @@ pub fn assemble(
             push_functions(&mut items, functions);
             push_keywords(&mut items, keywords);
         }
-        SqlExpect::Routine { functions: want_functions } => {
+        SqlExpect::Routine {
+            functions: want_functions,
+        } => {
             push_routines(&mut items, snap, *want_functions);
             push_keywords(&mut items, keywords);
         }
@@ -251,7 +253,9 @@ fn resolve_alias<'a>(ctx: &'a SqlCtx, q: &str) -> Option<&'a str> {
 enum Base {
     Table,
     /// A routine-name slot; `functions` picks functions vs procedures.
-    Routine { functions: bool },
+    Routine {
+        functions: bool,
+    },
     Column,
     Any,
 }
@@ -631,8 +635,14 @@ mod tests {
                 },
             ],
             routines: vec![
-                RoutineSnap { name: "update_max_transaction_id".into(), is_function: false },
-                RoutineSnap { name: "calc_bonus".into(), is_function: true },
+                RoutineSnap {
+                    name: "update_max_transaction_id".into(),
+                    is_function: false,
+                },
+                RoutineSnap {
+                    name: "calc_bonus".into(),
+                    is_function: true,
+                },
             ],
         }
     }

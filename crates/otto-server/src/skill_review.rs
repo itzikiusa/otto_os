@@ -90,8 +90,14 @@ fn is_cancelled(flag: &Arc<AtomicBool>) -> bool {
 /// neither the static pass nor the reviewer agents ever see them — `.mcp.json`
 /// in particular can carry a live API token that would otherwise be flagged
 /// (or worse, quoted) in every review.
-const IGNORED_ENTRIES: &[&str] =
-    &[".git", ".DS_Store", ".mcp.json", ".env", "node_modules", "__pycache__"];
+const IGNORED_ENTRIES: &[&str] = &[
+    ".git",
+    ".DS_Store",
+    ".mcp.json",
+    ".env",
+    "node_modules",
+    "__pycache__",
+];
 
 fn is_ignored(name: &str) -> bool {
     IGNORED_ENTRIES.contains(&name) || name.starts_with(".env.")
@@ -130,12 +136,18 @@ fn copy_skill_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Remove any [`IGNORED_ENTRIES`] from an already-staged tree (bundled skills
 /// are written by the install primitive, so they get pruned instead of copied).
 fn prune_ignored(dir: &Path) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let name = entry.file_name();
         let p = entry.path();
         if is_ignored(&name.to_string_lossy()) {
-            let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+            let _ = if p.is_dir() {
+                std::fs::remove_dir_all(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
         } else if p.is_dir() {
             prune_ignored(&p);
         }
@@ -166,7 +178,9 @@ fn real_skill_dir(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<Pat
             .ok_or_else(|| otto_core::Error::Invalid("unsafe skill name".into()))?
     };
     if !dir.join("SKILL.md").exists() {
-        return Err(otto_core::Error::NotFound(format!("skill '{source}/{skill_name}'")));
+        return Err(otto_core::Error::NotFound(format!(
+            "skill '{source}/{skill_name}'"
+        )));
     }
     Ok(dir)
 }
@@ -182,14 +196,16 @@ fn stage_target(ctx: &ServerCtx, skill_name: &str, source: &str) -> Result<Stage
     if otto_core::paths::safe_component(skill_name).is_none() {
         return Err(otto_core::Error::Invalid("unsafe skill name".into()));
     }
-    let tmp = tempfile::tempdir()
-        .map_err(|e| otto_core::Error::Internal(format!("stage skill: {e}")))?;
+    let tmp =
+        tempfile::tempdir().map_err(|e| otto_core::Error::Internal(format!("stage skill: {e}")))?;
     if source == "bundled" {
         let templib = otto_context::Library::new(tmp.path());
         let ok = otto_skills::install_into(&templib, skill_name)
             .map_err(|e| otto_core::Error::Internal(format!("stage bundled skill: {e}")))?;
         if !ok {
-            return Err(otto_core::Error::NotFound(format!("bundled skill '{skill_name}'")));
+            return Err(otto_core::Error::NotFound(format!(
+                "bundled skill '{skill_name}'"
+            )));
         }
         let dir = tmp.path().join("skills").join(skill_name);
         prune_ignored(&dir);
@@ -230,7 +246,9 @@ async fn start_review(
 ) -> ApiResult<Json<SkillReview>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
     if req.skill_name.trim().is_empty() {
-        return Err(ApiError(otto_core::Error::Invalid("skill_name is required".into())));
+        return Err(ApiError(otto_core::Error::Invalid(
+            "skill_name is required".into(),
+        )));
     }
     // Accept "library", "bundled", or a provider name (claude/codex/agy).
     let source: &str = if req.skill_source == "bundled" {
@@ -246,13 +264,24 @@ async fn start_review(
     // Determine mode + providers.
     let want_agents = req.agent_mode != "static" && !req.providers.is_empty();
     let mode = if want_agents { "agents" } else { "static" };
-    let providers: Vec<String> = if want_agents { req.providers.clone() } else { Vec::new() };
+    let providers: Vec<String> = if want_agents {
+        req.providers.clone()
+    } else {
+        Vec::new()
+    };
 
     let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
     let instructions = req.instructions.trim().to_string();
     let review = ctx
         .skill_reviews_store
-        .create(&ws_id, &req.skill_name, source, mode, &instructions, Some(&user.id))
+        .create(
+            &ws_id,
+            &req.skill_name,
+            source,
+            mode,
+            &instructions,
+            Some(&user.id),
+        )
         .await
         .map_err(ApiError)?;
 
@@ -262,8 +291,18 @@ async fn start_review(
     let source_s = source.to_string();
     let cancel = register_cancel(&ctx.skill_review_cancels, &review_id);
     tokio::spawn(async move {
-        run_review(ctx_bg, review_id, ws, user, skill_name, source_s, providers, instructions, cancel)
-            .await;
+        run_review(
+            ctx_bg,
+            review_id,
+            ws,
+            user,
+            skill_name,
+            source_s,
+            providers,
+            instructions,
+            cancel,
+        )
+        .await;
     });
 
     Ok(Json(review))
@@ -275,7 +314,11 @@ async fn list_reviews(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<SkillReview>>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
-    let list = ctx.skill_reviews_store.list(&ws_id).await.map_err(ApiError)?;
+    let list = ctx
+        .skill_reviews_store
+        .list(&ws_id)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(list))
 }
 
@@ -302,10 +345,17 @@ async fn cancel_review(
             let _ = ctx.manager.archive(sid).await;
         }
     }
-    if let Some(sid) = review.fix_agent.as_ref().and_then(|f| f.session_id.as_ref()) {
+    if let Some(sid) = review
+        .fix_agent
+        .as_ref()
+        .and_then(|f| f.session_id.as_ref())
+    {
         let _ = ctx.manager.archive(sid).await;
     }
-    let _ = ctx.skill_reviews_store.set_status(&id, "cancelled", Some("Cancelled by user")).await;
+    let _ = ctx
+        .skill_reviews_store
+        .set_status(&id, "cancelled", Some("Cancelled by user"))
+        .await;
     emit(&ctx, &review.workspace_id, &id, "cancelled");
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
     Ok(Json(review))
@@ -324,10 +374,17 @@ async fn delete_review(
             let _ = ctx.manager.archive(sid).await;
         }
     }
-    if let Some(sid) = review.fix_agent.as_ref().and_then(|f| f.session_id.as_ref()) {
+    if let Some(sid) = review
+        .fix_agent
+        .as_ref()
+        .and_then(|f| f.session_id.as_ref())
+    {
         let _ = ctx.manager.archive(sid).await;
     }
-    ctx.skill_reviews_store.delete(&id).await.map_err(ApiError)?;
+    ctx.skill_reviews_store
+        .delete(&id)
+        .await
+        .map_err(ApiError)?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -339,14 +396,22 @@ async fn retry_agent(
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &review.workspace_id, WorkspaceRole::Editor).await?;
     let Some(agent) = review.agents.get(index).cloned() else {
-        return Err(ApiError(otto_core::Error::NotFound(format!("agent #{index}"))));
+        return Err(ApiError(otto_core::Error::NotFound(format!(
+            "agent #{index}"
+        ))));
     };
     if agent.name == "summarizer" {
-        return Err(ApiError(otto_core::Error::Invalid("cannot retry the summarizer".into())));
+        return Err(ApiError(otto_core::Error::Invalid(
+            "cannot retry the summarizer".into(),
+        )));
     }
     let ctx_bg = ctx.clone();
     let review_id = id.clone();
-    let ws = ctx.workspaces.get(&review.workspace_id).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&review.workspace_id)
+        .await
+        .map_err(ApiError)?;
     let skill_name = review.skill_name.clone();
     let source = review.skill_source.clone();
     let instructions = review.instructions.clone();
@@ -369,8 +434,18 @@ async fn retry_agent(
         };
         otto_sessions::trust::ensure_trusted(&provider, &staged.path().to_string_lossy());
         run_skill_review_agent(
-            &ctx_bg, &ws, &user, &review_id, index, base, &provider, staged.path(), &skill_name,
-            &reviewer, &instructions, &cancel,
+            &ctx_bg,
+            &ws,
+            &user,
+            &review_id,
+            index,
+            base,
+            &provider,
+            staged.path(),
+            &skill_name,
+            &reviewer,
+            &instructions,
+            &cancel,
         )
         .await;
         emit(&ctx_bg, &ws.id, &review_id, "running");
@@ -410,14 +485,20 @@ async fn apply_fixes(
         (None, None) => (Vec::new(), Vec::new()),
     };
     if findings.is_empty() && patch_plan.is_empty() {
-        return Err(ApiError(otto_core::Error::Invalid("this review has no findings to apply".into())));
+        return Err(ApiError(otto_core::Error::Invalid(
+            "this review has no findings to apply".into(),
+        )));
     }
     let dir = real_skill_dir(&ctx, &review.skill_name, &review.skill_source).map_err(ApiError)?;
 
     // Resolve the fixer provider through the configured default (mirrors the
     // skill-eval path): explicit request → workspace default → global default →
     // "claude".
-    let ws = ctx.workspaces.get(&review.workspace_id).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&review.workspace_id)
+        .await
+        .map_err(ApiError)?;
     let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
         .get("default_provider")
         .await
@@ -437,15 +518,28 @@ async fn apply_fixes(
         session_id: None,
         findings: vec![],
     };
-    ctx.skill_reviews_store.set_fix(&id, &row).await.map_err(ApiError)?;
+    ctx.skill_reviews_store
+        .set_fix(&id, &row)
+        .await
+        .map_err(ApiError)?;
 
     let out = fix_result_path(&id);
-    let prompt = fixer_prompt(&review, &findings, &patch_plan, &req.instructions, &dir, &out.to_string_lossy());
+    let prompt = fixer_prompt(
+        &review,
+        &findings,
+        &patch_plan,
+        &req.instructions,
+        &dir,
+        &out.to_string_lossy(),
+    );
     let ctx_bg = ctx.clone();
     let review_id = id.clone();
     otto_sessions::trust::ensure_trusted(&provider, &dir.to_string_lossy());
     tokio::spawn(async move {
-        run_fix_agent(&ctx_bg, &ws, &user, &review_id, row, &provider, &dir, &prompt).await;
+        run_fix_agent(
+            &ctx_bg, &ws, &user, &review_id, row, &provider, &dir, &prompt,
+        )
+        .await;
     });
 
     let review = ctx.skill_reviews_store.get(&id).await.map_err(ApiError)?;
@@ -469,7 +563,15 @@ async fn run_review(
     cancel: Arc<AtomicBool>,
 ) {
     let result = run_review_inner(
-        &ctx, &review_id, &ws, &user, &skill_name, &source, &providers, &instructions, &cancel,
+        &ctx,
+        &review_id,
+        &ws,
+        &user,
+        &skill_name,
+        &source,
+        &providers,
+        &instructions,
+        &cancel,
     )
     .await;
     let status = if is_cancelled(&cancel) {
@@ -480,9 +582,15 @@ async fn run_review(
         "done"
     };
     if let Err(e) = &result {
-        let _ = ctx.skill_reviews_store.set_status(&review_id, status, Some(&e.to_string())).await;
+        let _ = ctx
+            .skill_reviews_store
+            .set_status(&review_id, status, Some(&e.to_string()))
+            .await;
     } else {
-        let _ = ctx.skill_reviews_store.set_status(&review_id, status, None).await;
+        let _ = ctx
+            .skill_reviews_store
+            .set_status(&review_id, status, None)
+            .await;
     }
     unregister_cancel(&ctx.skill_review_cancels, &review_id);
     emit(&ctx, &ws.id, &review_id, status);
@@ -505,7 +613,9 @@ async fn run_review_inner(
 
     // 1. Static pass — always, instant, deterministic.
     let static_report = static_review(dir);
-    ctx.skill_reviews_store.set_static(review_id, &static_report).await?;
+    ctx.skill_reviews_store
+        .set_static(review_id, &static_report)
+        .await?;
     emit(ctx, &ws.id, review_id, "running");
 
     if providers.is_empty() {
@@ -535,7 +645,9 @@ async fn run_review_inner(
         session_id: None,
         findings: vec![],
     });
-    ctx.skill_reviews_store.set_agents(review_id, &agents).await?;
+    ctx.skill_reviews_store
+        .set_agents(review_id, &agents)
+        .await?;
 
     // Pre-trust the staged skill dir for every provider so no agent stalls on the
     // interactive "trust this folder?" dialog.
@@ -561,8 +673,18 @@ async fn run_review_inner(
         let base = agents[index].clone();
         set.spawn(async move {
             run_skill_review_agent(
-                &ctx, &ws, &user, &review_id, index, base, &provider, &dir, &skill_name,
-                &reviewer, &instructions, &cancel,
+                &ctx,
+                &ws,
+                &user,
+                &review_id,
+                index,
+                base,
+                &provider,
+                &dir,
+                &skill_name,
+                &reviewer,
+                &instructions,
+                &cancel,
             )
             .await
         });
@@ -586,12 +708,19 @@ async fn run_review_inner(
     let summarizer_index = providers.len();
     let mut summarizer_row = agents[summarizer_index].clone();
     summarizer_row.status = "running".into();
-    let _ = ctx.skill_reviews_store.set_agent_at(review_id, summarizer_index, &summarizer_row).await;
+    let _ = ctx
+        .skill_reviews_store
+        .set_agent_at(review_id, summarizer_index, &summarizer_row)
+        .await;
     emit(ctx, &ws.id, review_id, "running");
 
     let mut summary = merge_summary(&static_report, &agent_findings);
     let prompt = summarizer_prompt(skill_name, &static_report, &agent_batches, instructions);
-    match ctx.orchestrator.run_agent(&prompt, &dir.to_string_lossy(), None, SUMMARIZER_TIMEOUT).await {
+    match ctx
+        .orchestrator
+        .run_agent(&prompt, &dir.to_string_lossy(), None, SUMMARIZER_TIMEOUT)
+        .await
+    {
         Ok(text) => {
             if let Some(parsed) = parse_summary(&text) {
                 // Prefer the model's verdict + patch plan; keep the merged findings.
@@ -603,7 +732,11 @@ async fn run_review_inner(
                 }
                 if !parsed.findings.is_empty() {
                     summary.findings = dedupe_findings(
-                        summary.findings.into_iter().chain(parsed.findings).collect(),
+                        summary
+                            .findings
+                            .into_iter()
+                            .chain(parsed.findings)
+                            .collect(),
                     );
                 }
             }
@@ -615,8 +748,13 @@ async fn run_review_inner(
             summarizer_row.note = format!("summarizer failed: {e}");
         }
     }
-    let _ = ctx.skill_reviews_store.set_agent_at(review_id, summarizer_index, &summarizer_row).await;
-    ctx.skill_reviews_store.set_summary(review_id, &summary).await?;
+    let _ = ctx
+        .skill_reviews_store
+        .set_agent_at(review_id, summarizer_index, &summarizer_row)
+        .await;
+    ctx.skill_reviews_store
+        .set_summary(review_id, &summary)
+        .await?;
     Ok(())
 }
 
@@ -670,7 +808,13 @@ async fn run_skill_review_agent(
         return vec![];
     }
 
-    let prompt = agent_prompt(skill_name, dir, reviewer, instructions, &out.to_string_lossy());
+    let prompt = agent_prompt(
+        skill_name,
+        dir,
+        reviewer,
+        instructions,
+        &out.to_string_lossy(),
+    );
     let meta = serde_json::json!({ "source": "skillreview", "review_id": review_id, "agent_index": index });
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
@@ -828,7 +972,8 @@ async fn run_fix_agent(
     let repo = &ctx.skill_reviews_store;
     let cwd = dir.to_string_lossy().into_owned();
 
-    let meta = serde_json::json!({ "source": "skillreview", "review_id": review_id, "role": "fixer" });
+    let meta =
+        serde_json::json!({ "source": "skillreview", "review_id": review_id, "role": "fixer" });
     let req = CreateSessionReq {
         kind: SessionKind::Agent,
         provider: Some(provider.to_string()),
@@ -940,7 +1085,13 @@ issues from earlier implementations):\n{t}\n"
     }
 }
 
-fn agent_prompt(skill_name: &str, dir: &Path, reviewer: &str, instructions: &str, out_path: &str) -> String {
+fn agent_prompt(
+    skill_name: &str,
+    dir: &Path,
+    reviewer: &str,
+    instructions: &str,
+    out_path: &str,
+) -> String {
     format!(
         "You are auditing the Agent Skill package `{skill_name}` located at:\n{dir}\n\n\
 Read its SKILL.md and every file under references/, examples/, scripts/, evals/. Local machine \
@@ -1141,7 +1292,11 @@ fn parse_summary(text: &str) -> Option<SkillReviewSummary> {
         scorecard: raw
             .scorecard
             .into_iter()
-            .map(|s| SkillScoreRow { area: s.area, score: s.score.round().clamp(0.0, 5.0) as u8, notes: s.notes })
+            .map(|s| SkillScoreRow {
+                area: s.area,
+                score: s.score.round().clamp(0.0, 5.0) as u8,
+                notes: s.notes,
+            })
             .collect(),
         findings: raw
             .findings
@@ -1184,7 +1339,10 @@ fn sev_rank(s: &str) -> u8 {
 
 /// Build the agents-mode summary from the deterministic static report plus the
 /// union of agent findings (the model's summarizer output enriches this).
-fn merge_summary(static_report: &SkillStaticReport, agent_findings: &[SkillFinding]) -> SkillReviewSummary {
+fn merge_summary(
+    static_report: &SkillStaticReport,
+    agent_findings: &[SkillFinding],
+) -> SkillReviewSummary {
     let findings = dedupe_findings(
         static_report
             .findings
@@ -1197,7 +1355,13 @@ fn merge_summary(static_report: &SkillStaticReport, agent_findings: &[SkillFindi
         .iter()
         .filter(|f| f.severity == "Critical" || f.severity == "High")
         .take(5)
-        .map(|f| if f.fix.trim().is_empty() { f.title.clone() } else { f.fix.clone() })
+        .map(|f| {
+            if f.fix.trim().is_empty() {
+                f.title.clone()
+            } else {
+                f.fix.clone()
+            }
+        })
         .collect();
     SkillReviewSummary {
         verdict: static_report.verdict.clone(),

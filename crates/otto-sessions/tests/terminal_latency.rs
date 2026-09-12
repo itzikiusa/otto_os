@@ -62,8 +62,13 @@ async fn manager() -> (Arc<SessionManager>, Workspace, Id) {
         .bind(&user).bind("u").bind("x").bind("U").bind(&now)
         .execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
-        .bind(&ws_id).bind("w").bind("/tmp").bind(&now)
-        .execute(&pool).await.unwrap();
+        .bind(&ws_id)
+        .bind("w")
+        .bind("/tmp")
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let repo = SessionsRepo::new(pool);
     let (events, _rx) = broadcast::channel(64);
@@ -145,7 +150,10 @@ async fn keystroke_reaches_the_pty_while_a_db_read_is_stalled() {
             _ => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
-    assert!(mgr.live_handle(&session.id).is_some(), "PTY did not come up");
+    assert!(
+        mgr.live_handle(&session.id).is_some(),
+        "PTY did not come up"
+    );
 
     // The re-auth pass, mid-flight: a `get` that will sit on SQLite for 2 s.
     let stalled = {

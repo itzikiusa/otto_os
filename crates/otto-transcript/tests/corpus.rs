@@ -19,7 +19,9 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     if depth > 6 {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -138,7 +140,10 @@ fn whole_local_corpus_folds_without_unknown_records() {
     report("codex", &xc);
 
     println!("total wall time: {:.1}s", t0.elapsed().as_secs_f64());
-    assert!(cc.files + xc.files >= 100, "corpus too small to be meaningful");
+    assert!(
+        cc.files + xc.files >= 100,
+        "corpus too small to be meaningful"
+    );
     assert_eq!(cc.unknown, 0, "claude unknown records: {:?}", cc.bad_files);
     assert_eq!(xc.unknown, 0, "codex unknown records: {:?}", xc.bad_files);
 }

@@ -82,7 +82,9 @@ fn strip_rs_hash(rs: &str) -> String {
         Some((base, hash))
             if !hash.is_empty()
                 && hash.len() >= 5
-                && hash.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) =>
+                && hash
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) =>
         {
             base.to_string()
         }
@@ -91,7 +93,12 @@ fn strip_rs_hash(rs: &str) -> String {
 }
 
 /// Derive `(workload_kind, workload)` from the pod's owner reference.
-fn workload_of(owner_kind: &str, owner: &str, pod_name: &str, labels: &BTreeMap<String, String>) -> (String, String) {
+fn workload_of(
+    owner_kind: &str,
+    owner: &str,
+    pod_name: &str,
+    labels: &BTreeMap<String, String>,
+) -> (String, String) {
     match owner_kind {
         "ReplicaSet" => {
             // Argo Rollouts label their RS pods; Deployments do not.
@@ -107,7 +114,9 @@ fn workload_of(owner_kind: &str, owner: &str, pod_name: &str, labels: &BTreeMap<
         "Job" => {
             // CronJob-spawned jobs are `<cronjob>-<unix-minutes>`.
             match owner.rsplit_once('-') {
-                Some((base, suffix)) if suffix.len() >= 8 && suffix.chars().all(|c| c.is_ascii_digit()) => {
+                Some((base, suffix))
+                    if suffix.len() >= 8 && suffix.chars().all(|c| c.is_ascii_digit()) =>
+                {
                     ("cronjob".into(), base.to_string())
                 }
                 _ => ("job".into(), owner.to_string()),
@@ -121,7 +130,9 @@ fn workload_of(owner_kind: &str, owner: &str, pod_name: &str, labels: &BTreeMap<
 fn container_snap(st: &Value) -> ContainerSnap {
     ContainerSnap {
         restarts: i(st, "/restartCount").unwrap_or(0),
-        last_reason: s(st, "/lastState/terminated/reason").unwrap_or("").to_string(),
+        last_reason: s(st, "/lastState/terminated/reason")
+            .unwrap_or("")
+            .to_string(),
         last_exit: i(st, "/lastState/terminated/exitCode").unwrap_or(0) as i32,
         last_finished: s(st, "/lastState/terminated/finishedAt").map(str::to_string),
         waiting_reason: s(st, "/state/waiting/reason").unwrap_or("").to_string(),
@@ -147,10 +158,7 @@ pub fn snapshot_pod(item: &Value) -> PodSnap {
     let (workload_kind, workload) = workload_of(&owner_kind, &owner, &name, &labels);
     let mut containers = BTreeMap::new();
     for st in arr(item, "/status/containerStatuses") {
-        containers.insert(
-            s(st, "/name").unwrap_or("").to_string(),
-            container_snap(st),
-        );
+        containers.insert(s(st, "/name").unwrap_or("").to_string(), container_snap(st));
     }
     let specs = arr(item, "/spec/containers");
     let mem_limit: i64 = specs
@@ -187,7 +195,9 @@ pub fn snapshot_pod(item: &Value) -> PodSnap {
             .filter_map(|c| s(c, "/image").map(str::to_string))
             .collect(),
         labels,
-        created: s(item, "/metadata/creationTimestamp").unwrap_or("").to_string(),
+        created: s(item, "/metadata/creationTimestamp")
+            .unwrap_or("")
+            .to_string(),
         deleting: item.pointer("/metadata/deletionTimestamp").is_some(),
         first_port,
         pod_reason: s(item, "/status/reason").unwrap_or("").to_string(),
@@ -285,7 +295,13 @@ fn events_for<'a>(
     })
 }
 
-fn classify_restart(c: &ContainerSnap, events: &[EventHint], ns: &str, pod: &str, now: DateTime<Utc>) -> Class {
+fn classify_restart(
+    c: &ContainerSnap,
+    events: &[EventHint],
+    ns: &str,
+    pod: &str,
+    now: DateTime<Utc>,
+) -> Class {
     if c.last_reason == "OOMKilled"
         || events_for(events, ns, pod, now, Duration::minutes(10)).any(|e| e.reason == "OOMKilling")
     {
@@ -366,22 +382,39 @@ pub fn classify(
     }
 
     // Churn: pods gone / new, grouped per (ns, workload).
-    let gone: Vec<&PodSnap> = prev.iter().filter(|(k, _)| !cur.contains_key(*k)).map(|(_, p)| p).collect();
-    let new: Vec<&PodSnap> = cur.iter().filter(|(k, _)| !prev.contains_key(*k)).map(|(_, p)| p).collect();
+    let gone: Vec<&PodSnap> = prev
+        .iter()
+        .filter(|(k, _)| !cur.contains_key(*k))
+        .map(|(_, p)| p)
+        .collect();
+    let new: Vec<&PodSnap> = cur
+        .iter()
+        .filter(|(k, _)| !prev.contains_key(*k))
+        .map(|(_, p)| p)
+        .collect();
     let mut groups: BTreeSet<(String, String)> = BTreeSet::new();
     for p in gone.iter().chain(new.iter()) {
         groups.insert((p.namespace.clone(), p.workload.clone()));
     }
     for (ns, wl) in groups {
-        let g: Vec<&PodSnap> = gone.iter().copied().filter(|p| p.namespace == ns && p.workload == wl).collect();
-        let n: Vec<&PodSnap> = new.iter().copied().filter(|p| p.namespace == ns && p.workload == wl).collect();
+        let g: Vec<&PodSnap> = gone
+            .iter()
+            .copied()
+            .filter(|p| p.namespace == ns && p.workload == wl)
+            .collect();
+        let n: Vec<&PodSnap> = new
+            .iter()
+            .copied()
+            .filter(|p| p.namespace == ns && p.workload == wl)
+            .collect();
         let sample = g.first().or(n.first()).copied();
         let Some(sample) = sample else { continue };
         let wl_kind = sample.workload_kind.clone();
 
         // Jobs finishing are completions, not churn.
         if matches!(wl_kind.as_str(), "job" | "cronjob")
-            && g.iter().all(|p| p.phase == "Succeeded" || p.phase == "Running")
+            && g.iter()
+                .all(|p| p.phase == "Succeeded" || p.phase == "Running")
             && n.is_empty()
         {
             for p in &g {
@@ -395,13 +428,17 @@ pub fn classify(
         let rollout = !g.is_empty() && !n.is_empty() && gone_owners.is_disjoint(&new_owners);
         let otto = actions
             .iter()
-            .filter(|a| a.namespace == ns && a.workload == wl && (now - a.at) <= Duration::minutes(5))
+            .filter(|a| {
+                a.namespace == ns && a.workload == wl && (now - a.at) <= Duration::minutes(5)
+            })
             .max_by_key(|a| a.at);
         let scaled = events.iter().any(|e| {
             e.namespace == ns
                 && e.reason == "ScalingReplicaSet"
                 && e.at >= now - Duration::minutes(10)
-                && (e.involved_name == wl || e.message.contains(&format!(" {wl}-")) || e.message.contains(&format!(" {wl} ")))
+                && (e.involved_name == wl
+                    || e.message.contains(&format!(" {wl}-"))
+                    || e.message.contains(&format!(" {wl} ")))
         });
 
         for p in g.iter().chain(n.iter()) {
@@ -455,8 +492,14 @@ pub fn version_changes(prev: &Snapshot, cur: &Snapshot, now: DateTime<Utc>) -> V
     let now_s = now.to_rfc3339();
     let mut out = Vec::new();
     for (ns, wl) in groups {
-        let before = dominant_version(prev.values().filter(|p| p.namespace == ns && p.workload == wl));
-        let after = dominant_version(cur.values().filter(|p| p.namespace == ns && p.workload == wl));
+        let before = dominant_version(
+            prev.values()
+                .filter(|p| p.namespace == ns && p.workload == wl),
+        );
+        let after = dominant_version(
+            cur.values()
+                .filter(|p| p.namespace == ns && p.workload == wl),
+        );
         if before.is_empty() || after.is_empty() || before == after {
             continue;
         }
@@ -533,7 +576,9 @@ mod tests {
         }
     }
     fn snaps(v: Vec<PodSnap>) -> Snapshot {
-        v.into_iter().map(|p| (snap_key(&p.namespace, &p.name), p)).collect()
+        v.into_iter()
+            .map(|p| (snap_key(&p.namespace, &p.name), p))
+            .collect()
     }
     fn ev(name: &str, reason: &str, message: &str, at: DateTime<Utc>) -> EventHint {
         EventHint {
@@ -561,8 +606,20 @@ mod tests {
 
     #[test]
     fn crash_on_error_exit() {
-        let prev = snaps(vec![snap("gba-a", "gobalanceadjustment-549b8bd7b6", 0, "", 0)]);
-        let cur = snaps(vec![snap("gba-a", "gobalanceadjustment-549b8bd7b6", 1, "Error", 2)]);
+        let prev = snaps(vec![snap(
+            "gba-a",
+            "gobalanceadjustment-549b8bd7b6",
+            0,
+            "",
+            0,
+        )]);
+        let cur = snaps(vec![snap(
+            "gba-a",
+            "gobalanceadjustment-549b8bd7b6",
+            1,
+            "Error",
+            2,
+        )]);
         let out = classify(&prev, &cur, &[], &[], Utc::now());
         assert_eq!(out[0].class, Class::Crash);
         assert_eq!(out[0].workload, "gobalanceadjustment");
@@ -574,8 +631,18 @@ mod tests {
         let prev = snaps(vec![snap("p-a", "p-1234567890", 0, "", 0)]);
         let cur = snaps(vec![snap("p-a", "p-1234567890", 1, "Error", 137)]);
         let events = vec![
-            ev("p-a", "Unhealthy", "Liveness probe failed: HTTP 503", now - Duration::seconds(50)),
-            ev("p-a", "Killing", "Container main failed liveness probe, will be restarted", now - Duration::seconds(40)),
+            ev(
+                "p-a",
+                "Unhealthy",
+                "Liveness probe failed: HTTP 503",
+                now - Duration::seconds(50),
+            ),
+            ev(
+                "p-a",
+                "Killing",
+                "Container main failed liveness probe, will be restarted",
+                now - Duration::seconds(40),
+            ),
         ];
         let out = classify(&prev, &cur, &events, &[], now);
         assert_eq!(out[0].class, Class::Probe);
@@ -587,7 +654,9 @@ mod tests {
         let cur = snaps(vec![snap("adm-new", "admission-2222222222", 0, "", 0)]);
         let out = classify(&prev, &cur, &[], &[], Utc::now());
         assert_eq!(out.len(), 2, "gone + new");
-        assert!(out.iter().all(|c| c.kind == "churn" && c.class == Class::Planned && c.planned_by == "rollout"));
+        assert!(out
+            .iter()
+            .all(|c| c.kind == "churn" && c.class == Class::Planned && c.planned_by == "rollout"));
     }
 
     #[test]
@@ -602,7 +671,9 @@ mod tests {
             actor: "itzik".into(),
         }];
         let out = classify(&prev, &cur, &[], &actions, now);
-        assert!(out.iter().all(|c| c.class == Class::Planned && c.planned_by == "otto:itzik"));
+        assert!(out
+            .iter()
+            .all(|c| c.class == Class::Planned && c.planned_by == "otto:itzik"));
     }
 
     #[test]
@@ -622,7 +693,13 @@ mod tests {
 
     #[test]
     fn job_completion_is_completed_not_restart() {
-        let mut j = snap("cleanup-29312345-abc", "cleanup-29312345", 0, "Completed", 0);
+        let mut j = snap(
+            "cleanup-29312345-abc",
+            "cleanup-29312345",
+            0,
+            "Completed",
+            0,
+        );
         j.owner_kind = "Job".into();
         j.workload_kind = "cronjob".into();
         j.workload = "cleanup".into();
@@ -650,9 +727,17 @@ mod tests {
             p.version = v.into();
             p
         };
-        let prev = snaps(vec![mk("gm-a", "5.02.27-201"), mk("gm-b", "5.02.27-201"), mk("gm-c", "")]);
+        let prev = snaps(vec![
+            mk("gm-a", "5.02.27-201"),
+            mk("gm-b", "5.02.27-201"),
+            mk("gm-c", ""),
+        ]);
         // Rolling: two pods on the new build, one still old → dominant flips.
-        let cur = snaps(vec![mk("gm-a", "5.02.28-205"), mk("gm-b", "5.02.28-205"), mk("gm-c", "5.02.27-201")]);
+        let cur = snaps(vec![
+            mk("gm-a", "5.02.28-205"),
+            mk("gm-b", "5.02.28-205"),
+            mk("gm-c", "5.02.27-201"),
+        ]);
         let out = version_changes(&prev, &cur, Utc::now());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, "version");
@@ -667,7 +752,10 @@ mod tests {
 
     #[test]
     fn first_cycle_without_baseline_emits_nothing() {
-        let cur = snaps(vec![snap("a-1", "a-1111111111", 3, "Error", 1), snap("b-1", "b-1111111111", 0, "", 0)]);
+        let cur = snaps(vec![
+            snap("a-1", "a-1111111111", 3, "Error", 1),
+            snap("b-1", "b-1111111111", 0, "", 0),
+        ]);
         assert!(classify(&Snapshot::new(), &cur, &[], &[], Utc::now()).is_empty());
     }
 
@@ -682,7 +770,10 @@ mod tests {
     #[test]
     fn scaling_event_marks_scale() {
         let now = Utc::now();
-        let prev = snaps(vec![snap("s-a", "s-1111111111", 0, "", 0), snap("s-b", "s-1111111111", 0, "", 0)]);
+        let prev = snaps(vec![
+            snap("s-a", "s-1111111111", 0, "", 0),
+            snap("s-b", "s-1111111111", 0, "", 0),
+        ]);
         let cur = snaps(vec![snap("s-a", "s-1111111111", 0, "", 0)]);
         let events = vec![EventHint {
             namespace: "ns".into(),
@@ -726,13 +817,31 @@ mod tests {
     #[test]
     fn workload_derivation() {
         let l = BTreeMap::new();
-        assert_eq!(workload_of("ReplicaSet", "auditlog-7c8dc556fb", "x", &l), ("deployment".into(), "auditlog".into()));
-        assert_eq!(workload_of("Job", "cleanup-29312345", "x", &l), ("cronjob".into(), "cleanup".into()));
-        assert_eq!(workload_of("Job", "one-off", "x", &l), ("job".into(), "one-off".into()));
-        assert_eq!(workload_of("StatefulSet", "redis", "x", &l), ("statefulset".into(), "redis".into()));
-        assert_eq!(workload_of("", "", "lonely", &l), ("pod".into(), "lonely".into()));
+        assert_eq!(
+            workload_of("ReplicaSet", "auditlog-7c8dc556fb", "x", &l),
+            ("deployment".into(), "auditlog".into())
+        );
+        assert_eq!(
+            workload_of("Job", "cleanup-29312345", "x", &l),
+            ("cronjob".into(), "cleanup".into())
+        );
+        assert_eq!(
+            workload_of("Job", "one-off", "x", &l),
+            ("job".into(), "one-off".into())
+        );
+        assert_eq!(
+            workload_of("StatefulSet", "redis", "x", &l),
+            ("statefulset".into(), "redis".into())
+        );
+        assert_eq!(
+            workload_of("", "", "lonely", &l),
+            ("pod".into(), "lonely".into())
+        );
         let mut rl = BTreeMap::new();
         rl.insert("rollouts-pod-template-hash".to_string(), "abc".to_string());
-        assert_eq!(workload_of("ReplicaSet", "api-5d8f9c7b6", "x", &rl).0, "rollout");
+        assert_eq!(
+            workload_of("ReplicaSet", "api-5d8f9c7b6", "x", &rl).0,
+            "rollout"
+        );
     }
 }

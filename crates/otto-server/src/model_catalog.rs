@@ -97,7 +97,10 @@ fn scan_tokens(text: &str, prefix: &str) -> Vec<String> {
                 continue;
             }
         }
-        let tail: String = text[start..].chars().take_while(|c| is_id_char(*c)).collect();
+        let tail: String = text[start..]
+            .chars()
+            .take_while(|c| is_id_char(*c))
+            .collect();
         let token = tail.trim_end_matches(['.', '-']).to_string();
         if token.len() > prefix.len() && !out.contains(&token) {
             out.push(token);
@@ -142,9 +145,13 @@ pub fn extract_codex_ids(html: &str) -> Vec<String> {
     let mut from = 0;
     while let Some(pos) = html[from..].find("<code") {
         let start = from + pos;
-        let Some(gt) = html[start..].find('>') else { break };
+        let Some(gt) = html[start..].find('>') else {
+            break;
+        };
         let inner_start = start + gt + 1;
-        let Some(end) = html[inner_start..].find("</code>") else { break };
+        let Some(end) = html[inner_start..].find("</code>") else {
+            break;
+        };
         from = inner_start + end;
         let inner = html[inner_start..inner_start + end].trim();
         if inner.starts_with("gpt-")
@@ -178,7 +185,9 @@ pub fn extract_gemini_ids(html: &str) -> Vec<String> {
     scan_tokens(html, "gemini-")
         .into_iter()
         .filter(|t| {
-            t.chars().nth("gemini-".len()).is_some_and(|c| c.is_ascii_digit())
+            t.chars()
+                .nth("gemini-".len())
+                .is_some_and(|c| c.is_ascii_digit())
                 && !t.ends_with(".jpg")
                 && !t.ends_with(".webp")
                 && !t.ends_with(".png")
@@ -225,7 +234,10 @@ pub fn parse_models_dev(json: &Value, provider: &str) -> Vec<(String, String)> {
         "agy" => ("google", "gemini-"),
         _ => return Vec::new(),
     };
-    let Some(models) = json.get(key).and_then(|p| p.get("models")).and_then(Value::as_object)
+    let Some(models) = json
+        .get(key)
+        .and_then(|p| p.get("models"))
+        .and_then(Value::as_object)
     else {
         return Vec::new();
     };
@@ -233,7 +245,11 @@ pub fn parse_models_dev(json: &Value, provider: &str) -> Vec<(String, String)> {
         .iter()
         .filter(|(id, _)| id.starts_with(family))
         .map(|(id, m)| {
-            let label = m.get("name").and_then(Value::as_str).unwrap_or(id).to_string();
+            let label = m
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(id)
+                .to_string();
             (id.clone(), label)
         })
         .collect();
@@ -282,9 +298,7 @@ async fn cli_probe(provider: &str) -> Option<Result<Vec<(String, String)>, Strin
         match tokio::time::timeout(FETCH_TIMEOUT, out).await {
             Err(_) => Err("agy models: timed out".to_string()),
             Ok(Err(e)) => Err(format!("agy models: {e}")),
-            Ok(Ok(o)) if !o.status.success() => {
-                Err(format!("agy models: exit {}", o.status))
-            }
+            Ok(Ok(o)) if !o.status.success() => Err(format!("agy models: exit {}", o.status)),
             Ok(Ok(o)) => {
                 let models = parse_agy_models_output(&String::from_utf8_lossy(&o.stdout));
                 if models.is_empty() {
@@ -301,9 +315,15 @@ async fn cli_probe(provider: &str) -> Option<Result<Vec<(String, String)>, Strin
 /// Source 2 — docs scrape (the primary source in practice for claude/codex).
 async fn docs_scrape(provider: &str) -> Option<Result<Vec<(String, String)>, String>> {
     let (url, extract): (&str, fn(&str) -> Vec<String>) = match provider {
-        "claude" => ("https://platform.claude.com/docs/en/models/overview", extract_claude_ids),
+        "claude" => (
+            "https://platform.claude.com/docs/en/models/overview",
+            extract_claude_ids,
+        ),
         "codex" => ("https://learn.chatgpt.com/docs/models", extract_codex_ids),
-        "agy" => ("https://ai.google.dev/gemini-api/docs/models", extract_gemini_ids),
+        "agy" => (
+            "https://ai.google.dev/gemini-api/docs/models",
+            extract_gemini_ids,
+        ),
         _ => return None,
     };
     Some(match guarded_fetch_text(url).await {
@@ -350,7 +370,12 @@ pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
             Some(Ok(models)) => {
                 match repo.upsert_batch(provider, source, &models).await {
                     Ok(()) => {
-                        info!(provider, source, count = models.len(), "model catalog refreshed");
+                        info!(
+                            provider,
+                            source,
+                            count = models.len(),
+                            "model catalog refreshed"
+                        );
                         set_status(provider, None);
                     }
                     Err(e) => {
@@ -434,15 +459,20 @@ fn group(rows: Vec<ProviderModel>) -> HashMap<String, ProviderCatalog> {
         );
     }
     for row in rows {
-        let entry = providers.entry(row.provider.clone()).or_insert_with(|| ProviderCatalog {
-            models: Vec::new(),
-            fetched_at: None,
-            stale: true,
-            last_error: last_error_of(&row.provider),
-        });
+        let entry = providers
+            .entry(row.provider.clone())
+            .or_insert_with(|| ProviderCatalog {
+                models: Vec::new(),
+                fetched_at: None,
+                stale: true,
+                last_error: last_error_of(&row.provider),
+            });
         // Staleness tracks the fetched rows; manual rows never age out.
         if row.source != "manual"
-            && entry.fetched_at.as_deref().is_none_or(|cur| row.fetched_at.as_str() > cur)
+            && entry
+                .fetched_at
+                .as_deref()
+                .is_none_or(|cur| row.fetched_at.as_str() > cur)
         {
             entry.fetched_at = Some(row.fetched_at.clone());
         }
@@ -454,7 +484,9 @@ fn group(rows: Vec<ProviderModel>) -> HashMap<String, ProviderCatalog> {
     }
     for cat in providers.values_mut() {
         cat.stale = match cat.fetched_at.as_deref().and_then(|t| {
-            DateTime::parse_from_rfc3339(t).ok().map(|d| d.with_timezone(&Utc))
+            DateTime::parse_from_rfc3339(t)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
         }) {
             Some(at) => Utc::now() - at > chrono::Duration::hours(STALE_AFTER_HOURS),
             None => true,
@@ -465,7 +497,9 @@ fn group(rows: Vec<ProviderModel>) -> HashMap<String, ProviderCatalog> {
 
 async fn payload(ctx: &ServerCtx) -> ApiResult<ModelsResp> {
     let rows = ProviderModelsRepo::new(ctx.pool.clone()).list_all().await?;
-    Ok(ModelsResp { providers: group(rows) })
+    Ok(ModelsResp {
+        providers: group(rows),
+    })
 }
 
 /// `GET /api/v1/providers/models` — the full grouped catalog + staleness.
@@ -484,7 +518,12 @@ pub async fn refresh(
     body: Option<Json<RefreshReq>>,
 ) -> ApiResult<Json<ModelsResp>> {
     let req = body.map(|Json(r)| r).unwrap_or_default();
-    match req.provider.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    match req
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         Some(p) => refresh_provider(&ctx, p).await,
         None => refresh_all(&ctx).await,
     }
@@ -508,8 +547,16 @@ mod tests {
     #[test]
     fn claude_ids_from_docs_snapshot() {
         let ids = extract_claude_ids(CLAUDE_HTML);
-        for expect in ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] {
-            assert!(ids.contains(&expect.to_string()), "missing {expect} in {ids:?}");
+        for expect in [
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+        ] {
+            assert!(
+                ids.contains(&expect.to_string()),
+                "missing {expect} in {ids:?}"
+            );
         }
         // Doc slugs that share the prefix must NOT survive the grammar filter.
         for reject in ids.iter() {
@@ -522,10 +569,14 @@ mod tests {
     fn codex_ids_from_docs_snapshot() {
         let ids = extract_codex_ids(CODEX_HTML);
         for expect in ["gpt-5.3-codex", "gpt-5.4", "gpt-5.6-luna"] {
-            assert!(ids.contains(&expect.to_string()), "missing {expect} in {ids:?}");
+            assert!(
+                ids.contains(&expect.to_string()),
+                "missing {expect} in {ids:?}"
+            );
         }
         assert!(
-            ids.iter().all(|i| !i.ends_with(".jpg") && !i.ends_with(".webp")),
+            ids.iter()
+                .all(|i| !i.ends_with(".jpg") && !i.ends_with(".webp")),
             "asset name leaked: {ids:?}"
         );
     }
@@ -542,7 +593,10 @@ mod tests {
     fn agy_cli_output_parses() {
         let models = parse_agy_models_output(AGY_OUT);
         assert!(!models.is_empty());
-        assert!(models.iter().any(|(id, _)| id.starts_with("gemini-")), "{models:?}");
+        assert!(
+            models.iter().any(|(id, _)| id.starts_with("gemini-")),
+            "{models:?}"
+        );
         // Labels come from the second column, not the id.
         let (_, label) = models.iter().find(|(id, _)| id.contains("pro")).unwrap();
         assert!(label.contains(' '), "label should be human text: {label}");
@@ -550,9 +604,16 @@ mod tests {
 
     #[test]
     fn gemini_ids_token_scan() {
-        let html = r#"<code>gemini-3.1-pro-high</code> and "gemini-3.7-flash-low" but not gemini-api"#;
+        let html =
+            r#"<code>gemini-3.1-pro-high</code> and "gemini-3.7-flash-low" but not gemini-api"#;
         let ids = extract_gemini_ids(html);
-        assert_eq!(ids, vec!["gemini-3.1-pro-high".to_string(), "gemini-3.7-flash-low".to_string()]);
+        assert_eq!(
+            ids,
+            vec![
+                "gemini-3.1-pro-high".to_string(),
+                "gemini-3.7-flash-low".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -563,7 +624,10 @@ mod tests {
         assert!(!claude.is_empty());
         let agy = parse_models_dev(&json, "agy");
         // gemma-* entries in google's map must be filtered out by family.
-        assert!(agy.iter().all(|(id, _)| id.starts_with("gemini-")), "{agy:?}");
+        assert!(
+            agy.iter().all(|(id, _)| id.starts_with("gemini-")),
+            "{agy:?}"
+        );
         assert!(!agy.is_empty());
         assert!(parse_models_dev(&json, "unknown").is_empty());
         // Defensive: garbage shape → empty, not panic.

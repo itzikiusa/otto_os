@@ -163,11 +163,15 @@ const RATE_LIMIT_MAX_WAIT: Duration = Duration::from_secs(30);
 /// to [`RATE_LIMIT_MAX_WAIT`] for retry purposes — the value itself is exact so
 /// the error text can quote it. Missing / unparsable → 1 s.
 fn rate_limit_wait(status: u16, headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let hdr = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+    let hdr = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+    };
     let retry_after = hdr("retry-after");
     let limited = status == 429
-        || (status == 403
-            && (hdr("x-ratelimit-remaining") == Some("0") || retry_after.is_some()));
+        || (status == 403 && (hdr("x-ratelimit-remaining") == Some("0") || retry_after.is_some()));
     if !limited {
         return None;
     }
@@ -349,10 +353,7 @@ impl Http {
 
             // We have an ETag → send conditional GET.
             if let Some(ref tag) = etag {
-                let mut rb2 = self
-                    .client
-                    .get(&url)
-                    .header("If-None-Match", tag);
+                let mut rb2 = self.client.get(&url).header("If-None-Match", tag);
                 // Re-attach the auth header by copying from the original req.
                 for (name, value) in req.headers() {
                     rb2 = rb2.header(name.clone(), value.clone());
@@ -441,17 +442,29 @@ impl Http {
         let mut all: Vec<Value> = Vec::new();
         let resp = self.send(first_rb).await?;
         let next = parse_next_link(resp.headers());
-        let page: Value = resp.json().await.map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))?;
-        if let Some(arr) = page.as_array() { all.extend_from_slice(arr); }
+        let page: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))?;
+        if let Some(arr) = page.as_array() {
+            all.extend_from_slice(arr);
+        }
         let mut next_url = next;
         let mut pages = 1usize;
         while let Some(url) = next_url {
-            if pages >= MAX_PAGES { break; }
+            if pages >= MAX_PAGES {
+                break;
+            }
             let rb = client.get(&url).header(auth_header.0, &auth_header.1);
             let resp = self.send(rb).await?;
             let nxt = parse_next_link(resp.headers());
-            let page: Value = resp.json().await.map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))?;
-            if let Some(arr) = page.as_array() { all.extend_from_slice(arr); }
+            let page: Value = resp
+                .json()
+                .await
+                .map_err(|e| Error::Upstream(format!("{}: bad json: {e}", self.provider)))?;
+            if let Some(arr) = page.as_array() {
+                all.extend_from_slice(arr);
+            }
             next_url = nxt;
             pages += 1;
         }
@@ -496,7 +509,12 @@ fn provider_status_err(
     if let Some(wait) = rate_limit_wait(status.as_u16(), headers) {
         return rate_limited_err(provider, wait);
     }
-    let msg = format!("{} {}: {}", provider, status.as_u16(), extract_message(body));
+    let msg = format!(
+        "{} {}: {}",
+        provider,
+        status.as_u16(),
+        extract_message(body)
+    );
     match status.as_u16() {
         401 | 403 => Error::Forbidden(format!(
             "{msg} — the {provider} credential was rejected; check the git account's token/scopes"
@@ -552,7 +570,12 @@ pub fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
     for part in link.split(',') {
         let part = part.trim();
         if part.contains(r#"rel="next""#) {
-            let url = part.split(';').next()?.trim().trim_start_matches('<').trim_end_matches('>');
+            let url = part
+                .split(';')
+                .next()?
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>');
             return Some(url.to_string());
         }
     }
@@ -573,7 +596,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn entry(body: &str, fetched_at: Instant) -> CachedGet {
-        CachedGet { etag: None, body: body.to_string(), fetched_at }
+        CachedGet {
+            etag: None,
+            body: body.to_string(),
+            fetched_at,
+        }
     }
 
     fn headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
@@ -681,10 +708,18 @@ mod tests {
         let mut map: HashMap<String, CachedGet> = HashMap::new();
         let base = Instant::now();
         for i in 0..CACHE_MAX_ENTRIES {
-            insert_into(&mut map, format!("k{i}"), entry("body", base + Duration::from_millis(i as u64)));
+            insert_into(
+                &mut map,
+                format!("k{i}"),
+                entry("body", base + Duration::from_millis(i as u64)),
+            );
         }
         // Refreshing an existing key is not a new entry — nothing may be dropped.
-        insert_into(&mut map, "k0".to_string(), entry("fresh", base + Duration::from_secs(10)));
+        insert_into(
+            &mut map,
+            "k0".to_string(),
+            entry("fresh", base + Duration::from_secs(10)),
+        );
         assert_eq!(map.len(), CACHE_MAX_ENTRIES);
         assert_eq!(map.get("k0").map(|e| e.body.as_str()), Some("fresh"));
     }
@@ -698,9 +733,16 @@ mod tests {
         };
         let mut map: HashMap<String, CachedGet> = HashMap::new();
         insert_into(&mut map, "stale".to_string(), entry("old body", stale_at));
-        insert_into(&mut map, "fresh".to_string(), entry("new body", Instant::now()));
+        insert_into(
+            &mut map,
+            "fresh".to_string(),
+            entry("new body", Instant::now()),
+        );
 
-        assert!(read_from(&mut map, "stale").is_none(), "an hour-old entry is a miss");
+        assert!(
+            read_from(&mut map, "stale").is_none(),
+            "an hour-old entry is a miss"
+        );
         assert!(!map.contains_key("stale"), "and it is dropped, not kept");
         assert_eq!(
             read_from(&mut map, "fresh").map(|(_, b, _)| b),
@@ -719,18 +761,18 @@ mod tests {
         );
         // HTTP-date, ~60 s out (allow a second of slack for the clock read).
         let when = chrono::Utc::now() + chrono::Duration::seconds(60);
-        let secs = rate_limit_wait(
-            429,
-            &headers(&[("retry-after", &when.to_rfc2822())]),
-        )
-        .expect("date retry-after is a rate limit")
-        .as_secs();
+        let secs = rate_limit_wait(429, &headers(&[("retry-after", &when.to_rfc2822())]))
+            .expect("date retry-after is a rate limit")
+            .as_secs();
         assert!((58..=61).contains(&secs), "got {secs}s");
         // x-ratelimit-reset (absolute unix ts) on a 403 with the budget spent.
         let reset = chrono::Utc::now().timestamp() + 120;
         let secs = rate_limit_wait(
             403,
-            &headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", &reset.to_string())]),
+            &headers(&[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", &reset.to_string()),
+            ]),
         )
         .expect("spent budget is a rate limit")
         .as_secs();

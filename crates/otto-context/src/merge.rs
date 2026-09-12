@@ -63,7 +63,9 @@ pub fn read_manifest(skills_dir: &Path) -> Vec<String> {
 /// Write the managed-skill manifest to `<skills_dir>/.otto-managed.json`.
 pub fn write_manifest(skills_dir: &Path, names: &[String]) -> io::Result<()> {
     fs::create_dir_all(skills_dir)?;
-    let manifest = Manifest { skills: names.to_vec() };
+    let manifest = Manifest {
+        skills: names.to_vec(),
+    };
     let json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(skills_dir.join(MANIFEST_FILE), json)
@@ -96,8 +98,7 @@ mod tests {
 
     #[test]
     fn replace_in_region() {
-        let existing =
-            "before\n<!-- OTTO:START -->\nold content\n<!-- OTTO:END -->\nafter\n";
+        let existing = "before\n<!-- OTTO:START -->\nold content\n<!-- OTTO:END -->\nafter\n";
         let out = merge_otto_region(existing, "new content");
         assert!(out.contains("new content"));
         assert!(!out.contains("old content"));

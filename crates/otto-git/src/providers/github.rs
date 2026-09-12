@@ -105,10 +105,7 @@ impl Github {
                     .json(&json!({ "query": query, "variables": variables })),
             )
             .await?;
-        if let Some(msg) = varr(&v, &["errors"])
-            .first()
-            .map(|e| vstr(e, &["message"]))
-        {
+        if let Some(msg) = varr(&v, &["errors"]).first().map(|e| vstr(e, &["message"])) {
             return Err(Error::Upstream(format!("github graphql: {msg}")));
         }
         Ok(v)
@@ -122,9 +119,22 @@ impl Github {
             reviewThreads(first:100){nodes{id isResolved \
             comments(first:50){nodes{databaseId}}}}}}}";
         let v = self
-            .graphql(Q, json!({ "owner": r.owner, "name": r.repo, "number": number }))
+            .graphql(
+                Q,
+                json!({ "owner": r.owner, "name": r.repo, "number": number }),
+            )
             .await?;
-        Ok(varr(&v, &["data", "repository", "pullRequest", "reviewThreads", "nodes"]).to_vec())
+        Ok(varr(
+            &v,
+            &[
+                "data",
+                "repository",
+                "pullRequest",
+                "reviewThreads",
+                "nodes",
+            ],
+        )
+        .to_vec())
     }
 
     /// Fetch GitHub check-run status for the HEAD commit of `number` and
@@ -141,7 +151,10 @@ impl Github {
             return CiStatus::none();
         }
         // Fetch check-runs for the commit.
-        let path = format!("/repos/{}/{}/commits/{sha}/check-runs?per_page=100", r.owner, r.repo);
+        let path = format!(
+            "/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
+            r.owner, r.repo
+        );
         let v = match self.http.json(self.req(reqwest::Method::GET, &path)).await {
             Ok(v) => v,
             Err(_) => return CiStatus::none(),
@@ -179,13 +192,22 @@ impl Github {
         } else {
             "none"
         };
-        CiStatus { state: state.to_string(), total, passed, failed, url: run_url }
+        CiStatus {
+            state: state.to_string(),
+            total,
+            passed,
+            failed,
+            url: run_url,
+        }
     }
 
     /// Fallback: aggregate legacy GitHub commit statuses (the older Statuses
     /// API, still used by some third-party integrations).
     async fn fetch_commit_status(&self, r: &RemoteRef, sha: &str) -> CiStatus {
-        let path = format!("/repos/{}/{}/commits/{sha}/statuses?per_page=100", r.owner, r.repo);
+        let path = format!(
+            "/repos/{}/{}/commits/{sha}/statuses?per_page=100",
+            r.owner, r.repo
+        );
         let v = match self.http.json(self.req(reqwest::Method::GET, &path)).await {
             Ok(v) => v,
             Err(_) => return CiStatus::none(),
@@ -225,7 +247,13 @@ impl Github {
         } else {
             "none"
         };
-        CiStatus { state: state.to_string(), total, passed, failed, url }
+        CiStatus {
+            state: state.to_string(),
+            total,
+            passed,
+            failed,
+            url,
+        }
     }
 }
 
@@ -307,9 +335,14 @@ fn summary_from(v: &Value) -> PrSummary {
         reviewer_warnings: Vec::new(),
         draft: Some(v.get("draft").and_then(|d| d.as_bool()).unwrap_or(false)),
         ci_status: None,
-        labels: v.get("labels")
+        labels: v
+            .get("labels")
             .and_then(|l| l.as_array())
-            .map(|arr| arr.iter().filter_map(|l| l.get("name").and_then(|n| n.as_str()).map(str::to_string)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|l| l.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
     }
 }
@@ -542,11 +575,7 @@ impl super::GitProvider for Github {
         })
     }
 
-    async fn get_issue(
-        &self,
-        r: &RemoteRef,
-        number: u64,
-    ) -> Result<otto_core::api::IssueLite> {
+    async fn get_issue(&self, r: &RemoteRef, number: u64) -> Result<otto_core::api::IssueLite> {
         let v: Value = self
             .http
             .json(self.req(
@@ -590,7 +619,11 @@ impl super::GitProvider for Github {
         // best-effort second call. A failure must not fail the (already open)
         // PR; it surfaces as a warning on the response instead.
         if let Some(reviewers) = req.reviewers.as_ref().filter(|l| !l.is_empty()) {
-            let path = format!("{}/{}/requested_reviewers", Self::prs_path(r), summary.number);
+            let path = format!(
+                "{}/{}/requested_reviewers",
+                Self::prs_path(r),
+                summary.number
+            );
             if let Err(e) = self
                 .http
                 .ok(self
@@ -598,7 +631,9 @@ impl super::GitProvider for Github {
                     .json(&json!({ "reviewers": reviewers })))
                 .await
             {
-                summary.reviewer_warnings.push(reviewer_warning(reviewers, &e.to_string()));
+                summary
+                    .reviewer_warnings
+                    .push(reviewer_warning(reviewers, &e.to_string()));
             }
         }
         Ok(summary)
@@ -695,7 +730,9 @@ impl super::GitProvider for Github {
         } else {
             "mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{id}}}"
         };
-        self.graphql(m, json!({ "id": thread_id })).await.map(|_| ())
+        self.graphql(m, json!({ "id": thread_id }))
+            .await
+            .map(|_| ())
     }
 
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()> {
@@ -816,11 +853,11 @@ impl super::GitProvider for Github {
         r: &RemoteRef,
         q: &str,
     ) -> Result<Vec<otto_core::api::Collaborator>> {
-        let path = format!(
-            "/repos/{}/{}/collaborators?per_page=100",
-            r.owner, r.repo
-        );
-        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let path = format!("/repos/{}/{}/collaborators?per_page=100", r.owner, r.repo);
+        let v = self
+            .http
+            .json(self.req(reqwest::Method::GET, &path))
+            .await?;
         let needle = q.to_ascii_lowercase();
         Ok(varr(&v, &[])
             .iter()
@@ -837,13 +874,19 @@ impl super::GitProvider for Github {
     /// classic-PAT scopes from the `x-oauth-scopes` header (absent for
     /// fine-grained PATs — scopes stay empty).
     async fn verify_token(&self) -> Result<super::TokenCheck> {
-        let resp = self.http.send(self.req(reqwest::Method::GET, "/user")).await?;
+        let resp = self
+            .http
+            .send(self.req(reqwest::Method::GET, "/user"))
+            .await?;
         let scopes = scopes_header(resp.headers());
         let v: Value = resp
             .json()
             .await
             .map_err(|e| otto_core::Error::Upstream(format!("github: bad json: {e}")))?;
-        Ok(super::TokenCheck { login: vstr(&v, &["login"]), scopes })
+        Ok(super::TokenCheck {
+            login: vstr(&v, &["login"]),
+            scopes,
+        })
     }
 
     async fn list_repos(
@@ -909,7 +952,10 @@ impl super::GitProvider for Github {
             "/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
             r.owner, r.repo
         );
-        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let v = self
+            .http
+            .json(self.req(reqwest::Method::GET, &path))
+            .await?;
         let rows = checks_from_check_runs(&v);
         if !rows.is_empty() {
             return Ok(rows);
@@ -918,7 +964,10 @@ impl super::GitProvider for Github {
             "/repos/{}/{}/commits/{sha}/statuses?per_page=100",
             r.owner, r.repo
         );
-        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let v = self
+            .http
+            .json(self.req(reqwest::Method::GET, &path))
+            .await?;
         Ok(checks_from_statuses(&v))
     }
 
@@ -1030,7 +1079,13 @@ fn parse_check_runs_fixture(json_str: &str) -> crate::types::CiStatus {
     } else {
         "none"
     };
-    crate::types::CiStatus { state: state.to_string(), total, passed, failed, url: run_url }
+    crate::types::CiStatus {
+        state: state.to_string(),
+        total,
+        passed,
+        failed,
+        url: run_url,
+    }
 }
 
 #[cfg(test)]
@@ -1093,7 +1148,10 @@ mod tests {
         assert_eq!(b["base"], serde_json::json!("main"));
         // Absent draft → today's payload, no `draft` key at all.
         assert!(create_pr_body(&req(None, None)).get("draft").is_none());
-        assert_eq!(create_pr_body(&req(Some(false), None))["draft"], serde_json::json!(false));
+        assert_eq!(
+            create_pr_body(&req(Some(false), None))["draft"],
+            serde_json::json!(false)
+        );
     }
 
     #[test]
@@ -1105,7 +1163,10 @@ mod tests {
 
     #[test]
     fn reviewer_failure_is_a_warning_not_an_error() {
-        let w = reviewer_warning(&["alice".into(), "bob".into()], "github 422: not a collaborator");
+        let w = reviewer_warning(
+            &["alice".into(), "bob".into()],
+            "github 422: not a collaborator",
+        );
         assert!(w.contains("alice, bob"));
         assert!(w.contains("422"));
         // The create flow attaches this to reviewer_warnings on an Ok summary —
@@ -1127,7 +1188,10 @@ mod tests {
     fn scopes_header_parses_comma_list() {
         let mut h = reqwest::header::HeaderMap::new();
         h.insert("x-oauth-scopes", "repo, read:org".parse().unwrap());
-        assert_eq!(scopes_header(&h), vec!["repo".to_string(), "read:org".to_string()]);
+        assert_eq!(
+            scopes_header(&h),
+            vec!["repo".to_string(), "read:org".to_string()]
+        );
         assert!(scopes_header(&reqwest::header::HeaderMap::new()).is_empty());
     }
 
@@ -1236,7 +1300,10 @@ mod tests {
         );
         assert_eq!(rows[0].url.as_deref(), Some("https://ci.example.com/1"));
         assert_eq!(rows[0].started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
-        assert_eq!(rows[0].completed_at.as_deref(), Some("2026-01-01T00:04:00Z"));
+        assert_eq!(
+            rows[0].completed_at.as_deref(),
+            Some("2026-01-01T00:04:00Z")
+        );
         assert!(rows[1].url.is_none());
     }
 

@@ -112,7 +112,10 @@ pub struct WorkloadStat {
 
 fn f(v: &Value, k: &str) -> f64 {
     v.get(k)
-        .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|x| {
+            x.as_f64()
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(0.0)
 }
 fn st<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -132,23 +135,32 @@ fn seed_from_snapshot(snap: &Snapshot, ns: Option<&str>) -> BTreeMap<String, Wor
                 continue;
             }
         }
-        let e = m.entry(key(&p.namespace, &p.workload)).or_insert_with(|| WorkloadStat {
-            namespace: p.namespace.clone(),
-            workload: p.workload.clone(),
-            kind: p.workload_kind.clone(),
-            ..WorkloadStat::default()
-        });
+        let e = m
+            .entry(key(&p.namespace, &p.workload))
+            .or_insert_with(|| WorkloadStat {
+                namespace: p.namespace.clone(),
+                workload: p.workload.clone(),
+                kind: p.workload_kind.clone(),
+                ..WorkloadStat::default()
+            });
         e.pods += 1;
         if p.ready {
             e.ready += 1;
         }
         e.mem_limit += p.mem_limit as f64;
-        let crashloop = p.containers.values().any(|c| c.waiting_reason == "CrashLoopBackOff");
+        let crashloop = p
+            .containers
+            .values()
+            .any(|c| c.waiting_reason == "CrashLoopBackOff");
         if crashloop {
             e.crashloop += 1;
         }
         let age = chrono::DateTime::parse_from_rfc3339(&p.created)
-            .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds().max(0))
+            .map(|t| {
+                (chrono::Utc::now() - t.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0)
+            })
             .unwrap_or(0);
         e.pods_detail.push(PodStat {
             pod: p.name.clone(),
@@ -184,7 +196,8 @@ pub async fn workload_stats(
     // Every query below is independent — issue them together. Sequential
     // awaits made the workloads tab wait ~9× one ClickHouse round trip.
     let q_mem_now = queries::latest_memory_sql(&cids, ns, LATEST_SECS);
-    let q_mem_then = queries::memory_between_sql(&cids, ns, secs + LATEST_SECS, (secs - LATEST_SECS).max(1));
+    let q_mem_then =
+        queries::memory_between_sql(&cids, ns, secs + LATEST_SECS, (secs - LATEST_SECS).max(1));
     let q_restarts = queries::restart_counts_sql(&cids, ns, window);
     let q_rates_now = queries::request_rates_sql(&cids, ns, secs, 0);
     let q_rates_then = queries::request_rates_sql(&cids, ns, secs + 86_400, secs);
@@ -207,14 +220,17 @@ pub async fn workload_stats(
         async { sink.query_rows(&q_buckets_then).await.unwrap_or_default() },
         async { sink.query_rows(&q_versions).await.unwrap_or_default() },
     );
-    let (mem_now, restarts, rates_now, buckets_now) = (mem_now?, restarts?, rates_now?, buckets_now?);
+    let (mem_now, restarts, rates_now, buckets_now) =
+        (mem_now?, restarts?, rates_now?, buckets_now?);
 
     // Memory now + at the start of the window (trend).
     // Baseline for the trend: AVERAGE per pod at the start of the window (a
     // sum would explode when the first cycle scraped 2 of 15 pods).
     let mut mem_then_by_wl: BTreeMap<String, (f64, u32)> = BTreeMap::new();
     for r in mem_then {
-        let e = mem_then_by_wl.entry(key(st(&r, "namespace"), st(&r, "workload"))).or_default();
+        let e = mem_then_by_wl
+            .entry(key(st(&r, "namespace"), st(&r, "workload")))
+            .or_default();
         e.0 += f(&r, "mem");
         e.1 += 1;
     }
@@ -240,7 +256,11 @@ pub async fn workload_stats(
         s.mem_sampled = sampled.len() as u32;
         if !sampled.is_empty() {
             s.mem_avg = sampled.iter().map(|p| p.mem_bytes).sum::<f64>() / sampled.len() as f64;
-            if let Some(top) = sampled.iter().max_by(|a, b| a.mem_bytes.partial_cmp(&b.mem_bytes).unwrap_or(std::cmp::Ordering::Equal)) {
+            if let Some(top) = sampled.iter().max_by(|a, b| {
+                a.mem_bytes
+                    .partial_cmp(&b.mem_bytes)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }) {
                 s.mem_max = top.mem_bytes;
                 s.mem_max_pod = top.pod.clone();
             }
@@ -291,23 +311,28 @@ pub async fn workload_stats(
     for r in rates_now {
         if let Some(s) = stats.get_mut(&key(st(&r, "namespace"), st(&r, "workload"))) {
             s.rps = f(&r, "rps");
-            s.err_pct = if s.rps > 0.0 { 100.0 * f(&r, "err_rps") / s.rps } else { 0.0 };
+            s.err_pct = if s.rps > 0.0 {
+                100.0 * f(&r, "err_rps") / s.rps
+            } else {
+                0.0
+            };
         }
     }
     for r in rates_then {
         if let Some(s) = stats.get_mut(&key(st(&r, "namespace"), st(&r, "workload"))) {
             let rps = f(&r, "rps");
             s.rps_baseline = rps;
-            s.err_pct_baseline = if rps > 0.0 { 100.0 * f(&r, "err_rps") / rps } else { 0.0 };
+            s.err_pct_baseline = if rps > 0.0 {
+                100.0 * f(&r, "err_rps") / rps
+            } else {
+                0.0
+            };
         }
     }
 
     // Latency: p95 from buckets, else avg from sum/count.
     let mut had_p95 = false;
-    for (rows, baseline) in [
-        (buckets_now, false),
-        (buckets_then, true),
-    ] {
+    for (rows, baseline) in [(buckets_now, false), (buckets_then, true)] {
         let mut by_wl: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
         for r in rows {
             by_wl
@@ -331,7 +356,12 @@ pub async fn workload_stats(
     }
     if !had_p95 {
         for (rows, baseline) in [
-            (sink.query_rows(&queries::latency_avg_sql(&cids, ns, secs, 0)).await.unwrap_or_default(), false),
+            (
+                sink.query_rows(&queries::latency_avg_sql(&cids, ns, secs, 0))
+                    .await
+                    .unwrap_or_default(),
+                false,
+            ),
             (
                 sink.query_rows(&queries::latency_avg_sql(&cids, ns, secs + 86_400, secs))
                     .await
@@ -392,7 +422,10 @@ pub fn outliers(stats: &[WorkloadStat]) -> (Vec<Value>, Vec<Value>, Vec<Value>) 
                 }),
             ));
         }
-        if s.rps > 0.0 && s.err_pct >= ERR_MIN_PCT && s.err_pct >= ERR_MULT * s.err_pct_baseline.max(0.1) {
+        if s.rps > 0.0
+            && s.err_pct >= ERR_MIN_PCT
+            && s.err_pct >= ERR_MULT * s.err_pct_baseline.max(0.1)
+        {
             err.push((
                 s.err_pct,
                 json!({
@@ -401,7 +434,10 @@ pub fn outliers(stats: &[WorkloadStat]) -> (Vec<Value>, Vec<Value>, Vec<Value>) 
                 }),
             ));
         }
-        if s.latency_ms > 0.0 && s.latency_baseline_ms > 0.0 && s.latency_ms >= P95_MULT * s.latency_baseline_ms {
+        if s.latency_ms > 0.0
+            && s.latency_baseline_ms > 0.0
+            && s.latency_ms >= P95_MULT * s.latency_baseline_ms
+        {
             lat.push((
                 s.latency_ms,
                 json!({
@@ -451,7 +487,10 @@ fn pod_counts(snap: &Snapshot) -> Value {
             "Succeeded" => succeeded += 1,
             _ => {}
         }
-        if p.containers.values().any(|c| c.waiting_reason == "CrashLoopBackOff") {
+        if p.containers
+            .values()
+            .any(|c| c.waiting_reason == "CrashLoopBackOff")
+        {
             crashloop += 1;
         }
     }
@@ -488,12 +527,17 @@ pub async fn health(
     }
     let mut churn: BTreeMap<(String, String), (u32, String)> = BTreeMap::new();
     let mut deployments: Vec<Value> = Vec::new();
-    for r in sink.query_rows(&queries::recent_restarts_sql(&cid, window, 500)).await? {
+    for r in sink
+        .query_rows(&queries::recent_restarts_sql(&cid, window, 500))
+        .await?
+    {
         let kind = st(&r, "kind");
         let class = st(&r, "class").to_string();
         if kind == "version" {
             // "A new version came up": reason is "<from> → <to>".
-            let (from, to) = st(&r, "reason").split_once(" → ").unwrap_or(("", st(&r, "reason")));
+            let (from, to) = st(&r, "reason")
+                .split_once(" → ")
+                .unwrap_or(("", st(&r, "reason")));
             if deployments.len() < LIST_CAP {
                 deployments.push(json!({
                     "namespace": st(&r, "namespace"), "workload": st(&r, "workload"),
@@ -511,7 +555,11 @@ pub async fn health(
                 "at": st(&r, "ts"), "reason": st(&r, "reason"), "exit_code": f(&r, "exit_code") as i64,
             });
             if class == "oom" {
-                item["mem_limit"] = json!(if limit > 0 { human_bytes(limit as f64) } else { "none".into() });
+                item["mem_limit"] = json!(if limit > 0 {
+                    human_bytes(limit as f64)
+                } else {
+                    "none".into()
+                });
             }
             let list = restarts.entry(class.clone()).or_default();
             if list.len() < LIST_CAP {
@@ -519,7 +567,11 @@ pub async fn health(
             }
         } else if kind == "churn" {
             let detail: Value = serde_json::from_str(st(&r, "detail")).unwrap_or(Value::Null);
-            let by = detail.get("planned_by").and_then(Value::as_str).unwrap_or("").to_string();
+            let by = detail
+                .get("planned_by")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let e = churn
                 .entry((st(&r, "workload").to_string(), class.clone()))
                 .or_insert((0, by));

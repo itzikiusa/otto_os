@@ -145,7 +145,9 @@ impl TelegramAdapter {
             .map_err(|e| self.scrub(e))?
             .error_for_status()
             .map_err(|e| self.scrub(e))?;
-        resp.json::<TgResponse<T>>().await.map_err(|e| self.scrub(e))
+        resp.json::<TgResponse<T>>()
+            .await
+            .map_err(|e| self.scrub(e))
     }
 }
 
@@ -199,7 +201,9 @@ impl Adapter for TelegramAdapter {
             if desc.contains("can't parse") || desc.contains("parse entities") {
                 return self.send(chat, thread, text).await;
             }
-            return Err(anyhow::anyhow!("Telegram sendMessage (formatted) failed: {desc}"));
+            return Err(anyhow::anyhow!(
+                "Telegram sendMessage (formatted) failed: {desc}"
+            ));
         }
         Ok(tg
             .result

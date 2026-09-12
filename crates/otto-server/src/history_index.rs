@@ -88,16 +88,18 @@ pub fn list_transcripts(claude_root: &Path, codex_root: &Path) -> (Vec<Found>, b
     match std::fs::read_dir(claude_root) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => errors = true,
         Err(_) => {}
-        Ok(slugs) => for slug in slugs.flatten() {
-            let Ok(files) = std::fs::read_dir(slug.path()) else {
-                errors = true;
-                continue;
-            };
-            for f in files.flatten() {
-                let p = f.path();
-                if p.extension().is_some_and(|e| e == "jsonl") {
-                    if let Some(found) = stat(&p, Provider::Claude) {
-                        out.push(found);
+        Ok(slugs) => {
+            for slug in slugs.flatten() {
+                let Ok(files) = std::fs::read_dir(slug.path()) else {
+                    errors = true;
+                    continue;
+                };
+                for f in files.flatten() {
+                    let p = f.path();
+                    if p.extension().is_some_and(|e| e == "jsonl") {
+                        if let Some(found) = stat(&p, Provider::Claude) {
+                            out.push(found);
+                        }
                     }
                 }
             }
@@ -163,9 +165,10 @@ fn iso_from_unix(secs: i64) -> Option<String> {
 async fn scan(ctx: &ServerCtx, workspace_id: Option<&Id>) -> otto_core::Result<(u64, u64)> {
     let repo = TranscriptIndexRepo::new(ctx.pool.clone());
     let (claude_root, codex_root) = crate::routes::transcript::transcript_roots(&ctx.data_dir);
-    let (files, list_errors) = tokio::task::spawn_blocking(move || list_transcripts(&claude_root, &codex_root))
-        .await
-        .map_err(|e| otto_core::Error::Internal(format!("list transcripts: {e}")))?;
+    let (files, list_errors) =
+        tokio::task::spawn_blocking(move || list_transcripts(&claude_root, &codex_root))
+            .await
+            .map_err(|e| otto_core::Error::Internal(format!("list transcripts: {e}")))?;
     let total = files.len() as u64;
     let stamps = repo.stamps().await?;
     let mut seen: HashSet<String> = HashSet::with_capacity(files.len());
@@ -185,7 +188,9 @@ async fn scan(ctx: &ServerCtx, workspace_id: Option<&Id>) -> otto_core::Result<(
         scanned += 1;
         let key = found.path.to_string_lossy().into_owned();
         seen.insert(key.clone());
-        let unchanged = stamps.get(&key).is_some_and(|&(m, s)| m == found.mtime && s == found.size);
+        let unchanged = stamps
+            .get(&key)
+            .is_some_and(|&(m, s)| m == found.mtime && s == found.size);
         if !unchanged {
             let f = found.clone();
             match tokio::task::spawn_blocking(move || index_row(&f)).await {
@@ -212,7 +217,10 @@ async fn scan(ctx: &ServerCtx, workspace_id: Option<&Id>) -> otto_core::Result<(
     if total > 0 && !list_errors {
         let removed = repo.retain(&seen).await.unwrap_or(0);
         if removed > 0 {
-            tracing::info!(removed, "history index: dropped rows for deleted transcripts");
+            tracing::info!(
+                removed,
+                "history index: dropped rows for deleted transcripts"
+            );
         }
     } else if list_errors {
         tracing::warn!("history index: a root failed to list; skipping prune");
@@ -232,7 +240,11 @@ mod tests {
         let slug = claude.join("-Users-u-repo");
         std::fs::create_dir_all(slug.join("sid1").join("subagents")).unwrap();
         std::fs::write(slug.join("sid1.jsonl"), "{\"type\":\"user\"}\n").unwrap();
-        std::fs::write(slug.join("sid1").join("subagents").join("agent-x.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            slug.join("sid1").join("subagents").join("agent-x.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
         std::fs::write(slug.join("notes.txt"), "x").unwrap();
         let codex = dir.path().join("sessions");
         let day = codex.join("2026").join("07").join("01");
@@ -251,7 +263,10 @@ mod tests {
         assert!(found.iter().all(|f| f.size > 0 && f.mtime > 0));
         // A missing root is simply empty.
         let (none, errors) = list_transcripts(&dir.path().join("nope"), &dir.path().join("nope2"));
-        assert!(none.is_empty() && !errors, "a missing root is empty, not an error");
+        assert!(
+            none.is_empty() && !errors,
+            "a missing root is empty, not an error"
+        );
     }
 
     #[test]
@@ -263,7 +278,10 @@ mod tests {
         let row = index_row(&f).unwrap();
         assert_eq!(row.provider_session_id.as_deref(), Some("s"));
         assert_eq!(row.first_prompt.as_deref(), Some("hey"));
-        assert!(row.started_at.is_some(), "no timestamps in the file → mtime");
+        assert!(
+            row.started_at.is_some(),
+            "no timestamps in the file → mtime"
+        );
         assert_eq!(row.turns, Some(1));
     }
 }

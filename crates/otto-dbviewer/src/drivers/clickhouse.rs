@@ -31,7 +31,7 @@ use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, Capabilities, CancelToken, Column, ColumnDef, CompletionContext, CompletionResponse,
+    self, CancelToken, Capabilities, Column, ColumnDef, CompletionContext, CompletionResponse,
     DbQueryPlan, Engine, NodeKind, NodePath, ObjectDetail, ObjectHit, ObjectSearchReq,
     ObjectSearchResult, QueryHandle, QueryRequest, QueryResult, QueryStats, ResolvedConfig,
     SchemaNode, TestResult,
@@ -252,7 +252,11 @@ impl ClickhouseDriver {
         // (table_lc) → set of indexed column names referenced by skip-index exprs.
         let mut skip_exprs: HashMap<String, Vec<String>> = HashMap::new();
         for row in &skip.data {
-            let t = row.first().and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+            let t = row
+                .first()
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
             let expr = row.get(1).and_then(Value::as_str).unwrap_or("").to_string();
             skip_exprs.entry(t).or_default().push(expr);
         }
@@ -260,7 +264,11 @@ impl ClickhouseDriver {
         // Group columns by table, assigning ranks.
         let mut by_table: HashMap<String, Vec<FieldSnap>> = HashMap::new();
         for row in &cols.data {
-            let table = row.first().and_then(Value::as_str).unwrap_or("").to_string();
+            let table = row
+                .first()
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let name = row.get(1).and_then(Value::as_str).unwrap_or("").to_string();
             let ty = row.get(2).and_then(Value::as_str).unwrap_or("").to_string();
             let in_pk = row.get(3).map(cell_truthy).unwrap_or(false);
@@ -283,7 +291,11 @@ impl ClickhouseDriver {
 
         let mut objects: Vec<ObjectSnap> = Vec::new();
         for row in &tables.data {
-            let name = row.first().and_then(Value::as_str).unwrap_or("").to_string();
+            let name = row
+                .first()
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let engine = row.get(1).and_then(Value::as_str).unwrap_or("");
             let kind = if engine.contains("View") {
                 ObjKind::View
@@ -335,7 +347,8 @@ impl ClickhouseDriver {
         active_db: Option<&str>,
         query_id: Option<String>,
     ) -> Result<Conn> {
-        self.connect_id_timeout(cfg, active_db, query_id, None).await
+        self.connect_id_timeout(cfg, active_db, query_id, None)
+            .await
     }
 
     async fn connect_id_timeout(
@@ -352,7 +365,9 @@ impl ClickhouseDriver {
         // ORIGINAL hostname in the URL so the TLS SNI + Host header are the real
         // host (managed ClickHouse routes by SNI). `build_client` maps that host
         // back to the local tunnel port via reqwest `.resolve`.
-        let url_host = cfg.param_str("__tunnel_host").unwrap_or_else(|| cfg.host.clone());
+        let url_host = cfg
+            .param_str("__tunnel_host")
+            .unwrap_or_else(|| cfg.host.clone());
         let base = format!("{scheme}://{url_host}:{}/", cfg.port);
 
         let user = cfg.user.clone().unwrap_or_else(|| "default".to_string());
@@ -508,7 +523,8 @@ impl ClickhouseDriver {
         active_db: Option<&str>,
         query_id: Option<String>,
     ) -> Result<RawRows> {
-        self.query_rows_db_timeout(cfg, sql, active_db, query_id, None).await
+        self.query_rows_db_timeout(cfg, sql, active_db, query_id, None)
+            .await
     }
 
     async fn query_rows_db_timeout(
@@ -546,8 +562,7 @@ impl ClickhouseDriver {
                 Ok(conn.query_json(sql).await?.into_raw())
             }
             Transport::Native => {
-                native_with_timeout(timeout_secs, self.native_query_capped(cfg, sql, row_cap))
-                    .await
+                native_with_timeout(timeout_secs, self.native_query_capped(cfg, sql, row_cap)).await
             }
         }
     }
@@ -570,7 +585,8 @@ impl ClickhouseDriver {
         active_db: Option<&str>,
         query_id: Option<String>,
     ) -> Result<String> {
-        self.query_text_db_timeout(cfg, sql, active_db, query_id, None).await
+        self.query_text_db_timeout(cfg, sql, active_db, query_id, None)
+            .await
     }
 
     async fn query_text_db_timeout(
@@ -589,8 +605,7 @@ impl ClickhouseDriver {
                 conn.query_raw(sql).await
             }
             Transport::Native => {
-                let raw =
-                    native_with_timeout(timeout_secs, self.native_query(cfg, sql)).await?;
+                let raw = native_with_timeout(timeout_secs, self.native_query(cfg, sql)).await?;
                 // SHOW CREATE / single-value replies come back as one row, one
                 // string cell; stringify whatever the first cell is.
                 let text = raw
@@ -1134,9 +1149,7 @@ fn value_to_json(v: &klickhouse::Value) -> Value {
                 Value::Array(
                     keys.iter()
                         .zip(vals.iter())
-                        .map(|(k, val)| {
-                            Value::Array(vec![value_to_json(k), value_to_json(val)])
-                        })
+                        .map(|(k, val)| Value::Array(vec![value_to_json(k), value_to_json(val)]))
                         .collect(),
                 )
             }
@@ -1173,8 +1186,14 @@ fn map_key_to_string(v: &klickhouse::Value) -> Option<String> {
     use klickhouse::Value as V;
     match v {
         V::String(b) => Some(String::from_utf8_lossy(b).into_owned()),
-        V::Int8(_) | V::Int16(_) | V::Int32(_) | V::Int64(_) | V::UInt8(_) | V::UInt16(_)
-        | V::UInt32(_) | V::UInt64(_) => Some(v.to_string()),
+        V::Int8(_)
+        | V::Int16(_)
+        | V::Int32(_)
+        | V::Int64(_)
+        | V::UInt8(_)
+        | V::UInt16(_)
+        | V::UInt32(_)
+        | V::UInt64(_) => Some(v.to_string()),
         _ => None,
     }
 }
@@ -1343,7 +1362,8 @@ impl Driver for ClickhouseDriver {
         let mut nodes: Vec<(bool, SchemaNode)> = resp
             .first_col_strs()
             .map(|name| {
-                let node = SchemaNode::new(format!("db:{name}"), name, NodeKind::Database).expandable();
+                let node =
+                    SchemaNode::new(format!("db:{name}"), name, NodeKind::Database).expandable();
                 (is_system_db(name), node)
             })
             .collect();
@@ -1366,7 +1386,10 @@ impl Driver for ClickhouseDriver {
             esc(&req.q)
         );
         if !req.all_schemas() {
-            sql.push_str(&format!(" AND database = '{}'", esc(req.schema.as_deref().unwrap_or(""))));
+            sql.push_str(&format!(
+                " AND database = '{}'",
+                esc(req.schema.as_deref().unwrap_or(""))
+            ));
         }
         sql.push_str(&format!(" ORDER BY database, name LIMIT {}", limit + 1));
         let rows = self.query_rows(cfg, &sql).await?;
@@ -1398,7 +1421,12 @@ impl Driver for ClickhouseDriver {
                 path: format!("db:{db}/{seg}:{name}"),
             });
         }
-        Ok(ObjectSearchResult { hits, truncated, scanned: schemas.len(), supported: true })
+        Ok(ObjectSearchResult {
+            hits,
+            truncated,
+            scanned: schemas.len(),
+            supported: true,
+        })
     }
 
     async fn schema_children(
@@ -1503,7 +1531,11 @@ impl Driver for ClickhouseDriver {
         let mut columns = Vec::new();
         let mut primary_key = Vec::new();
         for row in &cols.data {
-            let name = row.first().and_then(Value::as_str).unwrap_or("").to_string();
+            let name = row
+                .first()
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let data_type = row.get(1).and_then(Value::as_str).unwrap_or("").to_string();
             let default_kind = row.get(2).and_then(Value::as_str).unwrap_or("");
             let default_expr = row.get(3).and_then(Value::as_str).unwrap_or("");
@@ -1569,9 +1601,10 @@ impl Driver for ClickhouseDriver {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let row_count = row
-            .and_then(|r| r.get(4))
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+        let row_count = row.and_then(|r| r.get(4)).and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
 
         let kind = if engine.ends_with("View") {
             NodeKind::View
@@ -1666,7 +1699,14 @@ impl Driver for ClickhouseDriver {
         if returns_rows(stmt) {
             let ri = types::inject_row_limit(stmt, max_rows.saturating_add(1), req.offset);
             let mut r = self
-                .exec_ch_read(cfg, &ri.sql, active_db, Some(query_id), timeout_secs, max_rows)
+                .exec_ch_read(
+                    cfg,
+                    &ri.sql,
+                    active_db,
+                    Some(query_id),
+                    timeout_secs,
+                    max_rows,
+                )
                 .await?;
             // Report the user-visible page size (max_rows), not the +1 probe.
             r.auto_limited = ri.limited.then_some(max_rows as u64);
@@ -1713,7 +1753,13 @@ impl Driver for ClickhouseDriver {
 
         // Preferred: EXPLAIN json = 1 → the plan JSON in the first cell.
         if let Ok(resp) = self
-            .query_rows_db_timeout(cfg, &format!("EXPLAIN json = 1 {stmt}"), active_db, None, None)
+            .query_rows_db_timeout(
+                cfg,
+                &format!("EXPLAIN json = 1 {stmt}"),
+                active_db,
+                None,
+                None,
+            )
             .await
         {
             let raw: Option<serde_json::Value> = match resp.data.first().and_then(|r| r.first()) {
@@ -1744,7 +1790,13 @@ impl Driver for ClickhouseDriver {
                 other => other.to_string(),
             })
             .collect();
-        let raw = serde_json::Value::Array(lines.iter().cloned().map(serde_json::Value::String).collect());
+        let raw = serde_json::Value::Array(
+            lines
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
         let root = crate::plan::from_clickhouse_text(&lines);
         Ok(DbQueryPlan {
             engine: "clickhouse".into(),
@@ -1797,7 +1849,9 @@ impl Driver for ClickhouseDriver {
             return Err(types::invalid("clickhouse: empty statement"));
         }
         if !returns_rows(sql) {
-            return Err(types::invalid("export supports row-returning statements only"));
+            return Err(types::invalid(
+                "export supports row-returning statements only",
+            ));
         }
         let active_db = node.map(str::trim).filter(|s| !s.is_empty());
 
@@ -1905,18 +1959,89 @@ fn write_rawrows(
 
 /// ClickHouse SQL keywords / clause heads.
 const KEYWORDS: &[&str] = &[
-    "SELECT", "DISTINCT", "FROM", "PREWHERE", "WHERE", "GROUP BY", "HAVING", "ORDER BY", "LIMIT",
-    "OFFSET", "LIMIT BY", "WITH", "WITH TOTALS", "WITH ROLLUP", "WITH CUBE", "UNION ALL",
-    "UNION DISTINCT", "INTERSECT", "EXCEPT", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN",
-    "FULL JOIN", "CROSS JOIN", "ANY JOIN", "ALL JOIN", "ASOF JOIN", "ARRAY JOIN",
-    "LEFT ARRAY JOIN", "ON", "USING", "AS", "AND", "OR", "NOT", "IN", "GLOBAL IN", "BETWEEN",
-    "LIKE", "ILIKE", "IS NULL", "IS NOT NULL", "CASE", "WHEN", "THEN", "ELSE", "END", "ASC",
-    "DESC", "NULLS FIRST", "NULLS LAST", "SETTINGS", "FORMAT", "SAMPLE", "FINAL", "INSERT INTO",
-    "VALUES", "SELECT *", "CREATE TABLE", "CREATE DATABASE", "CREATE VIEW",
-    "CREATE MATERIALIZED VIEW", "ATTACH", "DETACH", "ALTER TABLE", "DROP TABLE", "DROP DATABASE",
-    "RENAME TABLE", "TRUNCATE TABLE", "OPTIMIZE TABLE", "ENGINE", "PARTITION BY", "PRIMARY KEY",
-    "ORDER BY", "TTL", "SHOW DATABASES", "SHOW TABLES", "SHOW CREATE TABLE", "DESCRIBE TABLE",
-    "EXPLAIN", "SYSTEM", "USE",
+    "SELECT",
+    "DISTINCT",
+    "FROM",
+    "PREWHERE",
+    "WHERE",
+    "GROUP BY",
+    "HAVING",
+    "ORDER BY",
+    "LIMIT",
+    "OFFSET",
+    "LIMIT BY",
+    "WITH",
+    "WITH TOTALS",
+    "WITH ROLLUP",
+    "WITH CUBE",
+    "UNION ALL",
+    "UNION DISTINCT",
+    "INTERSECT",
+    "EXCEPT",
+    "JOIN",
+    "INNER JOIN",
+    "LEFT JOIN",
+    "RIGHT JOIN",
+    "FULL JOIN",
+    "CROSS JOIN",
+    "ANY JOIN",
+    "ALL JOIN",
+    "ASOF JOIN",
+    "ARRAY JOIN",
+    "LEFT ARRAY JOIN",
+    "ON",
+    "USING",
+    "AS",
+    "AND",
+    "OR",
+    "NOT",
+    "IN",
+    "GLOBAL IN",
+    "BETWEEN",
+    "LIKE",
+    "ILIKE",
+    "IS NULL",
+    "IS NOT NULL",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "ASC",
+    "DESC",
+    "NULLS FIRST",
+    "NULLS LAST",
+    "SETTINGS",
+    "FORMAT",
+    "SAMPLE",
+    "FINAL",
+    "INSERT INTO",
+    "VALUES",
+    "SELECT *",
+    "CREATE TABLE",
+    "CREATE DATABASE",
+    "CREATE VIEW",
+    "CREATE MATERIALIZED VIEW",
+    "ATTACH",
+    "DETACH",
+    "ALTER TABLE",
+    "DROP TABLE",
+    "DROP DATABASE",
+    "RENAME TABLE",
+    "TRUNCATE TABLE",
+    "OPTIMIZE TABLE",
+    "ENGINE",
+    "PARTITION BY",
+    "PRIMARY KEY",
+    "ORDER BY",
+    "TTL",
+    "SHOW DATABASES",
+    "SHOW TABLES",
+    "SHOW CREATE TABLE",
+    "DESCRIBE TABLE",
+    "EXPLAIN",
+    "SYSTEM",
+    "USE",
 ];
 
 /// ClickHouse builtin functions with a short signature/summary.
@@ -1946,7 +2071,10 @@ const FUNCTIONS: &[(&str, &str)] = &[
     ("varPop", "varPop(expr)"),
     ("varSamp", "varSamp(expr)"),
     ("groupArray", "groupArray(expr) — values into an array"),
-    ("groupUniqArray", "groupUniqArray(expr) — distinct values array"),
+    (
+        "groupUniqArray",
+        "groupUniqArray(expr) — distinct values array",
+    ),
     ("groupArrayInsertAt", "groupArrayInsertAt(x, pos)"),
     ("arrayJoin", "arrayJoin(arr) — unfold an array into rows"),
     ("arrayMap", "arrayMap(func, arr)"),
@@ -2136,10 +2264,7 @@ mod tests {
         assert_eq!(value_to_json(&V::Int32(-7)), json!(-7));
         assert_eq!(value_to_json(&V::UInt64(5)), json!(5));
         assert_eq!(value_to_json(&V::Float64(1.5)), json!(1.5));
-        assert_eq!(
-            value_to_json(&V::String(b"hello".to_vec())),
-            json!("hello")
-        );
+        assert_eq!(value_to_json(&V::String(b"hello".to_vec())), json!("hello"));
         // 128-bit ints render as strings (out of f64/i64 range safely).
         assert_eq!(
             value_to_json(&V::Int128(170141183460469231731687303715884105727i128)),
@@ -2175,7 +2300,10 @@ mod tests {
 
     #[test]
     fn json_cell_to_text_unwraps_strings() {
-        assert_eq!(json_cell_to_text(&json!("CREATE TABLE x")), "CREATE TABLE x");
+        assert_eq!(
+            json_cell_to_text(&json!("CREATE TABLE x")),
+            "CREATE TABLE x"
+        );
         assert_eq!(json_cell_to_text(&json!(42)), "42");
         assert_eq!(json_cell_to_text(&Value::Null), "");
     }

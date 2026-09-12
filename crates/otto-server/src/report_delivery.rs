@@ -133,7 +133,14 @@ async fn deliver_channel(
         .await
     {
         Ok(Some(i)) => i,
-        Ok(None) => return (false, Some(format!("no {kind} integration configured for the workspace"))),
+        Ok(None) => {
+            return (
+                false,
+                Some(format!(
+                    "no {kind} integration configured for the workspace"
+                )),
+            )
+        }
         Err(e) => return (false, Some(e.to_string())),
     };
     let chat = destination
@@ -146,11 +153,17 @@ async fn deliver_channel(
         return (false, Some("no destination chat configured".into()));
     }
     if !send_to(&ctx.secrets, &integ, &chat, None, msg).await {
-        return (false, Some("channel send failed (bot token missing or API error)".into()));
+        return (
+            false,
+            Some("channel send failed (bot token missing or API error)".into()),
+        );
     }
     if let Some(adapter) = build_adapter(&ctx.secrets, &integ) {
         if let Err(e) = adapter.upload(&chat, None, "report.md", bytes).await {
-            return (true, Some(format!("message sent but attachment upload failed: {e}")));
+            return (
+                true,
+                Some(format!("message sent but attachment upload failed: {e}")),
+            );
         }
     }
     (true, None)
@@ -171,7 +184,10 @@ async fn deliver_email(
         return (false, Some("email destination is missing 'to'".into()));
     };
     let Some(owner) = owner.filter(|s| !s.is_empty()) else {
-        return (false, Some("no owner to resolve a verified email sender".into()));
+        return (
+            false,
+            Some("no owner to resolve a verified email sender".into()),
+        );
     };
     let sender = match EmailSendersRepo::new(ctx.pool.clone()).get(owner).await {
         Ok(Some(s)) if s.verified_at.is_some() => s,
@@ -180,7 +196,12 @@ async fn deliver_email(
     };
     let pw = match ctx.secrets.get(&sender.secret_ref) {
         Ok(Some(p)) => p,
-        _ => return (false, Some("email app password unavailable in keychain".into())),
+        _ => {
+            return (
+                false,
+                Some("email app password unavailable in keychain".into()),
+            )
+        }
     };
     let subject = destination
         .get("subject")
@@ -189,7 +210,10 @@ async fn deliver_email(
         .unwrap_or("Scheduled task report")
         .to_string();
     let mailer = GmailSender::new(sender.gmail_address, pw);
-    match mailer.send_with_attachment(to, &subject, msg, "report.md", bytes).await {
+    match mailer
+        .send_with_attachment(to, &subject, msg, "report.md", bytes)
+        .await
+    {
         Ok(()) => (true, None),
         Err(e) => (false, Some(e.to_string())),
     }
@@ -199,7 +223,9 @@ async fn deliver_email(
 /// `otto_netguard` SSRF check + redirect policy before every request.
 pub async fn deliver_webhook(url: &str, text: &str, filename: &str, bytes: &[u8]) -> Result<()> {
     if url.trim().is_empty() {
-        return Err(Error::Invalid("webhook destination is missing 'url'".into()));
+        return Err(Error::Invalid(
+            "webhook destination is missing 'url'".into(),
+        ));
     }
     let adapter = WebhookAdapter::new(Some(url.to_string()));
     adapter

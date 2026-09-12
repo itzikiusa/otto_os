@@ -145,7 +145,13 @@ pub async fn put_tasks(
     // (`claude_ingest`/`codex_ingest`), which is unaffected by this check.
     let session = session_in_ws(&ctx, &wid, &sid).await?;
     require_session_owner_or_admin(&ctx, &user, &session).await?;
-    let prior_all_done = all_done(&ctx.activity().repo().list_tasks(&sid).await.unwrap_or_default());
+    let prior_all_done = all_done(
+        &ctx.activity()
+            .repo()
+            .list_tasks(&sid)
+            .await
+            .unwrap_or_default(),
+    );
     let tasks: Vec<NewTask> = req
         .tasks
         .into_iter()
@@ -412,8 +418,14 @@ pub async fn codex_ingest(
 /// Verify the `X-Otto-Session`/`X-Otto-Token` headers against the per-session
 /// ingest token and return the loaded session, or `None` to silently ignore.
 async fn ingest_session(ctx: &ServerCtx, headers: &HeaderMap) -> Option<Session> {
-    let sid: Id = headers.get("x-otto-session").and_then(|v| v.to_str().ok())?.to_string();
-    let token = headers.get("x-otto-token").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let sid: Id = headers
+        .get("x-otto-session")
+        .and_then(|v| v.to_str().ok())?
+        .to_string();
+    let token = headers
+        .get("x-otto-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
     if !ctx.manager.verify_ingest_token(&sid, token) {
         return None;
     }
@@ -572,7 +584,10 @@ fn basename(p: &str) -> &str {
 fn tool_failed(p: &Value) -> bool {
     fn flagged(v: &Value) -> bool {
         v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false)
-            || v.get("success").and_then(|b| b.as_bool()).map(|s| !s).unwrap_or(false)
+            || v.get("success")
+                .and_then(|b| b.as_bool())
+                .map(|s| !s)
+                .unwrap_or(false)
     }
     flagged(p) || p.get("tool_response").is_some_and(flagged)
 }
@@ -581,7 +596,10 @@ fn tool_failed(p: &Value) -> bool {
 /// `hook_event_name` / `tool_name` — the single place that translates a
 /// provider's shape into the unified trail/task model.
 fn normalize_claude(p: &Value) -> Normalized {
-    let event = p.get("hook_event_name").and_then(|v| v.as_str()).unwrap_or("");
+    let event = p
+        .get("hook_event_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let mut out = Normalized::default();
 
     match event {
@@ -623,7 +641,10 @@ fn normalize_claude(p: &Value) -> Normalized {
             });
         }
         "Notification" => {
-            let msg = p.get("message").and_then(|v| v.as_str()).unwrap_or("Notification");
+            let msg = p
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Notification");
             out.trail = Some(TrailDraft {
                 source: TrailSource::Agent,
                 kind: TrailKind::Other,
@@ -636,7 +657,13 @@ fn normalize_claude(p: &Value) -> Normalized {
             let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
             let input = p.get("tool_input").cloned();
             let failed = tool_failed(p);
-            normalize_tool(tool, input.as_ref(), p.get("tool_response"), failed, &mut out);
+            normalize_tool(
+                tool,
+                input.as_ref(),
+                p.get("tool_response"),
+                failed,
+                &mut out,
+            );
         }
         _ => {}
     }
@@ -646,7 +673,13 @@ fn normalize_claude(p: &Value) -> Normalized {
 /// Normalize one PostToolUse event by tool name. Read-only/navigation tools
 /// (Read/Glob/Grep/LS) are intentionally dropped to keep the trail signal-rich.
 /// `failed` raises the entry's level to error.
-fn normalize_tool(tool: &str, input: Option<&Value>, response: Option<&Value>, failed: bool, out: &mut Normalized) {
+fn normalize_tool(
+    tool: &str,
+    input: Option<&Value>,
+    response: Option<&Value>,
+    failed: bool,
+    out: &mut Normalized,
+) {
     let s = |k: &str| -> String {
         input
             .and_then(|i| i.get(k))
@@ -656,13 +689,21 @@ fn normalize_tool(tool: &str, input: Option<&Value>, response: Option<&Value>, f
     };
     let lvl = |base: TrailLevel| if failed { TrailLevel::Error } else { base };
     let mut draft = |source, kind, level, summary, detail| {
-        out.trail = Some(TrailDraft { source, kind, level, summary, detail });
+        out.trail = Some(TrailDraft {
+            source,
+            kind,
+            level,
+            summary,
+            detail,
+        });
     };
 
     match tool {
         "TodoWrite" => {
             // Tasks only — the ingest path emits the transition trail line.
-            let todos = input.and_then(|i| i.get("todos")).and_then(|v| v.as_array());
+            let todos = input
+                .and_then(|i| i.get("todos"))
+                .and_then(|v| v.as_array());
             if let Some(todos) = todos {
                 out.tasks = Some(
                     todos
@@ -679,7 +720,11 @@ fn normalize_tool(tool: &str, input: Option<&Value>, response: Option<&Value>, f
                                 .and_then(|v| v.as_str())
                                 .and_then(TaskStatus::parse)
                                 .unwrap_or(TaskStatus::Pending);
-                            NewTask { ext_id: None, title, status }
+                            NewTask {
+                                ext_id: None,
+                                title,
+                                status,
+                            }
                         })
                         .collect(),
                 );
@@ -731,7 +776,11 @@ fn normalize_tool(tool: &str, input: Option<&Value>, response: Option<&Value>, f
         "Skill" => {
             let name = {
                 let c = s("command");
-                if c.is_empty() { s("skill") } else { c }
+                if c.is_empty() {
+                    s("skill")
+                } else {
+                    c
+                }
             };
             draft(
                 TrailSource::Agent,
@@ -744,7 +793,11 @@ fn normalize_tool(tool: &str, input: Option<&Value>, response: Option<&Value>, f
         "Task" => {
             let desc = {
                 let d = s("description");
-                if d.is_empty() { s("subagent_type") } else { d }
+                if d.is_empty() {
+                    s("subagent_type")
+                } else {
+                    d
+                }
             };
             draft(
                 TrailSource::Agent,
@@ -772,7 +825,11 @@ fn normalize_tool(tool: &str, input: Option<&Value>, response: Option<&Value>, f
         "WebFetch" | "WebSearch" => {
             let what = {
                 let u = s("url");
-                if u.is_empty() { s("query") } else { u }
+                if u.is_empty() {
+                    s("query")
+                } else {
+                    u
+                }
             };
             draft(
                 TrailSource::Agent,
@@ -913,7 +970,10 @@ mod tests {
         let tasks = n.tasks.expect("tasks");
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].status, TaskStatus::Completed);
-        assert!(n.trail.is_none(), "transition line comes from the ingest path, not the normalizer");
+        assert!(
+            n.trail.is_none(),
+            "transition line comes from the ingest path, not the normalizer"
+        );
     }
 
     #[test]
@@ -942,19 +1002,34 @@ mod tests {
 
     #[test]
     fn transition_detects_completion_start_and_plan() {
-        let now = vec![task("a", TaskStatus::Pending), task("b", TaskStatus::Pending)];
-        assert_eq!(task_transition_summary(&[], &now).as_deref(), Some("Planned 2 tasks"));
+        let now = vec![
+            task("a", TaskStatus::Pending),
+            task("b", TaskStatus::Pending),
+        ];
+        assert_eq!(
+            task_transition_summary(&[], &now).as_deref(),
+            Some("Planned 2 tasks")
+        );
 
         let prior = vec![task("a", TaskStatus::Pending)];
         let now = vec![task("a", TaskStatus::InProgress)];
-        assert_eq!(task_transition_summary(&prior, &now).as_deref(), Some("▶ Started: a"));
+        assert_eq!(
+            task_transition_summary(&prior, &now).as_deref(),
+            Some("▶ Started: a")
+        );
 
         let prior = vec![task("a", TaskStatus::InProgress)];
         let now = vec![task("a", TaskStatus::Completed)];
-        assert_eq!(task_transition_summary(&prior, &now).as_deref(), Some("✓ Completed: a"));
+        assert_eq!(
+            task_transition_summary(&prior, &now).as_deref(),
+            Some("✓ Completed: a")
+        );
 
         let prior = vec![task("a", TaskStatus::Completed)];
-        let now = vec![task("a", TaskStatus::Completed), task("b", TaskStatus::Pending)];
+        let now = vec![
+            task("a", TaskStatus::Completed),
+            task("b", TaskStatus::Pending),
+        ];
         assert_eq!(task_transition_summary(&prior, &now), None);
     }
 

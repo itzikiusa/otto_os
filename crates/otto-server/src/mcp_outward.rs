@@ -234,7 +234,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["title"],"properties":{
                 "workspace_id":{"type":"string"},"title":{"type":"string"},
                 "detail":{"type":"string"},"wait_seconds":{"type":"integer"}}}}),
-
         // ================= Workflows =================
         json!({"name":"otto.list_workflows","mutating":false,"category":"Workflows",
             "description":"List a workspace's workflows (visual node-graph automations). Read-only.",
@@ -256,7 +255,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.cancel_workflow_run","mutating":true,"category":"Workflows",
             "description":"Cancel a running workflow run by id. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
-
         // ================= Message Brokers =================
         json!({"name":"otto.list_broker_clusters","mutating":false,"category":"Message Brokers",
             "description":"List a workspace's broker clusters (Kafka). Read-only.",
@@ -281,12 +279,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["cluster_id","topic","value"],"properties":{
                 "cluster_id":{"type":"string"},"topic":{"type":"string"},"value":{"type":"string"},
                 "key":{"type":"string"},"partition":{"type":"integer"},"confirm":{"type":"boolean"}}}}),
-
         // ================= Connections =================
         json!({"name":"otto.list_connections","mutating":false,"category":"Database",
             "description":"List a workspace's connections (DB/SSH) — id, name, kind, environment. Secrets are never included. Read-only.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
-
         // ================= API Client =================
         json!({"name":"otto.api_list","mutating":false,"category":"API Client",
             "description":"READ-ONLY: discover a workspace's API client collections, saved requests, environments and automations. Request URLs remain templates; environment secret values and tokens are never returned.",
@@ -320,7 +316,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Run a saved API automation and return its per-step report. DANGEROUS: sends the automation's real HTTP requests — approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id","automation_id"],"properties":{
                 "workspace_id":{"type":"string"},"automation_id":{"type":"string"}}}}),
-
         // ================= Git =================
         json!({"name":"otto.list_repos","mutating":false,"category":"Git",
             "description":"List a workspace's git repositories (id, name, branch, remote). Read-only.",
@@ -350,7 +345,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Start Otto's multi-agent review of a pull request (fan-out). DANGEROUS: spawns agents — approval-gated.",
             "inputSchema":{"type":"object","required":["repo_id","pr_number"],"properties":{
                 "repo_id":{"type":"string"},"pr_number":{"type":"integer"}}}}),
-
         // ================= Issues (Jira / Confluence) =================
         json!({"name":"otto.search_issues","mutating":false,"category":"Issues",
             "description":"Search Jira issues for an issue account. `query` is JQL (empty → recent). Optional `project`. Read-only.",
@@ -395,7 +389,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Transition a Jira issue to a new status. `transition_id` from the issue's available transitions. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["account_id","key","transition_id"],"properties":{
                 "account_id":{"type":"string"},"key":{"type":"string"},"transition_id":{"type":"string"}}}}),
-
         // ================= Swarm =================
         json!({"name":"otto.list_swarms","mutating":false,"category":"Swarm",
             "description":"List a workspace's agent swarms. Read-only.",
@@ -414,7 +407,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["swarm_id","body"],"properties":{
                 "swarm_id":{"type":"string"},"body":{"type":"string"},
                 "project_id":{"type":"string"},"task_id":{"type":"string"}}}}),
-
         // ================= Vault (docs home) =================
         json!({"name":"otto.vault_list","mutating":false,"category":"Vault",
             "description":"List markdown doc vaults (id, name, root, OKF flag, note/link counts). Vaults are a global library — every workspace sees them all. Read-only.",
@@ -460,8 +452,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Soft-delete a note into the vault's .trash/ (never destroys files). DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["vault_id","path"],"properties":{
                 "workspace_id":{"type":"string","description":"Optional — vaults are global; defaults to an accessible workspace."},"vault_id":{"type":"integer"},"path":{"type":"string"}}}}),
-
-
         // ================= Sessions =================
         json!({"name":"otto.list_sessions","mutating":false,"category":"Sessions",
             "description":"List a workspace's agent/terminal sessions (id, title, kind, status). Read-only.",
@@ -488,7 +478,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["session_id"],"properties":{
                 "session_id":{"type":"string"},"status":{"type":"string","description":"comma-separated: running,working,idle,exited,reconnectable"},
                 "timeout_secs":{"type":"integer","description":"1..25, default 20"}}}}),
-
         // ================= Code Review / Findings =================
         json!({"name":"otto.list_findings","mutating":false,"category":"Code Review",
             "description":"List a code review's findings (with workflow state) by review id. Read-only.",
@@ -496,7 +485,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.get_finding","mutating":false,"category":"Code Review",
             "description":"Get one review finding's detail + event timeline by id. Read-only.",
             "inputSchema":{"type":"object","required":["finding_id"],"properties":{"finding_id":{"type":"string"}}}}),
-
         // ================= Product =================
         json!({"name":"otto.list_product_stories","mutating":false,"category":"Product",
             "description":"List a workspace's product stories (Jira/Confluence-backed). Read-only.",
@@ -504,7 +492,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.get_product_story","mutating":false,"category":"Product",
             "description":"Get one product story's detail by id. Read-only.",
             "inputSchema":{"type":"object","required":["story_id"],"properties":{"story_id":{"type":"string"}}}}),
-
         // ================= Channels =================
         json!({"name":"otto.list_integrations","mutating":false,"category":"Channels",
             "description":"List a workspace's channel integrations (Slack/Telegram/webhook). Read-only.",
@@ -513,17 +500,14 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Send a test message to a configured channel integration (`channel` = slack|telegram|webhook). DANGEROUS: outward-facing send — approval-gated.",
             "inputSchema":{"type":"object","required":["workspace_id","channel"],"properties":{
                 "workspace_id":{"type":"string"},"channel":{"type":"string"}}}}),
-
         // ================= Usage =================
         json!({"name":"otto.get_usage_summary","mutating":false,"category":"Usage",
             "description":"Token-usage rollups by provider/day/session/feature (root-only endpoint; non-root callers get a clean 403). Optional `days` (default 30). Read-only.",
             "inputSchema":{"type":"object","properties":{"days":{"type":"integer"},"otto_only":{"type":"boolean"}}}}),
-
         // ================= Skills =================
         json!({"name":"otto.list_bundled_skills","mutating":false,"category":"Skills",
             "description":"List Otto's bundled skill catalogue (name, version, install state). Read-only.",
             "inputSchema":{"type":"object","properties":{}}}),
-
         // ================= Self-Improvement =================
         json!({"name":"otto.get_self_improvement_config","mutating":false,"category":"Self-Improvement",
             "description":"Get a workspace's self-improvement config (cadence, autonomy). Read-only.",
@@ -549,7 +533,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.rollback_improvement_edit","mutating":true,"category":"Self-Improvement",
             "description":"Roll back (remove) a previously-applied self-improvement edit. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["edit_id"],"properties":{"edit_id":{"type":"string"}}}}),
-
         // ---- Personal Agents (rooms) ----
         // Deliberately mutating:false / non-DANGEROUS: a room post cannot leave
         // the machine (channel delivery of reports is separate), it is capped at
@@ -568,7 +551,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "inputSchema":{"type":"object","required":["room_id"],"properties":{
                 "room_id":{"type":"string"},"after":{"type":"string"},"limit":{"type":"integer"},
                 "session_id":{"type":"string","description":"the calling session (injected automatically by Otto's MCP bridge)"}}}}),
-
         // ---- Scheduled Tasks ----
         json!({"name":"otto.list_scheduled_tasks","mutating":false,"category":"Scheduled Tasks",
             "description":"List a workspace's scheduled tasks (recurring agent jobs). Read-only.",
@@ -607,7 +589,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Delete a scheduled task and its run history. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["task_id"],"properties":{
                 "task_id":{"type":"string"}}}}),
-
         // ================= AWS console =================
         // docs/design/aws-k8s-consoles.md §6. Accounts are global rows (no
         // workspace_id); the self-call reuses the per-service feature grants
@@ -666,7 +647,6 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"List the EKS clusters of an account/region (name, status, version, endpoint, arn, created_at). Read-only.",
             "inputSchema":{"type":"object","required":["account_id"],"properties":{
                 "account_id":{"type":"string"},"region":{"type":"string"}}}}),
-
         // ================= Kubernetes console =================
         // §3 routes; everything is `kubectl` with the cluster's own kubeconfig
         // server-side. `kubernetes` feature: View for reads, Edit for k8s_action.
@@ -1104,7 +1084,10 @@ pub(crate) async fn governed_invoke(
     let needs_approval =
         dangerous && !exempt && !token_write_grant && require_approval_dangerous(ctx).await;
     let args_hash = canonical_hash(arguments);
-    let ws = arguments.get("workspace_id").and_then(Value::as_str).map(str::to_string);
+    let ws = arguments
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     if needs_approval && !dry_run {
         match ctx
@@ -1115,7 +1098,13 @@ pub(crate) async fn governed_invoke(
             .map_err(ApiError)?
         {
             Some(appr_id) => {
-                if !ctx.mcp.approvals().consume(&appr_id).await.map_err(ApiError)? {
+                if !ctx
+                    .mcp
+                    .approvals()
+                    .consume(&appr_id)
+                    .await
+                    .map_err(ApiError)?
+                {
                     return Ok(deny_audit(ctx, &mut audit, "approval already used").await);
                 }
                 audit.approval_id = Some(appr_id);
@@ -1137,7 +1126,9 @@ pub(crate) async fn governed_invoke(
                         risk_label: Some("dangerous".into()),
                         requested_by: Some(user.id.clone()),
                         requested_by_kind: Some("mcp_server".into()),
-                        expires_at: Some((chrono::Utc::now() + chrono::Duration::minutes(120)).to_rfc3339()),
+                        expires_at: Some(
+                            (chrono::Utc::now() + chrono::Duration::minutes(120)).to_rfc3339(),
+                        ),
                     })
                     .await
                     .map_err(ApiError)?;
@@ -1150,7 +1141,9 @@ pub(crate) async fn governed_invoke(
                         audit.decision = "denied".into();
                         audit.decision_reason = Some("human denied the request".into());
                         let _ = ctx.mcp.call_log().insert(audit).await;
-                        return Ok(json!({"decision":"denied","executed":false,"reason":"human denied the request"}));
+                        return Ok(
+                            json!({"decision":"denied","executed":false,"reason":"human denied the request"}),
+                        );
                     }
                     None => {
                         audit.decision = "pending_approval".into();
@@ -1175,7 +1168,11 @@ pub(crate) async fn governed_invoke(
     }
 
     // Fail-closed audit: insert before executing.
-    audit.decision = if audit.approval_id.is_some() { "approved".into() } else { "allowed".into() };
+    audit.decision = if audit.approval_id.is_some() {
+        "approved".into()
+    } else {
+        "allowed".into()
+    };
     let audit_id = ctx.mcp.call_log().insert(audit).await.map_err(ApiError)?;
 
     let started = std::time::Instant::now();
@@ -1199,13 +1196,23 @@ pub(crate) async fn governed_invoke(
     let latency = started.elapsed().as_millis() as i64;
     match result {
         Ok(value) => {
-            let bytes = serde_json::to_vec(&value).map(|v| v.len() as i64).unwrap_or(0);
-            let _ = ctx.mcp.call_log().finalize(&audit_id, true, None, Some(latency), Some(bytes), None).await;
+            let bytes = serde_json::to_vec(&value)
+                .map(|v| v.len() as i64)
+                .unwrap_or(0);
+            let _ = ctx
+                .mcp
+                .call_log()
+                .finalize(&audit_id, true, None, Some(latency), Some(bytes), None)
+                .await;
             Ok(json!({"decision":"allowed","executed":true,"content":value}))
         }
         Err(e) => {
             let err = otto_core::redact::redact_text(&e.to_string()).value;
-            let _ = ctx.mcp.call_log().finalize(&audit_id, false, Some(&err), Some(latency), None, None).await;
+            let _ = ctx
+                .mcp
+                .call_log()
+                .finalize(&audit_id, false, Some(&err), Some(latency), None, None)
+                .await;
             Ok(json!({"decision":"error","executed":true,"is_error":true,"content":{"error":err}}))
         }
     }
@@ -1220,7 +1227,11 @@ async fn deny_audit(ctx: &ServerCtx, audit: &mut NewCallLog, reason: &str) -> Va
 
 /// Poll an approval up to a bounded wait. `Some(true)`=approved, `Some(false)`=denied,
 /// `None`=still pending after the wait (caller resubmits later).
-async fn wait_for_decision(ctx: &ServerCtx, approval_id: &str, wait_seconds: Option<u64>) -> Option<bool> {
+async fn wait_for_decision(
+    ctx: &ServerCtx,
+    approval_id: &str,
+    wait_seconds: Option<u64>,
+) -> Option<bool> {
     let budget = wait_seconds.unwrap_or(0).min(MAX_WAIT_SECS);
     let mut waited = 0u64;
     loop {
@@ -1304,7 +1315,9 @@ async fn fill_vault_workspace(
         repo.list_user_for_user(&user.id).await?
     };
     let ws = pick_vault_workspace(&rows, tool_is_mutating(tool)).ok_or_else(|| {
-        Error::Invalid("no accessible workspace to scope this vault call — pass 'workspace_id'".into())
+        Error::Invalid(
+            "no accessible workspace to scope this vault call — pass 'workspace_id'".into(),
+        )
     })?;
     let mut filled = args.clone();
     filled["workspace_id"] = json!(ws);
@@ -1319,7 +1332,11 @@ fn pick_vault_workspace(
     rows: &[(otto_core::domain::Workspace, WorkspaceRole)],
     mutating: bool,
 ) -> Option<Id> {
-    let need = if mutating { WorkspaceRole::Editor } else { WorkspaceRole::Viewer };
+    let need = if mutating {
+        WorkspaceRole::Editor
+    } else {
+        WorkspaceRole::Viewer
+    };
     rows.iter()
         .find(|(_, role)| *role >= need)
         .or_else(|| rows.first())
@@ -1362,7 +1379,9 @@ fn seg(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -1415,19 +1434,39 @@ pub(crate) struct SelfCall {
 
 impl SelfCall {
     fn get(path: String) -> Self {
-        Self { method: Method::Get, path, body: None }
+        Self {
+            method: Method::Get,
+            path,
+            body: None,
+        }
     }
     fn post(path: String, body: Value) -> Self {
-        Self { method: Method::Post, path, body: Some(body) }
+        Self {
+            method: Method::Post,
+            path,
+            body: Some(body),
+        }
     }
     fn put(path: String, body: Value) -> Self {
-        Self { method: Method::Put, path, body: Some(body) }
+        Self {
+            method: Method::Put,
+            path,
+            body: Some(body),
+        }
     }
     fn patch(path: String, body: Value) -> Self {
-        Self { method: Method::Patch, path, body: Some(body) }
+        Self {
+            method: Method::Patch,
+            path,
+            body: Some(body),
+        }
     }
     fn delete(path: String) -> Self {
-        Self { method: Method::Delete, path, body: None }
+        Self {
+            method: Method::Delete,
+            path,
+            body: None,
+        }
     }
 }
 
@@ -1441,7 +1480,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "search_codebase" => {
             let ws = arg_str(args, "workspace_id")?;
             let q = arg_str(args, "query")?;
-            let mut path = format!("/api/v1/workspaces/{}/mcp/code-search?q={}", seg(&ws), seg(&q));
+            let mut path = format!(
+                "/api/v1/workspaces/{}/mcp/code-search?q={}",
+                seg(&ws),
+                seg(&q)
+            );
             if let Some(p) = args.get("path").and_then(Value::as_str) {
                 path.push_str(&format!("&path={}", seg(p)));
             }
@@ -1452,7 +1495,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "get_context_packet" => {
             let ws = arg_str(args, "workspace_id")?;
-            SelfCall::post(format!("/api/v1/workspaces/{}/mcp/context-packet", seg(&ws)), args.clone())
+            SelfCall::post(
+                format!("/api/v1/workspaces/{}/mcp/context-packet", seg(&ws)),
+                args.clone(),
+            )
         }
         "get_proof_pack" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -1491,7 +1537,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let ws = arg_str(args, "workspace_id")?;
             let query = opt_query(
                 args,
-                &[("q", "q"), ("collection_id", "collection_id"), ("kind", "kind")],
+                &[
+                    ("q", "q"),
+                    ("collection_id", "collection_id"),
+                    ("kind", "kind"),
+                ],
             );
             let mut path = format!("/api/v1/workspaces/{}/api-client/overview", seg(&ws));
             if !query.is_empty() {
@@ -1511,7 +1561,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "api_history" => {
             let ws = arg_str(args, "workspace_id")?;
-            if let Some(id) = args.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(id) = args
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 SelfCall::get(format!(
                     "/api/v1/workspaces/{}/api-client/history/{}",
                     seg(&ws),
@@ -1549,7 +1603,13 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 }
             }
             let mut body = json!({"shape": "agent"});
-            for key in ["environment_id", "vars", "timeout_ms", "confirm", "confirm_new_host"] {
+            for key in [
+                "environment_id",
+                "vars",
+                "timeout_ms",
+                "confirm",
+                "confirm_new_host",
+            ] {
                 if let Some(value) = args.get(key) {
                     body[key] = value.clone();
                 }
@@ -1569,7 +1629,15 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let method = arg_str(args, "method")?;
             let url = arg_str(args, "url")?;
             let mut body = json!({"name": name, "method": method, "url": url});
-            for key in ["collection_id", "headers", "query", "body_mode", "body", "auth", "extras"] {
+            for key in [
+                "collection_id",
+                "headers",
+                "query",
+                "body_mode",
+                "body",
+                "auth",
+                "extras",
+            ] {
                 if let Some(value) = args.get(key) {
                     body[key] = value.clone();
                 }
@@ -1610,7 +1678,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "open_pr_draft" => {
             let repo = arg_str(args, "repo_id")?;
             let base_branch = arg_str(args, "base")?;
-            SelfCall::post(format!("/api/v1/repos/{}/pr/draft", seg(&repo)), json!({"base": base_branch}))
+            SelfCall::post(
+                format!("/api/v1/repos/{}/pr/draft", seg(&repo)),
+                json!({"base": base_branch}),
+            )
         }
         "list_repos" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -1623,7 +1694,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "list_prs" => {
             let repo = arg_str(args, "repo_id")?;
             let mut path = format!("/api/v1/repos/{}/prs", seg(&repo));
-            if let Some(s) = args.get("state").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(s) = args
+                .get("state")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 path.push_str(&format!("?state={}", seg(s)));
             }
             SelfCall::get(path)
@@ -1652,12 +1727,18 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 "line": args.get("line").and_then(Value::as_u64),
                 "in_reply_to": args.get("in_reply_to").and_then(Value::as_str),
             });
-            SelfCall::post(format!("/api/v1/repos/{}/prs/{}/comments", seg(&repo), n), body)
+            SelfCall::post(
+                format!("/api/v1/repos/{}/prs/{}/comments", seg(&repo), n),
+                body,
+            )
         }
         "start_pr_review" => {
             let repo = arg_str(args, "repo_id")?;
             let n = arg_i64(args, "pr_number")?;
-            SelfCall::post(format!("/api/v1/repos/{}/prs/{}/review", seg(&repo), n), json!({}))
+            SelfCall::post(
+                format!("/api/v1/repos/{}/prs/{}/review", seg(&repo), n),
+                json!({}),
+            )
         }
         // ---- Workflows ----
         "list_workflows" => {
@@ -1694,7 +1775,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "cancel_workflow_run" => {
             let id = arg_str(args, "run_id")?;
-            SelfCall::post(format!("/api/v1/workflow-runs/{}/cancel", seg(&id)), json!({}))
+            SelfCall::post(
+                format!("/api/v1/workflow-runs/{}/cancel", seg(&id)),
+                json!({}),
+            )
         }
         // ---- Message brokers ----
         "list_broker_clusters" => {
@@ -1708,7 +1792,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "get_broker_topic" => {
             let id = arg_str(args, "cluster_id")?;
             let topic = arg_str(args, "topic")?;
-            SelfCall::get(format!("/api/v1/brokers/clusters/{}/topics/{}", seg(&id), seg(&topic)))
+            SelfCall::get(format!(
+                "/api/v1/brokers/clusters/{}/topics/{}",
+                seg(&id),
+                seg(&topic)
+            ))
         }
         "list_consumer_groups" => {
             let id = arg_str(args, "cluster_id")?;
@@ -1727,7 +1815,14 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             if let Some(f) = args.get("value_filter").and_then(Value::as_str) {
                 body["value_filter"] = json!(f);
             }
-            SelfCall::post(format!("/api/v1/brokers/clusters/{}/topics/{}/consume", seg(&id), seg(&topic)), body)
+            SelfCall::post(
+                format!(
+                    "/api/v1/brokers/clusters/{}/topics/{}/consume",
+                    seg(&id),
+                    seg(&topic)
+                ),
+                body,
+            )
         }
         "produce_broker_message" => {
             let id = arg_str(args, "cluster_id")?;
@@ -1742,7 +1837,14 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             if let Some(c) = args.get("confirm").and_then(Value::as_bool) {
                 body["confirm"] = json!(c);
             }
-            SelfCall::post(format!("/api/v1/brokers/clusters/{}/topics/{}/produce", seg(&id), seg(&topic)), body)
+            SelfCall::post(
+                format!(
+                    "/api/v1/brokers/clusters/{}/topics/{}/produce",
+                    seg(&id),
+                    seg(&topic)
+                ),
+                body,
+            )
         }
         // ---- Issues (Jira / Confluence) ----
         "search_issues" => {
@@ -1751,7 +1853,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             if let Some(q) = args.get("query").and_then(Value::as_str) {
                 path.push_str(&format!("&q={}", seg(q)));
             }
-            if let Some(p) = args.get("project").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(p) = args
+                .get("project")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 path.push_str(&format!("&project={}", seg(p)));
             }
             SelfCall::get(path)
@@ -1764,8 +1870,16 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "search_confluence" => {
             let acc = arg_str(args, "account_id")?;
             let q = arg_str(args, "query")?;
-            let mut path = format!("/api/v1/issue/confluence/search?account_id={}&q={}", seg(&acc), seg(&q));
-            if let Some(s) = args.get("space").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            let mut path = format!(
+                "/api/v1/issue/confluence/search?account_id={}&q={}",
+                seg(&acc),
+                seg(&q)
+            );
+            if let Some(s) = args
+                .get("space")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 path.push_str(&format!("&space={}", seg(s)));
             }
             SelfCall::get(path)
@@ -1795,7 +1909,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 "title": arg_str(args, "title")?,
             });
             for k in ["body_md", "body_html"] {
-                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
                     body[k] = json!(v);
                 }
             }
@@ -1816,7 +1934,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let pid = arg_str(args, "page_id")?;
             let mut body = json!({});
             for k in ["body_md", "body_html"] {
-                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
                     body[k] = json!(v);
                 }
             }
@@ -1841,7 +1963,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let pid = arg_str(args, "page_id")?;
             let mut body = json!({});
             for k in ["body_md", "body_html"] {
-                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
                     body[k] = json!(v);
                 }
             }
@@ -1858,13 +1984,19 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let acc = arg_str(args, "account_id")?;
             let key = arg_str(args, "key")?;
             let body = json!({ "body": arg_str(args, "body")? });
-            SelfCall::post(format!("/api/v1/issue/{}/{}/comment", seg(&acc), seg(&key)), body)
+            SelfCall::post(
+                format!("/api/v1/issue/{}/{}/comment", seg(&acc), seg(&key)),
+                body,
+            )
         }
         "transition_issue" => {
             let acc = arg_str(args, "account_id")?;
             let key = arg_str(args, "key")?;
             let body = json!({ "transition_id": arg_str(args, "transition_id")? });
-            SelfCall::post(format!("/api/v1/issue/{}/{}/transitions", seg(&acc), seg(&key)), body)
+            SelfCall::post(
+                format!("/api/v1/issue/{}/{}/transitions", seg(&acc), seg(&key)),
+                body,
+            )
         }
         // ---- Swarm ----
         "list_swarms" => {
@@ -1898,10 +2030,18 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "list_memory" => {
             let ws = arg_str(args, "workspace_id")?;
             let mut q: Vec<String> = Vec::new();
-            if let Some(c) = args.get("collection").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(c) = args
+                .get("collection")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 q.push(format!("collection={}", seg(c)));
             }
-            if let Some(s) = args.get("story_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(s) = args
+                .get("story_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 q.push(format!("story_id={}", seg(s)));
             }
             let mut path = format!("/api/v1/workspaces/{}/memories", seg(&ws));
@@ -1917,7 +2057,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             // supply a useful default so a caller that omits it still gets hits.
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(20);
             let body = json!({ "text": arg_str(args, "query")?, "k": k });
-            SelfCall::post(format!("/api/v1/workspaces/{}/memory/search", seg(&ws)), body)
+            SelfCall::post(
+                format!("/api/v1/workspaces/{}/memory/search", seg(&ws)),
+                body,
+            )
         }
         // ---- Vault v3 (docs home) ----
         "vault_list" => {
@@ -1928,7 +2071,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let ws = arg_str(args, "workspace_id")?;
             let v = arg_i64(args, "vault_id")?;
             let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-            SelfCall::get(format!("/api/v1/workspaces/{}/vault/vaults/{v}/dir?path={}", seg(&ws), seg(path)))
+            SelfCall::get(format!(
+                "/api/v1/workspaces/{}/vault/vaults/{v}/dir?path={}",
+                seg(&ws),
+                seg(path)
+            ))
         }
         "vault_read" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -1944,7 +2091,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let v = arg_i64(args, "vault_id")?;
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20);
             let body = json!({ "query": arg_str(args, "query")?, "limit": limit });
-            SelfCall::post(format!("/api/v1/workspaces/{}/vault/vaults/{v}/search", seg(&ws)), body)
+            SelfCall::post(
+                format!("/api/v1/workspaces/{}/vault/vaults/{v}/search", seg(&ws)),
+                body,
+            )
         }
         "vault_backlinks" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -1958,13 +2108,19 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "vault_tags" => {
             let ws = arg_str(args, "workspace_id")?;
             let v = arg_i64(args, "vault_id")?;
-            SelfCall::get(format!("/api/v1/workspaces/{}/vault/vaults/{v}/tags", seg(&ws)))
+            SelfCall::get(format!(
+                "/api/v1/workspaces/{}/vault/vaults/{v}/tags",
+                seg(&ws)
+            ))
         }
         "vault_graph" => {
             let ws = arg_str(args, "workspace_id")?;
             let v = arg_i64(args, "vault_id")?;
             let mut path = format!("/api/v1/workspaces/{}/vault/vaults/{v}/graph", seg(&ws));
-            let focus = args.get("path").and_then(Value::as_str).filter(|s| !s.is_empty());
+            let focus = args
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
             let mode = args
                 .get("mode")
                 .and_then(Value::as_str)
@@ -1982,7 +2138,13 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "vault_okf_validate" => {
             let ws = arg_str(args, "workspace_id")?;
             let v = arg_i64(args, "vault_id")?;
-            SelfCall::post(format!("/api/v1/workspaces/{}/vault/vaults/{v}/okf/validate", seg(&ws)), json!({}))
+            SelfCall::post(
+                format!(
+                    "/api/v1/workspaces/{}/vault/vaults/{v}/okf/validate",
+                    seg(&ws)
+                ),
+                json!({}),
+            )
         }
         "vault_write" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -1994,13 +2156,19 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             if let Some(h) = args.get("if_hash").and_then(Value::as_str) {
                 body["if_hash"] = json!(h);
             }
-            SelfCall::put(format!("/api/v1/workspaces/{}/vault/vaults/{v}/note", seg(&ws)), body)
+            SelfCall::put(
+                format!("/api/v1/workspaces/{}/vault/vaults/{v}/note", seg(&ws)),
+                body,
+            )
         }
         "vault_rename" => {
             let ws = arg_str(args, "workspace_id")?;
             let v = arg_i64(args, "vault_id")?;
             let body = json!({ "from": arg_str(args, "from")?, "to": arg_str(args, "to")? });
-            SelfCall::post(format!("/api/v1/workspaces/{}/vault/vaults/{v}/rename", seg(&ws)), body)
+            SelfCall::post(
+                format!("/api/v1/workspaces/{}/vault/vaults/{v}/rename", seg(&ws)),
+                body,
+            )
         }
         "vault_delete" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -2029,11 +2197,18 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             let ws = arg_str(args, "workspace_id")?;
             let mut body = json!({ "provider": arg_str(args, "provider")? });
             for k in ["title", "cwd", "model", "prompt"] {
-                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()) {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                {
                     body[k] = json!(v);
                 }
             }
-            SelfCall::post(format!("/api/v1/workspaces/{}/sessions/open", seg(&ws)), body)
+            SelfCall::post(
+                format!("/api/v1/workspaces/{}/sessions/open", seg(&ws)),
+                body,
+            )
         }
         "send_message" => {
             let id = arg_str(args, "session_id")?;
@@ -2043,7 +2218,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "wait_session" => {
             let id = arg_str(args, "session_id")?;
             let mut path = format!("/api/v1/sessions/{}/wait?", seg(&id));
-            let q = opt_query(args, &[("status", "status"), ("timeout_secs", "timeout_secs")]);
+            let q = opt_query(
+                args,
+                &[("status", "status"), ("timeout_secs", "timeout_secs")],
+            );
             path.push_str(&q);
             SelfCall::get(path)
         }
@@ -2073,7 +2251,14 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "test_integration" => {
             let ws = arg_str(args, "workspace_id")?;
             let ch = arg_str(args, "channel")?;
-            SelfCall::post(format!("/api/v1/workspaces/{}/integrations/{}/test", seg(&ws), seg(&ch)), json!({}))
+            SelfCall::post(
+                format!(
+                    "/api/v1/workspaces/{}/integrations/{}/test",
+                    seg(&ws),
+                    seg(&ch)
+                ),
+                json!({}),
+            )
         }
         // ---- Usage ----
         "get_usage_summary" => {
@@ -2112,19 +2297,31 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         }
         "run_self_improvement" => {
             let ws = arg_str(args, "workspace_id")?;
-            SelfCall::post(format!("/api/v1/workspaces/{}/self-improvement/run", seg(&ws)), json!({}))
+            SelfCall::post(
+                format!("/api/v1/workspaces/{}/self-improvement/run", seg(&ws)),
+                json!({}),
+            )
         }
         "approve_improvement_edit" => {
             let id = arg_str(args, "edit_id")?;
-            SelfCall::post(format!("/api/v1/improvement/edits/{}/approve", seg(&id)), json!({}))
+            SelfCall::post(
+                format!("/api/v1/improvement/edits/{}/approve", seg(&id)),
+                json!({}),
+            )
         }
         "reject_improvement_edit" => {
             let id = arg_str(args, "edit_id")?;
-            SelfCall::post(format!("/api/v1/improvement/edits/{}/reject", seg(&id)), json!({}))
+            SelfCall::post(
+                format!("/api/v1/improvement/edits/{}/reject", seg(&id)),
+                json!({}),
+            )
         }
         "rollback_improvement_edit" => {
             let id = arg_str(args, "edit_id")?;
-            SelfCall::post(format!("/api/v1/improvement/edits/{}/rollback", seg(&id)), json!({}))
+            SelfCall::post(
+                format!("/api/v1/improvement/edits/{}/rollback", seg(&id)),
+                json!({}),
+            )
         }
         // ---- Goal loop / swarm task / scheduled tasks ----
         "run_goal_loop" => {
@@ -2143,13 +2340,20 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 "description": args.get("description").and_then(Value::as_str),
                 "priority": args.get("priority").and_then(Value::as_str),
             });
-            SelfCall::post(format!("/api/v1/swarm/projects/{}/tasks", seg(&project)), body)
+            SelfCall::post(
+                format!("/api/v1/swarm/projects/{}/tasks", seg(&project)),
+                body,
+            )
         }
         "room_post" => {
             let room = arg_str(args, "room_id")?;
             let text = arg_str(args, "text")?;
             let mut body = json!({"text": text});
-            if let Some(sid) = args.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(sid) = args
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 body["session_id"] = json!(sid);
             }
             SelfCall::post(format!("/api/v1/agent-rooms/{}/messages", seg(&room)), body)
@@ -2157,16 +2361,28 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "room_read" => {
             let room = arg_str(args, "room_id")?;
             let mut q = String::new();
-            if let Some(after) = args.get("after").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(after) = args
+                .get("after")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 q.push_str(&format!("&after={}", seg(after)));
             }
             if let Some(limit) = args.get("limit").and_then(Value::as_i64) {
                 q.push_str(&format!("&limit={limit}"));
             }
-            if let Some(sid) = args.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(sid) = args
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 q.push_str(&format!("&session_id={}", seg(sid)));
             }
-            SelfCall::get(format!("/api/v1/agent-rooms/{}/messages?{}", seg(&room), q.trim_start_matches('&')))
+            SelfCall::get(format!(
+                "/api/v1/agent-rooms/{}/messages?{}",
+                seg(&room),
+                q.trim_start_matches('&')
+            ))
         }
         "list_scheduled_tasks" => {
             let ws = arg_str(args, "workspace_id")?;
@@ -2182,7 +2398,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             if let Some(o) = body.as_object_mut() {
                 o.remove("workspace_id");
             }
-            SelfCall::post(format!("/api/v1/workspaces/{}/scheduled-tasks", seg(&ws)), body)
+            SelfCall::post(
+                format!("/api/v1/workspaces/{}/scheduled-tasks", seg(&ws)),
+                body,
+            )
         }
         "update_scheduled_task" => {
             let id = arg_str(args, "task_id")?;
@@ -2195,11 +2414,17 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "set_scheduled_task_enabled" => {
             let id = arg_str(args, "task_id")?;
             let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-            SelfCall::patch(format!("/api/v1/scheduled-tasks/{}", seg(&id)), json!({"enabled": enabled}))
+            SelfCall::patch(
+                format!("/api/v1/scheduled-tasks/{}", seg(&id)),
+                json!({"enabled": enabled}),
+            )
         }
         "run_scheduled_task" => {
             let id = arg_str(args, "task_id")?;
-            SelfCall::post(format!("/api/v1/scheduled-tasks/{}/run", seg(&id)), json!({}))
+            SelfCall::post(
+                format!("/api/v1/scheduled-tasks/{}/run", seg(&id)),
+                json!({}),
+            )
         }
         "delete_scheduled_task" => {
             let id = arg_str(args, "task_id")?;
@@ -2216,7 +2441,15 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             "/api/v1/aws/accounts/{}/s3/buckets/{}/objects?{}",
             seg(&arg_str(args, "account_id")?),
             seg(&arg_str(args, "bucket")?),
-            opt_query(args, &[("prefix", "prefix"), ("token", "token"), ("max", "max"), ("region", "region")])
+            opt_query(
+                args,
+                &[
+                    ("prefix", "prefix"),
+                    ("token", "token"),
+                    ("max", "max"),
+                    ("region", "region")
+                ]
+            )
         )),
         "aws_s3_preview" => {
             let extra = opt_query(args, &[("max_bytes", "max_bytes"), ("region", "region")]);
@@ -2259,7 +2492,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
                 body["delay_seconds"] = json!(d);
             }
             for k in ["group_id", "dedup_id"] {
-                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
                     body[k] = json!(v);
                 }
             }
@@ -2278,7 +2515,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "aws_ec2_list_instances" => SelfCall::get(format!(
             "/api/v1/aws/accounts/{}/ec2/instances?{}",
             seg(&arg_str(args, "account_id")?),
-            opt_query(args, &[("region", "region"), ("state", "state"), ("q", "q")])
+            opt_query(
+                args,
+                &[("region", "region"), ("state", "state"), ("q", "q")]
+            )
         )),
         "aws_athena_list_tables" => {
             let extra = opt_query(args, &[("catalog", "catalog"), ("region", "region")]);
@@ -2296,7 +2536,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "aws_athena_query" => {
             let mut body = json!({"sql": arg_str(args, "sql")?});
             for k in ["database", "workgroup", "output_location"] {
-                if let Some(v) = args.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                if let Some(v) = args
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
                     body[k] = json!(v);
                 }
             }
@@ -2313,7 +2557,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             "/api/v1/aws/accounts/{}/athena/query/{}?{}",
             seg(&arg_str(args, "account_id")?),
             seg(&arg_str(args, "query_execution_id")?),
-            opt_query(args, &[("token", "token"), ("max", "max"), ("region", "region")])
+            opt_query(
+                args,
+                &[("token", "token"), ("max", "max"), ("region", "region")]
+            )
         )),
         "aws_eks_list_clusters" => SelfCall::get(format!(
             "/api/v1/aws/accounts/{}/eks/clusters?{}",
@@ -2371,7 +2618,10 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             opt_query(args, &[("window", "window")])
         )),
         "k8s_action" => SelfCall::post(
-            format!("/api/v1/k8s/clusters/{}/actions", seg(&arg_str(args, "cluster_id")?)),
+            format!(
+                "/api/v1/k8s/clusters/{}/actions",
+                seg(&arg_str(args, "cluster_id")?)
+            ),
             json!({
                 "action": arg_str(args, "action")?,
                 "kind": arg_str(args, "kind")?,
@@ -2417,27 +2667,70 @@ async fn run_tool(
 }
 
 async fn self_get(client: &reqwest::Client, token: &str, url: &str) -> Result<Value, Error> {
-    let resp = client.get(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").send().await
+    let resp = client
+        .get(url)
+        .bearer_auth(token)
+        .header("X-Otto-Agent", "mcp-outward")
+        .send()
+        .await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
-async fn self_post(client: &reqwest::Client, token: &str, url: &str, body: &Value) -> Result<Value, Error> {
-    let resp = client.post(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").json(body).send().await
+async fn self_post(
+    client: &reqwest::Client,
+    token: &str,
+    url: &str,
+    body: &Value,
+) -> Result<Value, Error> {
+    let resp = client
+        .post(url)
+        .bearer_auth(token)
+        .header("X-Otto-Agent", "mcp-outward")
+        .json(body)
+        .send()
+        .await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
-async fn self_put(client: &reqwest::Client, token: &str, url: &str, body: &Value) -> Result<Value, Error> {
-    let resp = client.put(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").json(body).send().await
+async fn self_put(
+    client: &reqwest::Client,
+    token: &str,
+    url: &str,
+    body: &Value,
+) -> Result<Value, Error> {
+    let resp = client
+        .put(url)
+        .bearer_auth(token)
+        .header("X-Otto-Agent", "mcp-outward")
+        .json(body)
+        .send()
+        .await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
-async fn self_patch(client: &reqwest::Client, token: &str, url: &str, body: &Value) -> Result<Value, Error> {
-    let resp = client.patch(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").json(body).send().await
+async fn self_patch(
+    client: &reqwest::Client,
+    token: &str,
+    url: &str,
+    body: &Value,
+) -> Result<Value, Error> {
+    let resp = client
+        .patch(url)
+        .bearer_auth(token)
+        .header("X-Otto-Agent", "mcp-outward")
+        .json(body)
+        .send()
+        .await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
 async fn self_delete(client: &reqwest::Client, token: &str, url: &str) -> Result<Value, Error> {
-    let resp = client.delete(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").send().await
+    let resp = client
+        .delete(url)
+        .bearer_auth(token)
+        .header("X-Otto-Agent", "mcp-outward")
+        .send()
+        .await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     parse_self(resp).await
 }
@@ -2454,7 +2747,12 @@ async fn parse_self(resp: reqwest::Response) -> Result<Value, Error> {
 /// keeping the newest [`MAX_TEXT_CHARS`] — `parse_self` would turn a non-JSON
 /// body into `null`.
 async fn self_get_text(client: &reqwest::Client, token: &str, url: &str) -> Result<Value, Error> {
-    let resp = client.get(url).bearer_auth(token).header("X-Otto-Agent", "mcp-outward").send().await
+    let resp = client
+        .get(url)
+        .bearer_auth(token)
+        .header("X-Otto-Agent", "mcp-outward")
+        .send()
+        .await
         .map_err(|e| Error::Upstream(format!("self-call: {e}")))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
@@ -2476,10 +2774,20 @@ async fn self_get_text(client: &reqwest::Client, token: &str, url: &str) -> Resu
     Ok(json!({"text": text, "truncated": truncated}))
 }
 
-async fn ask_human_approval(ctx: &ServerCtx, user: &otto_core::domain::User, args: &Value) -> Result<Value, Error> {
+async fn ask_human_approval(
+    ctx: &ServerCtx,
+    user: &otto_core::domain::User,
+    args: &Value,
+) -> Result<Value, Error> {
     let title = arg_str(args, "title")?;
-    let ws = args.get("workspace_id").and_then(Value::as_str).map(str::to_string);
-    let detail = args.get("detail").and_then(Value::as_str).map(str::to_string);
+    let ws = args
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let detail = args
+        .get("detail")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let appr = ctx
         .mcp
         .approvals()
@@ -2532,7 +2840,10 @@ pub async fn otto_server_status(
             })
         })
         .collect();
-    let prefix = AuthRepo::new(ctx.pool.clone()).mcp_token_prefix(&user.id).await.map_err(ApiError)?;
+    let prefix = AuthRepo::new(ctx.pool.clone())
+        .mcp_token_prefix(&user.id)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(json!({
         "enabled": enabled,
         "tools": tools,
@@ -2556,12 +2867,19 @@ pub async fn otto_server_config(
 ) -> ApiResult<Json<Value>> {
     let settings = SettingsRepo::new(ctx.pool.clone());
     if let Some(en) = req.enabled {
-        settings.put("mcp_otto_server_enabled", &json!(en)).await.map_err(ApiError)?;
+        settings
+            .put("mcp_otto_server_enabled", &json!(en))
+            .await
+            .map_err(ApiError)?;
     }
     if let Some(tools) = &req.tools {
         let known: Vec<String> = otto_tool_specs()
             .iter()
-            .filter_map(|t| t["name"].as_str().map(|n| n.strip_prefix("otto.").unwrap_or(n).to_string()))
+            .filter_map(|t| {
+                t["name"]
+                    .as_str()
+                    .map(|n| n.strip_prefix("otto.").unwrap_or(n).to_string())
+            })
             .collect();
         // The UI sends full `otto.*` names; the read path (`enabled_tools`) keys on
         // the bare name. Accept either form, validate + STORE the bare name so the
@@ -2574,13 +2892,20 @@ pub async fn otto_server_config(
             }
             normalized.push(bare);
         }
-        settings.put("mcp_otto_server_tools", &json!(normalized)).await.map_err(ApiError)?;
+        settings
+            .put("mcp_otto_server_tools", &json!(normalized))
+            .await
+            .map_err(ApiError)?;
     }
     let mut minted: Option<String> = None;
     if req.rotate_token {
         let repo = AuthRepo::new(ctx.pool.clone());
         repo.revoke_mcp_tokens(&user.id).await.map_err(ApiError)?;
-        minted = Some(repo.issue_mcp_token(&user.id, Some("otto-mcp-server")).await.map_err(ApiError)?);
+        minted = Some(
+            repo.issue_mcp_token(&user.id, Some("otto-mcp-server"))
+                .await
+                .map_err(ApiError)?,
+        );
         ctx.audit(otto_state::NewAuditEntry {
             user_id: Some(user.id.clone()),
             action: "mcp.otto_server.token_mint".into(),
@@ -2666,7 +2991,11 @@ pub async fn create_mcp_token(
     if let Some(tools) = &scope.tools {
         let known: Vec<String> = otto_tool_specs()
             .iter()
-            .filter_map(|t| t["name"].as_str().map(|n| n.strip_prefix("otto.").unwrap_or(n).to_string()))
+            .filter_map(|t| {
+                t["name"]
+                    .as_str()
+                    .map(|n| n.strip_prefix("otto.").unwrap_or(n).to_string())
+            })
             .collect();
         for t in tools {
             let bare = t.strip_prefix("otto.").unwrap_or(t);
@@ -2744,14 +3073,36 @@ pub async fn gateway_tools(
     CurrentUser(user): CurrentUser,
     Query(q): Query<GatewayToolsQuery>,
 ) -> ApiResult<Json<Value>> {
-    crate::auth::require_ws_role(&ctx,&user,&q.workspace_id,WorkspaceRole::Viewer).await?;
-    let servers = ctx.mcp.registry().list_for_ws(&q.workspace_id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &q.workspace_id, WorkspaceRole::Viewer).await?;
+    let servers = ctx
+        .mcp
+        .registry()
+        .list_for_ws(&q.workspace_id)
+        .await
+        .map_err(ApiError)?;
     let mut tools: Vec<Value> = Vec::new();
     for s in servers.into_iter().filter(|s| s.enabled) {
-        let policy=otto_state::ResourceAccessRepo::new(ctx.pool.clone()).get_live_policy(otto_core::access::ResourceKind::McpServer,&s.id).await?;
-        if !s.managed && policy.mode == otto_core::access::AccessMode::Legacy { continue; }
-        if !ctx.mcp.resource_allowed(&s,&user,"discover",None).await? { continue; }
-        for t in ctx.mcp.visible_tools(&s,&user).await.map_err(ApiError)?.into_iter().filter(|t| t.enabled) {
+        let policy = otto_state::ResourceAccessRepo::new(ctx.pool.clone())
+            .get_live_policy(otto_core::access::ResourceKind::McpServer, &s.id)
+            .await?;
+        if !s.managed && policy.mode == otto_core::access::AccessMode::Legacy {
+            continue;
+        }
+        if !ctx
+            .mcp
+            .resource_allowed(&s, &user, "discover", None)
+            .await?
+        {
+            continue;
+        }
+        for t in ctx
+            .mcp
+            .visible_tools(&s, &user)
+            .await
+            .map_err(ApiError)?
+            .into_iter()
+            .filter(|t| t.enabled)
+        {
             tools.push(json!({
                 "name": format!("mcp__{}__{}", s.name, t.name),
                 "server_id": s.id,
@@ -2789,14 +3140,35 @@ pub async fn gateway_invoke(
     Json(req): Json<GatewayInvokeReq>,
 ) -> ApiResult<Json<Value>> {
     let server = ctx.mcp.registry().get(&req.server_id).await?;
-    if server.workspace_id != req.workspace_id { return Err(Error::Forbidden("MCP workspace mismatch".into()).into()); }
-    let policy = otto_state::ResourceAccessRepo::new(ctx.pool.clone()).get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await?;
-    let role = if policy.mode == otto_core::access::AccessMode::Legacy { WorkspaceRole::Editor } else { WorkspaceRole::Viewer };
-    crate::auth::require_ws_role(&ctx,&user,&server.workspace_id,role).await?;
-    if policy.mode == otto_core::access::AccessMode::Legacy {
-        otto_state::GrantsRepo::new(ctx.pool.clone()).check_global(&user,otto_core::domain::Feature::Mcp,otto_core::domain::Capability::Edit,"legacy MCP invocation requires edit").await?;
+    if server.workspace_id != req.workspace_id {
+        return Err(Error::Forbidden("MCP workspace mismatch".into()).into());
     }
-    if !ctx.mcp.resource_allowed(&server,&user,"invoke",Some(&req.tool)).await? { return Err(Error::Forbidden("MCP tool access denied".into()).into()); }
+    let policy = otto_state::ResourceAccessRepo::new(ctx.pool.clone())
+        .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)
+        .await?;
+    let role = if policy.mode == otto_core::access::AccessMode::Legacy {
+        WorkspaceRole::Editor
+    } else {
+        WorkspaceRole::Viewer
+    };
+    crate::auth::require_ws_role(&ctx, &user, &server.workspace_id, role).await?;
+    if policy.mode == otto_core::access::AccessMode::Legacy {
+        otto_state::GrantsRepo::new(ctx.pool.clone())
+            .check_global(
+                &user,
+                otto_core::domain::Feature::Mcp,
+                otto_core::domain::Capability::Edit,
+                "legacy MCP invocation requires edit",
+            )
+            .await?;
+    }
+    if !ctx
+        .mcp
+        .resource_allowed(&server, &user, "invoke", Some(&req.tool))
+        .await?
+    {
+        return Err(Error::Forbidden("MCP tool access denied".into()).into());
+    }
     let _ = &req.session_id;
     let ictx = InvokeCtx {
         workspace_id: Some(req.workspace_id.clone()),
@@ -2805,7 +3177,11 @@ pub async fn gateway_invoke(
         caller_kind: "gateway".into(),
         direction: "outbound".into(),
     };
-    let outcome = ctx.mcp.invoke(&req.server_id, &req.tool, &req.arguments, &ictx).await.map_err(ApiError)?;
+    let outcome = ctx
+        .mcp
+        .invoke(&req.server_id, &req.tool, &req.arguments, &ictx)
+        .await
+        .map_err(ApiError)?;
     let resp = otto_mcp::outcome_to_resp(outcome);
     if resp.decision == "pending_approval" {
         let _ = ctx.events.send(otto_core::event::Event::Notice {
@@ -2921,11 +3297,18 @@ mod tests {
                 .unwrap();
             // category present + non-empty (drives the control-plane UI grouping).
             assert!(
-                t["category"].as_str().map(|c| !c.is_empty()).unwrap_or(false),
+                t["category"]
+                    .as_str()
+                    .map(|c| !c.is_empty())
+                    .unwrap_or(false),
                 "{short} missing category"
             );
             // inputSchema is an object; every declared `required` key exists in `properties`.
-            assert_eq!(t["inputSchema"]["type"], json!("object"), "{short} schema not an object");
+            assert_eq!(
+                t["inputSchema"]["type"],
+                json!("object"),
+                "{short} schema not an object"
+            );
             if let Some(reqd) = t["inputSchema"]["required"].as_array() {
                 for r in reqd {
                     let key = r.as_str().unwrap();
@@ -2938,13 +3321,25 @@ mod tests {
             // Classification invariant: mutating ⟺ DANGEROUS; reads are default-on XOR opt-in.
             let s = short.as_str();
             if mutating {
-                assert!(DANGEROUS.contains(&s), "{short} is mutating but not DANGEROUS");
-                assert!(!DEFAULT_ENABLED.contains(&s), "{short} is mutating but default-enabled");
+                assert!(
+                    DANGEROUS.contains(&s),
+                    "{short} is mutating but not DANGEROUS"
+                );
+                assert!(
+                    !DEFAULT_ENABLED.contains(&s),
+                    "{short} is mutating but default-enabled"
+                );
             } else {
                 let de = DEFAULT_ENABLED.contains(&s);
                 let opt = OPT_IN_READS.contains(&s);
-                assert!(de ^ opt, "{short} (read) must be default-enabled XOR opt-in (de={de}, opt={opt})");
-                assert!(!DANGEROUS.contains(&s), "{short} (read) must not be DANGEROUS");
+                assert!(
+                    de ^ opt,
+                    "{short} (read) must be default-enabled XOR opt-in (de={de}, opt={opt})"
+                );
+                assert!(
+                    !DANGEROUS.contains(&s),
+                    "{short} (read) must not be DANGEROUS"
+                );
             }
         }
     }
@@ -2953,8 +3348,15 @@ mod tests {
     fn classification_lists_reference_real_tools() {
         let shorts: std::collections::HashSet<String> =
             spec_short_mut().into_iter().map(|(s, _)| s).collect();
-        for n in DEFAULT_ENABLED.iter().chain(DANGEROUS.iter()).chain(OPT_IN_READS.iter()) {
-            assert!(shorts.contains(*n), "classification names a non-existent tool '{n}'");
+        for n in DEFAULT_ENABLED
+            .iter()
+            .chain(DANGEROUS.iter())
+            .chain(OPT_IN_READS.iter())
+        {
+            assert!(
+                shorts.contains(*n),
+                "classification names a non-existent tool '{n}'"
+            );
         }
     }
 
@@ -2971,12 +3373,18 @@ mod tests {
             assert_eq!(spec["category"], json!("API Client"));
         }
         for read in READS {
-            assert!(DEFAULT_ENABLED.contains(read), "{read} must be default-enabled");
+            assert!(
+                DEFAULT_ENABLED.contains(read),
+                "{read} must be default-enabled"
+            );
             assert!(!DANGEROUS.contains(read), "{read} must not be DANGEROUS");
         }
         for write in WRITES {
             assert!(DANGEROUS.contains(write), "{write} must be DANGEROUS");
-            assert!(!DEFAULT_ENABLED.contains(write), "{write} must be off by default");
+            assert!(
+                !DEFAULT_ENABLED.contains(write),
+                "{write} must be off by default"
+            );
         }
 
         assert_eq!(
@@ -2989,9 +3397,12 @@ mod tests {
             "/api/v1/workspaces/w1/api-client/overview?q=login&kind=requests"
         );
         assert_eq!(
-            route_for("api_get_request", &json!({"workspace_id":"w1","request_id":"r1"}))
-                .unwrap()
-                .path,
+            route_for(
+                "api_get_request",
+                &json!({"workspace_id":"w1","request_id":"r1"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/workspaces/w1/api-client/requests/r1?shape=agent"
         );
         assert_eq!(
@@ -3020,7 +3431,10 @@ mod tests {
             execute.path,
             "/api/v1/workspaces/w1/api-client/requests/r1/execute"
         );
-        assert_eq!(execute.body.unwrap(), json!({"shape":"agent","confirm":true}));
+        assert_eq!(
+            execute.body.unwrap(),
+            json!({"shape":"agent","confirm":true})
+        );
 
         let update = route_for(
             "api_upsert_request",
@@ -3129,11 +3543,19 @@ mod tests {
         assert!(DEFAULT_ENABLED.contains(&"room_post"));
         assert!(DEFAULT_ENABLED.contains(&"room_read"));
         assert!(!DANGEROUS.contains(&"room_post"));
-        let c = route_for("room_post", &json!({"room_id":"r1","text":"hi","session_id":"s1"})).unwrap();
+        let c = route_for(
+            "room_post",
+            &json!({"room_id":"r1","text":"hi","session_id":"s1"}),
+        )
+        .unwrap();
         assert_eq!(c.method, Method::Post);
         assert_eq!(c.path, "/api/v1/agent-rooms/r1/messages");
         assert_eq!(c.body.unwrap(), json!({"text":"hi","session_id":"s1"}));
-        let c = route_for("room_read", &json!({"room_id":"r1","after":"m9","limit":50})).unwrap();
+        let c = route_for(
+            "room_read",
+            &json!({"room_id":"r1","after":"m9","limit":50}),
+        )
+        .unwrap();
         assert_eq!(c.method, Method::Get);
         assert_eq!(c.path, "/api/v1/agent-rooms/r1/messages?after=m9&limit=50");
         // No optional args → no dangling query separator.
@@ -3145,9 +3567,17 @@ mod tests {
     fn route_for_maps_workflows_and_brokers() {
         assert_eq!(
             route_for("list_workflows", &json!({"workspace_id":"ws1"})).unwrap(),
-            SelfCall { method: Method::Get, path: "/api/v1/workspaces/ws1/workflows".into(), body: None }
+            SelfCall {
+                method: Method::Get,
+                path: "/api/v1/workspaces/ws1/workflows".into(),
+                body: None
+            }
         );
-        let c = route_for("run_workflow", &json!({"workflow_id":"wf1","input":{"k":1},"start_node":"n2","review_mode":"fan_out"})).unwrap();
+        let c = route_for(
+            "run_workflow",
+            &json!({"workflow_id":"wf1","input":{"k":1},"start_node":"n2","review_mode":"fan_out"}),
+        )
+        .unwrap();
         assert_eq!(c.method, Method::Post);
         assert_eq!(c.path, "/api/v1/workflows/wf1/run");
         assert_eq!(
@@ -3156,16 +3586,36 @@ mod tests {
         );
         assert_eq!(
             route_for("cancel_workflow_run", &json!({"run_id":"r1"})).unwrap(),
-            SelfCall { method: Method::Post, path: "/api/v1/workflow-runs/r1/cancel".into(), body: Some(json!({})) }
+            SelfCall {
+                method: Method::Post,
+                path: "/api/v1/workflow-runs/r1/cancel".into(),
+                body: Some(json!({}))
+            }
         );
         assert_eq!(
-            route_for("get_broker_topic", &json!({"cluster_id":"c1","topic":"orders"})).unwrap().path,
+            route_for(
+                "get_broker_topic",
+                &json!({"cluster_id":"c1","topic":"orders"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/brokers/clusters/c1/topics/orders"
         );
-        let c = route_for("produce_broker_message", &json!({"cluster_id":"c1","topic":"orders","value":"hi","key":"k","confirm":true})).unwrap();
+        let c = route_for(
+            "produce_broker_message",
+            &json!({"cluster_id":"c1","topic":"orders","value":"hi","key":"k","confirm":true}),
+        )
+        .unwrap();
         assert_eq!(c.path, "/api/v1/brokers/clusters/c1/topics/orders/produce");
-        assert_eq!(c.body.unwrap(), json!({"value":"hi","key":"k","confirm":true}));
-        let c = route_for("consume_broker_messages", &json!({"cluster_id":"c1","topic":"orders","limit":10,"value_filter":"x"})).unwrap();
+        assert_eq!(
+            c.body.unwrap(),
+            json!({"value":"hi","key":"k","confirm":true})
+        );
+        let c = route_for(
+            "consume_broker_messages",
+            &json!({"cluster_id":"c1","topic":"orders","limit":10,"value_filter":"x"}),
+        )
+        .unwrap();
         assert_eq!(c.path, "/api/v1/brokers/clusters/c1/topics/orders/consume");
         assert_eq!(c.body.unwrap(), json!({"limit":10,"value_filter":"x"}));
     }
@@ -3174,9 +3624,11 @@ mod tests {
     fn run_workflow_forwards_review_mode() {
         // The override rides alone (no input / start_node) and reaches the route
         // verbatim — the route, not the tool, validates the value.
-        let c =
-            route_for("run_workflow", &json!({"workflow_id":"wf1","review_mode":"orchestrator"}))
-                .unwrap();
+        let c = route_for(
+            "run_workflow",
+            &json!({"workflow_id":"wf1","review_mode":"orchestrator"}),
+        )
+        .unwrap();
         assert_eq!(c.body.unwrap(), json!({"review_mode":"orchestrator"}));
         // Absent ⇒ no key at all, so pre-field callers post exactly what they did.
         let c = route_for("run_workflow", &json!({"workflow_id":"wf1"})).unwrap();
@@ -3189,16 +3641,32 @@ mod tests {
             spec["inputSchema"]["properties"]["review_mode"]["enum"],
             json!(["fan_out", "orchestrator"])
         );
-        assert!(spec["description"].as_str().unwrap().contains("review_mode"));
+        assert!(spec["description"]
+            .as_str()
+            .unwrap()
+            .contains("review_mode"));
     }
 
     #[test]
     fn route_for_maps_git_issues_swarm_memory_usage() {
-        assert_eq!(route_for("get_pr", &json!({"repo_id":"r1","number":7})).unwrap().path, "/api/v1/repos/r1/prs/7");
+        assert_eq!(
+            route_for("get_pr", &json!({"repo_id":"r1","number":7}))
+                .unwrap()
+                .path,
+            "/api/v1/repos/r1/prs/7"
+        );
         let c = route_for("create_pr", &json!({"repo_id":"r1","title":"T","description":"D","source_branch":"feat","target_branch":"main"})).unwrap();
         assert_eq!(c.path, "/api/v1/repos/r1/prs");
-        assert_eq!(c.body.unwrap(), json!({"title":"T","description":"D","source_branch":"feat","target_branch":"main"}));
-        assert_eq!(route_for("list_prs", &json!({"repo_id":"r1","state":"open"})).unwrap().path, "/api/v1/repos/r1/prs?state=open");
+        assert_eq!(
+            c.body.unwrap(),
+            json!({"title":"T","description":"D","source_branch":"feat","target_branch":"main"})
+        );
+        assert_eq!(
+            route_for("list_prs", &json!({"repo_id":"r1","state":"open"}))
+                .unwrap()
+                .path,
+            "/api/v1/repos/r1/prs?state=open"
+        );
         // The route returns a PAGE, not a bare array — a caller that doesn't
         // know that reads `items` off an array and gets nothing.
         let spec = otto_tool_specs()
@@ -3206,37 +3674,98 @@ mod tests {
             .find(|t| t["name"] == "otto.list_prs")
             .expect("list_prs spec");
         assert!(
-            spec["description"].as_str().unwrap_or_default().contains("has_more"),
+            spec["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("has_more"),
             "list_prs description must describe the page shape: {}",
             spec["description"]
         );
 
-        let c = route_for("search_issues", &json!({"account_id":"a1","query":"a = b","project":"X"})).unwrap();
+        let c = route_for(
+            "search_issues",
+            &json!({"account_id":"a1","query":"a = b","project":"X"}),
+        )
+        .unwrap();
         assert!(c.path.starts_with("/api/v1/issue/search?account_id=a1"));
         assert!(c.path.contains("&q=a%20%3D%20b"), "got {}", c.path);
         assert!(c.path.contains("&project=X"));
-        let c = route_for("transition_issue", &json!({"account_id":"a1","key":"K-1","transition_id":"21"})).unwrap();
+        let c = route_for(
+            "transition_issue",
+            &json!({"account_id":"a1","key":"K-1","transition_id":"21"}),
+        )
+        .unwrap();
         assert_eq!(c.path, "/api/v1/issue/a1/K-1/transitions");
         assert_eq!(c.body.unwrap(), json!({"transition_id":"21"}));
 
-        let c = route_for("post_swarm_board", &json!({"swarm_id":"s1","body":"hello","project_id":"p1"})).unwrap();
+        let c = route_for(
+            "post_swarm_board",
+            &json!({"swarm_id":"s1","body":"hello","project_id":"p1"}),
+        )
+        .unwrap();
         assert_eq!(c.path, "/api/v1/swarm/swarms/s1/board");
         assert_eq!(c.body.unwrap(), json!({"body":"hello","project_id":"p1"}));
 
-        let c = route_for("search_memory", &json!({"workspace_id":"ws1","query":"schema","k":5})).unwrap();
+        let c = route_for(
+            "search_memory",
+            &json!({"workspace_id":"ws1","query":"schema","k":5}),
+        )
+        .unwrap();
         assert_eq!(c.path, "/api/v1/workspaces/ws1/memory/search");
         assert_eq!(c.body.unwrap(), json!({"text":"schema","k":5}));
-        assert_eq!(route_for("list_memory", &json!({"workspace_id":"ws1","collection":"vault"})).unwrap().path, "/api/v1/workspaces/ws1/memories?collection=vault");
+        assert_eq!(
+            route_for(
+                "list_memory",
+                &json!({"workspace_id":"ws1","collection":"vault"})
+            )
+            .unwrap()
+            .path,
+            "/api/v1/workspaces/ws1/memories?collection=vault"
+        );
 
-        assert_eq!(route_for("get_usage_summary", &json!({"days":7})).unwrap().path, "/api/v1/usage/summary?days=7");
-        assert_eq!(route_for("get_usage_summary", &json!({})).unwrap().path, "/api/v1/usage/summary");
+        assert_eq!(
+            route_for("get_usage_summary", &json!({"days":7}))
+                .unwrap()
+                .path,
+            "/api/v1/usage/summary?days=7"
+        );
+        assert_eq!(
+            route_for("get_usage_summary", &json!({})).unwrap().path,
+            "/api/v1/usage/summary"
+        );
         assert_eq!(
             route_for("list_bundled_skills", &json!({})).unwrap(),
-            SelfCall { method: Method::Get, path: "/api/v1/library/bundled".into(), body: None }
+            SelfCall {
+                method: Method::Get,
+                path: "/api/v1/library/bundled".into(),
+                body: None
+            }
         );
-        assert_eq!(route_for("list_findings", &json!({"review_id":"rv1"})).unwrap().path, "/api/v1/reviews/rv1/findings");
-        assert_eq!(route_for("broadcast_message", &json!({"workspace_id":"ws1","text":"hi"})).unwrap().body.unwrap(), json!({"text":"hi"}));
-        assert_eq!(route_for("test_integration", &json!({"workspace_id":"ws1","channel":"slack"})).unwrap().path, "/api/v1/workspaces/ws1/integrations/slack/test");
+        assert_eq!(
+            route_for("list_findings", &json!({"review_id":"rv1"}))
+                .unwrap()
+                .path,
+            "/api/v1/reviews/rv1/findings"
+        );
+        assert_eq!(
+            route_for(
+                "broadcast_message",
+                &json!({"workspace_id":"ws1","text":"hi"})
+            )
+            .unwrap()
+            .body
+            .unwrap(),
+            json!({"text":"hi"})
+        );
+        assert_eq!(
+            route_for(
+                "test_integration",
+                &json!({"workspace_id":"ws1","channel":"slack"})
+            )
+            .unwrap()
+            .path,
+            "/api/v1/workspaces/ws1/integrations/slack/test"
+        );
     }
 
     // ----- AWS / Kubernetes consoles (docs/design/aws-k8s-consoles.md §6) ----
@@ -3268,11 +3797,18 @@ mod tests {
         let names = spec_names();
         let specs = otto_tool_specs();
         for n in AWS_READS.iter().chain(K8S_READS).chain(CONSOLE_WRITES) {
-            assert!(names.contains(&format!("otto.{n}")), "missing spec otto.{n}");
-            let spec = specs.iter().find(|s| s["name"] == format!("otto.{n}")).unwrap();
+            assert!(
+                names.contains(&format!("otto.{n}")),
+                "missing spec otto.{n}"
+            );
+            let spec = specs
+                .iter()
+                .find(|s| s["name"] == format!("otto.{n}"))
+                .unwrap();
             let cat = spec["category"].as_str().unwrap();
             assert!(
-                (n.starts_with("aws_") && cat == "AWS") || (n.starts_with("k8s_") && cat == "Kubernetes"),
+                (n.starts_with("aws_") && cat == "AWS")
+                    || (n.starts_with("k8s_") && cat == "Kubernetes"),
                 "{n} in unexpected category {cat}"
             );
         }
@@ -3284,7 +3820,10 @@ mod tests {
             assert!(DANGEROUS.contains(w), "{w} must be DANGEROUS");
             assert!(!DEFAULT_ENABLED.contains(w), "{w} must be off by default");
             assert!(tool_is_mutating(w));
-            let spec = specs.iter().find(|s| s["name"] == format!("otto.{w}")).unwrap();
+            let spec = specs
+                .iter()
+                .find(|s| s["name"] == format!("otto.{w}"))
+                .unwrap();
             assert_eq!(spec["mutating"], json!(true));
         }
     }
@@ -3293,59 +3832,127 @@ mod tests {
     fn route_for_maps_aws_console() {
         assert_eq!(
             route_for("aws_list_accounts", &json!({})).unwrap(),
-            SelfCall { method: Method::Get, path: "/api/v1/aws/accounts".into(), body: None }
+            SelfCall {
+                method: Method::Get,
+                path: "/api/v1/aws/accounts".into(),
+                body: None
+            }
         );
         assert_eq!(
-            route_for("aws_s3_list_buckets", &json!({"account_id":"a1"})).unwrap().path,
+            route_for("aws_s3_list_buckets", &json!({"account_id":"a1"}))
+                .unwrap()
+                .path,
             "/api/v1/aws/accounts/a1/s3/buckets?"
         );
         assert_eq!(
-            route_for("aws_s3_list_buckets", &json!({"account_id":"a1","region":"eu-west-1"})).unwrap().path,
+            route_for(
+                "aws_s3_list_buckets",
+                &json!({"account_id":"a1","region":"eu-west-1"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/aws/accounts/a1/s3/buckets?region=eu-west-1"
         );
         assert_eq!(
-            route_for("aws_s3_list_objects", &json!({"account_id":"a1","bucket":"b","prefix":"logs/","token":"t","max":50})).unwrap().path,
+            route_for(
+                "aws_s3_list_objects",
+                &json!({"account_id":"a1","bucket":"b","prefix":"logs/","token":"t","max":50})
+            )
+            .unwrap()
+            .path,
             "/api/v1/aws/accounts/a1/s3/buckets/b/objects?prefix=logs%2F&token=t&max=50"
         );
         assert_eq!(
-            route_for("aws_s3_preview", &json!({"account_id":"a1","bucket":"b","key":"a b.json","max_bytes":1024})).unwrap().path,
+            route_for(
+                "aws_s3_preview",
+                &json!({"account_id":"a1","bucket":"b","key":"a b.json","max_bytes":1024})
+            )
+            .unwrap()
+            .path,
             "/api/v1/aws/accounts/a1/s3/buckets/b/preview?key=a%20b.json&max_bytes=1024"
         );
         assert_eq!(
-            route_for("aws_s3_preview", &json!({"account_id":"a1","bucket":"b","key":"k"})).unwrap().path,
+            route_for(
+                "aws_s3_preview",
+                &json!({"account_id":"a1","bucket":"b","key":"k"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/aws/accounts/a1/s3/buckets/b/preview?key=k"
         );
         assert_eq!(
-            route_for("aws_sqs_list_queues", &json!({"account_id":"a1","prefix":"orders"})).unwrap().path,
+            route_for(
+                "aws_sqs_list_queues",
+                &json!({"account_id":"a1","prefix":"orders"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/aws/accounts/a1/sqs/queues?prefix=orders"
         );
         // Peek: read-only POST, visibility timeout pinned to 0, max clamped 1..10.
-        let c = route_for("aws_sqs_peek", &json!({"account_id":"a1","url":"https://sqs/q","max":99})).unwrap();
+        let c = route_for(
+            "aws_sqs_peek",
+            &json!({"account_id":"a1","url":"https://sqs/q","max":99}),
+        )
+        .unwrap();
         assert_eq!(c.method, Method::Post);
         assert_eq!(c.path, "/api/v1/aws/accounts/a1/sqs/queues/peek?");
-        assert_eq!(c.body.unwrap(), json!({"url":"https://sqs/q","visibility_timeout":0,"max":10}));
+        assert_eq!(
+            c.body.unwrap(),
+            json!({"url":"https://sqs/q","visibility_timeout":0,"max":10})
+        );
         let c = route_for("aws_sqs_send", &json!({"account_id":"a1","url":"https://sqs/q.fifo","body":"{}","group_id":"g1","delay_seconds":5})).unwrap();
         assert_eq!(c.method, Method::Post);
         assert_eq!(c.path, "/api/v1/aws/accounts/a1/sqs/queues/send?");
-        assert_eq!(c.body.unwrap(), json!({"url":"https://sqs/q.fifo","body":"{}","group_id":"g1","delay_seconds":5}));
         assert_eq!(
-            route_for("aws_ec2_list_instances", &json!({"account_id":"a1","region":"us-east-1","state":"running","q":"web"})).unwrap().path,
+            c.body.unwrap(),
+            json!({"url":"https://sqs/q.fifo","body":"{}","group_id":"g1","delay_seconds":5})
+        );
+        assert_eq!(
+            route_for(
+                "aws_ec2_list_instances",
+                &json!({"account_id":"a1","region":"us-east-1","state":"running","q":"web"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/aws/accounts/a1/ec2/instances?region=us-east-1&state=running&q=web"
         );
         assert_eq!(
-            route_for("aws_athena_list_tables", &json!({"account_id":"a1","database":"db","catalog":"AwsDataCatalog"})).unwrap().path,
+            route_for(
+                "aws_athena_list_tables",
+                &json!({"account_id":"a1","database":"db","catalog":"AwsDataCatalog"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/aws/accounts/a1/athena/tables?database=db&catalog=AwsDataCatalog"
         );
-        let c = route_for("aws_athena_query", &json!({"account_id":"a1","sql":"SELECT 1","database":"db","workgroup":"primary"})).unwrap();
+        let c = route_for(
+            "aws_athena_query",
+            &json!({"account_id":"a1","sql":"SELECT 1","database":"db","workgroup":"primary"}),
+        )
+        .unwrap();
         assert_eq!(c.method, Method::Post);
         assert_eq!(c.path, "/api/v1/aws/accounts/a1/athena/query?");
-        assert_eq!(c.body.unwrap(), json!({"sql":"SELECT 1","database":"db","workgroup":"primary"}));
         assert_eq!(
-            route_for("aws_athena_get_query", &json!({"account_id":"a1","query_execution_id":"q-1","token":"t2","max":100})).unwrap().path,
+            c.body.unwrap(),
+            json!({"sql":"SELECT 1","database":"db","workgroup":"primary"})
+        );
+        assert_eq!(
+            route_for(
+                "aws_athena_get_query",
+                &json!({"account_id":"a1","query_execution_id":"q-1","token":"t2","max":100})
+            )
+            .unwrap()
+            .path,
             "/api/v1/aws/accounts/a1/athena/query/q-1?token=t2&max=100"
         );
         assert_eq!(
-            route_for("aws_eks_list_clusters", &json!({"account_id":"a1","region":"eu-west-1"})).unwrap().path,
+            route_for(
+                "aws_eks_list_clusters",
+                &json!({"account_id":"a1","region":"eu-west-1"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/aws/accounts/a1/eks/clusters?region=eu-west-1"
         );
         // Required ids are enforced.
@@ -3358,19 +3965,38 @@ mod tests {
     fn route_for_maps_k8s_console() {
         assert_eq!(
             route_for("k8s_list_clusters", &json!({})).unwrap(),
-            SelfCall { method: Method::Get, path: "/api/v1/k8s/clusters".into(), body: None }
+            SelfCall {
+                method: Method::Get,
+                path: "/api/v1/k8s/clusters".into(),
+                body: None
+            }
         );
         assert_eq!(
-            route_for("k8s_get_resources", &json!({"cluster_id":"c1","kind":"pods","namespace":"prod","label":"app=web"})).unwrap().path,
+            route_for(
+                "k8s_get_resources",
+                &json!({"cluster_id":"c1","kind":"pods","namespace":"prod","label":"app=web"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/k8s/clusters/c1/resources?kind=pods&ns=prod&label=app%3Dweb"
         );
         // No namespace ⇒ no `ns=` (route default = all namespaces).
         assert_eq!(
-            route_for("k8s_get_resources", &json!({"cluster_id":"c1","kind":"deployments"})).unwrap().path,
+            route_for(
+                "k8s_get_resources",
+                &json!({"cluster_id":"c1","kind":"deployments"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/k8s/clusters/c1/resources?kind=deployments"
         );
         assert_eq!(
-            route_for("k8s_describe", &json!({"cluster_id":"c1","kind":"deployments","namespace":"prod","name":"web"})).unwrap().path,
+            route_for(
+                "k8s_describe",
+                &json!({"cluster_id":"c1","kind":"deployments","namespace":"prod","name":"web"})
+            )
+            .unwrap()
+            .path,
             "/api/v1/k8s/clusters/c1/resource?kind=deployments&ns=prod&name=web"
         );
         let c = route_for("k8s_logs", &json!({"cluster_id":"c1","namespace":"prod","pod":"web-1","container":"app","tail":200,"since":"10m","previous":true,"follow":true})).unwrap();
@@ -3379,36 +4005,67 @@ mod tests {
         assert!(!c.path.contains("follow"), "follow must never be forwarded");
         assert!(TEXT_TOOLS.contains(&"k8s_logs"));
         assert_eq!(
-            route_for("k8s_top", &json!({"cluster_id":"c1","namespace":"prod"})).unwrap().path,
+            route_for("k8s_top", &json!({"cluster_id":"c1","namespace":"prod"}))
+                .unwrap()
+                .path,
             "/api/v1/k8s/clusters/c1/metrics?ns=prod"
         );
         assert_eq!(
-            route_for("k8s_health", &json!({"cluster_id":"c1","window":"6h"})).unwrap().path,
+            route_for("k8s_health", &json!({"cluster_id":"c1","window":"6h"}))
+                .unwrap()
+                .path,
             "/api/v1/k8s/clusters/c1/monitor/health?window=6h"
         );
         assert_eq!(
-            route_for("k8s_health", &json!({"cluster_id":"c1"})).unwrap().path,
+            route_for("k8s_health", &json!({"cluster_id":"c1"}))
+                .unwrap()
+                .path,
             "/api/v1/k8s/clusters/c1/monitor/health?"
         );
         let c = route_for("k8s_action", &json!({"cluster_id":"c1","action":"scale","kind":"deployments","namespace":"prod","name":"web","params":{"replicas":3}})).unwrap();
         assert_eq!(c.method, Method::Post);
         assert_eq!(c.path, "/api/v1/k8s/clusters/c1/actions");
-        assert_eq!(c.body.unwrap(), json!({"action":"scale","kind":"deployments","ns":"prod","name":"web","params":{"replicas":3}}));
+        assert_eq!(
+            c.body.unwrap(),
+            json!({"action":"scale","kind":"deployments","ns":"prod","name":"web","params":{"replicas":3}})
+        );
         // params defaults to {} so the route's confirm_name check sees an object.
         let c = route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart","kind":"deployments","namespace":"prod","name":"web"})).unwrap();
         assert_eq!(c.body.unwrap()["params"], json!({}));
         assert!(route_for("k8s_action", &json!({"cluster_id":"c1","action":"restart"})).is_err());
-        assert!(route_for("k8s_describe", &json!({"cluster_id":"c1","kind":"pods","name":"p"})).is_err());
+        assert!(route_for(
+            "k8s_describe",
+            &json!({"cluster_id":"c1","kind":"pods","name":"p"})
+        )
+        .is_err());
     }
 
     #[test]
     fn dangerous_detail_surfaces_console_targets() {
-        let d = dangerous_detail("otto.k8s_action", &json!({"cluster_id":"c1","action":"delete_pod","kind":"pods","namespace":"prod","name":"web-1"}));
-        assert!(d.contains("delete_pod") && d.contains("pods/web-1") && d.contains("prod") && d.contains("c1"), "{d}");
-        let d = dangerous_detail("otto.aws_sqs_send", &json!({"account_id":"a1","url":"https://sqs/q"}));
+        let d = dangerous_detail(
+            "otto.k8s_action",
+            &json!({"cluster_id":"c1","action":"delete_pod","kind":"pods","namespace":"prod","name":"web-1"}),
+        );
+        assert!(
+            d.contains("delete_pod")
+                && d.contains("pods/web-1")
+                && d.contains("prod")
+                && d.contains("c1"),
+            "{d}"
+        );
+        let d = dangerous_detail(
+            "otto.aws_sqs_send",
+            &json!({"account_id":"a1","url":"https://sqs/q"}),
+        );
         assert!(d.contains("https://sqs/q") && d.contains("a1"), "{d}");
-        let d = dangerous_detail("otto.aws_athena_query", &json!({"account_id":"a1","sql":"SELECT * FROM t","database":"db"}));
-        assert!(d.contains("SELECT * FROM t") && d.contains("db") && d.contains("a1"), "{d}");
+        let d = dangerous_detail(
+            "otto.aws_athena_query",
+            &json!({"account_id":"a1","sql":"SELECT * FROM t","database":"db"}),
+        );
+        assert!(
+            d.contains("SELECT * FROM t") && d.contains("db") && d.contains("a1"),
+            "{d}"
+        );
     }
 
     #[test]
@@ -3422,9 +4079,21 @@ mod tests {
 
     #[test]
     fn query_db_readonly_sql_guard_lives_in_route_for() {
-        assert!(route_for("query_db_readonly", &json!({"connection_id":"c1","statement":"SELECT 1"})).is_ok());
-        assert!(route_for("query_db_readonly", &json!({"connection_id":"c1","statement":"DELETE FROM t"})).is_err());
-        assert!(route_for("query_db_readonly", &json!({"connection_id":"c1","statement":"SELECT 1; DROP TABLE t"})).is_err());
+        assert!(route_for(
+            "query_db_readonly",
+            &json!({"connection_id":"c1","statement":"SELECT 1"})
+        )
+        .is_ok());
+        assert!(route_for(
+            "query_db_readonly",
+            &json!({"connection_id":"c1","statement":"DELETE FROM t"})
+        )
+        .is_err());
+        assert!(route_for(
+            "query_db_readonly",
+            &json!({"connection_id":"c1","statement":"SELECT 1; DROP TABLE t"})
+        )
+        .is_err());
     }
 
     #[test]
@@ -3438,32 +4107,66 @@ mod tests {
             "otto.rollback_improvement_edit",
             "otto.run_self_improvement",
         ] {
-            assert!(names.contains(&n.to_string()), "missing self-improvement spec {n}");
+            assert!(
+                names.contains(&n.to_string()),
+                "missing self-improvement spec {n}"
+            );
         }
         assert!(DEFAULT_ENABLED.contains(&"list_improvement_edits"));
         assert!(DANGEROUS.contains(&"approve_improvement_edit"));
         assert!(DANGEROUS.contains(&"reject_improvement_edit"));
         assert!(DANGEROUS.contains(&"rollback_improvement_edit"));
         assert_eq!(
-            route_for("list_improvement_edits", &json!({"workspace_id":"ws1"})).unwrap().path,
+            route_for("list_improvement_edits", &json!({"workspace_id":"ws1"}))
+                .unwrap()
+                .path,
             "/api/v1/workspaces/ws1/improvement/edits"
         );
         assert_eq!(
             route_for("approve_improvement_edit", &json!({"edit_id":"e1"})).unwrap(),
-            SelfCall { method: Method::Post, path: "/api/v1/improvement/edits/e1/approve".into(), body: Some(json!({})) }
+            SelfCall {
+                method: Method::Post,
+                path: "/api/v1/improvement/edits/e1/approve".into(),
+                body: Some(json!({}))
+            }
         );
-        assert_eq!(route_for("reject_improvement_edit", &json!({"edit_id":"e1"})).unwrap().path, "/api/v1/improvement/edits/e1/reject");
-        assert_eq!(route_for("rollback_improvement_edit", &json!({"edit_id":"e1"})).unwrap().path, "/api/v1/improvement/edits/e1/rollback");
-        assert!(dangerous_detail("otto.approve_improvement_edit", &json!({"edit_id":"e9"})).contains("e9"));
+        assert_eq!(
+            route_for("reject_improvement_edit", &json!({"edit_id":"e1"}))
+                .unwrap()
+                .path,
+            "/api/v1/improvement/edits/e1/reject"
+        );
+        assert_eq!(
+            route_for("rollback_improvement_edit", &json!({"edit_id":"e1"}))
+                .unwrap()
+                .path,
+            "/api/v1/improvement/edits/e1/rollback"
+        );
+        assert!(
+            dangerous_detail("otto.approve_improvement_edit", &json!({"edit_id":"e9"}))
+                .contains("e9")
+        );
     }
 
     #[test]
     fn dangerous_detail_surfaces_new_tool_targets() {
-        assert!(dangerous_detail("otto.run_workflow", &json!({"workflow_id":"wf-9"})).contains("wf-9"));
-        assert!(dangerous_detail("otto.produce_broker_message", &json!({"topic":"orders","cluster_id":"c1"})).contains("orders"));
-        let d = dangerous_detail("otto.create_pr", &json!({"repo_id":"r1","title":"Fix","source_branch":"f","target_branch":"main"}));
+        assert!(
+            dangerous_detail("otto.run_workflow", &json!({"workflow_id":"wf-9"})).contains("wf-9")
+        );
+        assert!(dangerous_detail(
+            "otto.produce_broker_message",
+            &json!({"topic":"orders","cluster_id":"c1"})
+        )
+        .contains("orders"));
+        let d = dangerous_detail(
+            "otto.create_pr",
+            &json!({"repo_id":"r1","title":"Fix","source_branch":"f","target_branch":"main"}),
+        );
         assert!(d.contains("Fix") && d.contains("main"));
-        assert!(dangerous_detail("otto.broadcast_message", &json!({"text":"hello team"})).contains("hello team"));
+        assert!(
+            dangerous_detail("otto.broadcast_message", &json!({"text":"hello team"}))
+                .contains("hello team")
+        );
     }
 
     // ----- Vault: optional workspace_id ------------------------------------
@@ -3511,7 +4214,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(create.method, Method::Post);
-        assert_eq!(create.path, "/api/v1/issue/confluence/pages?account_id=acc1");
+        assert_eq!(
+            create.path,
+            "/api/v1/issue/confluence/pages?account_id=acc1"
+        );
         let body = create.body.unwrap();
         assert_eq!(body["space_key"], json!("STOR"));
         assert_eq!(body["body_md"], json!("# hi"));
@@ -3537,7 +4243,10 @@ mod tests {
             "/api/v1/issue/confluence/pages/12345?account_id=acc1"
         );
         let ub = upd.body.unwrap();
-        assert!(ub.get("version").is_none(), "callers must not send a version");
+        assert!(
+            ub.get("version").is_none(),
+            "callers must not send a version"
+        );
         assert!(ub.get("title").is_none(), "absent title must stay absent");
 
         let cmt = route_for(
@@ -3573,7 +4282,10 @@ mod tests {
                 "{name} lost the workspace_id property"
             );
             if name != "otto.vault_list" {
-                assert!(reqd.iter().any(|r| r == "vault_id"), "{name} must require vault_id");
+                assert!(
+                    reqd.iter().any(|r| r == "vault_id"),
+                    "{name} must require vault_id"
+                );
             }
         }
     }
@@ -3596,12 +4308,21 @@ mod tests {
         ];
         // Reads take the first accessible workspace; writes skip ahead to the
         // first Editor+ membership.
-        assert_eq!(pick_vault_workspace(&rows, false).as_deref(), Some("view-only"));
-        assert_eq!(pick_vault_workspace(&rows, true).as_deref(), Some("editable"));
+        assert_eq!(
+            pick_vault_workspace(&rows, false).as_deref(),
+            Some("view-only")
+        );
+        assert_eq!(
+            pick_vault_workspace(&rows, true).as_deref(),
+            Some("editable")
+        );
         // Viewer-only memberships still resolve for a mutating tool — the
         // self-call's native RBAC owns the denial.
         let viewer_only = vec![(ws("view-only"), WorkspaceRole::Viewer)];
-        assert_eq!(pick_vault_workspace(&viewer_only, true).as_deref(), Some("view-only"));
+        assert_eq!(
+            pick_vault_workspace(&viewer_only, true).as_deref(),
+            Some("view-only")
+        );
         assert_eq!(pick_vault_workspace(&[], false), None);
     }
 }

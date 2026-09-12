@@ -345,7 +345,7 @@ pub fn looks_like_test_command(cmd: &str) -> bool {
         "playwright test",
         "pytest",
         "python -m pytest",
-        "go vet",        // build/lint runners that still gate quality
+        "go vet", // build/lint runners that still gate quality
         "cargo clippy",
         "svelte-check",
         "ctest",
@@ -422,9 +422,7 @@ fn required_met(pack: &ProofPack, arts: &[ProofArtifact]) -> bool {
                     .filter(|a| a.kind == ProofArtifactKind::Approval)
                     .all(|a| a.status == ProofArtifactStatus::Passed)
         }
-        RequiredSpec::Lenient => arts
-            .iter()
-            .any(|a| a.status != ProofArtifactStatus::Failed),
+        RequiredSpec::Lenient => arts.iter().any(|a| a.status != ProofArtifactStatus::Failed),
     }
 }
 
@@ -448,10 +446,7 @@ pub fn derive_status(pack: &ProofPack, arts: &[ProofArtifact]) -> ProofStatus {
 
 /// Read a usize-ish field from a diff artifact's metadata.
 fn meta_usize(a: &ProofArtifact, key: &str) -> usize {
-    a.metadata
-        .get(key)
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize
+    a.metadata.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize
 }
 
 /// Compute the 0..100 risk score from the artifact set. See spec §4.2.
@@ -549,7 +544,10 @@ pub fn compute_badges(pack: &ProofPack, arts: &[ProofArtifact]) -> Vec<ProofBadg
 
     // CI outcome (when a ci artifact is present). Failed wins, then pending,
     // then passed — mirrors how a human reads a check-run summary.
-    let ci: Vec<&ProofArtifact> = arts.iter().filter(|a| a.kind == ProofArtifactKind::Ci).collect();
+    let ci: Vec<&ProofArtifact> = arts
+        .iter()
+        .filter(|a| a.kind == ProofArtifactKind::Ci)
+        .collect();
     if !ci.is_empty() {
         if ci.iter().any(|a| a.status == ProofArtifactStatus::Failed) {
             out.push(ProofBadge::CiFailed);
@@ -864,9 +862,9 @@ pub fn compute_done_contract(
         .iter()
         .any(|a| a.kind == ProofArtifactKind::Ci && a.status == ProofArtifactStatus::Passed);
     let review_ok = has_kind(arts, ProofArtifactKind::Review)
-        && !arts
-            .iter()
-            .any(|a| a.kind == ProofArtifactKind::Review && a.status == ProofArtifactStatus::Failed);
+        && !arts.iter().any(|a| {
+            a.kind == ProofArtifactKind::Review && a.status == ProofArtifactStatus::Failed
+        });
     let pr_ok = has_kind(arts, ProofArtifactKind::PrCheck)
         && !arts.iter().any(|a| {
             a.kind == ProofArtifactKind::PrCheck && a.status == ProofArtifactStatus::Failed
@@ -885,16 +883,17 @@ pub fn compute_done_contract(
         .iter()
         .any(|a| a.kind == ProofArtifactKind::Approval && a.status == ProofArtifactStatus::Passed);
 
-    let item = |key: &str, label: &str, required: bool, satisfied: bool, weight: u8, detail: &str| {
-        ContractItem {
-            key: key.into(),
-            label: label.into(),
-            required,
-            satisfied,
-            weight,
-            detail: detail.into(),
-        }
-    };
+    let item =
+        |key: &str, label: &str, required: bool, satisfied: bool, weight: u8, detail: &str| {
+            ContractItem {
+                key: key.into(),
+                label: label.into(),
+                required,
+                satisfied,
+                weight,
+                detail: detail.into(),
+            }
+        };
 
     let items = vec![
         item(
@@ -903,7 +902,11 @@ pub fn compute_done_contract(
             code_change,
             has_diff,
             15,
-            if has_diff { "diff present" } else { "no diff artifact" },
+            if has_diff {
+                "diff present"
+            } else {
+                "no diff artifact"
+            },
         ),
         item(
             "tests",
@@ -911,7 +914,11 @@ pub fn compute_done_contract(
             code_change || policy.require_test,
             has_passing_test,
             25,
-            if has_passing_test { "passing test command" } else { "no passing recognized test" },
+            if has_passing_test {
+                "passing test command"
+            } else {
+                "no passing recognized test"
+            },
         ),
         item(
             "no_failures",
@@ -919,7 +926,13 @@ pub fn compute_done_contract(
             true,
             no_failures,
             20,
-            if !nonempty { "no evidence yet" } else if no_failures { "nothing failed" } else { "a failed artifact" },
+            if !nonempty {
+                "no evidence yet"
+            } else if no_failures {
+                "nothing failed"
+            } else {
+                "a failed artifact"
+            },
         ),
         item(
             "ci",
@@ -927,7 +940,11 @@ pub fn compute_done_contract(
             policy.require_ci,
             ci_passed,
             10,
-            if ci_passed { "CI passed" } else { "no green CI" },
+            if ci_passed {
+                "CI passed"
+            } else {
+                "no green CI"
+            },
         ),
         item(
             "review",
@@ -935,7 +952,11 @@ pub fn compute_done_contract(
             spec == RequiredSpec::Review || policy.require_review,
             review_ok,
             10,
-            if review_ok { "review resolved" } else { "no resolved review" },
+            if review_ok {
+                "review resolved"
+            } else {
+                "no resolved review"
+            },
         ),
         item(
             "pr_consistency",
@@ -943,22 +964,70 @@ pub fn compute_done_contract(
             policy.require_pr_consistency,
             pr_ok,
             10,
-            if pr_ok { "PR description consistent" } else { "no passing PR check" },
+            if pr_ok {
+                "PR description consistent"
+            } else {
+                "no passing PR check"
+            },
         ),
-        item("ui_evidence", "UI screenshot/video", false, ui_ok, 5,
-            if ui_ok { "UI media attached" } else { "no UI evidence" }),
-        item("data_evidence", "API/DB/Kafka verified", false, data_ok, 5,
-            if data_ok { "data read verified" } else { "no data evidence" }),
-        item("self_review", "Agent self-review", false, self_review, 5,
-            if self_review { "self-review present" } else { "no self-review" }),
-        item("human_approval", "Human approved", false, human_ok, 5,
-            if human_ok { "human approval recorded" } else { "no human approval" }),
+        item(
+            "ui_evidence",
+            "UI screenshot/video",
+            false,
+            ui_ok,
+            5,
+            if ui_ok {
+                "UI media attached"
+            } else {
+                "no UI evidence"
+            },
+        ),
+        item(
+            "data_evidence",
+            "API/DB/Kafka verified",
+            false,
+            data_ok,
+            5,
+            if data_ok {
+                "data read verified"
+            } else {
+                "no data evidence"
+            },
+        ),
+        item(
+            "self_review",
+            "Agent self-review",
+            false,
+            self_review,
+            5,
+            if self_review {
+                "self-review present"
+            } else {
+                "no self-review"
+            },
+        ),
+        item(
+            "human_approval",
+            "Human approved",
+            false,
+            human_ok,
+            5,
+            if human_ok {
+                "human approval recorded"
+            } else {
+                "no human approval"
+            },
+        ),
     ];
 
     // Score over the *required* weight. `no_failures` is required for every kind
     // (weight 20), so the required weight is always ≥ 20; `.max(1)` is a
     // belt-and-braces guard against a future all-optional contract.
-    let req_weight: u32 = items.iter().filter(|i| i.required).map(|i| i.weight as u32).sum();
+    let req_weight: u32 = items
+        .iter()
+        .filter(|i| i.required)
+        .map(|i| i.weight as u32)
+        .sum();
     let req_sat: u32 = items
         .iter()
         .filter(|i| i.required && i.satisfied)
@@ -969,7 +1038,11 @@ pub fn compute_done_contract(
     } else {
         // No required items → score by present optional weight.
         (
-            items.iter().filter(|i| i.satisfied).map(|i| i.weight as u32).sum(),
+            items
+                .iter()
+                .filter(|i| i.satisfied)
+                .map(|i| i.weight as u32)
+                .sum(),
             items.iter().map(|i| i.weight as u32).sum(),
         )
     };
@@ -1109,14 +1182,22 @@ pub fn check_pr_consistency(input: &PrConsistencyInput) -> PrConsistencyReport {
             label: "Description is substantive".into(),
             passed: desc_ok,
             weight: 20,
-            detail: if desc_ok { "≥40 chars".into() } else { "too short / empty".into() },
+            detail: if desc_ok {
+                "≥40 chars".into()
+            } else {
+                "too short / empty".into()
+            },
         },
         PrConsistencyCheck {
             key: "title".into(),
             label: "Title is sane".into(),
             passed: title_ok,
             weight: 10,
-            detail: if title_ok { "ok".into() } else { "empty or implausible length".into() },
+            detail: if title_ok {
+                "ok".into()
+            } else {
+                "empty or implausible length".into()
+            },
         },
         PrConsistencyCheck {
             key: "mentions_change".into(),
@@ -1134,7 +1215,11 @@ pub fn check_pr_consistency(input: &PrConsistencyInput) -> PrConsistencyReport {
             label: "Has testing notes for a code change".into(),
             passed: testing_ok,
             weight: 15,
-            detail: if testing_ok { "ok".into() } else { "code changed but no testing notes".into() },
+            detail: if testing_ok {
+                "ok".into()
+            } else {
+                "code changed but no testing notes".into()
+            },
         },
         PrConsistencyCheck {
             key: "no_false_test_claim".into(),
@@ -1149,7 +1234,11 @@ pub fn check_pr_consistency(input: &PrConsistencyInput) -> PrConsistencyReport {
         },
     ];
 
-    let score: u32 = checks.iter().filter(|c| c.passed).map(|c| c.weight as u32).sum();
+    let score: u32 = checks
+        .iter()
+        .filter(|c| c.passed)
+        .map(|c| c.weight as u32)
+        .sum();
     let score = score.min(100) as u8;
     let passed = !false_claim && score >= PR_CONSISTENCY_THRESHOLD;
 
@@ -1207,7 +1296,14 @@ fn artifact_preview(a: &ProofArtifact) -> String {
 pub fn render_report_md(v: &ReportView) -> String {
     let p = v.pack;
     let mut s = String::new();
-    s.push_str(&format!("# Proof Pack — {}\n\n", if p.title.is_empty() { &p.work_item_id } else { &p.title }));
+    s.push_str(&format!(
+        "# Proof Pack — {}\n\n",
+        if p.title.is_empty() {
+            &p.work_item_id
+        } else {
+            &p.title
+        }
+    ));
     s.push_str(&format!(
         "- **Status:** {}\n- **Done contract:** {}/100\n- **Risk:** {}/100\n- **Work item:** {} `{}`\n- **Generated:** {}\n\n",
         p.status.as_str(), v.contract.score, p.risk_score, p.work_item_kind.as_str(), p.work_item_id, v.generated_at
@@ -1222,7 +1318,10 @@ pub fn render_report_md(v: &ReportView) -> String {
         s.push_str(&format!(
             "> ⚠️ **Waived** by `{}`{}: {}\n\n",
             by,
-            p.waived_at.as_deref().map(|t| format!(" at {t}")).unwrap_or_default(),
+            p.waived_at
+                .as_deref()
+                .map(|t| format!(" at {t}"))
+                .unwrap_or_default(),
             reason
         ));
     }
@@ -1231,7 +1330,10 @@ pub fn render_report_md(v: &ReportView) -> String {
     for it in &v.contract.items {
         let mark = if it.satisfied { "x" } else { " " };
         let req = if it.required { " *(required)*" } else { "" };
-        s.push_str(&format!("- [{}] {}{} — {}\n", mark, it.label, req, it.detail));
+        s.push_str(&format!(
+            "- [{}] {}{} — {}\n",
+            mark, it.label, req, it.detail
+        ));
     }
     s.push('\n');
 
@@ -1252,7 +1354,10 @@ pub fn render_report_md(v: &ReportView) -> String {
             s.push_str(&pv);
             s.push_str("\n```\n\n");
         } else if a.kind.is_media() {
-            s.push_str(&format!("_(media: {})_\n\n", a.content_ref.as_deref().unwrap_or("")));
+            s.push_str(&format!(
+                "_(media: {})_\n\n",
+                a.content_ref.as_deref().unwrap_or("")
+            ));
         }
     }
     s
@@ -1268,7 +1373,11 @@ fn esc_html(s: &str) -> String {
 /// Render a self-contained HTML evidence report (inline CSS, no external assets).
 pub fn render_report_html(v: &ReportView) -> String {
     let p = v.pack;
-    let title = if p.title.is_empty() { &p.work_item_id } else { &p.title };
+    let title = if p.title.is_empty() {
+        &p.work_item_id
+    } else {
+        &p.title
+    };
     let mut body = String::new();
     body.push_str(&format!("<h1>Proof Pack — {}</h1>", esc_html(title)));
     body.push_str(&format!(
@@ -1290,7 +1399,10 @@ pub fn render_report_html(v: &ReportView) -> String {
         body.push_str(&format!(
             "<p class=waived>⚠️ Waived by <code>{}</code>{}: {}</p>",
             esc_html(by),
-            p.waived_at.as_deref().map(|t| format!(" at {}", esc_html(t))).unwrap_or_default(),
+            p.waived_at
+                .as_deref()
+                .map(|t| format!(" at {}", esc_html(t)))
+                .unwrap_or_default(),
             esc_html(reason)
         ));
     }
@@ -1317,11 +1429,17 @@ pub fn render_report_html(v: &ReportView) -> String {
             esc_html(a.status.as_str())
         ));
         if let Some(sha) = &a.content_sha256 {
-            body.push_str(&format!("<p class=sha><code>sha256:{}</code></p>", esc_html(sha)));
+            body.push_str(&format!(
+                "<p class=sha><code>sha256:{}</code></p>",
+                esc_html(sha)
+            ));
         }
         let pv = artifact_preview(a);
         if a.kind.is_media() {
-            body.push_str(&format!("<p class=media>media: {}</p>", esc_html(a.content_ref.as_deref().unwrap_or(""))));
+            body.push_str(&format!(
+                "<p class=media>media: {}</p>",
+                esc_html(a.content_ref.as_deref().unwrap_or(""))
+            ));
         } else if !pv.is_empty() {
             body.push_str(&format!("<pre>{}</pre>", esc_html(&pv)));
         }
@@ -1375,7 +1493,12 @@ mod tests {
         }
     }
 
-    fn art(kind: ProofArtifactKind, title: &str, status: ProofArtifactStatus, meta: Value) -> ProofArtifact {
+    fn art(
+        kind: ProofArtifactKind,
+        title: &str,
+        status: ProofArtifactStatus,
+        meta: Value,
+    ) -> ProofArtifact {
         ProofArtifact {
             id: "a".into(),
             proof_pack_id: "p1".into(),
@@ -1398,15 +1521,33 @@ mod tests {
             assert_eq!(ProofStatus::parse(s).unwrap().as_str(), s);
         }
         for s in [
-            "command", "log", "screenshot", "video", "diff", "ci", "api", "db", "kafka", "review",
-            "approval", "pr_check", "self_review",
+            "command",
+            "log",
+            "screenshot",
+            "video",
+            "diff",
+            "ci",
+            "api",
+            "db",
+            "kafka",
+            "review",
+            "approval",
+            "pr_check",
+            "self_review",
         ] {
             assert_eq!(ProofArtifactKind::parse(s).unwrap().as_str(), s);
         }
         for s in ["passed", "failed", "pending", "info"] {
             assert_eq!(ProofArtifactStatus::parse(s).unwrap().as_str(), s);
         }
-        for s in ["session", "goal_loop", "review", "workflow_run", "task", "manual"] {
+        for s in [
+            "session",
+            "goal_loop",
+            "review",
+            "workflow_run",
+            "task",
+            "manual",
+        ] {
             assert_eq!(WorkItemKind::parse(s).unwrap().as_str(), s);
         }
     }
@@ -1433,7 +1574,12 @@ mod tests {
         let mut p = pack(WorkItemKind::Session);
         p.waived_by = Some("u1".into());
         // even with a failing artifact, waived wins
-        let arts = vec![art(ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Failed, json!({}))];
+        let arts = vec![art(
+            ProofArtifactKind::Command,
+            "cargo test",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        )];
         assert_eq!(derive_status(&p, &arts), ProofStatus::Waived);
     }
 
@@ -1441,8 +1587,18 @@ mod tests {
     fn status_failed_on_any_failure() {
         let p = pack(WorkItemKind::Session);
         let arts = vec![
-            art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({})),
-            art(ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Failed, json!({})),
+            art(
+                ProofArtifactKind::Diff,
+                "diff",
+                ProofArtifactStatus::Info,
+                json!({}),
+            ),
+            art(
+                ProofArtifactKind::Command,
+                "cargo test",
+                ProofArtifactStatus::Failed,
+                json!({}),
+            ),
         ];
         assert_eq!(derive_status(&p, &arts), ProofStatus::Failed);
     }
@@ -1451,12 +1607,27 @@ mod tests {
     fn code_change_passed_requires_diff_and_passing_test() {
         let p = pack(WorkItemKind::Session);
         // diff only -> partial
-        let diff_only = vec![art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({}))];
+        let diff_only = vec![art(
+            ProofArtifactKind::Diff,
+            "diff",
+            ProofArtifactStatus::Info,
+            json!({}),
+        )];
         assert_eq!(derive_status(&p, &diff_only), ProofStatus::Partial);
         // diff + passing test -> passed
         let full = vec![
-            art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({})),
-            art(ProofArtifactKind::Command, "cargo test --workspace", ProofArtifactStatus::Passed, json!({})),
+            art(
+                ProofArtifactKind::Diff,
+                "diff",
+                ProofArtifactStatus::Info,
+                json!({}),
+            ),
+            art(
+                ProofArtifactKind::Command,
+                "cargo test --workspace",
+                ProofArtifactStatus::Passed,
+                json!({}),
+            ),
         ];
         assert_eq!(derive_status(&p, &full), ProofStatus::Passed);
     }
@@ -1466,8 +1637,18 @@ mod tests {
         let p = pack(WorkItemKind::Session);
         // a passing but non-test command does not satisfy CodeChange
         let arts = vec![
-            art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({})),
-            art(ProofArtifactKind::Command, "true", ProofArtifactStatus::Passed, json!({})),
+            art(
+                ProofArtifactKind::Diff,
+                "diff",
+                ProofArtifactStatus::Info,
+                json!({}),
+            ),
+            art(
+                ProofArtifactKind::Command,
+                "true",
+                ProofArtifactStatus::Passed,
+                json!({}),
+            ),
         ];
         assert_eq!(derive_status(&p, &arts), ProofStatus::Partial);
     }
@@ -1475,9 +1656,19 @@ mod tests {
     #[test]
     fn review_passed_with_review_artifact() {
         let p = pack(WorkItemKind::Review);
-        let clean = vec![art(ProofArtifactKind::Review, "review", ProofArtifactStatus::Passed, json!({}))];
+        let clean = vec![art(
+            ProofArtifactKind::Review,
+            "review",
+            ProofArtifactStatus::Passed,
+            json!({}),
+        )];
         assert_eq!(derive_status(&p, &clean), ProofStatus::Passed);
-        let unresolved = vec![art(ProofArtifactKind::Review, "review", ProofArtifactStatus::Failed, json!({}))];
+        let unresolved = vec![art(
+            ProofArtifactKind::Review,
+            "review",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        )];
         assert_eq!(derive_status(&p, &unresolved), ProofStatus::Failed);
     }
 
@@ -1485,14 +1676,34 @@ mod tests {
     fn workflow_passed_requires_approval_passed_if_present() {
         let p = pack(WorkItemKind::WorkflowRun);
         let approved = vec![
-            art(ProofArtifactKind::Log, "node", ProofArtifactStatus::Passed, json!({})),
-            art(ProofArtifactKind::Approval, "approval", ProofArtifactStatus::Passed, json!({})),
+            art(
+                ProofArtifactKind::Log,
+                "node",
+                ProofArtifactStatus::Passed,
+                json!({}),
+            ),
+            art(
+                ProofArtifactKind::Approval,
+                "approval",
+                ProofArtifactStatus::Passed,
+                json!({}),
+            ),
         ];
         assert_eq!(derive_status(&p, &approved), ProofStatus::Passed);
         // a pending approval -> not yet passed (partial)
         let pending = vec![
-            art(ProofArtifactKind::Log, "node", ProofArtifactStatus::Passed, json!({})),
-            art(ProofArtifactKind::Approval, "approval", ProofArtifactStatus::Pending, json!({})),
+            art(
+                ProofArtifactKind::Log,
+                "node",
+                ProofArtifactStatus::Passed,
+                json!({}),
+            ),
+            art(
+                ProofArtifactKind::Approval,
+                "approval",
+                ProofArtifactStatus::Pending,
+                json!({}),
+            ),
         ];
         assert_eq!(derive_status(&p, &pending), ProofStatus::Partial);
     }
@@ -1510,7 +1721,12 @@ mod tests {
                 json!({"additions": 100000, "deletions": 100000,
                        "risky_files": ["a/migrations/0077.sql", "b/auth.rs", "c/policy.rs", "d/Cargo.lock"]}),
             ),
-            art(ProofArtifactKind::Review, "review", ProofArtifactStatus::Failed, json!({})),
+            art(
+                ProofArtifactKind::Review,
+                "review",
+                ProofArtifactStatus::Failed,
+                json!({}),
+            ),
         ];
         assert_eq!(compute_risk(&big), 100);
         // small change, no risky files, but untested -> +10
@@ -1533,33 +1749,73 @@ mod tests {
         let mut pp = pack(WorkItemKind::Session);
         pp.status = ProofStatus::Passed;
         let arts = vec![
-            art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({"risky_files": []})),
-            art(ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Passed, json!({})),
+            art(
+                ProofArtifactKind::Diff,
+                "diff",
+                ProofArtifactStatus::Info,
+                json!({"risky_files": []}),
+            ),
+            art(
+                ProofArtifactKind::Command,
+                "cargo test",
+                ProofArtifactStatus::Passed,
+                json!({}),
+            ),
         ];
         let b = compute_badges(&pp, &arts);
         assert!(b.contains(&ProofBadge::TestsPassed));
         assert!(b.contains(&ProofBadge::CiMissing));
 
         // tests failed
-        let failed = vec![art(ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Failed, json!({}))];
+        let failed = vec![art(
+            ProofArtifactKind::Command,
+            "cargo test",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &failed).contains(&ProofBadge::TestsFailed));
 
         // human approved
-        let appr = vec![art(ProofArtifactKind::Approval, "a", ProofArtifactStatus::Passed, json!({}))];
+        let appr = vec![art(
+            ProofArtifactKind::Approval,
+            "a",
+            ProofArtifactStatus::Passed,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &appr).contains(&ProofBadge::HumanApproved));
 
         // db/api verified requires Passed, not Info
-        let db_info = vec![art(ProofArtifactKind::Db, "q", ProofArtifactStatus::Info, json!({}))];
+        let db_info = vec![art(
+            ProofArtifactKind::Db,
+            "q",
+            ProofArtifactStatus::Info,
+            json!({}),
+        )];
         assert!(!compute_badges(&p, &db_info).contains(&ProofBadge::DbApiVerified));
-        let db_pass = vec![art(ProofArtifactKind::Db, "q", ProofArtifactStatus::Passed, json!({}))];
+        let db_pass = vec![art(
+            ProofArtifactKind::Db,
+            "q",
+            ProofArtifactStatus::Passed,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &db_pass).contains(&ProofBadge::DbApiVerified));
 
         // review unresolved
-        let rev = vec![art(ProofArtifactKind::Review, "r", ProofArtifactStatus::Failed, json!({}))];
+        let rev = vec![art(
+            ProofArtifactKind::Review,
+            "r",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &rev).contains(&ProofBadge::ReviewUnresolved));
 
         // risky
-        let risky = vec![art(ProofArtifactKind::Diff, "d", ProofArtifactStatus::Info, json!({"risky_files": ["a/migrations/x.sql"]}))];
+        let risky = vec![art(
+            ProofArtifactKind::Diff,
+            "d",
+            ProofArtifactStatus::Info,
+            json!({"risky_files": ["a/migrations/x.sql"]}),
+        )];
         assert!(compute_badges(&p, &risky).contains(&ProofBadge::RiskyChange));
 
         // waived
@@ -1585,7 +1841,10 @@ mod tests {
     fn evidence_status_mappers() {
         assert_eq!(ci_artifact_status("success"), ProofArtifactStatus::Passed);
         assert_eq!(ci_artifact_status("FAILURE"), ProofArtifactStatus::Failed);
-        assert_eq!(ci_artifact_status("in_progress"), ProofArtifactStatus::Pending);
+        assert_eq!(
+            ci_artifact_status("in_progress"),
+            ProofArtifactStatus::Pending
+        );
         assert_eq!(ci_artifact_status("none"), ProofArtifactStatus::Info);
         assert_eq!(ci_artifact_status("weird"), ProofArtifactStatus::Info);
 
@@ -1604,22 +1863,57 @@ mod tests {
     fn new_badges() {
         let p = pack(WorkItemKind::Session);
         // ci passed/failed/pending
-        let ci_ok = vec![art(ProofArtifactKind::Ci, "CI", ProofArtifactStatus::Passed, json!({}))];
+        let ci_ok = vec![art(
+            ProofArtifactKind::Ci,
+            "CI",
+            ProofArtifactStatus::Passed,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &ci_ok).contains(&ProofBadge::CiPassed));
-        let ci_bad = vec![art(ProofArtifactKind::Ci, "CI", ProofArtifactStatus::Failed, json!({}))];
+        let ci_bad = vec![art(
+            ProofArtifactKind::Ci,
+            "CI",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &ci_bad).contains(&ProofBadge::CiFailed));
-        let ci_pend = vec![art(ProofArtifactKind::Ci, "CI", ProofArtifactStatus::Pending, json!({}))];
+        let ci_pend = vec![art(
+            ProofArtifactKind::Ci,
+            "CI",
+            ProofArtifactStatus::Pending,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &ci_pend).contains(&ProofBadge::CiPending));
         // ui verified
-        let ui = vec![art(ProofArtifactKind::Screenshot, "shot", ProofArtifactStatus::Info, json!({}))];
+        let ui = vec![art(
+            ProofArtifactKind::Screenshot,
+            "shot",
+            ProofArtifactStatus::Info,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &ui).contains(&ProofBadge::UiVerified));
-        let vid = vec![art(ProofArtifactKind::Video, "clip", ProofArtifactStatus::Info, json!({}))];
+        let vid = vec![art(
+            ProofArtifactKind::Video,
+            "clip",
+            ProofArtifactStatus::Info,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &vid).contains(&ProofBadge::UiVerified));
         // kafka joins data-verified
-        let kafka = vec![art(ProofArtifactKind::Kafka, "topic", ProofArtifactStatus::Passed, json!({}))];
+        let kafka = vec![art(
+            ProofArtifactKind::Kafka,
+            "topic",
+            ProofArtifactStatus::Passed,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &kafka).contains(&ProofBadge::DbApiVerified));
         // pr inconsistent
-        let pr = vec![art(ProofArtifactKind::PrCheck, "pr", ProofArtifactStatus::Failed, json!({}))];
+        let pr = vec![art(
+            ProofArtifactKind::PrCheck,
+            "pr",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        )];
         assert!(compute_badges(&p, &pr).contains(&ProofBadge::PrInconsistent));
     }
 
@@ -1637,17 +1931,57 @@ mod tests {
         ];
         let fixtures: Vec<Vec<ProofArtifact>> = vec![
             vec![],
-            vec![art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({}))],
+            vec![art(
+                ProofArtifactKind::Diff,
+                "diff",
+                ProofArtifactStatus::Info,
+                json!({}),
+            )],
             vec![
-                art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({})),
-                art(ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Passed, json!({})),
+                art(
+                    ProofArtifactKind::Diff,
+                    "diff",
+                    ProofArtifactStatus::Info,
+                    json!({}),
+                ),
+                art(
+                    ProofArtifactKind::Command,
+                    "cargo test",
+                    ProofArtifactStatus::Passed,
+                    json!({}),
+                ),
             ],
-            vec![art(ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Failed, json!({}))],
-            vec![art(ProofArtifactKind::Review, "rev", ProofArtifactStatus::Passed, json!({}))],
-            vec![art(ProofArtifactKind::Review, "rev", ProofArtifactStatus::Failed, json!({}))],
+            vec![art(
+                ProofArtifactKind::Command,
+                "cargo test",
+                ProofArtifactStatus::Failed,
+                json!({}),
+            )],
+            vec![art(
+                ProofArtifactKind::Review,
+                "rev",
+                ProofArtifactStatus::Passed,
+                json!({}),
+            )],
+            vec![art(
+                ProofArtifactKind::Review,
+                "rev",
+                ProofArtifactStatus::Failed,
+                json!({}),
+            )],
             vec![
-                art(ProofArtifactKind::Log, "node", ProofArtifactStatus::Passed, json!({})),
-                art(ProofArtifactKind::Approval, "ap", ProofArtifactStatus::Pending, json!({})),
+                art(
+                    ProofArtifactKind::Log,
+                    "node",
+                    ProofArtifactStatus::Passed,
+                    json!({}),
+                ),
+                art(
+                    ProofArtifactKind::Approval,
+                    "ap",
+                    ProofArtifactStatus::Pending,
+                    json!({}),
+                ),
             ],
         ];
         for k in kinds {
@@ -1670,19 +2004,40 @@ mod tests {
         // requires CI and there's no green CI → capped to Partial.
         let p = pack(WorkItemKind::Session);
         let arts = vec![
-            art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({})),
-            art(ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Passed, json!({})),
+            art(
+                ProofArtifactKind::Diff,
+                "diff",
+                ProofArtifactStatus::Info,
+                json!({}),
+            ),
+            art(
+                ProofArtifactKind::Command,
+                "cargo test",
+                ProofArtifactStatus::Passed,
+                json!({}),
+            ),
         ];
         assert_eq!(derive_status(&p, &arts), ProofStatus::Passed);
         let pol = DoneContractPolicy::default().with_repo(&RepoProofConfig {
             require_ci: true,
             ..Default::default()
         });
-        assert_eq!(derive_status_with_policy(&p, &arts, &pol), ProofStatus::Partial);
+        assert_eq!(
+            derive_status_with_policy(&p, &arts, &pol),
+            ProofStatus::Partial
+        );
         // add green CI → back to passed
         let mut with_ci = arts.clone();
-        with_ci.push(art(ProofArtifactKind::Ci, "CI", ProofArtifactStatus::Passed, json!({})));
-        assert_eq!(derive_status_with_policy(&p, &with_ci, &pol), ProofStatus::Passed);
+        with_ci.push(art(
+            ProofArtifactKind::Ci,
+            "CI",
+            ProofArtifactStatus::Passed,
+            json!({}),
+        ));
+        assert_eq!(
+            derive_status_with_policy(&p, &with_ci, &pol),
+            ProofStatus::Passed
+        );
     }
 
     #[test]
@@ -1694,10 +2049,21 @@ mod tests {
             ..Default::default()
         });
         // failed stays failed
-        let failed = vec![art(ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Failed, json!({}))];
-        assert_eq!(derive_status_with_policy(&p, &failed, &pol), ProofStatus::Failed);
+        let failed = vec![art(
+            ProofArtifactKind::Command,
+            "cargo test",
+            ProofArtifactStatus::Failed,
+            json!({}),
+        )];
+        assert_eq!(
+            derive_status_with_policy(&p, &failed, &pol),
+            ProofStatus::Failed
+        );
         // missing stays missing
-        assert_eq!(derive_status_with_policy(&p, &[], &pol), ProofStatus::Missing);
+        assert_eq!(
+            derive_status_with_policy(&p, &[], &pol),
+            ProofStatus::Missing
+        );
     }
 
     #[test]
@@ -1711,15 +2077,30 @@ mod tests {
 
         // diff + passing test → required (diff15+tests25+no_failures20=60) all met → 100.
         let full = vec![
-            art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({})),
-            art(ProofArtifactKind::Command, "cargo test", ProofArtifactStatus::Passed, json!({})),
+            art(
+                ProofArtifactKind::Diff,
+                "diff",
+                ProofArtifactStatus::Info,
+                json!({}),
+            ),
+            art(
+                ProofArtifactKind::Command,
+                "cargo test",
+                ProofArtifactStatus::Passed,
+                json!({}),
+            ),
         ];
         let c = compute_done_contract(&p, &full, &pol);
         assert_eq!(c.score, 100);
 
         // diff only → satisfied required = diff(15)+no_failures(20)=35 of 60
         // → round(35*100/60) = 58.
-        let diff_only = vec![art(ProofArtifactKind::Diff, "diff", ProofArtifactStatus::Info, json!({}))];
+        let diff_only = vec![art(
+            ProofArtifactKind::Diff,
+            "diff",
+            ProofArtifactStatus::Info,
+            json!({}),
+        )];
         let c2 = compute_done_contract(&p, &diff_only, &pol);
         assert_eq!(c2.score, 58u8);
 
@@ -1789,7 +2170,10 @@ mod tests {
             has_failing_tests: false,
         });
         // mentions_change (25) fails → score capped below threshold path.
-        assert!(r.checks.iter().any(|c| c.key == "mentions_change" && !c.passed));
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.key == "mentions_change" && !c.passed));
     }
 
     #[test]
@@ -1831,7 +2215,10 @@ mod tests {
             has_passing_tests: false,
             has_failing_tests: false,
         });
-        assert!(!thin.passed && !thin.hard_fail, "expected a soft fail: {thin:?}");
+        assert!(
+            !thin.passed && !thin.hard_fail,
+            "expected a soft fail: {thin:?}"
+        );
         assert_eq!(pr_check_artifact_status(&thin), ProofArtifactStatus::Info);
     }
 
@@ -1877,7 +2264,13 @@ mod tests {
         let mut p2 = pack(WorkItemKind::Manual);
         p2.summary = "<script>alert(1)</script>".into();
         let c2 = compute_done_contract(&p2, &[], &DoneContractPolicy::default());
-        let v2 = ReportView { pack: &p2, artifacts: &[], contract: &c2, badges: &[], generated_at: "t" };
+        let v2 = ReportView {
+            pack: &p2,
+            artifacts: &[],
+            contract: &c2,
+            badges: &[],
+            generated_at: "t",
+        };
         let h2 = render_report_html(&v2);
         assert!(!h2.contains("<script>alert(1)</script>"));
         assert!(h2.contains("&lt;script&gt;"));

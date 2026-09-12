@@ -120,7 +120,8 @@ async fn semantic_path_finds_related() {
         .unwrap();
 
     assert!(
-        hits.iter().any(|h| h.memory.body.contains("two factor authentication")),
+        hits.iter()
+            .any(|h| h.memory.body.contains("two factor authentication")),
         "semantic search should surface the auth memory"
     );
 }
@@ -129,9 +130,18 @@ async fn semantic_path_finds_related() {
 async fn exact_duplicate_is_noop() {
     let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
     let svc = MemoryService::with_defaults(pool);
-    let a = svc.save(&ws, &user, vec![nm("fact", "X", "the same body text")]).await.unwrap();
-    let b = svc.save(&ws, &user, vec![nm("fact", "X", "the same body text")]).await.unwrap();
-    assert_eq!(a[0].id, b[0].id, "duplicate save should return the existing row");
+    let a = svc
+        .save(&ws, &user, vec![nm("fact", "X", "the same body text")])
+        .await
+        .unwrap();
+    let b = svc
+        .save(&ws, &user, vec![nm("fact", "X", "the same body text")])
+        .await
+        .unwrap();
+    assert_eq!(
+        a[0].id, b[0].id,
+        "duplicate save should return the existing row"
+    );
 }
 
 // --- HTTP accessibility (router oneshot) ---

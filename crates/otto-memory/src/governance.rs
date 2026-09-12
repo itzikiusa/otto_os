@@ -195,9 +195,7 @@ impl MemoryService {
     /// `contradicted`; each child inherits the parent's collection/scope/story_id.
     pub async fn split(&self, ws: &str, by: &str, mid: &str, req: SplitReq) -> Result<SplitResp> {
         if req.parts.len() < 2 {
-            return Err(Error::Invalid(
-                "split requires at least 2 parts".into(),
-            ));
+            return Err(Error::Invalid("split requires at least 2 parts".into()));
         }
         // Caller-controlled fan-out: bound it so one request can't mint an
         // unbounded pile of memories (and so the allocation below stays sane).
@@ -248,22 +246,16 @@ impl MemoryService {
         for id in &child_ids {
             refreshed.push(self.repo().get(ws, id).await?);
         }
-        Ok(SplitResp { memories: refreshed })
+        Ok(SplitResp {
+            memories: refreshed,
+        })
     }
 
     /// Parse a governance file (AGENTS.md, CLAUDE.md, .cursorrules) into a set
     /// of `suggested` memories tagged with the import kind, and persist them as
     /// a governed-import batch for auditability + reverting.
-    pub async fn import_governed(
-        &self,
-        ws: &str,
-        by: &str,
-        req: ImportReq,
-    ) -> Result<ImportResp> {
-        let label = req
-            .label
-            .clone()
-            .unwrap_or_else(|| req.kind.clone());
+    pub async fn import_governed(&self, ws: &str, by: &str, req: ImportReq) -> Result<ImportResp> {
+        let label = req.label.clone().unwrap_or_else(|| req.kind.clone());
 
         let parsed = parse_governance_file(&req.kind, &req.content);
         let n = parsed.len();
@@ -289,14 +281,13 @@ impl MemoryService {
         .to_string();
         for id in &ids {
             let _ = self.repo().set_state(ws, id, STATE_SUGGESTED).await;
-            let _ = sqlx::query(
-                "UPDATE memories SET provenance_json=? WHERE id=? AND workspace_id=?",
-            )
-            .bind(&prov)
-            .bind(id)
-            .bind(ws)
-            .execute(self.pool())
-            .await;
+            let _ =
+                sqlx::query("UPDATE memories SET provenance_json=? WHERE id=? AND workspace_id=?")
+                    .bind(&prov)
+                    .bind(id)
+                    .bind(ws)
+                    .execute(self.pool())
+                    .await;
         }
 
         let gi = self

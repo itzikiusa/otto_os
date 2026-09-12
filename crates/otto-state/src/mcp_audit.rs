@@ -117,7 +117,9 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     async fn mem_pool() -> SqlitePool {
-        let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(opts)

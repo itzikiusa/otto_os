@@ -389,7 +389,8 @@ pub async fn send_message(
         otto_core::provider::workspace_default(&ws.settings),
         otto_core::provider::global_default(global_default.as_ref()),
     ]);
-    let mut meta = json!({ "source": "product_refine", "story_id": thread.story_id, "thread_id": tid });
+    let mut meta =
+        json!({ "source": "product_refine", "story_id": thread.story_id, "thread_id": tid });
     // Model: this turn's override, else the thread's stored model.
     if let Some(m) = req
         .model

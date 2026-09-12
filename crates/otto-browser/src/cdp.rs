@@ -319,7 +319,12 @@ impl LightpandaEngine {
     /// interpolated into the fill-and-submit JS expression run in the
     /// target page's own context — never logged, never returned in an
     /// `EngineError`.
-    async fn login_flow(&self, url: &str, username: &str, password: &str) -> Result<bool, EngineError> {
+    async fn login_flow(
+        &self,
+        url: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<bool, EngineError> {
         tokio::time::timeout(
             Duration::from_secs(PAGE_TIMEOUT_SECS),
             self.login_flow_inner(url, username, password),
@@ -377,12 +382,13 @@ impl LightpandaEngine {
         // (Page.loadEventFired); a JS/SPA login (fetch/XHR, no navigation)
         // never will, so a timeout here is expected, not an error — it just
         // means "check the DOM as it stands now" instead of "reload happened".
-        let _ = client
-            .wait_for_load_event(Duration::from_secs(5))
-            .await;
+        let _ = client.wait_for_load_event(Duration::from_secs(5)).await;
 
         let still_present = client
-            .evaluate(&session_id, "!!document.querySelector('input[type=\"password\"]')")
+            .evaluate(
+                &session_id,
+                "!!document.querySelector('input[type=\"password\"]')",
+            )
             .await
             .map_err(cdp_err)?;
         let _ = client.close_target(&target_id).await;

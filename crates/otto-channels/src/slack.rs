@@ -257,7 +257,9 @@ impl Adapter for SlackAdapter {
         filename: &str,
         content: &[u8],
     ) -> anyhow::Result<()> {
-        let (upload_url, file_id) = self.get_upload_url_external(filename, content.len()).await?;
+        let (upload_url, file_id) = self
+            .get_upload_url_external(filename, content.len())
+            .await?;
         self.put_bytes_to_upload_url(&upload_url, content).await?;
         self.complete_upload_external(&file_id, filename, chat, thread)
             .await
@@ -328,8 +330,7 @@ impl SlackAdapter {
         channel_id: &str,
         thread: Option<&str>,
     ) -> anyhow::Result<()> {
-        let files_json =
-            serde_json::json!([{ "id": file_id, "title": filename }]).to_string();
+        let files_json = serde_json::json!([{ "id": file_id, "title": filename }]).to_string();
 
         let mut params = vec![
             ("files", files_json),
@@ -646,7 +647,10 @@ async fn handle_event(
         return;
     }
     if is_membership_subtype(subtype) {
-        info!(event_type, subtype, "slack: membership notice skipped (no user content)");
+        info!(
+            event_type,
+            subtype, "slack: membership notice skipped (no user content)"
+        );
         return;
     }
     // A `message_changed` with no `edited` stamp is Slack rewriting the message
@@ -833,8 +837,15 @@ mod tests {
                 "attachments": [{"title": "some link"}]
             }
         });
-        assert!(!is_human_edit(&unfurl["message"]), "an unfurl is not an edit");
-        assert_eq!(dedup_ts(&unfurl), "1785255511.983239", "dedup on the original");
+        assert!(
+            !is_human_edit(&unfurl["message"]),
+            "an unfurl is not an edit"
+        );
+        assert_eq!(
+            dedup_ts(&unfurl),
+            "1785255511.983239",
+            "dedup on the original"
+        );
 
         // A real human edit keeps the `edited` stamp — still forwarded, but it
         // dedups onto the original message so it cannot re-trigger either.
@@ -868,7 +879,12 @@ mod tests {
     fn content_subtypes_are_forwarded() {
         // No subtype (plain message) and content-bearing subtypes still flow.
         assert!(!is_membership_subtype(None));
-        for s in ["message_changed", "thread_broadcast", "file_share", "me_message"] {
+        for s in [
+            "message_changed",
+            "thread_broadcast",
+            "file_share",
+            "me_message",
+        ] {
             assert!(!is_membership_subtype(Some(s)), "{s} must be forwarded");
         }
     }

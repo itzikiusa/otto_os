@@ -20,8 +20,8 @@ use otto_core::event::Event;
 use otto_state::{GoalPatch, SwarmAgent, SwarmGoal, SwarmProject, SwarmTask, TaskPatch};
 use serde_json::{json, Value};
 
-use crate::swarm_agent_run::CancelState;
 use crate::state::ServerCtx;
+use crate::swarm_agent_run::CancelState;
 
 // ===========================================================================
 // Pure engine
@@ -45,12 +45,30 @@ impl Verdict {
     pub fn parse(reply: &str) -> Option<Verdict> {
         let v = otto_swarm::recruiter::extract_json(reply)?;
         Some(Verdict {
-            target_met: v.get("target_met").and_then(|b| b.as_bool()).unwrap_or(false),
+            target_met: v
+                .get("target_met")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false),
             blocker: v.get("blocker").and_then(|b| b.as_bool()).unwrap_or(true),
-            severity: v.get("severity").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-            measured: v.get("measured").and_then(|s| s.as_str()).map(str::to_string),
-            summary: v.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-            findings: v.get("findings").and_then(|f| f.as_array()).cloned().unwrap_or_default(),
+            severity: v
+                .get("severity")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+            measured: v
+                .get("measured")
+                .and_then(|s| s.as_str())
+                .map(str::to_string),
+            summary: v
+                .get("summary")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+            findings: v
+                .get("findings")
+                .and_then(|f| f.as_array())
+                .cloned()
+                .unwrap_or_default(),
         })
     }
     fn to_json(&self) -> Value {
@@ -177,7 +195,8 @@ pub async fn run_verification(goals: Vec<SwarmGoal>, ops: &dyn VerifyOps) -> Ver
                     }
                     if ops.over_budget().await {
                         ops.record(goal, "unmet", iterations, Some(&v)).await;
-                        ops.escalate(goal, "budget exhausted before the goal was met").await;
+                        ops.escalate(goal, "budget exhausted before the goal was met")
+                            .await;
                         summary.blocked = true;
                         break "unmet";
                     }
@@ -197,7 +216,10 @@ pub async fn run_verification(goals: Vec<SwarmGoal>, ops: &dyn VerifyOps) -> Ver
                 }
             }
         };
-        summary.results.push(GoalResult { goal_id: goal.id.clone(), status: status.to_string() });
+        summary.results.push(GoalResult {
+            goal_id: goal.id.clone(),
+            status: status.to_string(),
+        });
     }
     // Merge only when no blocking goal is unmet.
     if !summary.cancelled && !summary.blocked {
@@ -242,7 +264,10 @@ pub fn is_verifying(task_id: &str) -> bool {
 pub async fn stop_swarm(ctx: &ServerCtx, swarm_id: &str) {
     let handles: Vec<CancelState> = {
         let map = registry().lock().unwrap();
-        map.values().filter(|h| h.swarm_id == swarm_id).map(|h| h.cancel.clone()).collect()
+        map.values()
+            .filter(|h| h.swarm_id == swarm_id)
+            .map(|h| h.cancel.clone())
+            .collect()
     };
     for cs in handles {
         cs.signal();
@@ -252,7 +277,11 @@ pub async fn stop_swarm(ctx: &ServerCtx, swarm_id: &str) {
 
 /// Stop a single task's verification.
 pub async fn stop_task(ctx: &ServerCtx, task_id: &str) {
-    let cs = registry().lock().unwrap().get(task_id).map(|h| h.cancel.clone());
+    let cs = registry()
+        .lock()
+        .unwrap()
+        .get(task_id)
+        .map(|h| h.cancel.clone());
     if let Some(cs) = cs {
         cs.signal();
         cs.kill_tracked(ctx).await;
@@ -284,8 +313,16 @@ pub async fn assemble_task_goals(ctx: &ServerCtx, task: &SwarmTask) -> Vec<Swarm
     ensure_standing_goals(ctx, &task.swarm_id, &task.workspace_id, &task.created_by).await;
 
     let mut templates: Vec<SwarmGoal> = Vec::new();
-    templates.extend(repo.list_goals_for_project(&task.project_id).await.unwrap_or_default());
-    templates.extend(repo.list_standing_goals(&task.swarm_id).await.unwrap_or_default());
+    templates.extend(
+        repo.list_goals_for_project(&task.project_id)
+            .await
+            .unwrap_or_default(),
+    );
+    templates.extend(
+        repo.list_standing_goals(&task.swarm_id)
+            .await
+            .unwrap_or_default(),
+    );
 
     for t in templates {
         if have.contains(&t.title.to_lowercase()) {
@@ -334,9 +371,17 @@ pub const STANDING_GOALS: &[(&str, &str)] = &[
 ];
 
 /// Ensure the swarm has its standing-goal templates (idempotent).
-pub async fn ensure_standing_goals(ctx: &ServerCtx, swarm_id: &str, workspace_id: &str, created_by: &str) {
+pub async fn ensure_standing_goals(
+    ctx: &ServerCtx,
+    swarm_id: &str,
+    workspace_id: &str,
+    created_by: &str,
+) {
     let repo = &ctx.swarm_repo;
-    let existing = repo.list_standing_goals(&swarm_id.to_string()).await.unwrap_or_default();
+    let existing = repo
+        .list_standing_goals(&swarm_id.to_string())
+        .await
+        .unwrap_or_default();
     if !existing.is_empty() {
         return;
     }
@@ -367,13 +412,27 @@ pub async fn ensure_standing_goals(ctx: &ServerCtx, swarm_id: &str, workspace_id
 /// Does this task have any goals to verify (explicit, project, or standing)?
 pub async fn task_has_goals(ctx: &ServerCtx, task: &SwarmTask) -> bool {
     let repo = &ctx.swarm_repo;
-    if !repo.list_goals_for_task(&task.id).await.unwrap_or_default().is_empty() {
+    if !repo
+        .list_goals_for_task(&task.id)
+        .await
+        .unwrap_or_default()
+        .is_empty()
+    {
         return true;
     }
-    if !repo.list_goals_for_project(&task.project_id).await.unwrap_or_default().is_empty() {
+    if !repo
+        .list_goals_for_project(&task.project_id)
+        .await
+        .unwrap_or_default()
+        .is_empty()
+    {
         return true;
     }
-    !repo.list_standing_goals(&task.swarm_id).await.unwrap_or_default().is_empty()
+    !repo
+        .list_standing_goals(&task.swarm_id)
+        .await
+        .unwrap_or_default()
+        .is_empty()
 }
 
 // ===========================================================================
@@ -383,8 +442,16 @@ pub async fn task_has_goals(ctx: &ServerCtx, task: &SwarmTask) -> bool {
 /// Resolve the leader who verifies the dev's work: the dev's manager (walk
 /// `reports_to` up to an agent that has reports), else the swarm root, else the
 /// dev itself (self-verification — acceptable; review m3).
-pub async fn resolve_leader(ctx: &ServerCtx, swarm_id: &str, dev_agent_id: &str) -> Option<SwarmAgent> {
-    let agents = ctx.swarm_repo.list_agents(&swarm_id.to_string()).await.ok()?;
+pub async fn resolve_leader(
+    ctx: &ServerCtx,
+    swarm_id: &str,
+    dev_agent_id: &str,
+) -> Option<SwarmAgent> {
+    let agents = ctx
+        .swarm_repo
+        .list_agents(&swarm_id.to_string())
+        .await
+        .ok()?;
     let by_id = |id: &str| agents.iter().find(|a| a.id == id).cloned();
     let has_reports = |id: &str| agents.iter().any(|a| a.reports_to.as_deref() == Some(id));
 
@@ -430,7 +497,11 @@ pub struct SwarmVerifyOps {
 impl VerifyOps for SwarmVerifyOps {
     async fn verify_goal(&self, goal: &SwarmGoal, scrutiny: u32) -> Option<Verdict> {
         let prompt = verify_prompt(goal, &self.integration_branch, scrutiny);
-        let title = format!("Verify: {} · {}", clip(&goal.title, 40), clip(&self.task.title, 30));
+        let title = format!(
+            "Verify: {} · {}",
+            clip(&goal.title, 40),
+            clip(&self.task.title, 30)
+        );
         let (raw, _rid) = crate::swarm_agent_run::run_swarm_agent(
             &self.ctx,
             &self.ws,
@@ -454,7 +525,11 @@ impl VerifyOps for SwarmVerifyOps {
 
     async fn request_fix(&self, goal: &SwarmGoal, v: &Verdict) -> FixOutcome {
         let prompt = fix_prompt(goal, v);
-        let title = format!("Fix: {} · {}", clip(&goal.title, 40), clip(&self.task.title, 30));
+        let title = format!(
+            "Fix: {} · {}",
+            clip(&goal.title, 40),
+            clip(&self.task.title, 30)
+        );
         let (raw, _rid) = crate::swarm_agent_run::run_swarm_agent(
             &self.ctx,
             &self.ws,
@@ -481,21 +556,46 @@ impl VerifyOps for SwarmVerifyOps {
     }
 
     async fn merge_back(&self) -> String {
-        let outcome =
-            crate::swarm_merge::merge_task_branch(&self.ctx, &self.swarm, &self.project, &self.agent_branch).await;
+        let outcome = crate::swarm_merge::merge_task_branch(
+            &self.ctx,
+            &self.swarm,
+            &self.project,
+            &self.agent_branch,
+        )
+        .await;
         let body = match outcome.status.as_str() {
-            "merged" => format!("✅ merged `{}` → `{}`.", self.agent_branch, outcome.integration_branch),
-            "up_to_date" => format!("`{}` already integrated into `{}`.", self.agent_branch, outcome.integration_branch),
+            "merged" => format!(
+                "✅ merged `{}` → `{}`.",
+                self.agent_branch, outcome.integration_branch
+            ),
+            "up_to_date" => format!(
+                "`{}` already integrated into `{}`.",
+                self.agent_branch, outcome.integration_branch
+            ),
             "conflicts" => format!(
                 "❌ merge conflict merging `{}` → `{}` on {} file(s): {}. A fix task was created.",
                 self.agent_branch,
                 outcome.integration_branch,
                 outcome.conflicted_files.len(),
-                outcome.conflicted_files.iter().take(8).map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")
+                outcome
+                    .conflicted_files
+                    .iter()
+                    .take(8)
+                    .map(|f| format!("`{f}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            _ => format!("⚠️ merge of `{}` did not complete: {}", self.agent_branch, outcome.note.clone().unwrap_or_default()),
+            _ => format!(
+                "⚠️ merge of `{}` did not complete: {}",
+                self.agent_branch,
+                outcome.note.clone().unwrap_or_default()
+            ),
         };
-        let kind = if outcome.status == "conflicts" || outcome.status == "error" { "concern" } else { "merge" };
+        let kind = if outcome.status == "conflicts" || outcome.status == "error" {
+            "concern"
+        } else {
+            "merge"
+        };
         crate::swarm_runtime::system_post_meta(
             &self.ctx,
             &self.swarm.id,
@@ -560,16 +660,35 @@ impl VerifyOps for SwarmVerifyOps {
             .swarm_repo
             .update_goal(
                 &goal.id,
-                GoalPatch { status: Some("verifying".into()), iterations: Some(iterations), ..Default::default() },
+                GoalPatch {
+                    status: Some("verifying".into()),
+                    iterations: Some(iterations),
+                    ..Default::default()
+                },
             )
             .await;
         self.emit_goal(&goal.id).await;
     }
 
     async fn post_verdict(&self, goal: &SwarmGoal, v: &Verdict) {
-        let icon = if v.target_met { "🔎✅" } else if v.blocker { "🔎❌" } else { "🔎⚠️" };
-        let measured = v.measured.as_deref().map(|m| format!(" (measured: {m})")).unwrap_or_default();
-        let body = format!("{icon} Goal “{}”{}: {}", goal.title, measured, clip(&v.summary, 240));
+        let icon = if v.target_met {
+            "🔎✅"
+        } else if v.blocker {
+            "🔎❌"
+        } else {
+            "🔎⚠️"
+        };
+        let measured = v
+            .measured
+            .as_deref()
+            .map(|m| format!(" (measured: {m})"))
+            .unwrap_or_default();
+        let body = format!(
+            "{icon} Goal “{}”{}: {}",
+            goal.title,
+            measured,
+            clip(&v.summary, 240)
+        );
         crate::swarm_runtime::system_post_meta(
             &self.ctx,
             &self.swarm.id,
@@ -583,7 +702,10 @@ impl VerifyOps for SwarmVerifyOps {
     }
 
     async fn escalate(&self, goal: &SwarmGoal, reason: &str) {
-        let body = format!("🚫 Goal “{}” {} (after {} attempt(s)).", goal.title, reason, goal.max_retries);
+        let body = format!(
+            "🚫 Goal “{}” {} (after {} attempt(s)).",
+            goal.title, reason, goal.max_retries
+        );
         crate::swarm_runtime::system_post_meta(
             &self.ctx,
             &self.swarm.id,
@@ -641,7 +763,11 @@ pub fn start_verification(ctx: &ServerCtx, task: SwarmTask, dev_agent_id: String
         }
         map.insert(
             task.id.clone(),
-            Handle { cancel: cancel.clone(), dev_agent_id: dev_agent_id.clone(), swarm_id: task.swarm_id.clone() },
+            Handle {
+                cancel: cancel.clone(),
+                dev_agent_id: dev_agent_id.clone(),
+                swarm_id: task.swarm_id.clone(),
+            },
         );
     }
     let ctx = ctx.clone();
@@ -652,7 +778,13 @@ pub fn start_verification(ctx: &ServerCtx, task: SwarmTask, dev_agent_id: String
             // Don't strand the task in `verifying`.
             let _ = ctx
                 .swarm_repo
-                .update_task(&task.id, TaskPatch { status: Some("blocked".into()), ..Default::default() })
+                .update_task(
+                    &task.id,
+                    TaskPatch {
+                        status: Some("blocked".into()),
+                        ..Default::default()
+                    },
+                )
                 .await;
             crate::swarm_runtime::emit_task_pub(&ctx, &task.id).await;
         }
@@ -670,23 +802,41 @@ async fn run_controller(
     let project = repo.get_project(&task.project_id).await?;
     let ws = ctx.workspaces.get(&swarm.workspace_id).await?;
     let dev = repo.get_agent(&dev_agent_id.to_string()).await?;
-    let leader = resolve_leader(ctx, &swarm.id, dev_agent_id).await.unwrap_or_else(|| dev.clone());
+    let leader = resolve_leader(ctx, &swarm.id, dev_agent_id)
+        .await
+        .unwrap_or_else(|| dev.clone());
 
     // The dev's worktree + branch (already created during the dev's turn).
-    let cwd_info = crate::swarm_workspace::ensure_cwd_info(ctx, &swarm, &dev, Some(&project)).await?;
-    let (agent_branch, integration_branch) = match (cwd_info.branch.clone(), cwd_info.integration_branch.clone()) {
-        (Some(b), Some(i)) => (b, i),
-        _ => {
-            // No worktree (scratch/repo mode) — nothing to verify-and-merge; just complete.
-            repo.update_task(&task.id, TaskPatch { status: Some("done".into()), ..Default::default() }).await?;
-            crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
-            return Ok(());
-        }
-    };
+    let cwd_info =
+        crate::swarm_workspace::ensure_cwd_info(ctx, &swarm, &dev, Some(&project)).await?;
+    let (agent_branch, integration_branch) =
+        match (cwd_info.branch.clone(), cwd_info.integration_branch.clone()) {
+            (Some(b), Some(i)) => (b, i),
+            _ => {
+                // No worktree (scratch/repo mode) — nothing to verify-and-merge; just complete.
+                repo.update_task(
+                    &task.id,
+                    TaskPatch {
+                        status: Some("done".into()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
+                return Ok(());
+            }
+        };
 
     let goals = assemble_task_goals(ctx, task).await;
     if goals.is_empty() {
-        repo.update_task(&task.id, TaskPatch { status: Some("done".into()), ..Default::default() }).await?;
+        repo.update_task(
+            &task.id,
+            TaskPatch {
+                status: Some("done".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
         crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
         return Ok(());
     }
@@ -725,12 +875,31 @@ async fn run_controller(
     } else {
         "done"
     };
-    repo.update_task(&task.id, TaskPatch { status: Some(final_status.into()), ..Default::default() }).await?;
+    repo.update_task(
+        &task.id,
+        TaskPatch {
+            status: Some(final_status.into()),
+            ..Default::default()
+        },
+    )
+    .await?;
     crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
 
-    let passed = summary.results.iter().filter(|r| r.status == "passed").count();
-    let warned = summary.results.iter().filter(|r| r.status == "warned").count();
-    let unmet = summary.results.iter().filter(|r| r.status == "unmet").count();
+    let passed = summary
+        .results
+        .iter()
+        .filter(|r| r.status == "passed")
+        .count();
+    let warned = summary
+        .results
+        .iter()
+        .filter(|r| r.status == "warned")
+        .count();
+    let unmet = summary
+        .results
+        .iter()
+        .filter(|r| r.status == "unmet")
+        .count();
     let merge_note = summary
         .merge_status
         .as_deref()
@@ -759,7 +928,11 @@ async fn run_controller(
 /// (e.g. after a daemon restart) so they aren't stranded (review B2). The trigger
 /// persists the dev as the task's `assignee_agent_id`, so recovery reads it there.
 pub async fn recover(ctx: &ServerCtx, swarm_id: &str) {
-    let tasks = ctx.swarm_repo.list_tasks_for_swarm(&swarm_id.to_string()).await.unwrap_or_default();
+    let tasks = ctx
+        .swarm_repo
+        .list_tasks_for_swarm(&swarm_id.to_string())
+        .await
+        .unwrap_or_default();
     for task in tasks {
         if task.status != "verifying" || is_verifying(&task.id) {
             continue;
@@ -768,7 +941,13 @@ pub async fn recover(ctx: &ServerCtx, swarm_id: &str) {
             tracing::warn!(task = %task.id, "swarm: stranded verifying task has no assignee; marking blocked");
             let _ = ctx
                 .swarm_repo
-                .update_task(&task.id, TaskPatch { status: Some("blocked".into()), ..Default::default() })
+                .update_task(
+                    &task.id,
+                    TaskPatch {
+                        status: Some("blocked".into()),
+                        ..Default::default()
+                    },
+                )
                 .await;
             continue;
         };
@@ -784,11 +963,18 @@ pub async fn recover(ctx: &ServerCtx, swarm_id: &str) {
 fn verify_prompt(goal: &SwarmGoal, base_branch: &str, scrutiny: u32) -> String {
     let mut s = String::new();
     s.push_str("You are the LEADER verifying ONE goal of a teammate's completed work, in their git worktree (your CWD).\n\n");
-    s.push_str(&format!("## Goal\n**{}**\n{}\n\n", goal.title, goal.description));
+    s.push_str(&format!(
+        "## Goal\n**{}**\n{}\n\n",
+        goal.title, goal.description
+    ));
     if let Some(metric) = &goal.metric {
         s.push_str(&format!("Metric: `{metric}`"));
         if let Some(t) = goal.target_value {
-            s.push_str(&format!(" — target {} {}", goal.comparator.clone().unwrap_or_else(|| "lte".into()), t));
+            s.push_str(&format!(
+                " — target {} {}",
+                goal.comparator.clone().unwrap_or_else(|| "lte".into()),
+                t
+            ));
         }
         if let Some(b) = goal.block_value {
             s.push_str(&format!(" (block threshold: {b})"));
@@ -829,7 +1015,10 @@ fn verify_prompt(goal: &SwarmGoal, base_branch: &str, scrutiny: u32) -> String {
 fn fix_prompt(goal: &SwarmGoal, v: &Verdict) -> String {
     let mut s = String::new();
     s.push_str("Your work did NOT yet meet a goal. Fix it in THIS worktree (your CWD), commit your changes, then report done.\n\n");
-    s.push_str(&format!("## Goal not met\n**{}**\n{}\n\n", goal.title, goal.description));
+    s.push_str(&format!(
+        "## Goal not met\n**{}**\n{}\n\n",
+        goal.title, goal.description
+    ));
     if !v.summary.is_empty() {
         s.push_str(&format!("Leader's summary: {}\n\n", v.summary));
     }
@@ -840,7 +1029,18 @@ fn fix_prompt(goal: &SwarmGoal, v: &Verdict) -> String {
             let detail = f.get("detail").and_then(|x| x.as_str()).unwrap_or("");
             let file = f.get("file").and_then(|x| x.as_str()).unwrap_or("");
             let fix = f.get("fix").and_then(|x| x.as_str()).unwrap_or("");
-            s.push_str(&format!("{}. {} — {} {}\n   fix: {}\n", i + 1, title, detail, if file.is_empty() { String::new() } else { format!("({file})") }, fix));
+            s.push_str(&format!(
+                "{}. {} — {} {}\n   fix: {}\n",
+                i + 1,
+                title,
+                detail,
+                if file.is_empty() {
+                    String::new()
+                } else {
+                    format!("({file})")
+                },
+                fix
+            ));
         }
         s.push('\n');
     }
@@ -897,7 +1097,11 @@ mod tests {
     }
 
     fn vd(target_met: bool, blocker: bool) -> Verdict {
-        Verdict { target_met, blocker, ..Default::default() }
+        Verdict {
+            target_met,
+            blocker,
+            ..Default::default()
+        }
     }
 
     /// Scripted ops: per-goal queue of verdicts, a fixed fix outcome, and a log of
@@ -935,7 +1139,10 @@ mod tests {
     impl VerifyOps for MockOps {
         async fn verify_goal(&self, g: &SwarmGoal, scrutiny: u32) -> Option<Verdict> {
             self.scrutiny.lock().unwrap().push((g.id.clone(), scrutiny));
-            self.log.lock().unwrap().push(format!("verify:{}:{}", g.id, scrutiny));
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("verify:{}:{}", g.id, scrutiny));
             if self.cancel_after_first_verify {
                 self.cancel.store(true, Ordering::Relaxed);
             }
@@ -951,14 +1158,23 @@ mod tests {
             "merged".into()
         }
         async fn record(&self, g: &SwarmGoal, status: &str, iterations: i64, _v: Option<&Verdict>) {
-            self.log.lock().unwrap().push(format!("record:{}:{}:{}", g.id, status, iterations));
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("record:{}:{}:{}", g.id, status, iterations));
         }
         async fn record_iterations(&self, g: &SwarmGoal, iterations: i64) {
-            self.log.lock().unwrap().push(format!("iter:{}:{}", g.id, iterations));
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("iter:{}:{}", g.id, iterations));
         }
         async fn post_verdict(&self, _g: &SwarmGoal, _v: &Verdict) {}
         async fn escalate(&self, g: &SwarmGoal, reason: &str) {
-            self.log.lock().unwrap().push(format!("escalate:{}:{}", g.id, reason));
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("escalate:{}:{}", g.id, reason));
         }
         fn cancelled(&self) -> bool {
             self.cancel.load(Ordering::Relaxed)
@@ -971,15 +1187,30 @@ mod tests {
     #[test]
     fn classify_table() {
         // pass (incl. nits → target_met=true)
-        assert_eq!(classify(&goal("g", true, 3), &vd(true, true), 0), Decision::Pass);
+        assert_eq!(
+            classify(&goal("g", true, 3), &vd(true, true), 0),
+            Decision::Pass
+        );
         // advisory + unmet → warned (no fix loop)
-        assert_eq!(classify(&goal("g", false, 3), &vd(false, true), 0), Decision::Warned);
+        assert_eq!(
+            classify(&goal("g", false, 3), &vd(false, true), 0),
+            Decision::Warned
+        );
         // blocking + unmet, retries left → request fix
-        assert_eq!(classify(&goal("g", true, 3), &vd(false, true), 0), Decision::RequestFix);
+        assert_eq!(
+            classify(&goal("g", true, 3), &vd(false, true), 0),
+            Decision::RequestFix
+        );
         // retries exhausted: near miss (blocker=false) → warned
-        assert_eq!(classify(&goal("g", true, 2), &vd(false, false), 2), Decision::Warned);
+        assert_eq!(
+            classify(&goal("g", true, 2), &vd(false, false), 2),
+            Decision::Warned
+        );
         // retries exhausted: far miss (blocker=true) → unmet
-        assert_eq!(classify(&goal("g", true, 2), &vd(false, true), 2), Decision::Unmet);
+        assert_eq!(
+            classify(&goal("g", true, 2), &vd(false, true), 2),
+            Decision::Unmet
+        );
     }
 
     #[tokio::test]
@@ -995,8 +1226,10 @@ mod tests {
     #[tokio::test]
     async fn near_miss_warns_only_after_retries_then_merges() {
         // Gap A: a near miss is pushed via retries; warns (non-blocking) only at exhaustion.
-        let ops = MockOps::new(FixOutcome::Completed)
-            .script("g1", vec![vd(false, false), vd(false, false), vd(false, false)]);
+        let ops = MockOps::new(FixOutcome::Completed).script(
+            "g1",
+            vec![vd(false, false), vd(false, false), vd(false, false)],
+        );
         let s = run_verification(vec![goal("g1", true, 2)], &ops).await;
         assert!(!s.blocked, "near miss must NOT block the merge");
         assert_eq!(s.merge_status.as_deref(), Some("merged"));
@@ -1016,10 +1249,15 @@ mod tests {
             .script("g1", vec![vd(false, true), vd(false, true)]);
         let s = run_verification(vec![goal("g1", true, 1)], &ops).await;
         assert!(s.blocked);
-        assert!(s.merge_status.is_none(), "blocking unmet must skip the merge");
+        assert!(
+            s.merge_status.is_none(),
+            "blocking unmet must skip the merge"
+        );
         let log = ops.logged();
         assert!(log.contains(&"record:g1:unmet:1".to_string()));
-        assert!(log.iter().any(|l| l.starts_with("escalate:g1:goal could not be achieved")));
+        assert!(log
+            .iter()
+            .any(|l| l.starts_with("escalate:g1:goal could not be achieved")));
     }
 
     #[tokio::test]
@@ -1028,7 +1266,10 @@ mod tests {
         let s = run_verification(vec![goal("g1", false, 3)], &ops).await;
         assert!(!s.blocked);
         let log = ops.logged();
-        assert!(log.iter().all(|l| !l.starts_with("fix:")), "advisory goals never fix-loop");
+        assert!(
+            log.iter().all(|l| !l.starts_with("fix:")),
+            "advisory goals never fix-loop"
+        );
         assert!(log.contains(&"record:g1:warned:0".to_string()));
     }
 
@@ -1064,7 +1305,10 @@ mod tests {
         let s = run_verification(vec![goal("g1", true, 3)], &ops).await;
         assert!(s.blocked);
         let log = ops.logged();
-        assert!(log.iter().all(|l| !l.starts_with("fix:")), "no fix when over budget");
+        assert!(
+            log.iter().all(|l| !l.starts_with("fix:")),
+            "no fix when over budget"
+        );
         assert!(log.iter().any(|l| l.contains("budget exhausted")));
     }
 
@@ -1078,7 +1322,10 @@ mod tests {
         assert!(s.cancelled);
         assert!(s.merge_status.is_none());
         let log = ops.logged();
-        assert!(!log.contains(&"verify:g2:1".to_string()), "cancel stops before later goals");
+        assert!(
+            !log.contains(&"verify:g2:1".to_string()),
+            "cancel stops before later goals"
+        );
         assert!(!log.contains(&"merge".to_string()));
     }
 }

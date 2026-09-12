@@ -122,8 +122,14 @@ async fn login_fills_submits_and_detects_success_over_real_cdp() {
     let addr = spawn_fixture().await;
     let url = format!("http://{addr}/login");
 
-    let logged_in = engine.login(&url, "test@example.com", "hunter2").await.unwrap();
-    assert!(logged_in, "password field should be gone after a successful submit");
+    let logged_in = engine
+        .login(&url, "test@example.com", "hunter2")
+        .await
+        .unwrap();
+    assert!(
+        logged_in,
+        "password field should be gone after a successful submit"
+    );
 
     lp.shutdown().await;
 }
@@ -143,8 +149,14 @@ async fn login_reports_failure_when_credentials_are_wrong() {
     let addr = spawn_fixture().await;
     let url = format!("http://{addr}/login");
 
-    let logged_in = engine.login(&url, "test@example.com", "wrong-password").await.unwrap();
-    assert!(!logged_in, "password field should still be present after a failed submit");
+    let logged_in = engine
+        .login(&url, "test@example.com", "wrong-password")
+        .await
+        .unwrap();
+    assert!(
+        !logged_in,
+        "password field should still be present after a failed submit"
+    );
 
     lp.shutdown().await;
 }

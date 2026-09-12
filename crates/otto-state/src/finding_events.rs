@@ -78,7 +78,9 @@ impl FindingEventsRepo {
     }
 
     fn row(r: &sqlx::sqlite::SqliteRow) -> Result<FindingEvent> {
-        let detail_raw: String = r.try_get("detail_json").unwrap_or_else(|_| "{}".to_string());
+        let detail_raw: String = r
+            .try_get("detail_json")
+            .unwrap_or_else(|_| "{}".to_string());
         let detail = serde_json::from_str(&detail_raw).unwrap_or(serde_json::Value::Null);
         Ok(FindingEvent {
             id: r.get("id"),
@@ -114,11 +116,27 @@ mod tests {
     async fn append_and_list_timeline() {
         let repo = FindingEventsRepo::new(mem_pool().await);
         let fid = "f1";
-        repo.append(fid, "ws1", "created", "agent:grill", None, Some("open"), serde_json::json!({"comment_id": "c1"}))
-            .await
-            .unwrap();
+        repo.append(
+            fid,
+            "ws1",
+            "created",
+            "agent:grill",
+            None,
+            Some("open"),
+            serde_json::json!({"comment_id": "c1"}),
+        )
+        .await
+        .unwrap();
         let e2 = repo
-            .append(fid, "ws1", "fix_requested", "u1", Some("open"), Some("accepted"), serde_json::json!({"session_id": "s1"}))
+            .append(
+                fid,
+                "ws1",
+                "fix_requested",
+                "u1",
+                Some("open"),
+                Some("accepted"),
+                serde_json::json!({"session_id": "s1"}),
+            )
             .await
             .unwrap();
         assert_eq!(e2.kind, "fix_requested");

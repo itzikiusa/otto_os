@@ -144,7 +144,10 @@ fn every_registered_route_is_documented() {
     let api_md = std::fs::read_to_string(root.join("docs/contracts/api.md"))
         .expect("read docs/contracts/api.md");
 
-    let undocumented: Vec<&String> = routes.iter().filter(|p| !api_md.contains(p.as_str())).collect();
+    let undocumented: Vec<&String> = routes
+        .iter()
+        .filter(|p| !api_md.contains(p.as_str()))
+        .collect();
 
     assert!(
         undocumented.is_empty(),

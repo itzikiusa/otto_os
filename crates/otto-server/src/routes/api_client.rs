@@ -231,7 +231,12 @@ fn ssh_config_from_conn(conn: &Connection) -> Result<SshTunnelConfig, String> {
         Some(Value::String(s)) => s
             .parse::<u16>()
             .map_err(|_| format!("SSH connection '{}' has an invalid port", conn.name))?,
-        Some(_) => return Err(format!("SSH connection '{}' has an invalid port", conn.name)),
+        Some(_) => {
+            return Err(format!(
+                "SSH connection '{}' has an invalid port",
+                conn.name
+            ))
+        }
     };
     let identity_file = p
         .get("identity_file")
@@ -305,7 +310,10 @@ async fn resolve_socks_proxy(
         .await
         .map_err(|_| "SSH tunnel connection not found".to_string())?;
     if conn.kind != ConnectionKind::Ssh {
-        return Err(format!("connection '{}' is not an SSH connection", conn.name));
+        return Err(format!(
+            "connection '{}' is not an SSH connection",
+            conn.name
+        ));
     }
     // Global profiles (workspace_id = None) are visible everywhere; otherwise it
     // must belong to this workspace.
@@ -599,9 +607,12 @@ pub async fn create_request(
     // row exists (lazy migration on save; plaintext never touches SQLite).
     let id = otto_core::new_id();
     let own_ref = api_secrets::request_ref(&id);
-    let (auth_row, blob) =
-        api_secrets::split_auth_secrets(&normalize_json_object(req.auth.clone()), &own_ref, &BTreeMap::new())
-            .map_err(|m| ApiError(Error::Invalid(m)))?;
+    let (auth_row, blob) = api_secrets::split_auth_secrets(
+        &normalize_json_object(req.auth.clone()),
+        &own_ref,
+        &BTreeMap::new(),
+    )
+    .map_err(|m| ApiError(Error::Invalid(m)))?;
     api_secrets::store_blob(ctx.secrets.as_ref(), &own_ref, &blob)?;
 
     let mut new = req_to_new(&wid, req, position, extras);
@@ -683,9 +694,9 @@ pub async fn delete_request(
 fn validate_extras(extras: Option<Value>) -> Result<Option<Value>, ApiError> {
     match extras {
         None | Some(Value::Null) => Ok(None),
-        Some(v) if !v.is_object() => {
-            Err(ApiError(Error::Invalid("extras must be a JSON object".into())))
-        }
+        Some(v) if !v.is_object() => Err(ApiError(Error::Invalid(
+            "extras must be a JSON object".into(),
+        ))),
         Some(v) => {
             if v.to_string().len() > EXTRAS_MAX_BYTES {
                 return Err(ApiError(Error::Invalid(format!(
@@ -796,7 +807,12 @@ pub async fn update_environment(
     }
     api_secrets::store_blob(ctx.secrets.as_ref(), &sref, &blob)?;
     let env = repo
-        .update_environment(&id, Some(req.name.trim()), Some(&vars), Some(&req.secret_keys))
+        .update_environment(
+            &id,
+            Some(req.name.trim()),
+            Some(&vars),
+            Some(&req.secret_keys),
+        )
         .await?;
     Ok(Json(env))
 }
@@ -1010,7 +1026,12 @@ pub async fn postman_sync(
 
     // Resolve the key: explicit in the request, else the remembered one.
     let stored = api_secrets::load_blob(ctx.secrets.as_ref(), POSTMAN_SECRET_REF);
-    let key = match req.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+    let key = match req
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
         Some(k) => k.to_string(),
         None => stored.get("api_key").cloned().ok_or_else(|| {
             ApiError(Error::Invalid(
@@ -1033,7 +1054,10 @@ pub async fn postman_sync(
     let mut environments = Vec::new();
     let mut failed = Vec::new();
 
-    let listed = listing["collections"].as_array().cloned().unwrap_or_default();
+    let listed = listing["collections"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     if listed.len() > POSTMAN_SYNC_MAX {
         failed.push(PostmanSyncFailure {
             name: format!("(cap) {} more collections", listed.len() - POSTMAN_SYNC_MAX),
@@ -1043,8 +1067,12 @@ pub async fn postman_sync(
     for item in listed.iter().take(POSTMAN_SYNC_MAX) {
         let uid = item["uid"].as_str().unwrap_or_default();
         let name = item["name"].as_str().unwrap_or(uid).to_string();
-        match postman_get(&client, &key, &format!("https://api.getpostman.com/collections/{uid}"))
-            .await
+        match postman_get(
+            &client,
+            &key,
+            &format!("https://api.getpostman.com/collections/{uid}"),
+        )
+        .await
         {
             Ok(mut v) => match v.get_mut("collection") {
                 Some(c) => collections.push(c.take()),
@@ -1061,7 +1089,10 @@ pub async fn postman_sync(
     // the collections that already fetched fine.
     match postman_get(&client, &key, "https://api.getpostman.com/environments").await {
         Ok(listing) => {
-            let listed = listing["environments"].as_array().cloned().unwrap_or_default();
+            let listed = listing["environments"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             for item in listed.iter().take(POSTMAN_SYNC_MAX) {
                 let uid = item["uid"].as_str().unwrap_or_default();
                 let name = item["name"].as_str().unwrap_or(uid).to_string();
@@ -1263,10 +1294,14 @@ async fn resolve_marker_or_string(
                 ))));
             };
             let rid = api_secrets::parse_request_ref(r).ok_or_else(|| {
-                ApiError(Error::Invalid(format!("{field} has an unsupported secret ref")))
+                ApiError(Error::Invalid(format!(
+                    "{field} has an unsupported secret ref"
+                )))
             })?;
             let request = repo(ctx).get_request(&rid.to_string()).await.map_err(|_| {
-                ApiError(Error::Invalid(format!("{field} references an unknown request")))
+                ApiError(Error::Invalid(format!(
+                    "{field} references an unknown request"
+                )))
             })?;
             ensure_in_workspace(&request.workspace_id, wid)?;
             let blob = api_secrets::load_blob(ctx.secrets.as_ref(), r);
@@ -2960,7 +2995,10 @@ pub(crate) fn caller_source(headers: &HeaderMap) -> (Value, Option<Id>) {
             json!({"kind": "agent", "session_id": session_id}),
             Some(session_id),
         ),
-        (None, Some(via)) => (json!({"kind": "agent", "session_id": null, "via": via}), None),
+        (None, Some(via)) => (
+            json!({"kind": "agent", "session_id": null, "via": via}),
+            None,
+        ),
         (None, None) => (json!({"kind": "human", "session_id": null}), None),
     }
 }
@@ -3165,19 +3203,23 @@ mod tests {
         let ws = otto_core::new_id();
         let user = otto_core::new_id();
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query("INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, '', ?)")
-            .bind(&user)
-            .bind(format!("u-{user}"))
-            .bind(&now)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'ws', '/tmp', ?)")
-            .bind(&ws)
-            .bind(&now)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, '', ?)",
+        )
+        .bind(&user)
+        .bind(format!("u-{user}"))
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'ws', '/tmp', ?)",
+        )
+        .bind(&ws)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
         (pool.clone(), ApiClientRepo::new(pool), ws)
     }
 
@@ -3207,7 +3249,11 @@ mod tests {
 
         // Legacy rows: plaintext bearer token + a secret-shaped env variable.
         let req = repo
-            .create_request(legacy_request(&ws, "legacy", json!({"type":"bearer","token":"tk-1"})))
+            .create_request(legacy_request(
+                &ws,
+                "legacy",
+                json!({"type":"bearer","token":"tk-1"}),
+            ))
             .await
             .unwrap();
         let env = repo
@@ -3227,7 +3273,13 @@ mod tests {
         let after = repo.get_request(&req.id).await.unwrap();
         let own_ref = api_secrets::request_ref(&req.id);
         assert_eq!(after.auth["token"], json!({"$secret": own_ref.clone()}));
-        assert!(store.0.lock().unwrap().get(&own_ref).unwrap().contains("tk-1"));
+        assert!(store
+            .0
+            .lock()
+            .unwrap()
+            .get(&own_ref)
+            .unwrap()
+            .contains("tk-1"));
         assert!(!after.auth.to_string().contains("tk-1"));
 
         // Environment: key moved to secret_keys, value stripped from the row.
@@ -3235,7 +3287,13 @@ mod tests {
         assert_eq!(env_after.secret_keys, vec!["api_token".to_string()]);
         assert!(env_after.variables.get("api_token").is_none());
         assert_eq!(env_after.variables["base"], "https://x");
-        assert!(store.0.lock().unwrap().get(&api_secrets::env_ref(&env.id)).unwrap().contains("sekret"));
+        assert!(store
+            .0
+            .lock()
+            .unwrap()
+            .get(&api_secrets::env_ref(&env.id))
+            .unwrap()
+            .contains("sekret"));
 
         // Second sweep finds nothing to do (idempotent).
         let (r2, e2) = secure_all_sweep(&repo, &store, &ws).await.unwrap();
@@ -3260,7 +3318,11 @@ mod tests {
         let store = MemStore::new();
 
         let req = repo
-            .create_request(legacy_request(&ws, "mine", json!({"type":"bearer","token":"live-tok"})))
+            .create_request(legacy_request(
+                &ws,
+                "mine",
+                json!({"type":"bearer","token":"live-tok"}),
+            ))
             .await
             .unwrap();
         secure_all_sweep(&repo, &store, &ws).await.unwrap();
@@ -3289,13 +3351,17 @@ mod tests {
         // A caller in another workspace replaying the marker is rejected.
         let ws2 = otto_core::new_id();
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w2', '/tmp', ?)")
-            .bind(&ws2)
-            .bind(&now)
-            .execute(&pool)
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w2', '/tmp', ?)",
+        )
+        .bind(&ws2)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let err = resolve_exec_auth(&repo, &store, &ws2, &exec)
             .await
-            .unwrap();
-        let err = resolve_exec_auth(&repo, &store, &ws2, &exec).await.unwrap_err();
+            .unwrap_err();
         assert!(err.contains("outside this workspace"), "{err}");
 
         // History snapshots redact markers AND plaintext to ***.

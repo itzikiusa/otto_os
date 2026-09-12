@@ -430,11 +430,7 @@ impl ConfluenceClient {
             .get(&url)
             .header("Authorization", &self.auth_header)
             .header("Accept", "application/json")
-            .query(&[
-                ("cql", cql.as_str()),
-                ("limit", "25"),
-                ("expand", "space"),
-            ])
+            .query(&[("cql", cql.as_str()), ("limit", "25"), ("expand", "space")])
             .send()
             .await
             .map_err(|e| Error::Upstream(format!("confluence search_pages request: {e}")))?;
@@ -625,9 +621,7 @@ pub fn build_page_cql(space_key: Option<&str>, query: &str) -> String {
         return format!("type=page and id={q}");
     }
     // Escape CQL string literal: backslash first, then double-quote.
-    let escaped: String = q
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let escaped: String = q.replace('\\', "\\\\").replace('"', "\\\"");
 
     let space_clause = match space_key {
         Some(k) if !k.trim().is_empty() => format!(" and space=\"{}\"", k.trim()),
@@ -781,7 +775,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
     fn convert_table(input: &str, start_pos: usize) -> (String, usize) {
         let src = &input[start_pos..];
         // Locate </table>
-        let end_offset = src.to_ascii_lowercase().find("</table>").unwrap_or(src.len());
+        let end_offset = src
+            .to_ascii_lowercase()
+            .find("</table>")
+            .unwrap_or(src.len());
         let table_src = &src[..end_offset + "</table>".len()];
         let consumed = end_offset + "</table>".len();
 
@@ -793,10 +790,16 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
         while let Some(tr_start) = src_lc[search_from..].find("<tr") {
             let tr_start = search_from + tr_start;
             // Skip to end of opening <tr...> tag.
-            let tr_open_end = src_lc[tr_start..].find('>').map(|i| tr_start + i + 1).unwrap_or(tr_start + 3);
+            let tr_open_end = src_lc[tr_start..]
+                .find('>')
+                .map(|i| tr_start + i + 1)
+                .unwrap_or(tr_start + 3);
             let after_tr = tr_open_end;
             // Find </tr>.
-            let tr_end = src_lc[after_tr..].find("</tr>").map(|i| after_tr + i).unwrap_or(src_lc.len());
+            let tr_end = src_lc[after_tr..]
+                .find("</tr>")
+                .map(|i| after_tr + i)
+                .unwrap_or(src_lc.len());
             let row_src = &table_src[after_tr..tr_end];
             let row_src_lc = row_src.to_ascii_lowercase();
 
@@ -805,24 +808,36 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             let mut cell_pos = 0usize;
             while cell_pos < row_src.len() {
                 if let Some(cell_start_rel) = row_src_lc[cell_pos..].find("<td").or_else(|| {
-                    row_src_lc[cell_pos..]
-                        .find("<th")
-                        .map(|i| {
-                            // Use whichever is earlier if both present.
-                            let td = row_src_lc[cell_pos..].find("<td").unwrap_or(usize::MAX);
-                            if i <= td { i } else { td }
-                        })
+                    row_src_lc[cell_pos..].find("<th").map(|i| {
+                        // Use whichever is earlier if both present.
+                        let td = row_src_lc[cell_pos..].find("<td").unwrap_or(usize::MAX);
+                        if i <= td {
+                            i
+                        } else {
+                            td
+                        }
+                    })
                 }) {
                     let cell_start = cell_pos + cell_start_rel;
-                    let tag_end = row_src_lc[cell_start..].find('>').map(|i| cell_start + i + 1).unwrap_or(cell_start + 3);
+                    let tag_end = row_src_lc[cell_start..]
+                        .find('>')
+                        .map(|i| cell_start + i + 1)
+                        .unwrap_or(cell_start + 3);
                     // Determine closing tag.
                     let is_th = row_src_lc[cell_start..].starts_with("<th");
                     let close_tag = if is_th { "</th>" } else { "</td>" };
-                    let close_start = row_src_lc[tag_end..].find(close_tag).map(|i| tag_end + i).unwrap_or(row_src.len());
+                    let close_start = row_src_lc[tag_end..]
+                        .find(close_tag)
+                        .map(|i| tag_end + i)
+                        .unwrap_or(row_src.len());
                     let cell_content = &row_src[tag_end..close_start];
                     // Recursively convert cell content (may have inline markup).
                     let cell_md = strip_tags(cell_content);
-                    let cell_md = decode_entities(&cell_md).replace('|', "\\|").replace('\n', " ").trim().to_string();
+                    let cell_md = decode_entities(&cell_md)
+                        .replace('|', "\\|")
+                        .replace('\n', " ")
+                        .trim()
+                        .to_string();
                     cells.push(cell_md);
                     cell_pos = close_start + close_tag.len();
                 } else {
@@ -910,7 +925,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
                 let tag_start = search + rel;
                 // Back up to the `<`.
                 let lt = src_lc[..tag_start].rfind('<').unwrap_or(0);
-                let tag_end = src_lc[tag_start..].find('>').map(|i| tag_start + i + 1).unwrap_or(tag_start + 1);
+                let tag_end = src_lc[tag_start..]
+                    .find('>')
+                    .map(|i| tag_start + i + 1)
+                    .unwrap_or(tag_start + 1);
                 let tag_inner = &macro_src[lt + 1..tag_end - 1];
                 let actual_name = extract_attr(tag_inner, "ac:name").unwrap_or_default();
                 if actual_name.to_ascii_lowercase() == param_name {
@@ -991,7 +1009,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
         let filename = {
             let m_lc = macro_src.to_ascii_lowercase();
             if let Some(att_start) = m_lc.find("<ri:attachment") {
-                let tag_end = m_lc[att_start..].find('>').map(|i| att_start + i + 1).unwrap_or(att_start + 1);
+                let tag_end = m_lc[att_start..]
+                    .find('>')
+                    .map(|i| att_start + i + 1)
+                    .unwrap_or(att_start + 1);
                 let tag_inner = &macro_src[att_start + 1..tag_end.saturating_sub(1)];
                 extract_attr(tag_inner, "ri:filename")
             } else {
@@ -1013,7 +1034,9 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
 
             // ── Table look-ahead ──────────────────────────────────────────
             if input[pos..].len() >= 6
-                && input[pos..pos + 6].to_ascii_lowercase().starts_with("<table")
+                && input[pos..pos + 6]
+                    .to_ascii_lowercase()
+                    .starts_with("<table")
             {
                 push_block_sep!();
                 let (gfm, consumed) = convert_table(input, pos);
@@ -1215,7 +1238,10 @@ pub fn storage_to_markdown(storage_xhtml: &str) -> String {
             let _ = (is_self_close, in_code, pending_newline); // suppress unused warnings
         } else {
             // Text node.
-            let next_tag = input[pos..].find('<').map(|i| pos + i).unwrap_or(input.len());
+            let next_tag = input[pos..]
+                .find('<')
+                .map(|i| pos + i)
+                .unwrap_or(input.len());
             let text_raw = &input[pos..next_tag];
             pos = next_tag;
 
@@ -1479,7 +1505,9 @@ pub fn markdown_to_storage(md: &str) -> String {
             let mut para = String::new();
             while i < lines.len() {
                 let l = lines[i].trim_start();
-                let Some(rest) = l.strip_prefix('>') else { break };
+                let Some(rest) = l.strip_prefix('>') else {
+                    break;
+                };
                 let rest = rest.strip_prefix(' ').unwrap_or(rest);
                 if rest.trim().is_empty() {
                     // Blank quoted line separates paragraphs inside the quote.
@@ -1671,9 +1699,7 @@ fn is_table_delimiter(line: &str) -> bool {
     !cells.is_empty()
         && cells.iter().all(|c| {
             let c = c.trim();
-            !c.is_empty()
-                && c.chars().all(|ch| ch == '-' || ch == ':')
-                && c.contains('-')
+            !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':') && c.contains('-')
         })
 }
 
@@ -1709,7 +1735,10 @@ fn is_task_item(line: &str) -> Option<(bool, &str)> {
     if let Some(b) = rest.strip_prefix("[ ] ") {
         return Some((false, b));
     }
-    if let Some(b) = rest.strip_prefix("[x] ").or_else(|| rest.strip_prefix("[X] ")) {
+    if let Some(b) = rest
+        .strip_prefix("[x] ")
+        .or_else(|| rest.strip_prefix("[X] "))
+    {
         return Some((true, b));
     }
     None
@@ -1766,7 +1795,8 @@ mod tests {
 
     #[test]
     fn test_storage_to_markdown_basic() {
-        let storage = "<h2>Title</h2><p>Hello <a href=\"x\">link</a></p><ul><li>a</li><li>b</li></ul>";
+        let storage =
+            "<h2>Title</h2><p>Hello <a href=\"x\">link</a></p><ul><li>a</li><li>b</li></ul>";
         let md = storage_to_markdown(storage);
 
         // Should contain a level-2 heading.
@@ -1832,8 +1862,14 @@ mod tests {
         let storage = markdown_to_storage("- one\n- two\n- three");
         assert!(storage.contains("<ul>"), "ul open; got: {storage:?}");
         assert!(storage.contains("</ul>"), "ul close; got: {storage:?}");
-        assert!(storage.contains("<li>one</li>"), "item one; got: {storage:?}");
-        assert!(storage.contains("<li>two</li>"), "item two; got: {storage:?}");
+        assert!(
+            storage.contains("<li>one</li>"),
+            "item one; got: {storage:?}"
+        );
+        assert!(
+            storage.contains("<li>two</li>"),
+            "item two; got: {storage:?}"
+        );
     }
 
     #[test]
@@ -1841,14 +1877,20 @@ mod tests {
         let storage = markdown_to_storage("1. first\n2. second");
         assert!(storage.contains("<ol>"), "ol open; got: {storage:?}");
         assert!(storage.contains("</ol>"), "ol close; got: {storage:?}");
-        assert!(storage.contains("<li>first</li>"), "item first; got: {storage:?}");
+        assert!(
+            storage.contains("<li>first</li>"),
+            "item first; got: {storage:?}"
+        );
     }
 
     #[test]
     fn test_markdown_to_storage_fenced_code() {
         let storage = markdown_to_storage("```\nlet x = 1;\n```");
         assert!(storage.contains("<pre>"), "pre tag; got: {storage:?}");
-        assert!(storage.contains("let x = 1;"), "code content; got: {storage:?}");
+        assert!(
+            storage.contains("let x = 1;"),
+            "code content; got: {storage:?}"
+        );
     }
 
     #[test]
@@ -1902,57 +1944,99 @@ mod tests {
     #[test]
     fn test_cql_all_digits_is_id_lookup() {
         let cql = build_page_cql(None, "12345");
-        assert!(cql.contains("id=12345"), "should contain id=12345; got: {cql:?}");
-        assert!(!cql.contains("title ~"), "should NOT contain title ~; got: {cql:?}");
+        assert!(
+            cql.contains("id=12345"),
+            "should contain id=12345; got: {cql:?}"
+        );
+        assert!(
+            !cql.contains("title ~"),
+            "should NOT contain title ~; got: {cql:?}"
+        );
     }
 
     #[test]
     fn test_cql_digits_with_space_key_still_id_lookup() {
         let cql = build_page_cql(Some("DEV"), "99");
         assert!(cql.contains("id=99"), "should contain id=99; got: {cql:?}");
-        assert!(!cql.contains("title ~"), "should NOT contain title ~; got: {cql:?}");
+        assert!(
+            !cql.contains("title ~"),
+            "should NOT contain title ~; got: {cql:?}"
+        );
     }
 
     #[test]
     fn test_cql_name_with_space_key() {
         let cql = build_page_cql(Some("DEV"), "onboarding guide");
-        assert!(cql.contains("space=\"DEV\""), "should contain space clause; got: {cql:?}");
-        assert!(cql.contains("title ~ \"onboarding guide\""), "should contain title ~; got: {cql:?}");
-        assert!(cql.contains("type=page"), "should contain type=page; got: {cql:?}");
+        assert!(
+            cql.contains("space=\"DEV\""),
+            "should contain space clause; got: {cql:?}"
+        );
+        assert!(
+            cql.contains("title ~ \"onboarding guide\""),
+            "should contain title ~; got: {cql:?}"
+        );
+        assert!(
+            cql.contains("type=page"),
+            "should contain type=page; got: {cql:?}"
+        );
     }
 
     #[test]
     fn test_cql_name_without_space_key() {
         let cql = build_page_cql(None, "release notes");
-        assert!(!cql.contains("space="), "should NOT have space clause; got: {cql:?}");
-        assert!(cql.contains("type=page"), "should contain type=page; got: {cql:?}");
-        assert!(cql.contains("title ~"), "should contain title ~; got: {cql:?}");
+        assert!(
+            !cql.contains("space="),
+            "should NOT have space clause; got: {cql:?}"
+        );
+        assert!(
+            cql.contains("type=page"),
+            "should contain type=page; got: {cql:?}"
+        );
+        assert!(
+            cql.contains("title ~"),
+            "should contain title ~; got: {cql:?}"
+        );
     }
 
     #[test]
     fn test_cql_name_empty_space_key_treated_as_none() {
         let cql = build_page_cql(Some(""), "api design");
-        assert!(!cql.contains("space="), "empty space key → no space clause; got: {cql:?}");
-        assert!(cql.contains("title ~"), "should contain title ~; got: {cql:?}");
+        assert!(
+            !cql.contains("space="),
+            "empty space key → no space clause; got: {cql:?}"
+        );
+        assert!(
+            cql.contains("title ~"),
+            "should contain title ~; got: {cql:?}"
+        );
     }
 
     #[test]
     fn test_cql_escapes_double_quote_in_query() {
         let cql = build_page_cql(None, "say \"hello\"");
         // The CQL literal should have the quote escaped as \"
-        assert!(cql.contains("\\\"hello\\\""), "quote should be escaped; got: {cql:?}");
+        assert!(
+            cql.contains("\\\"hello\\\""),
+            "quote should be escaped; got: {cql:?}"
+        );
     }
 
     #[test]
     fn test_cql_escapes_backslash_in_query() {
         let cql = build_page_cql(None, r"path\to");
-        assert!(cql.contains("\\\\"), "backslash should be escaped; got: {cql:?}");
+        assert!(
+            cql.contains("\\\\"),
+            "backslash should be escaped; got: {cql:?}"
+        );
     }
 
     #[test]
     fn test_cql_trims_whitespace_from_query() {
         let cql = build_page_cql(None, "  onboard  ");
-        assert!(cql.contains("title ~ \"onboard\""), "should trim query; got: {cql:?}");
+        assert!(
+            cql.contains("title ~ \"onboard\""),
+            "should trim query; got: {cql:?}"
+        );
     }
 
     // ── storage_to_markdown fidelity: table → GFM pipe-table ────────────────
@@ -2022,9 +2106,15 @@ mod tests {
 </ac:structured-macro>"#;
         let md = storage_to_markdown(storage);
         // Should be rendered as a blockquote with a label.
-        assert!(md.contains("> **"), "blockquote with bold label; got: {md:?}");
+        assert!(
+            md.contains("> **"),
+            "blockquote with bold label; got: {md:?}"
+        );
         assert!(md.contains("INFO"), "INFO label; got: {md:?}");
-        assert!(md.contains("informational text"), "body content; got: {md:?}");
+        assert!(
+            md.contains("informational text"),
+            "body content; got: {md:?}"
+        );
     }
 
     #[test]
@@ -2047,7 +2137,10 @@ mod tests {
         assert!(md.contains("Before"), "before text; got: {md:?}");
         assert!(md.contains("After"), "after text; got: {md:?}");
         // The body of an unknown macro is silently dropped.
-        assert!(!md.contains("hidden"), "unknown macro body must be dropped; got: {md:?}");
+        assert!(
+            !md.contains("hidden"),
+            "unknown macro body must be dropped; got: {md:?}"
+        );
     }
 
     // ── storage_to_markdown fidelity: ac:image → Markdown image link ──────────
@@ -2056,7 +2149,10 @@ mod tests {
     fn test_storage_to_markdown_image_with_attachment() {
         let storage = r#"<ac:image><ri:attachment ri:filename="diagram.png"/></ac:image>"#;
         let md = storage_to_markdown(storage);
-        assert!(md.contains("![diagram.png](diagram.png)"), "image link; got: {md:?}");
+        assert!(
+            md.contains("![diagram.png](diagram.png)"),
+            "image link; got: {md:?}"
+        );
     }
 
     #[test]
@@ -2075,16 +2171,16 @@ mod tests {
     #[test]
     fn markdown_to_storage_survives_multibyte_next_to_inline_spans() {
         for md in [
-            "\u{23f3} \u{2014} **pending**",                 // emoji + em-dash + bold
-            "a \u{2014} **b**",                            // em-dash then bold
-            "`deducted = amount \u{d7} count` \u{2192} **ok**",  // multiplication sign + code + bold
+            "\u{23f3} \u{2014} **pending**", // emoji + em-dash + bold
+            "a \u{2014} **b**",              // em-dash then bold
+            "`deducted = amount \u{d7} count` \u{2192} **ok**", // multiplication sign + code + bold
             "\u{2022} outbox \u{2192} `MoveBonusToCash` \u{2192} **WAGERING_COMPLETE**",
             "\u{26a0}\u{fe0f} **NOT READY** \u{2014} see \u{a7}9",
             "\u{2500}\u{2500} *italic* \u{2500}\u{2500}",
             "[\u{2192} link](https://example.com/a\u{2014}b) \u{2014} **after**",
             "\u{2265} 5 \u{2248} `x` \u{2264} **y**",
         ] {
-            let out = markdown_to_storage(md);   // must not panic
+            let out = markdown_to_storage(md); // must not panic
             assert!(!out.is_empty(), "empty output for {md:?}");
         }
 
@@ -2094,7 +2190,10 @@ mod tests {
         let out = markdown_to_storage("\u{2192} `code` \u{2192}");
         assert!(out.contains("<code>code</code>"), "got: {out}");
         let out = markdown_to_storage("[\u{2192}t](http://u/\u{2014}) x");
-        assert!(out.contains("<a href=\"http://u/\u{2014}\">\u{2192}t</a>"), "got: {out}");
+        assert!(
+            out.contains("<a href=\"http://u/\u{2014}\">\u{2192}t</a>"),
+            "got: {out}"
+        );
     }
 
     /// Tables are the backbone of a test-case document (summary + coverage
@@ -2106,15 +2205,24 @@ mod tests {
         let out = markdown_to_storage(md);
         assert!(out.contains("<table><tbody>"), "no table: {out}");
         assert!(out.contains("<th>TC ID</th>"), "no header cell: {out}");
-        assert!(out.contains("<td><code>qual_expired</code></td>"), "inline in cell: {out}");
-        assert!(out.contains("<td><strong>bold</strong></td>"), "bold in cell: {out}");
+        assert!(
+            out.contains("<td><code>qual_expired</code></td>"),
+            "inline in cell: {out}"
+        );
+        assert!(
+            out.contains("<td><strong>bold</strong></td>"),
+            "bold in cell: {out}"
+        );
         assert!(out.contains("</tbody></table>"), "unclosed: {out}");
         assert!(out.contains("<p>after</p>"), "text after table: {out}");
         assert!(!out.contains("<p>| TC-1"), "row leaked as paragraph: {out}");
 
         // A short row must not shear the table.
         let ragged = markdown_to_storage("| a | b |\n|---|---|\n| only |");
-        assert!(ragged.contains("<td>only</td><td></td>"), "padding: {ragged}");
+        assert!(
+            ragged.contains("<td>only</td><td></td>"),
+            "padding: {ragged}"
+        );
 
         // A lone pipe line with no delimiter row stays a paragraph.
         let not_table = markdown_to_storage("| not a table");
@@ -2140,14 +2248,20 @@ mod tests {
         let out = markdown_to_storage("> **NOT READY.** line one\n> line two\n\nafter");
         assert!(out.contains("<blockquote>"), "blockquote: {out}");
         assert!(out.contains("line one line two"), "joined: {out}");
-        assert!(out.contains("<strong>NOT READY.</strong>"), "inline in quote: {out}");
+        assert!(
+            out.contains("<strong>NOT READY.</strong>"),
+            "inline in quote: {out}"
+        );
         assert!(out.contains("</blockquote>"), "closed: {out}");
         assert!(out.contains("<p>after</p>"), "text after: {out}");
         assert!(!out.contains("&gt; line two"), "literal marker: {out}");
 
         // A table delimiter must still belong to its table, not become an <hr>.
         let out = markdown_to_storage("| a |\n|---|\n| v |");
-        assert!(out.contains("<th>a</th>") && !out.contains("<hr />"), "delimiter: {out}");
+        assert!(
+            out.contains("<th>a</th>") && !out.contains("<hr />"),
+            "delimiter: {out}"
+        );
     }
 
     /// Native Confluence macros beat plain XHTML: real tickable checkboxes for
@@ -2156,23 +2270,38 @@ mod tests {
     fn markdown_to_storage_emits_task_lists_and_alert_panels() {
         let out = markdown_to_storage("- [ ] seed player `42`\n- [x] done step\n\nafter");
         assert!(out.contains("<ac:task-list>"), "task list: {out}");
-        assert!(out.contains("<ac:task-status>incomplete</ac:task-status>"), "unchecked: {out}");
-        assert!(out.contains("<ac:task-status>complete</ac:task-status>"), "checked: {out}");
+        assert!(
+            out.contains("<ac:task-status>incomplete</ac:task-status>"),
+            "unchecked: {out}"
+        );
+        assert!(
+            out.contains("<ac:task-status>complete</ac:task-status>"),
+            "checked: {out}"
+        );
         assert!(out.contains("<code>42</code>"), "inline in task: {out}");
         assert!(!out.contains("[ ]"), "literal checkbox: {out}");
         assert!(out.contains("<p>after</p>"), "text after: {out}");
 
         let out = markdown_to_storage("> [!WARNING]\n> **NOT READY** - 3 items\n\nx");
         assert!(out.contains("ac:name=\"warning\""), "warning panel: {out}");
-        assert!(out.contains("<strong>NOT READY</strong>"), "inline in panel: {out}");
+        assert!(
+            out.contains("<strong>NOT READY</strong>"),
+            "inline in panel: {out}"
+        );
         assert!(!out.contains("[!WARNING]"), "marker leaked: {out}");
 
         // A plain quote stays a blockquote.
         let out = markdown_to_storage("> just a quote");
-        assert!(out.contains("<blockquote>") && !out.contains("ac:structured-macro"), "{out}");
+        assert!(
+            out.contains("<blockquote>") && !out.contains("ac:structured-macro"),
+            "{out}"
+        );
 
         // A normal bullet is still a bullet, not a task.
         let out = markdown_to_storage("- plain bullet");
-        assert!(out.contains("<ul><li>") && !out.contains("ac:task"), "{out}");
+        assert!(
+            out.contains("<ul><li>") && !out.contains("ac:task"),
+            "{out}"
+        );
     }
 }

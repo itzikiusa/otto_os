@@ -393,7 +393,11 @@ impl ScheduledTasksRepo {
 
     /// The report hash of the most recent successful run for a task (excluding a
     /// given run id) — backs `notify_on_change` change detection.
-    pub async fn last_ok_report_hash(&self, task_id: &str, exclude_run: &str) -> Result<Option<String>> {
+    pub async fn last_ok_report_hash(
+        &self,
+        task_id: &str,
+        exclude_run: &str,
+    ) -> Result<Option<String>> {
         let row = sqlx::query(
             "SELECT report_hash FROM scheduled_task_runs WHERE task_id = ? AND status = 'ok' \
              AND id != ? AND report_hash IS NOT NULL ORDER BY started_at DESC LIMIT 1",
@@ -560,9 +564,14 @@ mod tests {
         seed_ws(&p, "ws1").await;
         let repo = ScheduledTasksRepo::new(p.clone());
         let t = repo.create(new_task("ws1", "t")).await.unwrap();
-        repo.set_runtime(&t.id, Some("2026-06-26T10:00:00+00:00"), "ok", Some("2026-06-26T11:00:00+00:00"))
-            .await
-            .unwrap();
+        repo.set_runtime(
+            &t.id,
+            Some("2026-06-26T10:00:00+00:00"),
+            "ok",
+            Some("2026-06-26T11:00:00+00:00"),
+        )
+        .await
+        .unwrap();
         let got = repo.get(&t.id).await.unwrap();
         assert_eq!(got.last_status.as_deref(), Some("ok"));
         assert!(got.last_run_at.is_some());
@@ -576,7 +585,11 @@ mod tests {
         let repo = ScheduledTasksRepo::new(p.clone());
         let t = repo.create(new_task("ws1", "t")).await.unwrap();
         let run = repo
-            .create_run(NewRun { task_id: t.id.clone(), workspace_id: "ws1".into(), trigger: "manual".into() })
+            .create_run(NewRun {
+                task_id: t.id.clone(),
+                workspace_id: "ws1".into(),
+                trigger: "manual".into(),
+            })
             .await
             .unwrap();
         assert_eq!(run.status, "running");
@@ -617,7 +630,11 @@ mod tests {
         let t = repo.create(new_task("ws1", "t")).await.unwrap();
         for i in 0..5 {
             let r = repo
-                .create_run(NewRun { task_id: t.id.clone(), workspace_id: "ws1".into(), trigger: "schedule".into() })
+                .create_run(NewRun {
+                    task_id: t.id.clone(),
+                    workspace_id: "ws1".into(),
+                    trigger: "schedule".into(),
+                })
                 .await
                 .unwrap();
             repo.finish_run(
@@ -643,7 +660,11 @@ mod tests {
         let repo = ScheduledTasksRepo::new(p.clone());
         let t = repo.create(new_task("ws1", "t")).await.unwrap();
         let r = repo
-            .create_run(NewRun { task_id: t.id.clone(), workspace_id: "ws1".into(), trigger: "schedule".into() })
+            .create_run(NewRun {
+                task_id: t.id.clone(),
+                workspace_id: "ws1".into(),
+                trigger: "schedule".into(),
+            })
             .await
             .unwrap();
         let n = repo.reap_running().await.unwrap();
@@ -657,9 +678,13 @@ mod tests {
         seed_ws(&p, "ws1").await;
         let repo = ScheduledTasksRepo::new(p.clone());
         let t = repo.create(new_task("ws1", "t")).await.unwrap();
-        repo.create_run(NewRun { task_id: t.id.clone(), workspace_id: "ws1".into(), trigger: "manual".into() })
-            .await
-            .unwrap();
+        repo.create_run(NewRun {
+            task_id: t.id.clone(),
+            workspace_id: "ws1".into(),
+            trigger: "manual".into(),
+        })
+        .await
+        .unwrap();
         repo.delete(&t.id).await.unwrap();
         assert!(repo.get(&t.id).await.is_err());
         assert_eq!(repo.list_runs(&t.id, 10).await.unwrap().len(), 0);

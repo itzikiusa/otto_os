@@ -48,11 +48,14 @@ async fn email_senders_has_expected_columns() {
 #[tokio::test]
 async fn email_senders_user_id_is_primary_key() {
     let pool = mem_pool().await;
-    let pk: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM pragma_table_info('email_senders') WHERE pk > 0",
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("pragma_table_info pk");
-    assert_eq!(pk, vec!["user_id".to_string()], "user_id must be the sole PK");
+    let pk: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('email_senders') WHERE pk > 0")
+            .fetch_all(&pool)
+            .await
+            .expect("pragma_table_info pk");
+    assert_eq!(
+        pk,
+        vec!["user_id".to_string()],
+        "user_id must be the sole PK"
+    );
 }

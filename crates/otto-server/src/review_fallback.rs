@@ -163,7 +163,10 @@ mod tests {
         ]));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["severity"], "bug");
-        assert_eq!(out[0]["reasoning"], "deterministic fallback — reported by 2 agents");
+        assert_eq!(
+            out[0]["reasoning"],
+            "deterministic fallback — reported by 2 agents"
+        );
         // Summarizer output shape: enriched fields present.
         assert_eq!(out[0]["title"], "Unchecked unwrap here");
         assert_eq!(out[0]["evidence"], "Unchecked unwrap here");
@@ -178,7 +181,10 @@ mod tests {
                 f("b.rs", 40, "warn", "warn b"),
                 f("a.rs", 9, "warn", "agreed warn"),
             ],
-            vec![f("a.rs", 9, "warn", "agreed warn"), f("c.rs", 1, "bug", "the bug")],
+            vec![
+                f("a.rs", 9, "warn", "agreed warn"),
+                f("c.rs", 1, "bug", "the bug"),
+            ],
         ];
         let expect = |o: &[serde_json::Value]| {
             // bug first; among warns the 2-agent one beats the 1-agent one;
@@ -192,7 +198,10 @@ mod tests {
         assert_eq!(once.len(), 4);
         expect(&once);
         // Deterministic: identical input → byte-identical output.
-        assert_eq!(deterministic_summary(&batches), deterministic_summary(&batches));
+        assert_eq!(
+            deterministic_summary(&batches),
+            deterministic_summary(&batches)
+        );
     }
 
     #[test]

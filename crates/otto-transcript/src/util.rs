@@ -59,7 +59,11 @@ pub fn clip(s: &str, max: usize) -> String {
 
 /// First non-empty line of `s`, clipped to `max` chars.
 pub fn first_line(s: &str, max: usize) -> String {
-    let line = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = s
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     clip(line, max)
 }
 
@@ -106,7 +110,9 @@ pub fn extract_pseudo_tags(text: &str) -> (String, Vec<SystemNote>) {
         let open = format!("<{tag}>");
         let close = format!("</{tag}>");
         while let Some(start) = out.find(&open) {
-            let Some(rel_end) = out[start + open.len()..].find(&close) else { break };
+            let Some(rel_end) = out[start + open.len()..].find(&close) else {
+                break;
+            };
             let body_start = start + open.len();
             let body_end = body_start + rel_end;
             let body = out[body_start..body_end].trim().to_string();
@@ -208,12 +214,16 @@ pub fn structured_patch_to_unified(patch: &Value, file: Option<&str>) -> Option<
 /// tokenizer — no regex crate in the tree.
 pub fn pr_urls(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for tok in text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>' | '"' | '\'' | '`' | ',')) {
+    for tok in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>' | '"' | '\'' | '`' | ',')
+    }) {
         let tok = tok.trim_end_matches(['.', ';', ':', ']', '*']);
         if !tok.starts_with("https://") {
             continue;
         }
-        let is_pr = tok.contains("/pull/") || tok.contains("/pull-requests/") || tok.contains("/merge_requests/");
+        let is_pr = tok.contains("/pull/")
+            || tok.contains("/pull-requests/")
+            || tok.contains("/merge_requests/");
         if is_pr
             && tok
                 .rsplit('/')
@@ -330,7 +340,13 @@ mod tests {
     fn pr_urls_are_found_and_labelled() {
         let t = "Opened https://github.com/o/r/pull/12. Also (https://bitbucket.org/w/r/pull-requests/7) and https://github.com/o/r/issues/3";
         let urls = pr_urls(t);
-        assert_eq!(urls, vec!["https://github.com/o/r/pull/12", "https://bitbucket.org/w/r/pull-requests/7"]);
+        assert_eq!(
+            urls,
+            vec![
+                "https://github.com/o/r/pull/12",
+                "https://bitbucket.org/w/r/pull-requests/7"
+            ]
+        );
         assert_eq!(pr_label(&urls[0]), "o/r#12");
     }
 }

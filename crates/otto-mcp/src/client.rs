@@ -75,16 +75,21 @@ impl McpClient {
         });
         let result = self.op(req, 3).await?;
         let bytes = serde_json::to_vec(&result).map(|v| v.len()).unwrap_or(0);
-        let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
-        Ok(CallResult { content: result, is_error, bytes })
+        let is_error = result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Ok(CallResult {
+            content: result,
+            is_error,
+            bytes,
+        })
     }
 
     /// Health probe = an `initialize` round-trip (no extra op).
     pub async fn health(&self) -> Result<(), String> {
         match &self.transport {
-            Transport::Stdio { .. } => {
-                self.stdio_op(None).await.map(|_| ())
-            }
+            Transport::Stdio { .. } => self.stdio_op(None).await.map(|_| ()),
             Transport::Http { .. } => self.http_op(None).await.map(|_| ()),
         }
     }
@@ -127,7 +132,11 @@ impl McpClient {
             let _ = read_until_id(&mut reader, 1).await?;
 
             // 2. initialized notification.
-            write_line(&mut stdin, &json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;
+            write_line(
+                &mut stdin,
+                &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            )
+            .await?;
 
             // 3. the op (if any), wait for its response.
             let result = match op {
@@ -161,9 +170,7 @@ impl McpClient {
         otto_netguard::check_url(url).await?;
         let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
         let host = parsed.host_str().ok_or("url has no host")?.to_string();
-        let port = parsed
-            .port_or_known_default()
-            .ok_or("url has no port")?;
+        let port = parsed.port_or_known_default().ok_or("url has no port")?;
         let addrs = tokio::net::lookup_host((host.as_str(), port))
             .await
             .map_err(|e| format!("dns: {e}"))?;
@@ -199,7 +206,9 @@ impl McpClient {
             "params":{"protocolVersion":PROTOCOL_VERSION,"capabilities":{},
                       "clientInfo":{"name":"otto-control-plane","version":"0.1.0"}}
         });
-        let resp = send(init, None).await.map_err(|e| format!("initialize: {e}"))?;
+        let resp = send(init, None)
+            .await
+            .map_err(|e| format!("initialize: {e}"))?;
         let session_id = resp
             .headers()
             .get("mcp-session-id")
@@ -211,10 +220,15 @@ impl McpClient {
             None => json!({}),
             Some((mut req, _id)) => {
                 // notifications/initialized first (best-effort).
-                let _ = send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}), session_id.clone())
-                    .await;
+                let _ = send(
+                    json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                    session_id.clone(),
+                )
+                .await;
                 req["id"] = json!(2);
-                let resp = send(req, session_id).await.map_err(|e| format!("op: {e}"))?;
+                let resp = send(req, session_id)
+                    .await
+                    .map_err(|e| format!("op: {e}"))?;
                 let msg = parse_http_message(resp).await?;
                 msg.get("result").cloned().ok_or_else(|| {
                     msg.get("error")
@@ -282,7 +296,10 @@ async fn read_until_id<R: AsyncBufReadExt + Unpin>(
     let mut total = 0usize;
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await.map_err(|e| format!("read: {e}"))?;
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
         if n == 0 {
             return Err("server closed before responding".into());
         }
@@ -355,7 +372,10 @@ done
 
     #[tokio::test]
     async fn stdio_call_tool() {
-        let r = stdio_client().call_tool("echo", &json!({"x":1})).await.unwrap();
+        let r = stdio_client()
+            .call_tool("echo", &json!({"x":1}))
+            .await
+            .unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content["content"][0]["text"], json!("ok"));
     }

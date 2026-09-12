@@ -101,7 +101,10 @@ pub fn parse_claude_line(line: &str) -> Option<ClaudeLine> {
         .unwrap_or_default()
         .to_string();
     let dedup_key = message.get("id").and_then(Value::as_str).map(|mid| {
-        let rid = v.get("requestId").and_then(Value::as_str).unwrap_or_default();
+        let rid = v
+            .get("requestId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         format!("{mid}:{rid}")
     });
     let timestamp = v
@@ -211,7 +214,11 @@ pub fn parse_codex_session_meta(line: &str) -> Option<CodexMeta> {
                 .map(str::to_string),
             _ => None,
         });
-    Some(CodexMeta { session_id, cwd, model })
+    Some(CodexMeta {
+        session_id,
+        cwd,
+        model,
+    })
 }
 
 /// A persistent map of `absolute-file-path → byte offset` that lets the tailer
@@ -333,8 +340,15 @@ impl CodexCounterStore {
             .ok()
             .and_then(|s| serde_json::from_str::<CodexCounterState>(&s).ok())
             .unwrap_or_default();
-        let mut store = Self { path, cap: cap.max(1), state };
-        store.state.order.retain(|key| store.state.counters.contains_key(key));
+        let mut store = Self {
+            path,
+            cap: cap.max(1),
+            state,
+        };
+        store
+            .state
+            .order
+            .retain(|key| store.state.counters.contains_key(key));
         store.evict();
         store
     }
@@ -382,7 +396,8 @@ impl CodexCounterStore {
             cache_read: current.cache_read - previous.cache_read,
             cache_write: current.cache_write - previous.cache_write,
         };
-        if delta.input == 0 && delta.output == 0 && delta.cache_read == 0 && delta.cache_write == 0 {
+        if delta.input == 0 && delta.output == 0 && delta.cache_read == 0 && delta.cache_write == 0
+        {
             return None;
         }
         self.state.counters.insert(session_id.to_string(), current);
@@ -744,12 +759,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = CodexCounterStore::load(dir.path().join("codex.json"), 100);
 
-        assert_eq!(store.apply("session-1", &codex_total(10, 2, 80)), Some(codex_total(10, 2, 80)));
-        assert_eq!(store.apply("session-1", &codex_total(14, 5, 110)), Some(codex_total(4, 3, 30)));
+        assert_eq!(
+            store.apply("session-1", &codex_total(10, 2, 80)),
+            Some(codex_total(10, 2, 80))
+        );
+        assert_eq!(
+            store.apply("session-1", &codex_total(14, 5, 110)),
+            Some(codex_total(4, 3, 30))
+        );
         assert_eq!(store.apply("session-1", &codex_total(14, 5, 110)), None);
         // A replayed older snapshot must not reset the baseline or count again.
         assert_eq!(store.apply("session-1", &codex_total(12, 4, 90)), None);
-        assert_eq!(store.apply("session-1", &codex_total(15, 6, 120)), Some(codex_total(1, 1, 10)));
+        assert_eq!(
+            store.apply("session-1", &codex_total(15, 6, 120)),
+            Some(codex_total(1, 1, 10))
+        );
     }
 
     #[test]
@@ -764,9 +788,15 @@ mod tests {
 
         let mut reloaded = CodexCounterStore::load(&path, 2);
         assert_eq!(reloaded.len(), 2);
-        assert_eq!(reloaded.apply("c", &codex_total(4, 4, 4)), Some(codex_total(1, 1, 1)));
+        assert_eq!(
+            reloaded.apply("c", &codex_total(4, 4, 4)),
+            Some(codex_total(1, 1, 1))
+        );
         // `a` was evicted, so seeing it again establishes a fresh baseline.
-        assert_eq!(reloaded.apply("a", &codex_total(1, 1, 1)), Some(codex_total(1, 1, 1)));
+        assert_eq!(
+            reloaded.apply("a", &codex_total(1, 1, 1)),
+            Some(codex_total(1, 1, 1))
+        );
     }
 
     // ── CursorStore ───────────────────────────────────────────────────────────

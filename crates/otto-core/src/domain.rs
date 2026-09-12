@@ -1884,7 +1884,13 @@ pub struct ScoreWeights {
 
 impl Default for ScoreWeights {
     fn default() -> Self {
-        Self { tests: 0.35, lint: 0.10, diff: 0.15, review: 0.25, human: 0.15 }
+        Self {
+            tests: 0.35,
+            lint: 0.10,
+            diff: 0.15,
+            review: 0.25,
+            human: 0.15,
+        }
     }
 }
 
@@ -2608,7 +2614,10 @@ mod tests {
         assert_eq!(Capability::parse("edit"), Some(Capability::Edit));
         assert_eq!(Feature::parse("database"), Some(Feature::Database));
         assert_eq!(Feature::Database.as_str(), "database");
-        assert_eq!(Feature::parse("scheduled_tasks"), Some(Feature::ScheduledTasks));
+        assert_eq!(
+            Feature::parse("scheduled_tasks"),
+            Some(Feature::ScheduledTasks)
+        );
         assert_eq!(Feature::ScheduledTasks.as_str(), "scheduled_tasks");
         assert_eq!(Feature::parse("run_with_otto"), Some(Feature::RunWithOtto));
         assert_eq!(Feature::RunWithOtto.as_str(), "run_with_otto");
@@ -2631,7 +2640,10 @@ mod tests {
 
     #[test]
     fn review_status_cancelled_roundtrips() {
-        assert_eq!(ReviewStatus::parse("cancelled"), Some(ReviewStatus::Cancelled));
+        assert_eq!(
+            ReviewStatus::parse("cancelled"),
+            Some(ReviewStatus::Cancelled)
+        );
         assert_eq!(ReviewStatus::Cancelled.as_str(), "cancelled");
         // Existing variants unaffected.
         assert_eq!(ReviewStatus::parse("running"), Some(ReviewStatus::Running));
@@ -2660,8 +2672,11 @@ mod tests {
         // No source at all → the user's own session → foreground.
         assert!(session(SessionKind::Agent, serde_json::json!({})).is_foreground_agent());
         // An UNKNOWN source also shows in the Agents tab (blacklist filter) → foreground.
-        assert!(session(SessionKind::Agent, serde_json::json!({"source": "someday-new"}))
-            .is_foreground_agent());
+        assert!(session(
+            SessionKind::Agent,
+            serde_json::json!({"source": "someday-new"})
+        )
+        .is_foreground_agent());
         // Every background source is excluded.
         for src in BACKGROUND_SESSION_SOURCES {
             assert!(
@@ -2673,7 +2688,9 @@ mod tests {
         // Non-agent kinds are never foreground *agent* sessions.
         assert!(!session(SessionKind::Connection, serde_json::json!({})).is_foreground_agent());
         // Malformed meta (source not a string) reads as no source → foreground.
-        assert!(session(SessionKind::Agent, serde_json::json!({"source": 7})).is_foreground_agent());
+        assert!(
+            session(SessionKind::Agent, serde_json::json!({"source": 7})).is_foreground_agent()
+        );
     }
 
     /// Every engine that stamps a `meta.source` must be classified background —

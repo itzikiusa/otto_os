@@ -193,10 +193,7 @@ fn build_app(pool: SqlitePool) -> axum::Router {
     let state = TestCtx { pool };
 
     let protected = axum::Router::new()
-        .route(
-            "/admin/impersonate/{user_id}",
-            post(start::<TestCtx>),
-        )
+        .route("/admin/impersonate/{user_id}", post(start::<TestCtx>))
         .route("/admin/impersonate/stop", post(stop::<TestCtx>))
         // PAT mint (guard mirrored from the real create_token).
         .route("/auth/tokens", post(create_token_guarded))
@@ -206,10 +203,8 @@ fn build_app(pool: SqlitePool) -> axum::Router {
         .route("/connections/{id}/db/query", post(db_write_stub));
 
     // The real central guard, layered as a route_layer (so MatchedPath is set).
-    let protected = protected.route_layer(from_fn_with_state(
-        state.clone(),
-        feature_guard::<TestCtx>,
-    ));
+    let protected =
+        protected.route_layer(from_fn_with_state(state.clone(), feature_guard::<TestCtx>));
 
     // The auth layer wraps everything (runs before the guard).
     let protected = protected.layer(from_fn_with_state(state.clone(), auth_layer));
@@ -301,7 +296,10 @@ async fn admin_can_impersonate_plain_user() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "start failed: {body}");
-    let imp_token = body["token"].as_str().expect("token in response").to_string();
+    let imp_token = body["token"]
+        .as_str()
+        .expect("token in response")
+        .to_string();
 
     // /auth/me with the impersonation token shows real=admin, effective=target.
     let (st, me) = req(&app, Method::GET, "/api/v1/auth/me", Some(&imp_token), None).await;
@@ -568,7 +566,10 @@ async fn audit_records_real_and_effective() {
         })
         .await
         .expect("list audit");
-    assert!(!entries.is_empty(), "impersonate.start audit entry must exist");
+    assert!(
+        !entries.is_empty(),
+        "impersonate.start audit entry must exist"
+    );
     let e = &entries[0];
     // Actor = the REAL user (the admin).
     assert_eq!(
@@ -653,5 +654,8 @@ async fn stop_revokes() {
         })
         .await
         .expect("list audit");
-    assert!(!entries.is_empty(), "impersonate.stop audit entry must exist");
+    assert!(
+        !entries.is_empty(),
+        "impersonate.stop audit entry must exist"
+    );
 }

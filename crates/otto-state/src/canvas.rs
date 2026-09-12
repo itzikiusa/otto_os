@@ -345,15 +345,14 @@ impl CanvasRepo {
     /// Link the managed session backing this scene's Ask-AI (set on first use).
     pub async fn set_session(&self, id: &Id, session_id: &Id) -> Result<()> {
         let now = fmt(Utc::now());
-        let result = sqlx::query(
-            "UPDATE canvas_scenes SET session_id = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(session_id)
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("set canvas scene session"))?;
+        let result =
+            sqlx::query("UPDATE canvas_scenes SET session_id = ?, updated_at = ? WHERE id = ?")
+                .bind(session_id)
+                .bind(&now)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(dberr("set canvas scene session"))?;
         if result.rows_affected() == 0 {
             return Err(Error::NotFound(format!("canvas scene {id}")));
         }
@@ -406,13 +405,19 @@ mod tests {
 
         // summary carries the section so the list can group
         let story_summaries = repo.list_for_story(&"s1".into()).await.unwrap();
-        assert_eq!(story_summaries[0].section.as_deref(), Some("Platform/Staging"));
+        assert_eq!(
+            story_summaries[0].section.as_deref(),
+            Some("Platform/Staging")
+        );
 
         // partial update of provider; section kept via COALESCE
         let prov = repo
             .update(
                 &scene.id,
-                SceneUpdate { provider: Some("codex".into()), ..Default::default() },
+                SceneUpdate {
+                    provider: Some("codex".into()),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -429,7 +434,10 @@ mod tests {
         let updated = repo
             .update(
                 &scene.id,
-                SceneUpdate { title: Some("Renamed".into()), ..Default::default() },
+                SceneUpdate {
+                    title: Some("Renamed".into()),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
@@ -442,7 +450,9 @@ mod tests {
                 &scene.id,
                 SceneUpdate {
                     title: None,
-                    doc_json: Some(r#"{"schema":1,"nodes":[{"id":"n1"}],"edges":[],"slides":[]}"#.into()),
+                    doc_json: Some(
+                        r#"{"schema":1,"nodes":[{"id":"n1"}],"edges":[],"slides":[]}"#.into(),
+                    ),
                     thumbnail: Some("data:image/png;base64,AAAA".into()),
                     ..Default::default()
                 },
@@ -451,7 +461,10 @@ mod tests {
             .unwrap();
         assert_eq!(updated2.title, "Renamed"); // unchanged
         assert!(updated2.doc_json.contains("n1"));
-        assert_eq!(updated2.thumbnail.as_deref(), Some("data:image/png;base64,AAAA"));
+        assert_eq!(
+            updated2.thumbnail.as_deref(),
+            Some("data:image/png;base64,AAAA")
+        );
 
         // Optimistic guard: a STALE expect_updated_at (from before updated2's
         // write) must Conflict — not silently clobber the newer doc.
@@ -466,9 +479,15 @@ mod tests {
                 },
             )
             .await;
-        assert!(matches!(conflicted, Err(Error::Conflict(_))), "{conflicted:?}");
+        assert!(
+            matches!(conflicted, Err(Error::Conflict(_))),
+            "{conflicted:?}"
+        );
         let still = repo.get(&scene.id).await.unwrap().unwrap();
-        assert!(still.doc_json.contains("n1"), "doc untouched after conflict");
+        assert!(
+            still.doc_json.contains("n1"),
+            "doc untouched after conflict"
+        );
         // The FRESH stamp applies cleanly.
         let ok = repo
             .update(
@@ -492,7 +511,10 @@ mod tests {
             repo.update(&missing, SceneUpdate::default()).await,
             Err(Error::NotFound(_))
         ));
-        assert!(matches!(repo.delete(&missing).await, Err(Error::NotFound(_))));
+        assert!(matches!(
+            repo.delete(&missing).await,
+            Err(Error::NotFound(_))
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -572,13 +594,21 @@ mod tests {
         assert!(repo.list_refs_for_session(&sid).await.unwrap().is_empty());
 
         // Add twice — idempotent, not a conflict error.
-        repo.add_ref(&scene.id, &sid, &"w1".into(), &"u1".into()).await.unwrap();
-        repo.add_ref(&scene.id, &sid, &"w1".into(), &"u1".into()).await.unwrap();
+        repo.add_ref(&scene.id, &sid, &"w1".into(), &"u1".into())
+            .await
+            .unwrap();
+        repo.add_ref(&scene.id, &sid, &"w1".into(), &"u1".into())
+            .await
+            .unwrap();
 
         let refs = repo.list_refs_for_session(&sid).await.unwrap();
         assert_eq!(refs.len(), 1, "idempotent add must not duplicate the ref");
         assert_eq!(refs[0].id, scene.id);
-        assert_eq!(refs[0].format.as_deref(), Some("d2"), "format is pulled from doc_json");
+        assert_eq!(
+            refs[0].format.as_deref(),
+            Some("d2"),
+            "format is pulled from doc_json"
+        );
 
         // Remove — list goes back to empty.
         repo.remove_ref(&scene.id, &sid).await.unwrap();
@@ -608,7 +638,9 @@ mod tests {
             })
             .await
             .unwrap();
-        repo.add_ref(&scene.id, &sid, &"w1".into(), &"u1".into()).await.unwrap();
+        repo.add_ref(&scene.id, &sid, &"w1".into(), &"u1".into())
+            .await
+            .unwrap();
         assert_eq!(repo.list_refs_for_session(&sid).await.unwrap().len(), 1);
 
         repo.delete(&scene.id).await.unwrap();

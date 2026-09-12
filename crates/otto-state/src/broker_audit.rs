@@ -64,11 +64,7 @@ impl BrokerAuditRepo {
     }
 
     /// Recent audit rows for a cluster (newest first, capped at `limit`).
-    pub async fn recent(
-        &self,
-        cluster_id: &Id,
-        limit: i64,
-    ) -> Result<Vec<BrokerAuditRow>> {
+    pub async fn recent(&self, cluster_id: &Id, limit: i64) -> Result<Vec<BrokerAuditRow>> {
         let rows = sqlx::query(
             "SELECT id, cluster_id, user_id, operation, detail, performed_at \
              FROM broker_write_audit \

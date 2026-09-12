@@ -93,10 +93,7 @@ pub struct GraphifyGraph {
 /// resolved to the created rows afterward).
 pub fn node_to_memory(collection: &str, n: &GraphifyNode) -> NewMemory {
     let title = n.label.clone().unwrap_or_else(|| n.id.clone());
-    let body = n
-        .summary
-        .clone()
-        .unwrap_or_else(|| title.clone());
+    let body = n.summary.clone().unwrap_or_else(|| title.clone());
     NewMemory {
         collection: collection.into(),
         record_type: "item".into(),

@@ -10,7 +10,7 @@ use otto_core::{new_id, Id, Result};
 use sqlx::{Row, SqlitePool};
 
 use crate::convert::{dberr, dberr_unique, fmt, ts};
-use chrono::{DateTime};
+use chrono::DateTime;
 
 // ---------------------------------------------------------------------------
 // Lag alerts

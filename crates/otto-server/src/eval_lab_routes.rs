@@ -11,7 +11,9 @@ use axum::extract::{Path as AxPath, Query as AxQuery, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-use otto_core::api::{GoldenTaskReq, RunGoldenReq, SkillSourceReq, StartMatrixReq, StartSkillEvalReq};
+use otto_core::api::{
+    GoldenTaskReq, RunGoldenReq, SkillSourceReq, StartMatrixReq, StartSkillEvalReq,
+};
 use otto_core::domain::{EvalMatrix, GoldenTask, MatrixCell, WorkspaceRole};
 use otto_core::{Error, Id};
 use otto_state::GoldenTaskInput;
@@ -74,7 +76,15 @@ async fn create_golden(
         .unwrap_or_else(|| ws_id.clone());
     let task = ctx
         .golden_tasks_store
-        .create(&ws_id, &repo_key, &to_input(&req), "manual", None, None, &user.id)
+        .create(
+            &ws_id,
+            &repo_key,
+            &to_input(&req),
+            "manual",
+            None,
+            None,
+            &user.id,
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(task))
@@ -166,7 +176,12 @@ async fn run_golden(
 // ---------------------------------------------------------------------------
 
 /// Build a per-cell StartSkillEvalReq for one (provider, skill, prompt) triple.
-fn cell_req(m: &StartMatrixReq, provider: &str, skill: &SkillSourceReq, prompt: &otto_core::domain::MatrixPrompt) -> StartSkillEvalReq {
+fn cell_req(
+    m: &StartMatrixReq,
+    provider: &str,
+    skill: &SkillSourceReq,
+    prompt: &otto_core::domain::MatrixPrompt,
+) -> StartSkillEvalReq {
     let mode = if m.mode.trim().is_empty() {
         "generate".to_string()
     } else {
@@ -196,7 +211,11 @@ async fn list_matrices(
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<EvalMatrix>>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
-    let matrices = ctx.eval_matrices_store.list(&ws_id).await.map_err(ApiError)?;
+    let matrices = ctx
+        .eval_matrices_store
+        .list(&ws_id)
+        .await
+        .map_err(ApiError)?;
     Ok(Json(matrices))
 }
 
@@ -218,7 +237,11 @@ async fn create_matrix(
         .create(
             &ws_id,
             req.name.trim(),
-            if req.mode.trim().is_empty() { "generate" } else { req.mode.trim() },
+            if req.mode.trim().is_empty() {
+                "generate"
+            } else {
+                req.mode.trim()
+            },
             &ws_id,
             &req.providers,
             &skill_names,
@@ -310,13 +333,20 @@ async fn cancel_matrix(
     let matrix = ctx.eval_matrices_store.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &matrix.workspace_id, WorkspaceRole::Editor).await?;
     // Cancel each still-running cell run.
-    let cells = ctx.skill_evals_store.list_for_matrix(&id).await.unwrap_or_default();
+    let cells = ctx
+        .skill_evals_store
+        .list_for_matrix(&id)
+        .await
+        .unwrap_or_default();
     for ev in &cells {
         if ev.status == otto_core::domain::SkillEvalStatus::Running {
             crate::skill_eval::cancel_run(&ctx, &ev.id).await;
         }
     }
-    ctx.eval_matrices_store.set_status(&id, "cancelled").await.map_err(ApiError)?;
+    ctx.eval_matrices_store
+        .set_status(&id, "cancelled")
+        .await
+        .map_err(ApiError)?;
     let matrix = ctx.eval_matrices_store.get(&id).await.map_err(ApiError)?;
     Ok(Json(matrix_view(&ctx, matrix).await))
 }

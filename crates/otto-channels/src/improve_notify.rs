@@ -112,7 +112,10 @@ async fn run(
 /// Read an arbitrary bool flag from the settings store. Missing / non-bool /
 /// read error all resolve to `false` (off by default — every notify flag is opt-in).
 async fn setting_enabled(settings: &SettingsRepo, key: &str) -> bool {
-    matches!(settings.get(key).await, Ok(Some(serde_json::Value::Bool(true))))
+    matches!(
+        settings.get(key).await,
+        Ok(Some(serde_json::Value::Bool(true)))
+    )
 }
 
 /// Classify an event into `(opt_in_key, workspace_id_opt, one_line_message)`.
@@ -123,12 +126,23 @@ async fn setting_enabled(settings: &SettingsRepo, key: &str) -> bool {
 fn classify(event: &Event) -> Option<(&'static str, Option<String>, String)> {
     match event {
         // ---- self-improvement events (existing) ----------------------------
-        Event::ImprovementEditApplied { workspace_id, target_ref, .. } => Some((
+        Event::ImprovementEditApplied {
+            workspace_id,
+            target_ref,
+            ..
+        } => Some((
             NOTIFY_SETTING_KEY,
             Some(workspace_id.clone()),
-            format!("Self-improvement: {} — applied", describe_target(target_ref)),
+            format!(
+                "Self-improvement: {} — applied",
+                describe_target(target_ref)
+            ),
         )),
-        Event::ImprovementApprovalPending { workspace_id, target_ref, .. } => {
+        Event::ImprovementApprovalPending {
+            workspace_id,
+            target_ref,
+            ..
+        } => {
             // The `approval_required` key is a finer-grained alias; fall back
             // to the main `notify_self_improvement` flag (whichever is on).
             // We run a combined check: if either the main key OR the specific
@@ -145,7 +159,12 @@ fn classify(event: &Event) -> Option<(&'static str, Option<String>, String)> {
                 ),
             ))
         }
-        Event::ImprovementRunFinished { workspace_id, applied, pending, .. } => {
+        Event::ImprovementRunFinished {
+            workspace_id,
+            applied,
+            pending,
+            ..
+        } => {
             if *applied == 0 && *pending == 0 {
                 return None; // nothing happened — no ping
             }
@@ -157,7 +176,11 @@ fn classify(event: &Event) -> Option<(&'static str, Option<String>, String)> {
         }
 
         // ---- code review ---------------------------------------------------
-        Event::ReviewChanged { workspace_id, status, .. } if status == "done" || status == "error" => {
+        Event::ReviewChanged {
+            workspace_id,
+            status,
+            ..
+        } if status == "done" || status == "error" => {
             let label = if status == "done" { "done" } else { "failed" };
             Some((
                 NOTIFY_REVIEW_KEY,
@@ -167,7 +190,11 @@ fn classify(event: &Event) -> Option<(&'static str, Option<String>, String)> {
         }
 
         // ---- swarm ---------------------------------------------------------
-        Event::SwarmStatus { workspace_id, status, swarm_id } => {
+        Event::SwarmStatus {
+            workspace_id,
+            status,
+            swarm_id,
+        } => {
             // Only notify for terminal states.
             if !matches!(status.as_str(), "done" | "aborted" | "failed") {
                 return None;
@@ -192,16 +219,20 @@ fn classify(event: &Event) -> Option<(&'static str, Option<String>, String)> {
         )),
 
         // ---- budget exceeded -----------------------------------------------
-        Event::BudgetExceeded { workspace_id, provider, spend_usd, cap_usd, direction } => {
+        Event::BudgetExceeded {
+            workspace_id,
+            provider,
+            spend_usd,
+            cap_usd,
+            direction,
+        } => {
             if direction != "exceeded" {
                 return None; // only notify on the "crossed over" edge
             }
             Some((
                 NOTIFY_BUDGET_KEY,
                 Some(workspace_id.clone()),
-                format!(
-                    "Budget exceeded: {provider} spent ${spend_usd:.2} (cap ${cap_usd:.2})"
-                ),
+                format!("Budget exceeded: {provider} spent ${spend_usd:.2} (cap ${cap_usd:.2})"),
             ))
         }
 
@@ -249,11 +280,7 @@ async fn deliver(
 
 /// Post `text` to the default chat of EVERY enabled integration (used for
 /// global events like `InsightReady` that have no workspace scope).
-async fn deliver_all(
-    integrations: &IntegrationsRepo,
-    secrets: &Arc<dyn SecretStore>,
-    text: &str,
-) {
+async fn deliver_all(integrations: &IntegrationsRepo, secrets: &Arc<dyn SecretStore>, text: &str) {
     let all = match integrations.list_all_enabled().await {
         Ok(list) => list,
         Err(e) => {
@@ -321,11 +348,17 @@ pub async fn send_to(
 /// Build the outbound adapter for an integration, resolving its bot token from
 /// the secret store (same refs the channel manager uses). Returns `None` when the
 /// token is missing/empty (nothing to send with).
-pub fn build_adapter(secrets: &Arc<dyn SecretStore>, integ: &Integration) -> Option<Arc<dyn Adapter>> {
+pub fn build_adapter(
+    secrets: &Arc<dyn SecretStore>,
+    integ: &Integration,
+) -> Option<Arc<dyn Adapter>> {
     let ws = &integ.workspace_id;
     match integ.channel {
         Channel::Telegram => {
-            let token = secrets.get(&format!("chan-bot-{ws}-telegram")).ok().flatten();
+            let token = secrets
+                .get(&format!("chan-bot-{ws}-telegram"))
+                .ok()
+                .flatten();
             match token {
                 Some(t) if !t.is_empty() => Some(Arc::new(TelegramAdapter::new(t))),
                 _ => {
@@ -493,7 +526,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(key, NOTIFY_INSIGHT_KEY);
-        assert!(ws.is_none(), "InsightReady must be global (no workspace filter)");
+        assert!(
+            ws.is_none(),
+            "InsightReady must be global (no workspace filter)"
+        );
         assert!(line.contains("daily 2026-06-20"));
     }
 

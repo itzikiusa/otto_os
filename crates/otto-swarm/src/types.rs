@@ -296,7 +296,7 @@ pub struct RunTaskReq {}
 #[derive(Debug, Serialize)]
 pub struct GraphNode {
     pub id: String,
-    pub kind: String,   // task | run
+    pub kind: String, // task | run
     pub label: String,
     pub status: String,
     pub agent_id: Option<Id>,
@@ -308,7 +308,7 @@ pub struct GraphNode {
 pub struct GraphEdge {
     pub from: String,
     pub to: String,
-    pub kind: String,   // depends | handoff | review
+    pub kind: String, // depends | handoff | review
 }
 
 #[derive(Debug, Serialize)]

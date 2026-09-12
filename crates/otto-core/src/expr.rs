@@ -605,7 +605,8 @@ fn eval_ast(ast: &Ast, ctx: &Value) -> Result<Value, ExprError> {
             match op {
                 '!' => Ok(Value::Bool(!truthy(&v))),
                 '-' => {
-                    let n = as_f64(&v).ok_or_else(|| ExprError::Eval("unary '-' on non-number".into()))?;
+                    let n = as_f64(&v)
+                        .ok_or_else(|| ExprError::Eval("unary '-' on non-number".into()))?;
                     Ok(num_value(-n, v.is_i64() || v.is_u64()))
                 }
                 _ => unreachable!(),
@@ -764,7 +765,8 @@ fn eval_call(name: &str, args: &[Ast], ctx: &Value) -> Result<Value, ExprError> 
         }
         "float" => {
             arity(1)?;
-            let n = coerce_f64(&argv[0]).ok_or_else(|| ExprError::Eval("float() bad arg".into()))?;
+            let n =
+                coerce_f64(&argv[0]).ok_or_else(|| ExprError::Eval("float() bad arg".into()))?;
             Ok(serde_json::Number::from_f64(n)
                 .map(Value::Number)
                 .unwrap_or(Value::Null))
@@ -779,9 +781,11 @@ fn eval_call(name: &str, args: &[Ast], ctx: &Value) -> Result<Value, ExprError> 
 
 fn json_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(_), Value::Number(_)) => {
-            a.as_f64().zip(b.as_f64()).map(|(x, y)| x == y).unwrap_or(false)
-        }
+        (Value::Number(_), Value::Number(_)) => a
+            .as_f64()
+            .zip(b.as_f64())
+            .map(|(x, y)| x == y)
+            .unwrap_or(false),
         _ => a == b,
     }
 }

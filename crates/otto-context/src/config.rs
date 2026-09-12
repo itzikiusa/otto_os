@@ -62,7 +62,10 @@ mod tests {
                 "include_memory": false
             }
         }));
-        assert_eq!(cfg.skills.as_deref(), Some(&["a".to_string(), "b".to_string()][..]));
+        assert_eq!(
+            cfg.skills.as_deref(),
+            Some(&["a".to_string(), "b".to_string()][..])
+        );
         assert_eq!(cfg.extra_context_md, "hello");
         assert!(!cfg.include_memory);
     }
@@ -84,7 +87,12 @@ mod tests {
             .as_bool()
             .unwrap());
         assert_eq!(
-            out.get("context").unwrap().get("soul").unwrap().as_str().unwrap(),
+            out.get("context")
+                .unwrap()
+                .get("soul")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "otto"
         );
     }

@@ -99,7 +99,9 @@ impl otto_connections::Spawner for NoopSpawner {
 }
 
 async fn mem_pool() -> SqlitePool {
-    let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
+    let opts = SqliteConnectOptions::new()
+        .in_memory(true)
+        .foreign_keys(true);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)
@@ -135,7 +137,9 @@ async fn test_ctx(pool: &SqlitePool, data_dir: PathBuf) -> ServerCtx {
         improvements: otto_state::ImprovementsRepo::new(pool.clone()),
         sessions: SessionsRepo::new(pool.clone()),
         workspaces: WorkspacesRepo::new(pool.clone()),
-        producer: Arc::new(otto_improve::RealProposalProducer::new(orchestrator.clone())),
+        producer: Arc::new(otto_improve::RealProposalProducer::new(
+            orchestrator.clone(),
+        )),
         events: events.clone(),
         library_root: PathBuf::from("/tmp/otto-test-lib-snips"),
     });
@@ -210,7 +214,7 @@ async fn test_ctx(pool: &SqlitePool, data_dir: PathBuf) -> ServerCtx {
         skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
         skill_review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         orchestrator,
         improve_engine,
@@ -249,8 +253,7 @@ review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::
         browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
         browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
         browser: Arc::new(otto_server::routes::browser::BrowserEngineHandle::new(
-            None,
-            data_dir,
+            None, data_dir,
         )),
     }
 }
@@ -292,7 +295,13 @@ async fn send(
     req.extensions_mut().insert(AuthUser(user("alice")));
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
-    let body = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     (status, body)
 }
 
@@ -315,7 +324,12 @@ async fn upload_roundtrip_and_clipboard_sink() {
         Some(serde_json::json!({ "data_b64": PNG_B64, "filename": "shot.png" })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "upload: {}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "upload: {}",
+        String::from_utf8_lossy(&body)
+    );
     let snip = json(&body);
     let id = snip["id"].as_str().expect("id").to_string();
     assert_eq!(snip["width"], 60);
@@ -374,7 +388,12 @@ async fn invalid_ids_are_not_found_and_do_not_traverse() {
     let (_tmp, _data_dir, app) = test_app().await;
     // Encoded traversal (axum rejects raw `../` in paths at the routing layer;
     // the encoded form reaches the handler and must fail the id check).
-    for bad in ["..%2F..%2Fetc%2Fpasswd", "AB", "a%20b", "x".repeat(65).as_str()] {
+    for bad in [
+        "..%2F..%2Fetc%2Fpasswd",
+        "AB",
+        "a%20b",
+        "x".repeat(65).as_str(),
+    ] {
         let (status, _) = send(&app, Method::GET, &format!("/snips/{bad}/image"), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "id {bad:?} must 404");
     }
@@ -407,7 +426,12 @@ async fn annotated_save_updates_clipboard_and_copy_prefers_annotated() {
         Some(serde_json::json!({ "data_b64": PNG2_B64 })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "save annotated: {}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "save annotated: {}",
+        String::from_utf8_lossy(&body)
+    );
     assert_eq!(json(&body)["copied"], true);
 
     // R4: the clipboard sink now holds the ANNOTATED bytes, not the original.
@@ -470,10 +494,21 @@ async fn capture_success_creates_snip_and_copies() {
         format!("cp {} \"$1\"", src.display()),
     );
 
-    let (status, body) = send(&app, Method::POST, "/snips/capture", Some(serde_json::json!({}))).await;
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        "/snips/capture",
+        Some(serde_json::json!({})),
+    )
+    .await;
     std::env::remove_var("OTTO_SNIP_CAPTURE_CMD");
 
-    assert_eq!(status, StatusCode::OK, "capture: {}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "capture: {}",
+        String::from_utf8_lossy(&body)
+    );
     let resp = json(&body);
     assert_eq!(resp["cancelled"], false);
     let snip = &resp["snip"];
@@ -493,7 +528,13 @@ async fn capture_cancel_reports_cancelled() {
 
     // Fake screencapture that writes nothing and exits 1 (Esc behavior).
     std::env::set_var("OTTO_SNIP_CAPTURE_CMD", "exit 1");
-    let (status, body) = send(&app, Method::POST, "/snips/capture", Some(serde_json::json!({}))).await;
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        "/snips/capture",
+        Some(serde_json::json!({})),
+    )
+    .await;
     std::env::remove_var("OTTO_SNIP_CAPTURE_CMD");
 
     assert_eq!(status, StatusCode::OK);

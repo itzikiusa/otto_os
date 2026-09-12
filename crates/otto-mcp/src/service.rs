@@ -63,26 +63,65 @@ impl McpService {
 
     /// Current identity and resource policy are checked again at execution, so
     /// API, gateway and agent callers share the same authorization boundary.
-    pub async fn resource_allowed(&self, server: &otto_state::McpServerDetail, user: &otto_core::domain::User, operation: &str, child: Option<&str>) -> Result<bool> {
-        use otto_core::access::{ResourceKind, ResourceRef, AccessMode};
+    pub async fn resource_allowed(
+        &self,
+        server: &otto_state::McpServerDetail,
+        user: &otto_core::domain::User,
+        operation: &str,
+        child: Option<&str>,
+    ) -> Result<bool> {
+        use otto_core::access::{AccessMode, ResourceKind, ResourceRef};
         self.registry().get(&server.id).await?;
-        let policy = otto_state::ResourceAccessRepo::new(self.pool.clone()).get_live_policy(ResourceKind::McpServer,&server.id).await?;
-        if policy.mode == AccessMode::Legacy { return Ok(!user.disabled); }
-        let feature = otto_state::GrantsRepo::new(self.pool.clone()).capability_of(user,otto_core::domain::Feature::Mcp).await?;
-        if feature < otto_core::domain::Capability::View { return Ok(false); }
-        if otto_state::WorkspacesRepo::new(self.pool.clone()).role_of(user,&server.workspace_id).await?.is_none() { return Ok(false); }
+        let policy = otto_state::ResourceAccessRepo::new(self.pool.clone())
+            .get_live_policy(ResourceKind::McpServer, &server.id)
+            .await?;
+        if policy.mode == AccessMode::Legacy {
+            return Ok(!user.disabled);
+        }
+        let feature = otto_state::GrantsRepo::new(self.pool.clone())
+            .capability_of(user, otto_core::domain::Feature::Mcp)
+            .await?;
+        if feature < otto_core::domain::Capability::View {
+            return Ok(false);
+        }
+        if otto_state::WorkspacesRepo::new(self.pool.clone())
+            .role_of(user, &server.workspace_id)
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
         let access = otto_rbac::ResourceAccess::new(self.pool.clone());
-        let resource = ResourceRef { kind:ResourceKind::McpServer,id:server.id.clone(),child:child.map(str::to_string) };
-        if operation != "discover" && !access.evaluate(user,&resource,"discover").await?.allowed { return Ok(false); }
-        Ok(access.evaluate(user,&resource,operation).await?.allowed)
+        let resource = ResourceRef {
+            kind: ResourceKind::McpServer,
+            id: server.id.clone(),
+            child: child.map(str::to_string),
+        };
+        if operation != "discover" && !access.evaluate(user, &resource, "discover").await?.allowed {
+            return Ok(false);
+        }
+        Ok(access.evaluate(user, &resource, operation).await?.allowed)
     }
 
-    pub async fn visible_tools(&self, server: &otto_state::McpServerDetail, user: &otto_core::domain::User) -> Result<Vec<otto_state::McpTool>> {
+    pub async fn visible_tools(
+        &self,
+        server: &otto_state::McpServerDetail,
+        user: &otto_core::domain::User,
+    ) -> Result<Vec<otto_state::McpTool>> {
         let mut visible = Vec::new();
         for tool in self.tools().list_for_server(&server.id).await? {
-            if self.resource_allowed(server,user,"discover",Some(&tool.name)).await?
-                && (self.resource_allowed(server,user,"invoke",Some(&tool.name)).await?
-                    || self.resource_allowed(server,user,"configure",Some(&tool.name)).await?) { visible.push(tool); }
+            if self
+                .resource_allowed(server, user, "discover", Some(&tool.name))
+                .await?
+                && (self
+                    .resource_allowed(server, user, "invoke", Some(&tool.name))
+                    .await?
+                    || self
+                        .resource_allowed(server, user, "configure", Some(&tool.name))
+                        .await?)
+            {
+                visible.push(tool);
+            }
         }
         Ok(visible)
     }
@@ -112,7 +151,10 @@ impl McpService {
     }
 
     /// Resolve the keychain secret blob `{env:{},headers:{}}` for a server.
-    fn resolve_secrets(&self, server: &McpServerDetail) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    fn resolve_secrets(
+        &self,
+        server: &McpServerDetail,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
         let mut env = BTreeMap::new();
         let mut headers = BTreeMap::new();
         if !server.has_secret {
@@ -179,7 +221,10 @@ impl McpService {
             .iter()
             .filter_map(|t| {
                 let name = t.get("name").and_then(Value::as_str)?.to_string();
-                let description = t.get("description").and_then(Value::as_str).map(str::to_string);
+                let description = t
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let annotations = t.get("annotations").cloned().unwrap_or(json!({}));
                 let labels = risk::label_tool(&name, description.as_deref(), &annotations);
                 Some(DiscoveredTool {
@@ -195,7 +240,9 @@ impl McpService {
                 })
             })
             .collect();
-        self.tools().upsert_discovered(&server.id, &discovered).await?;
+        self.tools()
+            .upsert_discovered(&server.id, &discovered)
+            .await?;
         self.registry()
             .set_tools_meta(&server.id, discovered.len() as i64)
             .await?;
@@ -206,7 +253,9 @@ impl McpService {
     pub async fn health_check(&self, server_id: &str) -> Result<McpServerDetail> {
         let server = self.registry().get(&server_id.to_string()).await?;
         if !server.enabled {
-            self.registry().set_health(&server.id, "disabled", None, None).await?;
+            self.registry()
+                .set_health(&server.id, "disabled", None, None)
+                .await?;
             return self.registry().get(&server.id).await;
         }
         let client = self.client_for(&server);
@@ -215,11 +264,15 @@ impl McpService {
         let latency = start.elapsed().as_millis() as i64;
         match res {
             Ok(()) => {
-                self.registry().set_health(&server.id, "healthy", Some(latency), None).await?;
+                self.registry()
+                    .set_health(&server.id, "healthy", Some(latency), None)
+                    .await?;
             }
             Err(e) => {
                 let err = redact_text(&e).value;
-                self.registry().set_health(&server.id, "unhealthy", Some(latency), Some(&err)).await?;
+                self.registry()
+                    .set_health(&server.id, "unhealthy", Some(latency), Some(&err))
+                    .await?;
             }
         }
         self.registry().get(&server.id).await
@@ -253,51 +306,98 @@ impl McpService {
         let server = self.registry().get(&server_id.to_string()).await?;
         // Tool metadata (must be discovered to be governed).
         let tool = self.tools().get_by_name(&server.id, tool_name).await.ok();
-        let (risk_label, injection_risk, mutating, tool_enabled, tool_require_approval) = match &tool {
-            Some(t) => (
-                t.risk_label.clone(),
-                t.injection_risk.clone(),
-                t.mutating,
-                t.enabled,
-                t.require_approval,
-            ),
-            // Unknown/undiscovered tool: fail closed (treat as dangerous + disabled).
-            None => ("dangerous".into(), "high".into(), true, false, true),
-        };
+        let (risk_label, injection_risk, mutating, tool_enabled, tool_require_approval) =
+            match &tool {
+                Some(t) => (
+                    t.risk_label.clone(),
+                    t.injection_risk.clone(),
+                    t.mutating,
+                    t.enabled,
+                    t.require_approval,
+                ),
+                // Unknown/undiscovered tool: fail closed (treat as dangerous + disabled).
+                None => ("dangerous".into(), "high".into(), true, false, true),
+            };
 
         let access_policy = otto_state::ResourceAccessRepo::new(self.pool.clone())
-            .get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await?;
+            .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)
+            .await?;
         if access_policy.mode == otto_core::access::AccessMode::Enforced {
             let permitted = match &ctx.caller_user_id {
                 Some(uid) => match otto_state::UsersRepo::new(self.pool.clone()).get(uid).await {
-                    Ok(user) => self.resource_allowed(&server,&user,"invoke",Some(tool_name)).await?,
+                    Ok(user) => {
+                        self.resource_allowed(&server, &user, "invoke", Some(tool_name))
+                            .await?
+                    }
                     Err(otto_core::Error::NotFound(_)) => false,
                     Err(e) => return Err(e),
                 },
                 None => false,
             };
             if !permitted {
-                return self.terminal_deny(&server,tool_name,args,&risk_label,&injection_risk,ctx,"resource access denied").await;
+                return self
+                    .terminal_deny(
+                        &server,
+                        tool_name,
+                        args,
+                        &risk_label,
+                        &injection_risk,
+                        ctx,
+                        "resource access denied",
+                    )
+                    .await;
             }
         }
         // 0. server gate.
-        if !server.enabled || (!server.managed && access_policy.mode == otto_core::access::AccessMode::Legacy) {
+        if !server.enabled
+            || (!server.managed && access_policy.mode == otto_core::access::AccessMode::Legacy)
+        {
             return self
-                .terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx,
-                    "server is disabled or not managed").await;
+                .terminal_deny(
+                    &server,
+                    tool_name,
+                    args,
+                    &risk_label,
+                    &injection_risk,
+                    ctx,
+                    "server is disabled or not managed",
+                )
+                .await;
         }
         // 1. allowlist (per workspace), deny wins.
         if let Some(ws) = ctx.workspace_id.as_deref() {
-            match self.allowlist().resolve(&ws.to_string(), &server.id, tool_name).await? {
+            match self
+                .allowlist()
+                .resolve(&ws.to_string(), &server.id, tool_name)
+                .await?
+            {
                 Some(mode) if mode == "deny" => {
-                    return self.terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx,
-                        "workspace allowlist denies this tool").await;
+                    return self
+                        .terminal_deny(
+                            &server,
+                            tool_name,
+                            args,
+                            &risk_label,
+                            &injection_risk,
+                            ctx,
+                            "workspace allowlist denies this tool",
+                        )
+                        .await;
                 }
                 Some(_) => {} // explicit allow
                 None => {
                     if server.default_tool_access == "deny" {
-                        return self.terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx,
-                            "not in workspace allowlist (server default = deny)").await;
+                        return self
+                            .terminal_deny(
+                                &server,
+                                tool_name,
+                                args,
+                                &risk_label,
+                                &injection_risk,
+                                ctx,
+                                "not in workspace allowlist (server default = deny)",
+                            )
+                            .await;
                     }
                 }
             }
@@ -305,8 +405,16 @@ impl McpService {
         // 2. per-tool permission.
         if !tool_enabled {
             return self
-                .terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx,
-                    "tool is disabled (per-tool permission)").await;
+                .terminal_deny(
+                    &server,
+                    tool_name,
+                    args,
+                    &risk_label,
+                    &injection_risk,
+                    ctx,
+                    "tool is disabled (per-tool permission)",
+                )
+                .await;
         }
         // 3. policy-as-code (most-restrictive-wins).
         let rules = self
@@ -327,15 +435,24 @@ impl McpService {
         let effect = policy::evaluate(&rules, &pctx);
         if let Effect::Deny(reason) = &effect {
             return self
-                .terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx,
-                    &format!("policy denied: {reason}")).await;
+                .terminal_deny(
+                    &server,
+                    tool_name,
+                    args,
+                    &risk_label,
+                    &injection_risk,
+                    ctx,
+                    &format!("policy denied: {reason}"),
+                )
+                .await;
         }
         let policy_dry_run = matches!(effect, Effect::RequireDryRun(_));
         let policy_approval = matches!(effect, Effect::RequireApproval(_));
 
         // 4. risk / approval gate. dry-run requests skip the approval *creation*
         //    (a preview executes nothing), but a policy require_dry_run still applies.
-        let dangerous_default = risk_label == "dangerous" && self.require_approval_dangerous().await;
+        let dangerous_default =
+            risk_label == "dangerous" && self.require_approval_dangerous().await;
         let needs_approval = policy_approval || tool_require_approval || dangerous_default;
         let args_hash = canonical_hash(args);
 
@@ -343,25 +460,50 @@ impl McpService {
         if needs_approval && !ctx.dry_run {
             match self
                 .approvals()
-                .find_usable(ctx.workspace_id.as_deref(), Some(&server.id), tool_name, &args_hash)
+                .find_usable(
+                    ctx.workspace_id.as_deref(),
+                    Some(&server.id),
+                    tool_name,
+                    &args_hash,
+                )
                 .await?
             {
                 Some(appr_id) => {
                     let approval = self.approvals().get(&appr_id).await?;
                     if approval.requested_by != ctx.caller_user_id {
-                        return self.terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx, "approval belongs to another caller").await;
+                        return self
+                            .terminal_deny(
+                                &server,
+                                tool_name,
+                                args,
+                                &risk_label,
+                                &injection_risk,
+                                ctx,
+                                "approval belongs to another caller",
+                            )
+                            .await;
                     }
                     // Single-use: consume atomically; a lost race => already used.
                     if !self.approvals().consume(&appr_id).await? {
-                        return self.terminal_deny(&server, tool_name, args, &risk_label, &injection_risk, ctx,
-                            "approval was already used").await;
+                        return self
+                            .terminal_deny(
+                                &server,
+                                tool_name,
+                                args,
+                                &risk_label,
+                                &injection_risk,
+                                ctx,
+                                "approval was already used",
+                            )
+                            .await;
                     }
                     approval_id_used = Some(appr_id);
                 }
                 None => {
                     // Create a pending approval bound to the EXACT args.
                     let redacted = redact_json(args).value.to_string();
-                    let expires = (Utc::now() + ChronoDuration::minutes(APPROVAL_TTL_MINS)).to_rfc3339();
+                    let expires =
+                        (Utc::now() + ChronoDuration::minutes(APPROVAL_TTL_MINS)).to_rfc3339();
                     let appr = self
                         .approvals()
                         .create(NewApproval {
@@ -384,12 +526,21 @@ impl McpService {
                         })
                         .await?;
                     self.audit_terminal(
-                        &server, tool_name, args, &risk_label, &injection_risk, ctx,
-                        "pending_approval", Some(&format!("awaiting approval for {risk_label} tool")),
+                        &server,
+                        tool_name,
+                        args,
+                        &risk_label,
+                        &injection_risk,
+                        ctx,
+                        "pending_approval",
+                        Some(&format!("awaiting approval for {risk_label} tool")),
                         Some(&appr.id),
                     )
                     .await?;
-                    return Ok(InvokeOutcome::Pending { approval_id: appr.id, title: format!("{} → {}", server.name, tool_name) });
+                    return Ok(InvokeOutcome::Pending {
+                        approval_id: appr.id,
+                        title: format!("{} → {}", server.name, tool_name),
+                    });
                 }
             }
         }
@@ -402,14 +553,28 @@ impl McpService {
                 "would_call": { "server": server.name, "tool": tool_name, "arguments": redact_json(args).value },
                 "note": "dry-run: arguments validated and target resolved; the tool was NOT executed",
             });
-            self.audit_terminal(&server, tool_name, args, &risk_label, &injection_risk, ctx,
-                "dry_run", None, approval_id_used.as_deref()).await?;
+            self.audit_terminal(
+                &server,
+                tool_name,
+                args,
+                &risk_label,
+                &injection_risk,
+                ctx,
+                "dry_run",
+                None,
+                approval_id_used.as_deref(),
+            )
+            .await?;
             return Ok(InvokeOutcome::DryRun { preview });
         }
 
         // 6. execute. Fail-closed audit: insert the row BEFORE running so an
         //    audit failure aborts the call; finalize with the outcome after.
-        let decision = if approval_id_used.is_some() { "approved" } else { "allowed" };
+        let decision = if approval_id_used.is_some() {
+            "approved"
+        } else {
+            "allowed"
+        };
         let audit_id = self
             .call_log()
             .insert(NewCallLog {
@@ -437,16 +602,33 @@ impl McpService {
 
         let client = self.client_for(&server);
         let start = Instant::now();
-        let latest = otto_state::ResourceAccessRepo::new(self.pool.clone()).get_policy(otto_core::access::ResourceKind::McpServer,&server.id).await?;
+        let latest = otto_state::ResourceAccessRepo::new(self.pool.clone())
+            .get_policy(otto_core::access::ResourceKind::McpServer, &server.id)
+            .await?;
         if latest.mode == otto_core::access::AccessMode::Enforced {
             let permitted = match &ctx.caller_user_id {
                 Some(id) => match otto_state::UsersRepo::new(self.pool.clone()).get(id).await {
-                    Ok(user) => self.resource_allowed(&server,&user,"invoke",Some(tool_name)).await?,
+                    Ok(user) => {
+                        self.resource_allowed(&server, &user, "invoke", Some(tool_name))
+                            .await?
+                    }
                     Err(_) => false,
                 },
                 None => false,
             };
-            if !permitted { return self.terminal_deny(&server,tool_name,args,&risk_label,&injection_risk,ctx,"resource access revoked before execution").await; }
+            if !permitted {
+                return self
+                    .terminal_deny(
+                        &server,
+                        tool_name,
+                        args,
+                        &risk_label,
+                        &injection_risk,
+                        ctx,
+                        "resource access revoked before execution",
+                    )
+                    .await;
+            }
         }
         self.registry().get(&server.id).await?;
         let res = client.call_tool(tool_name, args).await;
@@ -457,9 +639,19 @@ impl McpService {
                 let capped = cap_rows(call.content.clone(), &mut rows);
                 let content = redact_json(&capped).value;
                 self.call_log()
-                    .finalize(&audit_id, !call.is_error, None, Some(latency), Some(call.bytes as i64), Some(rows as i64))
+                    .finalize(
+                        &audit_id,
+                        !call.is_error,
+                        None,
+                        Some(latency),
+                        Some(call.bytes as i64),
+                        Some(rows as i64),
+                    )
                     .await?;
-                Ok(InvokeOutcome::Executed { content, is_error: call.is_error })
+                Ok(InvokeOutcome::Executed {
+                    content,
+                    is_error: call.is_error,
+                })
             }
             Err(e) => {
                 let err = redact_text(&e).value;
@@ -488,7 +680,10 @@ impl McpService {
             Some(t) => (t.risk_label.clone(), t.injection_risk.clone(), t.mutating),
             None => ("dangerous".into(), "high".into(), true),
         };
-        let rules = self.policies().list_applicable(workspace_id.unwrap_or("")).await?;
+        let rules = self
+            .policies()
+            .list_applicable(workspace_id.unwrap_or(""))
+            .await?;
         let pctx = PolicyCtx {
             server_id: &server.id,
             server_name: &server.name,
@@ -540,9 +735,21 @@ impl McpService {
         ctx: &InvokeCtx,
         reason: &str,
     ) -> Result<InvokeOutcome> {
-        self.audit_terminal(server, tool, args, risk_label, injection_risk, ctx, "denied", Some(reason), None)
-            .await?;
-        Ok(InvokeOutcome::Denied { reason: reason.to_string() })
+        self.audit_terminal(
+            server,
+            tool,
+            args,
+            risk_label,
+            injection_risk,
+            ctx,
+            "denied",
+            Some(reason),
+            None,
+        )
+        .await?;
+        Ok(InvokeOutcome::Denied {
+            reason: reason.to_string(),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -622,13 +829,23 @@ fn cap_rows(v: Value, max_seen: &mut usize) -> Value {
                 *max_seen = n;
             }
             let truncated = n > MAX_ROWS;
-            let mut out: Vec<Value> = items.into_iter().take(MAX_ROWS).map(|i| cap_rows(i, max_seen)).collect();
+            let mut out: Vec<Value> = items
+                .into_iter()
+                .take(MAX_ROWS)
+                .map(|i| cap_rows(i, max_seen))
+                .collect();
             if truncated {
-                out.push(Value::String(format!("[otto: truncated — {n} items, showing first {MAX_ROWS}]")));
+                out.push(Value::String(format!(
+                    "[otto: truncated — {n} items, showing first {MAX_ROWS}]"
+                )));
             }
             Value::Array(out)
         }
-        Value::Object(map) => Value::Object(map.into_iter().map(|(k, val)| (k, cap_rows(val, max_seen))).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, val)| (k, cap_rows(val, max_seen)))
+                .collect(),
+        ),
         other => other,
     }
 }

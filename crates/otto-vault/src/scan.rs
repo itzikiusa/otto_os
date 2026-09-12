@@ -46,7 +46,9 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
             if name.starts_with('.') {
                 continue;
             }
-            let Ok(rel) = path.strip_prefix(root) else { continue };
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
             let rel = rel.to_string_lossy().replace('\\', "/");
             let size = meta.len() as i64;
             let mtime_ns = meta
@@ -55,7 +57,11 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_nanos() as i64)
                 .unwrap_or(0);
-            let e = WalkEntry { rel, size, mtime_ns };
+            let e = WalkEntry {
+                rel,
+                size,
+                mtime_ns,
+            };
             if name.to_lowercase().ends_with(".md") {
                 notes.push(e);
             } else {
@@ -69,13 +75,12 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
 }
 
 /// Diff a walk against the indexed signatures → (added_or_changed, removed).
-pub fn diff(
-    on_disk: &[WalkEntry],
-    indexed: &[(String, i64, i64)],
-) -> (Vec<String>, Vec<String>) {
+pub fn diff(on_disk: &[WalkEntry], indexed: &[(String, i64, i64)]) -> (Vec<String>, Vec<String>) {
     use std::collections::HashMap;
-    let idx: HashMap<&str, (i64, i64)> =
-        indexed.iter().map(|(p, s, m)| (p.as_str(), (*s, *m))).collect();
+    let idx: HashMap<&str, (i64, i64)> = indexed
+        .iter()
+        .map(|(p, s, m)| (p.as_str(), (*s, *m)))
+        .collect();
     let mut changed = Vec::new();
     for e in on_disk {
         match idx.get(e.rel.as_str()) {
@@ -109,17 +114,34 @@ mod tests {
         std::fs::write(r.join(".trash/gone.md"), "z").unwrap();
         std::fs::write(r.join(".DS_Store"), "m").unwrap();
         let w = walk(r).unwrap();
-        assert_eq!(w.notes.iter().map(|e| e.rel.as_str()).collect::<Vec<_>>(), vec!["a.md", "sub/b.MD"]);
-        assert_eq!(w.files.iter().map(|e| e.rel.as_str()).collect::<Vec<_>>(), vec!["sub/pic.png"]);
+        assert_eq!(
+            w.notes.iter().map(|e| e.rel.as_str()).collect::<Vec<_>>(),
+            vec!["a.md", "sub/b.MD"]
+        );
+        assert_eq!(
+            w.files.iter().map(|e| e.rel.as_str()).collect::<Vec<_>>(),
+            vec!["sub/pic.png"]
+        );
     }
 
     #[test]
     fn diff_detects_add_change_remove() {
         let disk = vec![
-            WalkEntry { rel: "a.md".into(), size: 5, mtime_ns: 100 },
-            WalkEntry { rel: "b.md".into(), size: 9, mtime_ns: 300 },
+            WalkEntry {
+                rel: "a.md".into(),
+                size: 5,
+                mtime_ns: 100,
+            },
+            WalkEntry {
+                rel: "b.md".into(),
+                size: 9,
+                mtime_ns: 300,
+            },
         ];
-        let indexed = vec![("a.md".to_string(), 5i64, 100i64), ("c.md".to_string(), 1, 1)];
+        let indexed = vec![
+            ("a.md".to_string(), 5i64, 100i64),
+            ("c.md".to_string(), 1, 1),
+        ];
         let (changed, removed) = diff(&disk, &indexed);
         assert_eq!(changed, vec!["b.md"]);
         assert_eq!(removed, vec!["c.md"]);

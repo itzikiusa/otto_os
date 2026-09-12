@@ -85,7 +85,11 @@ mod tests {
     #[test]
     fn renders_enabled_rules_only() {
         let rules = vec![
-            rule("Never build SQL with format!", "Use parameterized queries.", true),
+            rule(
+                "Never build SQL with format!",
+                "Use parameterized queries.",
+                true,
+            ),
             rule("Disabled rule", "should not appear", false),
         ];
         let block = render_repo_rules_block(&rules);

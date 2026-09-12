@@ -30,6 +30,7 @@ pub mod tailer;
 pub mod usage;
 pub mod util;
 
+pub use fold::PAGE_BYTES_BUDGET;
 pub use fold::{FoldOpts, Folded, FoldedTurn, PriceFn};
 pub use images::ImageStore;
 pub use model::*;
@@ -38,7 +39,6 @@ pub use records::{parse_records, read_head_tail, read_records};
 pub use subagents::{read_subagents, subagent_path, subagents_dir};
 pub use tailer::{TailDelta, Tailer};
 pub use util::{TOOL_INPUT_CAP, TOOL_TEXT_CAP};
-pub use fold::PAGE_BYTES_BUDGET;
 
 /// Fold parsed records for `provider`. agy yields an empty fold (the adapter is
 /// a stub — the route reports `provider_unsupported` before getting here).
@@ -114,7 +114,11 @@ impl<'a> Folder<'a> {
 }
 
 /// Read + fold a transcript file in one go.
-pub fn fold_file(provider: Provider, path: &std::path::Path, opts: FoldOpts<'_>) -> std::io::Result<Folded> {
+pub fn fold_file(
+    provider: Provider,
+    path: &std::path::Path,
+    opts: FoldOpts<'_>,
+) -> std::io::Result<Folded> {
     let records = read_records(path)?;
     Ok(fold(provider, &records, opts))
 }

@@ -129,7 +129,12 @@ fn row_to_cluster(r: &sqlx::sqlite::SqliteRow) -> Result<K8sCluster> {
     let known_namespaces: Vec<String> = params
         .get("known_namespaces")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     let capabilities = r
         .get::<Option<String>, _>("capabilities_json")
@@ -256,7 +261,10 @@ impl K8sClustersRepo {
         let mut params = params_with_color(cur.params, color.as_deref());
         if let Some(list) = p.known_namespaces {
             if let Some(obj) = params.as_object_mut() {
-                obj.insert("known_namespaces".into(), Value::Array(list.into_iter().map(Value::String).collect()));
+                obj.insert(
+                    "known_namespaces".into(),
+                    Value::Array(list.into_iter().map(Value::String).collect()),
+                );
             }
         }
         sqlx::query(
@@ -321,7 +329,11 @@ mod tests {
     async fn pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect_with(SqliteConnectOptions::new().in_memory(true).foreign_keys(true))
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
@@ -347,7 +359,10 @@ mod tests {
     #[tokio::test]
     async fn crud_roundtrip_keeps_color_inside_params() {
         let repo = K8sClustersRepo::new(pool().await);
-        let c = repo.create(new("a", K8sClusterSource::Imported)).await.unwrap();
+        let c = repo
+            .create(new("a", K8sClusterSource::Imported))
+            .await
+            .unwrap();
         assert_eq!(c.color.as_deref(), Some("#f00"));
         assert_eq!(c.params["eks_region"], "eu-west-1");
         assert_eq!(c.params["color"], "#f00");
@@ -383,7 +398,9 @@ mod tests {
         assert_eq!(got.capabilities.unwrap()["metrics_server"], true);
         assert!(got.last_used_at.is_some());
 
-        repo.create(new("b", K8sClusterSource::Kubeconfig)).await.unwrap();
+        repo.create(new("b", K8sClusterSource::Kubeconfig))
+            .await
+            .unwrap();
         assert_eq!(repo.list().await.unwrap().len(), 2);
 
         let deleted = repo.delete(&c.id).await.unwrap();

@@ -374,12 +374,12 @@ mod tests {
         b.extend_from_slice(&corr.to_be_bytes()); // correlation id
         b.extend_from_slice(&0i32.to_be_bytes()); // throttle (v>=3)
         b.extend_from_slice(&2i32.to_be_bytes()); // broker count
-        // broker 0
+                                                  // broker 0
         b.extend_from_slice(&101i32.to_be_bytes());
         put_str(&mut b, "b-1.msk.amazonaws.com");
         b.extend_from_slice(&9094i32.to_be_bytes());
         put_nullable(&mut b, Some("use1-az1")); // rack
-                                                 // broker 1
+                                                // broker 1
         b.extend_from_slice(&102i32.to_be_bytes());
         put_str(&mut b, "b-2.msk.amazonaws.com");
         b.extend_from_slice(&9094i32.to_be_bytes());
@@ -403,7 +403,11 @@ mod tests {
         // Map each broker to a distinct local port.
         let out = rewrite_metadata(&body, 4, |host, port| {
             assert_eq!(port, 9094);
-            let lp = if host.starts_with("b-1") { 30001 } else { 30002 };
+            let lp = if host.starts_with("b-1") {
+                30001
+            } else {
+                30002
+            };
             ("127.0.0.1".to_string(), lp)
         })
         .unwrap();
@@ -497,7 +501,10 @@ mod tests {
             r.uvarint().unwrap();
             maxes.push((key, max));
         }
-        assert_eq!(maxes, vec![(0, 9), (API_METADATA, 8), (API_FIND_COORDINATOR, 2)]);
+        assert_eq!(
+            maxes,
+            vec![(0, 9), (API_METADATA, 8), (API_FIND_COORDINATOR, 2)]
+        );
     }
 
     #[test]

@@ -85,7 +85,11 @@ pub async fn assist_mockup(
 ) -> ApiResult<Json<ProductAttachment>> {
     let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
-    let ws = ctx.workspaces.get(&story.workspace_id).await.map_err(ApiError)?;
+    let ws = ctx
+        .workspaces
+        .get(&story.workspace_id)
+        .await
+        .map_err(ApiError)?;
 
     // Resolve the agent provider (honored only when a NEW mockup session is
     // created; a refine resumes the existing one). Precedence mirrors Discovery
@@ -112,12 +116,14 @@ pub async fn assist_mockup(
     // body — confine the join under the mockup_assist root so a hostile id can't
     // steer the fs ops (rust/path-injection).
     let dir = otto_core::paths::confine_join(&ctx.data_dir.join(SCRATCH_ROOT), &attachment_id)
-    .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe mockup id {attachment_id}"))))?;
+        .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe mockup id {attachment_id}"))))?;
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         if created_now {
             cleanup(&ctx, &att).await;
         }
-        return Err(ApiError(Error::Internal(format!("mockup scratch dir: {e}"))));
+        return Err(ApiError(Error::Internal(format!(
+            "mockup scratch dir: {e}"
+        ))));
     }
     let work_file = dir.join(format.file_name());
     let _ = tokio::fs::write(&work_file, &current).await;
@@ -127,11 +133,22 @@ pub async fn assist_mockup(
     // Live preview: broadcast each file change while the turn runs.
     let poll = spawn_file_poll(&ctx, &story, &attachment_id, &work_file, format, &current);
 
-    let prompt = build_mockup_prompt(&req.prompt, format, format.file_name(), &current, &story.title);
+    let prompt = build_mockup_prompt(
+        &req.prompt,
+        format,
+        format.file_name(),
+        &current,
+        &story.title,
+    );
     let mut meta = serde_json::json!({
         "source": "mockup_assist", "story_id": story.id, "attachment_id": attachment_id,
     });
-    if let Some(m) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+    if let Some(m) = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
         meta["model"] = serde_json::json!(m);
     }
     // Surface the session the MOMENT it exists (turn start) so the Assistant panel
@@ -263,8 +280,9 @@ async fn resolve_target(
             .unwrap_or_else(|| format.base_stub(&story.title));
         Ok((att, false, format, current, session_id))
     } else {
-        let format = crate::design_format::parse_or_default(req.format.as_deref(), DesignFormat::Html)
-            .map_err(ApiError)?;
+        let format =
+            crate::design_format::parse_or_default(req.format.as_deref(), DesignFormat::Html)
+                .map_err(ApiError)?;
         let current = format.base_stub(&story.title);
         // Mirror upload_attachment: the storage filename id is independent of the
         // row id (storage_path is authoritative for serving).
@@ -334,7 +352,10 @@ async fn read_text_capped(path: &std::path::Path) -> Option<String> {
 /// traversing path fails closed instead of escaping (rust/path-injection).
 fn storage_full(ctx: &ServerCtx, att: &ProductAttachment) -> Result<std::path::PathBuf, Error> {
     otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path).ok_or_else(|| {
-        Error::Invalid(format!("attachment {} storage path escapes the data dir", att.id))
+        Error::Invalid(format!(
+            "attachment {} storage path escapes the data dir",
+            att.id
+        ))
     })
 }
 
@@ -548,7 +569,13 @@ mod tests {
 
     #[test]
     fn html_prompt_has_sentinel_file_and_rules() {
-        let p = build_mockup_prompt("a settings page", DesignFormat::Html, "design.html", "<html></html>", "My Story");
+        let p = build_mockup_prompt(
+            "a settings page",
+            DesignFormat::Html,
+            "design.html",
+            "<html></html>",
+            "My Story",
+        );
         assert!(p.contains("OTTO_TASK: mockup_assist"));
         assert!(p.contains("design.html"));
         assert!(p.contains("SELF-CONTAINED HTML"));
@@ -558,7 +585,13 @@ mod tests {
 
     #[test]
     fn mermaid_prompt_points_at_mmd_file() {
-        let p = build_mockup_prompt("a login flow", DesignFormat::Mermaid, "design.mmd", "flowchart TD\n", "S");
+        let p = build_mockup_prompt(
+            "a login flow",
+            DesignFormat::Mermaid,
+            "design.mmd",
+            "flowchart TD\n",
+            "S",
+        );
         assert!(p.contains("OTTO_TASK: mockup_assist"));
         assert!(p.contains("design.mmd"));
         assert!(p.contains("sequenceDiagram"));
@@ -567,7 +600,13 @@ mod tests {
 
     #[test]
     fn excalidraw_and_scene3d_prompts_carry_their_schemas() {
-        let p = build_mockup_prompt("a checkout flow", DesignFormat::Excalidraw, "design.excalidraw", "{}", "S");
+        let p = build_mockup_prompt(
+            "a checkout flow",
+            DesignFormat::Excalidraw,
+            "design.excalidraw",
+            "{}",
+            "S",
+        );
         assert!(p.contains("OTTO_TASK: mockup_assist"));
         assert!(p.contains("design.excalidraw"));
         assert!(p.contains("\"type\":\"excalidraw\""));
@@ -583,7 +622,8 @@ mod tests {
     fn unknown_format_is_rejected_not_defaulted() {
         // The old `normalize_format("weird") == "html"` fallback is gone: a bad
         // format on a NEW artifact is a 400 from `parse_or_default`.
-        let err = crate::design_format::parse_or_default(Some("weird"), DesignFormat::Html).unwrap_err();
+        let err =
+            crate::design_format::parse_or_default(Some("weird"), DesignFormat::Html).unwrap_err();
         assert!(matches!(err, Error::Invalid(_)));
         assert_eq!(
             crate::design_format::parse_or_default(None, DesignFormat::Html).unwrap(),
@@ -593,7 +633,9 @@ mod tests {
         assert_eq!(DesignFormat::Html.file_name(), "design.html");
         assert_eq!(DesignFormat::Mermaid.mime(), "text/vnd.mermaid");
         assert_eq!(DesignFormat::Html.mime(), "text/html");
-        assert!(DesignFormat::Html.base_stub("T").contains("<!doctype html>"));
+        assert!(DesignFormat::Html
+            .base_stub("T")
+            .contains("<!doctype html>"));
         assert!(DesignFormat::Mermaid.base_stub("T").contains("flowchart"));
     }
 
@@ -605,10 +647,16 @@ mod tests {
             Some("<!doctype html><body>hi</body>")
         );
         let raw2 = "Done.\n\n```mermaid\nflowchart TD\n  A-->B\n```";
-        assert_eq!(extract_fenced(raw2, "mermaid").as_deref(), Some("flowchart TD\n  A-->B"));
+        assert_eq!(
+            extract_fenced(raw2, "mermaid").as_deref(),
+            Some("flowchart TD\n  A-->B")
+        );
         assert!(extract_fenced("no fence", "html").is_none());
         let raw3 = "```json\n{\"type\":\"otto-scene3d\"}\n```";
-        assert_eq!(extract_fenced(raw3, DesignFormat::Scene3d.fence_lang()).as_deref(), Some("{\"type\":\"otto-scene3d\"}"));
+        assert_eq!(
+            extract_fenced(raw3, DesignFormat::Scene3d.fence_lang()).as_deref(),
+            Some("{\"type\":\"otto-scene3d\"}")
+        );
     }
 
     #[tokio::test]
@@ -632,7 +680,9 @@ mod tests {
         let path = dir.join("design.html");
 
         // Agent edited the file → use the file.
-        tokio::fs::write(&path, "<html>edited</html>").await.unwrap();
+        tokio::fs::write(&path, "<html>edited</html>")
+            .await
+            .unwrap();
         let got = resolve_source(&path, "<html>stub</html>", DesignFormat::Html, "").await;
         assert!(got.contains("edited"));
 
@@ -642,7 +692,10 @@ mod tests {
         let got = resolve_source(&path, "<html>stub</html>", DesignFormat::Html, raw).await;
         assert!(got.contains("from-reply"));
         let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(on_disk.contains("from-reply"), "reply source written back to file");
+        assert!(
+            on_disk.contains("from-reply"),
+            "reply source written back to file"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

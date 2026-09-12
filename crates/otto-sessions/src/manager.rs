@@ -66,7 +66,10 @@ fn model_args(template: Option<&[String]>, meta: &serde_json::Value) -> Vec<Stri
     if model.is_empty() {
         return vec![];
     }
-    template.iter().map(|a| a.replace("{model}", model)).collect()
+    template
+        .iter()
+        .map(|a| a.replace("{model}", model))
+        .collect()
 }
 
 /// Extra argv for a **lean turn** — a short, mechanical, user-blocking agent
@@ -312,7 +315,13 @@ pub fn codex_rollout_path_under(root: &std::path::Path, psid: &str) -> Option<st
 /// Best-effort: resolve + persist `sessions.transcript_path` right after a
 /// provider id is captured (design §4.2), so the conversation view never has to
 /// scan `~/.codex/sessions` for this session again. Failures only log.
-async fn persist_transcript_path(repo: &SessionsRepo, id: &Id, provider: &str, cwd: &str, psid: &str) {
+async fn persist_transcript_path(
+    repo: &SessionsRepo,
+    id: &Id,
+    provider: &str,
+    cwd: &str,
+    psid: &str,
+) {
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
     match crate::lifecycle::transcript_path(&home, provider, cwd, Some(psid)) {
         Ok(path) => {
@@ -405,10 +414,7 @@ fn codex_rollout_first_user_message(path: &std::path::Path) -> Option<String> {
         };
         let p = v.get("payload")?;
         if p.get("type").and_then(|t| t.as_str()) == Some("user_message") {
-            return p
-                .get("message")
-                .and_then(|m| m.as_str())
-                .map(str::to_owned);
+            return p.get("message").and_then(|m| m.as_str()).map(str::to_owned);
         }
     }
     None
@@ -1912,7 +1918,12 @@ impl SessionManager {
         // Fold the explicit `model` param into `meta.model` (winning over any
         // model already in `meta`) so ONE meta key drives both the spawn args
         // below and every later resume (`restart_locked` re-reads it).
-        if let Some(model) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        if let Some(model) = req
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
             let meta = req.meta.get_or_insert_with(|| serde_json::json!({}));
             if let Some(obj) = meta.as_object_mut() {
                 obj.insert("model".into(), model.into());
@@ -2223,7 +2234,9 @@ impl SessionManager {
                 let claimed: std::collections::HashSet<&str> =
                     claimed_rows.iter().map(String::as_str).collect();
                 let pick = match provider.as_str() {
-                    "codex" => pick_codex_rollout(&codex_sessions_root(), &cwd, floor, &claimed, probe),
+                    "codex" => {
+                        pick_codex_rollout(&codex_sessions_root(), &cwd, floor, &claimed, probe)
+                    }
                     "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed)
                         .map(RolloutPick::Claim)
                         .unwrap_or(RolloutPick::Nothing),
@@ -2516,7 +2529,14 @@ impl SessionManager {
                             session = %id, provider = %session.provider, provider_session = %psid,
                             "late provider id capture — session is now resumable"
                         );
-                        persist_transcript_path(&self.repo, id, &session.provider, &session.cwd, &psid).await;
+                        persist_transcript_path(
+                            &self.repo,
+                            id,
+                            &session.provider,
+                            &session.cwd,
+                            &psid,
+                        )
+                        .await;
                         session.provider_session_id = Some(psid);
                     }
                     Err(e) => {
@@ -3072,10 +3092,11 @@ impl SessionManager {
         }
         let provider = s.provider.clone();
         let path_owned = path.clone();
-        let title = tokio::task::spawn_blocking(move || read_provider_title(&provider, &path_owned))
-            .await
-            .ok()
-            .flatten();
+        let title =
+            tokio::task::spawn_blocking(move || read_provider_title(&provider, &path_owned))
+                .await
+                .ok()
+                .flatten();
         // Record the mtime we just parsed at so the next sweep can skip it.
         {
             let mut probe = self.title_probe.entry(s.id.clone()).or_default();
@@ -3560,7 +3581,9 @@ impl SessionManager {
                 spec.args
                     .extend(add_dir_args(&session.provider, &session.meta));
                 spec.args.extend(model_args(
-                    self.providers.model_args_template(&session.provider).as_deref(),
+                    self.providers
+                        .model_args_template(&session.provider)
+                        .as_deref(),
                     &session.meta,
                 ));
                 // Re-apply the out-of-tree context injection so a resumed session
@@ -3929,7 +3952,10 @@ mod tests {
         // A word boundary landing on the clip point doesn't leave "word …".
         let sentence = format!("{} zzzz", "word ".repeat(20));
         let clipped = clean_provider_title(&sentence).unwrap();
-        assert!(!clipped.contains(" …"), "no space before ellipsis: {clipped:?}");
+        assert!(
+            !clipped.contains(" …"),
+            "no space before ellipsis: {clipped:?}"
+        );
     }
 
     #[test]
@@ -4190,7 +4216,11 @@ mod tests {
         let psid = "019ed94a-994a-7010-b01f-9b840c5b7068";
         let f = day.join(format!("rollout-2026-07-12T20-00-00-{psid}.jsonl"));
         std::fs::write(&f, b"{}").unwrap();
-        std::fs::write(day.join("rollout-2026-07-12T21-00-00-other-uuid-here.jsonl"), b"{}").unwrap();
+        std::fs::write(
+            day.join("rollout-2026-07-12T21-00-00-other-uuid-here.jsonl"),
+            b"{}",
+        )
+        .unwrap();
         assert_eq!(codex_rollout_path_under(root.path(), psid), Some(f));
         assert_eq!(codex_rollout_path_under(root.path(), "nope"), None);
         assert_eq!(codex_rollout_path_under(root.path(), ""), None);
@@ -4248,7 +4278,10 @@ mod tests {
             normalize_pty_input(raw),
             "Scan the repository koala-vivo-go line2"
         );
-        assert_eq!(normalize_pty_input(b"  hi \r\n there \x1b[A\x7f"), "hi there");
+        assert_eq!(
+            normalize_pty_input(b"  hi \r\n there \x1b[A\x7f"),
+            "hi there"
+        );
         assert_eq!(normalize_pty_input(b"\x1b[200~\x1b[201~\r"), "");
     }
 
@@ -4383,7 +4416,8 @@ mod tests {
         mgr.live
             .insert(id.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
         // A pending capture registers an empty probe at spawn.
-        mgr.capture_probes.insert(id.clone(), CaptureProbe::default());
+        mgr.capture_probes
+            .insert(id.clone(), CaptureProbe::default());
 
         mgr.input(&id, b"\x1b[200~hello world\x1b[201~\r")
             .await
@@ -4415,9 +4449,7 @@ mod tests {
             "user",
         );
         // Static file → not actively written.
-        assert!(
-            !rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await
-        );
+        assert!(!rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await);
         // A concurrent writer appending during the settle window → detected.
         let writer = std::thread::spawn({
             let p = p.clone();
@@ -4431,9 +4463,7 @@ mod tests {
         assert!(rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await);
         writer.join().unwrap();
         // Unknown psid → never blocks a resume.
-        assert!(
-            !rollout_actively_written(tmp.path(), "NOPE", Duration::from_millis(50)).await
-        );
+        assert!(!rollout_actively_written(tmp.path(), "NOPE", Duration::from_millis(50)).await);
     }
 
     #[test]
@@ -4698,9 +4728,15 @@ mod tests {
             Some("cd '/Users/dev/other' && codex resume 'abc'"),
         );
         // A plain terminal — nothing was ever captured — just respawns empty.
-        assert_eq!(nested_resume_command(&mk(None, serde_json::json!({}))), None);
+        assert_eq!(
+            nested_resume_command(&mk(None, serde_json::json!({}))),
+            None
+        );
         // Half a capture (id but no provider, or the reverse) is never guessed at.
-        assert_eq!(nested_resume_command(&mk(Some("abc"), serde_json::json!({}))), None);
+        assert_eq!(
+            nested_resume_command(&mk(Some("abc"), serde_json::json!({}))),
+            None
+        );
         assert_eq!(nested_resume_command(&mk(None, same_dir)), None);
     }
 
@@ -4733,17 +4769,32 @@ mod tests {
         let bg = serde_json::json!({ "source": "review" });
 
         // Engine-owned, idle past the grace → reap.
-        assert!(should_reap_unresumable(&mk(SessionKind::Agent, bg.clone()), past));
+        assert!(should_reap_unresumable(
+            &mk(SessionKind::Agent, bg.clone()),
+            past
+        ));
         // Not yet past the (long) grace → keep.
-        assert!(!should_reap_unresumable(&mk(SessionKind::Agent, bg.clone()), under));
-        // Foreground (no source / unknown source) → NEVER killed.
-        assert!(!should_reap_unresumable(&mk(SessionKind::Agent, serde_json::json!({})), past));
         assert!(!should_reap_unresumable(
-            &mk(SessionKind::Agent, serde_json::json!({ "source": "someday-new" })),
+            &mk(SessionKind::Agent, bg.clone()),
+            under
+        ));
+        // Foreground (no source / unknown source) → NEVER killed.
+        assert!(!should_reap_unresumable(
+            &mk(SessionKind::Agent, serde_json::json!({})),
+            past
+        ));
+        assert!(!should_reap_unresumable(
+            &mk(
+                SessionKind::Agent,
+                serde_json::json!({ "source": "someday-new" })
+            ),
             past
         ));
         // Connection terminals (ssh/db) are not agent sessions → never killed.
-        assert!(!should_reap_unresumable(&mk(SessionKind::Connection, bg), past));
+        assert!(!should_reap_unresumable(
+            &mk(SessionKind::Connection, bg),
+            past
+        ));
     }
 
     #[tokio::test]
@@ -4899,13 +4950,19 @@ mod tests {
         assert_eq!(args[0], "--strict-mcp-config");
         assert_eq!(args[1], "--disallowed-tools");
         // Read/Grep/Glob stay allowed — a truncated diff still needs an escape hatch.
-        assert!(!args[2].contains("Read"), "read-only tools must stay allowed");
+        assert!(
+            !args[2].contains("Read"),
+            "read-only tools must stay allowed"
+        );
         assert!(args[2].contains("Bash"));
 
         // Off / absent / wrong provider ⇒ no flags at all.
         assert!(lean_turn_args("claude", &serde_json::json!({ "lean_turn": false })).is_empty());
         assert!(lean_turn_args("claude", &serde_json::json!({})).is_empty());
-        assert!(lean_turn_args("codex", &on).is_empty(), "codex takes neither flag");
+        assert!(
+            lean_turn_args("codex", &on).is_empty(),
+            "codex takes neither flag"
+        );
     }
 
     /// The built-in `--model {model}` template (claude/codex/agy) expands to

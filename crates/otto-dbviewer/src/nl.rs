@@ -254,9 +254,16 @@ mod tests {
             }
         }
         let drafter = ScriptedDrafter::new(&["DELETE FROM users", "DROP TABLE users"]);
-        let err = drive_nl_to_sql(Engine::Mysql, "remove all", "", &drafter, &NeverValidates, 2)
-            .await
-            .expect_err("write-only drafts must fail closed");
+        let err = drive_nl_to_sql(
+            Engine::Mysql,
+            "remove all",
+            "",
+            &drafter,
+            &NeverValidates,
+            2,
+        )
+        .await
+        .expect_err("write-only drafts must fail closed");
         assert!(err.to_string().to_lowercase().contains("read"));
     }
 

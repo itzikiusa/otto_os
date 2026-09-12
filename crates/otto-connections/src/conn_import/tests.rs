@@ -74,8 +74,14 @@ fn engine_mapping() {
     assert_eq!(kind_for_engine("mongo").unwrap(), ConnectionKind::Mongodb);
     assert_eq!(kind_for_engine("redis").unwrap(), ConnectionKind::Redis);
     // Postgres is now a first-class engine (jdbc:postgresql / postgis map to it).
-    assert_eq!(kind_for_engine("postgresql").unwrap(), ConnectionKind::Postgres);
-    assert_eq!(kind_for_engine("postgis").unwrap(), ConnectionKind::Postgres);
+    assert_eq!(
+        kind_for_engine("postgresql").unwrap(),
+        ConnectionKind::Postgres
+    );
+    assert_eq!(
+        kind_for_engine("postgis").unwrap(),
+        ConnectionKind::Postgres
+    );
     // Unsupported engines carry an explanatory note.
     assert!(kind_for_engine("oracle").unwrap_err().contains("Oracle"));
     assert!(kind_for_engine("mssql").unwrap_err().contains("SQL Server"));

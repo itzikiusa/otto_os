@@ -170,9 +170,9 @@ impl BrowserAnnotationsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("create browser annotation"))?;
-        self.get(&id).await.and_then(|a| {
-            a.ok_or_else(|| dberr("browser annotation")(sqlx::Error::RowNotFound))
-        })
+        self.get(&id)
+            .await
+            .and_then(|a| a.ok_or_else(|| dberr("browser annotation")(sqlx::Error::RowNotFound)))
     }
 
     pub async fn get(&self, id: &Id) -> Result<Option<BrowserAnnotation>> {
@@ -186,7 +186,11 @@ impl BrowserAnnotationsRepo {
         .map_err(dberr("browser annotation"))
     }
 
-    pub async fn list_for_url(&self, workspace_id: &str, url: &str) -> Result<Vec<BrowserAnnotation>> {
+    pub async fn list_for_url(
+        &self,
+        workspace_id: &str,
+        url: &str,
+    ) -> Result<Vec<BrowserAnnotation>> {
         sqlx::query_as::<_, BrowserAnnotation>(
             "SELECT id, workspace_id, tab_id, url, selector, excerpt, text, comment, color, created_at
              FROM browser_annotations WHERE workspace_id = ? AND url = ? ORDER BY created_at",

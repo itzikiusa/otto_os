@@ -213,7 +213,9 @@ mod tests {
             assert!(is_blocked_ip(ip.parse().unwrap()), "{ip} must be blocked");
         }
         // IPv4-mapped loopback must not slip through.
-        assert!(is_blocked_ip(IpAddr::V6("::ffff:127.0.0.1".parse::<Ipv6Addr>().unwrap())));
+        assert!(is_blocked_ip(IpAddr::V6(
+            "::ffff:127.0.0.1".parse::<Ipv6Addr>().unwrap()
+        )));
         assert!(is_blocked_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         // A normal public address is allowed.
         assert!(!is_blocked_ip("8.8.8.8".parse().unwrap()));
@@ -223,7 +225,9 @@ mod tests {
     #[tokio::test]
     async fn check_url_rejects_loopback_and_bad_schemes() {
         assert!(check_url("http://127.0.0.1/").await.is_err());
-        assert!(check_url("http://169.254.169.254/latest/meta-data/").await.is_err());
+        assert!(check_url("http://169.254.169.254/latest/meta-data/")
+            .await
+            .is_err());
         assert!(check_url("file:///etc/passwd").await.is_err());
         assert!(check_url("data:text/plain,hi").await.is_err());
         assert!(check_url("http://[::1]/").await.is_err());

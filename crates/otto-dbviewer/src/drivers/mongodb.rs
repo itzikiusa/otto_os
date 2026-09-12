@@ -29,7 +29,7 @@ use crate::drivers::{mongo_parse, mongo_sql};
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
 use crate::tls::TlsFiles;
 use crate::types::{
-    self, compact_count, Capabilities, CancelToken, Column, CompletionContext, CompletionResponse,
+    self, compact_count, CancelToken, Capabilities, Column, CompletionContext, CompletionResponse,
     DbQueryPlan, Engine, IndexDef, NodeKind, NodePath, ObjectDetail, ObjectHit, ObjectSearchReq,
     ObjectSearchResult, QueryHandle, QueryRequest, QueryResult, QueryStats, ResolvedConfig,
     SchemaNode, TestResult,
@@ -184,10 +184,7 @@ impl Driver for MongoDriver {
             }
             // Database node → collections, filtered by name (case-insensitive) when set.
             None => {
-                let mut names = db
-                    .list_collection_names()
-                    .await
-                    .map_err(types::upstream)?;
+                let mut names = db.list_collection_names().await.map_err(types::upstream)?;
                 names.sort();
                 let filter_lower = filter.map(|f| f.to_lowercase());
                 let mut nodes = Vec::with_capacity(names.len());
@@ -219,7 +216,9 @@ impl Driver for MongoDriver {
         if !counts || parent.get("coll").is_some() {
             return Ok(nodes);
         }
-        let Some(db_name) = parent.get("db") else { return Ok(nodes) };
+        let Some(db_name) = parent.get("db") else {
+            return Ok(nodes);
+        };
         let client = self.connect(cfg).await?;
         let db = client.database(db_name);
         let mut out = Vec::with_capacity(nodes.len());
@@ -240,7 +239,10 @@ impl Driver for MongoDriver {
         req: &ObjectSearchReq,
     ) -> Result<ObjectSearchResult> {
         if !req.wants("collection") {
-            return Ok(ObjectSearchResult { supported: true, ..Default::default() });
+            return Ok(ObjectSearchResult {
+                supported: true,
+                ..Default::default()
+            });
         }
         let client = self.connect(cfg).await?;
         let limit = req.capped();
@@ -248,7 +250,10 @@ impl Driver for MongoDriver {
         // `listCollections` round trip per database. `scanned` reports the real
         // cost back to the caller so the UI can be honest about it.
         let dbs: Vec<String> = if req.all_schemas() {
-            let mut names = client.list_database_names().await.map_err(types::upstream)?;
+            let mut names = client
+                .list_database_names()
+                .await
+                .map_err(types::upstream)?;
             names.sort();
             names
         } else {
@@ -288,7 +293,12 @@ impl Driver for MongoDriver {
                 });
             }
         }
-        Ok(ObjectSearchResult { hits, truncated, scanned, supported: true })
+        Ok(ObjectSearchResult {
+            hits,
+            truncated,
+            scanned,
+            supported: true,
+        })
     }
 
     async fn object_detail(&self, cfg: &ResolvedConfig, path: &NodePath) -> Result<ObjectDetail> {
@@ -321,7 +331,9 @@ impl Driver for MongoDriver {
                 .unwrap_or_default();
             let mut indexes = Vec::new();
             for item in &batch {
-                let Some(spec) = item.as_document() else { continue };
+                let Some(spec) = item.as_document() else {
+                    continue;
+                };
                 let keys = spec.get_document("key").cloned().unwrap_or_default();
                 let name = spec
                     .get_str("name")
@@ -518,7 +530,10 @@ impl Driver for MongoDriver {
             Err(e) => return Err(types::upstream(e)),
         };
         for opid in opids_from_current_op(&ops) {
-            match admin.run_command(doc! { "killOp": 1, "op": opid.clone() }).await {
+            match admin
+                .run_command(doc! { "killOp": 1, "op": opid.clone() })
+                .await
+            {
                 Ok(_) => tracing::debug!(tag, ?opid, "mongodb cancel: killOp issued"),
                 Err(e) if is_unauthorized(&e) => {
                     tracing::warn!(tag, ?opid, error = %e, "mongodb cancel: killOp denied — no-op");
@@ -813,9 +828,10 @@ impl MongoDriver {
         let coll: Collection<Document> = db.collection(&parsed.collection);
         let max_rows = req.max_rows.unwrap_or(DEFAULT_MAX_ROWS);
         // Per-statement timeout: MongoDB accepts `maxTimeMS` on cursors/commands.
-        let max_time_ms = req.timeout_ms.filter(|&t| t > 0).map(|t| {
-            i64::try_from(t).unwrap_or(i64::MAX)
-        });
+        let max_time_ms = req
+            .timeout_ms
+            .filter(|&t| t > 0)
+            .map(|t| i64::try_from(t).unwrap_or(i64::MAX));
         let started = Instant::now();
 
         // `.explain()` (or the request's explain flag) → return the query plan.
@@ -1093,7 +1109,9 @@ impl MongoDriver {
                     .and_then(|n| NodePath::parse(n).get("coll").map(str::to_string))
             });
             match coll {
-                Some(c) if !db_name.is_empty() => Some(self.completion_fields(cfg, &db_name, &c).await),
+                Some(c) if !db_name.is_empty() => {
+                    Some(self.completion_fields(cfg, &db_name, &c).await)
+                }
                 _ => None,
             }
         } else {
@@ -1146,7 +1164,9 @@ impl MongoDriver {
             let rank = |n: &str| SYSTEM_DBS.iter().position(|s| *s == n).map_or(0, |i| i + 1);
             rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
         });
-        names.into_iter().find(|n| !SYSTEM_DBS.contains(&n.as_str()))
+        names
+            .into_iter()
+            .find(|n| !SYSTEM_DBS.contains(&n.as_str()))
     }
 
     /// SQL-dialect completion (`SELECT … FROM <coll> WHERE …`): delegate context
@@ -1222,7 +1242,11 @@ impl MongoDriver {
         self.completions.put_snapshot(
             &cache_key,
             db,
-            crate::complete::SchemaSnapshot { databases, objects, ..Default::default() },
+            crate::complete::SchemaSnapshot {
+                databases,
+                objects,
+                ..Default::default()
+            },
         );
         names
     }
@@ -1250,17 +1274,15 @@ impl MongoDriver {
         // Insertion-ordered path list with the strongest rank seen for each path.
         let mut order: Vec<String> = Vec::new();
         let mut rank: std::collections::HashMap<String, Rank> = std::collections::HashMap::new();
-        let mut add = |path: String, r: Rank| {
-            match rank.get_mut(&path) {
-                Some(existing) => {
-                    if rank_strength(r) > rank_strength(*existing) {
-                        *existing = r;
-                    }
+        let mut add = |path: String, r: Rank| match rank.get_mut(&path) {
+            Some(existing) => {
+                if rank_strength(r) > rank_strength(*existing) {
+                    *existing = r;
                 }
-                None => {
-                    order.push(path.clone());
-                    rank.insert(path, r);
-                }
+            }
+            None => {
+                order.push(path.clone());
+                rank.insert(path, r);
             }
         };
 
@@ -1268,7 +1290,11 @@ impl MongoDriver {
         if let Ok(mut cursor) = collection.list_indexes().await {
             while let Some(Ok(model)) = cursor.next().await {
                 let name = model.options.as_ref().and_then(|o| o.name.clone());
-                let unique = model.options.as_ref().and_then(|o| o.unique).unwrap_or(false);
+                let unique = model
+                    .options
+                    .as_ref()
+                    .and_then(|o| o.unique)
+                    .unwrap_or(false);
                 let is_id = name.as_deref() == Some("_id_");
                 let r = if is_id {
                     Rank::Pk
@@ -1497,7 +1523,12 @@ impl MongoDriver {
             // streams, not just stderr.
             let clip = |s: &str| -> String {
                 let t = s.trim();
-                let start = t.char_indices().rev().nth(3999).map(|(i, _)| i).unwrap_or(0);
+                let start = t
+                    .char_indices()
+                    .rev()
+                    .nth(3999)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 t[start..].to_string()
             };
             let code = out
@@ -1576,7 +1607,8 @@ fn mongosh_invocation(cfg: &ResolvedConfig, node: Option<&str>) -> Result<String
             if cfg.user.is_some() {
                 query.push(format!(
                     "authSource={}",
-                    cfg.param_str("auth_source").unwrap_or_else(|| "admin".into())
+                    cfg.param_str("auth_source")
+                        .unwrap_or_else(|| "admin".into())
                 ));
             }
             if let Some(rs) = cfg.param_str("replica_set") {
@@ -1726,7 +1758,8 @@ pub(crate) fn split_statements(input: &str) -> Vec<String> {
                     }
                 } else if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
                     i += 2;
-                    while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                    while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/'))
+                    {
                         i += 1;
                     }
                     i += 2; // consume the closing */
@@ -1761,9 +1794,17 @@ fn clean_statement(slice: &str) -> Option<String> {
     let mut s = slice.trim();
     loop {
         if let Some(rest) = s.strip_prefix("//") {
-            s = rest.split_once('\n').map(|x| x.1).unwrap_or("").trim_start();
+            s = rest
+                .split_once('\n')
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
         } else if let Some(rest) = s.strip_prefix("/*") {
-            s = rest.split_once("*/").map(|x| x.1).unwrap_or("").trim_start();
+            s = rest
+                .split_once("*/")
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim_start();
         } else {
             break;
         }
@@ -1901,7 +1942,10 @@ fn parse_json_command(raw: &str) -> Result<ParsedCommand> {
         documents,
         index_keys: to_doc(obj.get("index_keys"))?,
         index_options: to_doc(obj.get("index_options"))?,
-        index_name: obj.get("index_name").and_then(Value::as_str).map(str::to_string),
+        index_name: obj
+            .get("index_name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         explain: obj.get("explain").and_then(Value::as_bool).unwrap_or(false),
     })
 }
@@ -2476,13 +2520,14 @@ fn bson_to_json(b: &Bson) -> Value {
                 .map(|(k, v)| (k.clone(), bson_to_json(v)))
                 .collect(),
         ),
-        Bson::DateTime(dt) => Value::String(dt.try_to_rfc3339_string().unwrap_or_else(|_| dt.to_string())),
+        Bson::DateTime(dt) => Value::String(
+            dt.try_to_rfc3339_string()
+                .unwrap_or_else(|_| dt.to_string()),
+        ),
         Bson::Timestamp(ts) => json!({ "t": ts.time, "i": ts.increment }),
         Bson::Decimal128(d) => Value::String(d.to_string()),
         Bson::Symbol(s) => Value::String(s.clone()),
-        Bson::RegularExpression(re) => {
-            Value::String(format!("/{}/{}", re.pattern, re.options))
-        }
+        Bson::RegularExpression(re) => Value::String(format!("/{}/{}", re.pattern, re.options)),
         Bson::JavaScriptCode(code) => Value::String(code.clone()),
         Bson::JavaScriptCodeWithScope(c) => Value::String(c.code.clone()),
         Bson::Binary(bin) => Value::String(binary_to_string(bin)),
@@ -2591,7 +2636,10 @@ fn bson_type_name(b: &Bson) -> &'static str {
 }
 
 fn join_index_keys(keys: &Document) -> String {
-    keys.keys().map(|k| k.to_string()).collect::<Vec<_>>().join("_")
+    keys.keys()
+        .map(|k| k.to_string())
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 // --- sampling & result shaping ----------------------------------------------
@@ -2865,7 +2913,9 @@ fn explain_inner(parsed: &Parsed) -> Result<Document> {
                 .into_iter()
                 .map(Bson::Document)
                 .collect();
-            Ok(doc! { "aggregate": &parsed.collection, "pipeline": Bson::Array(stages), "cursor": {} })
+            Ok(
+                doc! { "aggregate": &parsed.collection, "pipeline": Bson::Array(stages), "cursor": {} },
+            )
         }
         _ => Err(types::invalid("explain supports find and aggregate")),
     }
@@ -3028,12 +3078,11 @@ fn resolve_sql_collection(
     node_coll: Option<&str>,
 ) -> Option<String> {
     use crate::complete::sql::SqlExpect;
-    if let SqlExpect::Column {
-        qualifier: Some(q),
-    } = &sctx.expect
-    {
+    if let SqlExpect::Column { qualifier: Some(q) } = &sctx.expect {
         if let Some(t) = sctx.tables.iter().find(|t| {
-            t.alias.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(q))
+            t.alias
+                .as_deref()
+                .is_some_and(|a| a.eq_ignore_ascii_case(q))
                 || t.name.eq_ignore_ascii_case(q)
         }) {
             return Some(t.name.clone());
@@ -3051,7 +3100,8 @@ fn resolve_sql_collection(
 /// the editor's `[\w$.]` completion boundary).
 const MONGO_SQL_KEYWORDS: &[&str] = &[
     "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN", "GROUP",
-    "ORDER", "BY", "LIMIT", "ASC", "DESC", "AS", "JOIN", "INNER", "LEFT", "ON", "COUNT", "DISTINCT",
+    "ORDER", "BY", "LIMIT", "ASC", "DESC", "AS", "JOIN", "INNER", "LEFT", "ON", "COUNT",
+    "DISTINCT",
 ];
 
 /// SQL aggregate functions `mongo_sql` maps to `$group` accumulators / countDocuments.
@@ -3158,7 +3208,10 @@ mod tests {
         )
         .unwrap();
         assert!(uri.contains("replicaSet=rs0"), "uri: {uri}");
-        assert!(uri.ends_with("&proxyHost=127.0.0.1&proxyPort=1080"), "uri: {uri}");
+        assert!(
+            uri.ends_with("&proxyHost=127.0.0.1&proxyPort=1080"),
+            "uri: {uri}"
+        );
     }
 
     /// A full `conn_string` wins verbatim (with `{secret}` substituted), and
@@ -3283,25 +3336,20 @@ mod tests {
 
     #[test]
     fn shorthand_find_with_filter_limit_sort() {
-        let p = parse_command(
-            r#"db.orders.find({"status":"paid"}).sort({"total":-1}).limit(5)"#,
-        )
-        .unwrap();
+        let p = parse_command(r#"db.orders.find({"status":"paid"}).sort({"total":-1}).limit(5)"#)
+            .unwrap();
         assert_eq!(p.collection, "orders");
         assert_eq!(p.op, MongoOp::Find);
         assert_eq!(p.limit, Some(5));
-        assert_eq!(
-            p.filter.unwrap().get_str("status").unwrap(),
-            "paid"
-        );
+        assert_eq!(p.filter.unwrap().get_str("status").unwrap(), "paid");
         // serde_json integers become BSON Int64.
         assert_eq!(p.sort.unwrap().get_i64("total").unwrap(), -1);
     }
 
     #[test]
     fn shorthand_aggregate() {
-        let p = parse_command(r#"db.events.aggregate([{"$match":{"k":1}},{"$count":"n"}])"#)
-            .unwrap();
+        let p =
+            parse_command(r#"db.events.aggregate([{"$match":{"k":1}},{"$count":"n"}])"#).unwrap();
         assert_eq!(p.collection, "events");
         assert_eq!(p.op, MongoOp::Aggregate);
         assert_eq!(p.pipeline.unwrap().len(), 2);
@@ -3494,7 +3542,10 @@ mod tests {
         );
         // The unprivileged retry differs ONLY in `allUsers`.
         let scoped = current_op_pipeline_scoped("otto:q-42", false);
-        assert_eq!(scoped[0], doc! { "$currentOp": { "allUsers": false, "localOps": true } });
+        assert_eq!(
+            scoped[0],
+            doc! { "$currentOp": { "allUsers": false, "localOps": true } }
+        );
         assert_eq!(scoped[1..], p[1..]);
     }
 
@@ -3530,14 +3581,22 @@ mod tests {
         // An explicit `.limit(n)` is never paged (neither by offset nor keyset).
         assert!(keyset_filter(None, None, true, None).unwrap().is_none());
         // A sort on another field (or descending `_id`) needs the offset path.
-        assert!(keyset_filter(None, Some(&doc! { "age": -1 }), false, None).unwrap().is_none());
-        assert!(keyset_filter(None, Some(&doc! { "_id": -1 }), false, None).unwrap().is_none());
-        assert!(keyset_filter(None, Some(&doc! { "_id": 1, "age": 1 }), false, None)
+        assert!(keyset_filter(None, Some(&doc! { "age": -1 }), false, None)
             .unwrap()
             .is_none());
+        assert!(keyset_filter(None, Some(&doc! { "_id": -1 }), false, None)
+            .unwrap()
+            .is_none());
+        assert!(
+            keyset_filter(None, Some(&doc! { "_id": 1, "age": 1 }), false, None)
+                .unwrap()
+                .is_none()
+        );
         // A filter already pinning `_id` keeps the order the user asked for.
         let f = doc! { "_id": { "$in": [1, 2] } };
-        assert!(keyset_filter(Some(&f), None, false, None).unwrap().is_none());
+        assert!(keyset_filter(Some(&f), None, false, None)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -3553,8 +3612,14 @@ mod tests {
         assert_eq!(filter, doc! {});
         assert_eq!(sort, doc! { "_id": 1 });
         // An explicit `{_id: 1}` sort is eligible too (any numeric 1).
-        assert!(keyset_filter(None, Some(&doc! { "_id": 1_i64 }), false, None).unwrap().is_some());
-        assert!(keyset_filter(None, Some(&doc! { "_id": 1.0 }), false, None).unwrap().is_some());
+        assert!(
+            keyset_filter(None, Some(&doc! { "_id": 1_i64 }), false, None)
+                .unwrap()
+                .is_some()
+        );
+        assert!(keyset_filter(None, Some(&doc! { "_id": 1.0 }), false, None)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -3562,15 +3627,18 @@ mod tests {
         let oid = mongodb::bson::oid::ObjectId::new();
         let f = doc! { "$or": [{ "a": 1 }, { "b": 2 }] };
         let cursor = json!({ "$oid": oid.to_hex() });
-        let (filter, sort) =
-            keyset_filter(Some(&f), None, false, Some(&cursor)).unwrap().unwrap();
+        let (filter, sort) = keyset_filter(Some(&f), None, false, Some(&cursor))
+            .unwrap()
+            .unwrap();
         // `$and` keeps a top-level `$or` intact, and the cursor is decoded to a
         // real ObjectId (not compared as a string / sub-document).
         assert_eq!(filter, doc! { "$and": [f, { "_id": { "$gt": oid } }] });
         assert_eq!(sort, doc! { "_id": 1 });
         // No filter + cursor ⇒ `$and: [{}, …]` (harmless, and keeps one shape).
         let cursor = json!(41);
-        let (filter, _) = keyset_filter(None, None, false, Some(&cursor)).unwrap().unwrap();
+        let (filter, _) = keyset_filter(None, None, false, Some(&cursor))
+            .unwrap()
+            .unwrap();
         assert_eq!(filter, doc! { "$and": [{}, { "_id": { "$gt": 41_i64 } }] });
         // A cursor that cannot be decoded is the caller's error, not a silent skip.
         let bad = json!({ "$oid": "nope" });
@@ -3582,7 +3650,11 @@ mod tests {
         let started = Instant::now();
         let a = mongodb::bson::oid::ObjectId::new();
         let b = mongodb::bson::oid::ObjectId::new();
-        let r = docs_to_result(vec![doc! { "_id": a, "n": 1 }, doc! { "n": 2, "_id": b }], true, started);
+        let r = docs_to_result(
+            vec![doc! { "_id": a, "n": 1 }, doc! { "n": 2, "_id": b }],
+            true,
+            started,
+        );
         // `_id` is pinned to column 0 whatever the document order was.
         assert_eq!(last_row_id(&r), Some(json!({ "$oid": b.to_hex() })));
         // No `_id` column (projected away) / no rows ⇒ no cursor.
@@ -3597,8 +3669,14 @@ mod tests {
     fn bson_to_json_typed_gates_int64_at_2_pow_53() {
         // Within ±2^53 a Long is exact in a JS number — keep it plain.
         assert_eq!(bson_to_json_typed(&Bson::Int64(42)), json!(42));
-        assert_eq!(bson_to_json_typed(&Bson::Int64(1 << 53)), json!(9007199254740992_i64));
-        assert_eq!(bson_to_json_typed(&Bson::Int64(-(1 << 53))), json!(-9007199254740992_i64));
+        assert_eq!(
+            bson_to_json_typed(&Bson::Int64(1 << 53)),
+            json!(9007199254740992_i64)
+        );
+        assert_eq!(
+            bson_to_json_typed(&Bson::Int64(-(1 << 53))),
+            json!(-9007199254740992_i64)
+        );
         // Beyond it the digits would round in the webview — sentinel, both signs.
         assert_eq!(
             bson_to_json_typed(&Bson::Int64((1 << 53) + 1)),
@@ -3621,15 +3699,27 @@ mod tests {
         let v = bson_to_json_typed(&Bson::Binary(BsonBinary::from(uuid)));
         assert_eq!(v, json!({ "$uuid": uuid.to_string() }));
         // Legacy UUID subtype (3) renders the same way.
-        let legacy = BsonBinary { subtype: BinarySubtype::UuidOld, bytes: uuid.bytes().to_vec() };
-        assert_eq!(bson_to_json_typed(&Bson::Binary(legacy)), json!({ "$uuid": uuid.to_string() }));
+        let legacy = BsonBinary {
+            subtype: BinarySubtype::UuidOld,
+            bytes: uuid.bytes().to_vec(),
+        };
+        assert_eq!(
+            bson_to_json_typed(&Bson::Binary(legacy)),
+            json!({ "$uuid": uuid.to_string() })
+        );
         // Generic bytes → canonical `$binary` with a 2-hex lowercase subtype.
-        let raw = BsonBinary { subtype: BinarySubtype::Generic, bytes: b"hello".to_vec() };
+        let raw = BsonBinary {
+            subtype: BinarySubtype::Generic,
+            bytes: b"hello".to_vec(),
+        };
         assert_eq!(
             bson_to_json_typed(&Bson::Binary(raw)),
             json!({ "$binary": { "base64": "aGVsbG8=", "subType": "00" } })
         );
-        let user = BsonBinary { subtype: BinarySubtype::UserDefined(0x80), bytes: vec![1, 2] };
+        let user = BsonBinary {
+            subtype: BinarySubtype::UserDefined(0x80),
+            bytes: vec![1, 2],
+        };
         assert_eq!(
             bson_to_json_typed(&Bson::Binary(user))["$binary"]["subType"],
             json!("80")
@@ -3638,24 +3728,38 @@ mod tests {
 
     #[test]
     fn binary_and_uuid_round_trip_through_typed_json() {
-        let raw = Bson::Binary(BsonBinary { subtype: BinarySubtype::Md5, bytes: vec![0, 255, 16] });
+        let raw = Bson::Binary(BsonBinary {
+            subtype: BinarySubtype::Md5,
+            bytes: vec![0, 255, 16],
+        });
         assert_eq!(json_to_bson(&bson_to_json_typed(&raw)).unwrap(), raw);
         let uuid = Bson::Binary(BsonBinary::from(BsonUuid::new()));
         assert_eq!(json_to_bson(&bson_to_json_typed(&uuid)).unwrap(), uuid);
         // A missing subType defaults to generic; a bad one is an error.
         assert_eq!(
             json_to_bson(&json!({ "$binary": { "base64": "AQI=" } })).unwrap(),
-            Bson::Binary(BsonBinary { subtype: BinarySubtype::Generic, bytes: vec![1, 2] })
+            Bson::Binary(BsonBinary {
+                subtype: BinarySubtype::Generic,
+                bytes: vec![1, 2]
+            })
         );
-        assert!(json_to_bson(&json!({ "$binary": { "base64": "AQI=", "subType": "zz" } })).is_err());
+        assert!(
+            json_to_bson(&json!({ "$binary": { "base64": "AQI=", "subType": "zz" } })).is_err()
+        );
         assert!(json_to_bson(&json!({ "$binary": { "base64": "not base64!" } })).is_err());
     }
 
     #[test]
     fn timestamp_round_trips_through_typed_json() {
-        let ts = Bson::Timestamp(BsonTimestamp { time: 1_700_000_000, increment: 7 });
+        let ts = Bson::Timestamp(BsonTimestamp {
+            time: 1_700_000_000,
+            increment: 7,
+        });
         let v = bson_to_json_typed(&ts);
-        assert_eq!(v, json!({ "$timestamp": { "t": 1_700_000_000_u32, "i": 7 } }));
+        assert_eq!(
+            v,
+            json!({ "$timestamp": { "t": 1_700_000_000_u32, "i": 7 } })
+        );
         assert_eq!(json_to_bson(&v).unwrap(), ts);
         // Nested inside a document/array it is typed and decoded the same way.
         let doc = doc! { "ops": [ts.clone()] };
@@ -3683,8 +3787,18 @@ mod tests {
         assert_eq!(set.get("a.b"), Some(&Bson::Int64(1)));
         assert_eq!(set.get("big"), Some(&Bson::Int64(9007199254740993)));
         assert!(matches!(set.get("at"), Some(Bson::DateTime(_))));
-        assert_eq!(update.get_document("$unset").unwrap().get_str("x").unwrap(), "");
-        assert_eq!(update.get_document("$rename").unwrap().get_str("o").unwrap(), "n");
+        assert_eq!(
+            update.get_document("$unset").unwrap().get_str("x").unwrap(),
+            ""
+        );
+        assert_eq!(
+            update
+                .get_document("$rename")
+                .unwrap()
+                .get_str("o")
+                .unwrap(),
+            "n"
+        );
     }
 }
 
@@ -3711,7 +3825,9 @@ mod sql_e2e {
     struct Cleanup;
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            let _ = Command::new("docker").args(["rm", "-f", CONTAINER]).output();
+            let _ = Command::new("docker")
+                .args(["rm", "-f", CONTAINER])
+                .output();
         }
     }
 
@@ -3744,7 +3860,15 @@ mod sql_e2e {
     async fn start_container(name: &'static str, port: u16) -> (Container, Client) {
         let _ = Command::new("docker").args(["rm", "-f", name]).output();
         let out = Command::new("docker")
-            .args(["run", "-d", "--name", name, "-p", &format!("{port}:27017"), IMAGE])
+            .args([
+                "run",
+                "-d",
+                "--name",
+                name,
+                "-p",
+                &format!("{port}:27017"),
+                IMAGE,
+            ])
             .output()
             .expect("docker run");
         assert!(
@@ -3758,7 +3882,11 @@ mod sql_e2e {
     }
 
     fn id_cells(r: &QueryResult) -> Vec<Value> {
-        let idx = r.columns.iter().position(|c| c.name == "_id").expect("_id column");
+        let idx = r
+            .columns
+            .iter()
+            .position(|c| c.name == "_id")
+            .expect("_id column");
         r.rows.iter().map(|row| row[idx].clone()).collect()
     }
 
@@ -3811,7 +3939,10 @@ mod sql_e2e {
 
         d.cancel(&cfg_on(CANCEL_PORT), &handle).await.unwrap();
         let outcome = run.await.unwrap();
-        assert!(outcome.is_err(), "a killed find must surface the interruption, got {outcome:?}");
+        assert!(
+            outcome.is_err(),
+            "a killed find must surface the interruption, got {outcome:?}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "cancel took {:?} — the sleep ran to completion",
@@ -3831,7 +3962,9 @@ mod sql_e2e {
         const KEYSET_PORT: u16 = 47021;
         let (_c, client) = start_container("otto-mongo-keyset-e2e", KEYSET_PORT).await;
         let coll = client.database("shop").collection::<Document>("keyset");
-        let docs: Vec<Document> = (0..2500).map(|n| doc! { "n": n, "even": n % 2 == 0 }).collect();
+        let docs: Vec<Document> = (0..2500)
+            .map(|n| doc! { "n": n, "even": n % 2 == 0 })
+            .collect();
         coll.insert_many(docs).await.unwrap();
         let d = MongoDriver::default();
         let cfg = cfg_on(KEYSET_PORT);
@@ -3843,18 +3976,27 @@ mod sql_e2e {
             ..Default::default()
         };
 
-        let p1 = d.run(&cfg, &page(None, None, "db.keyset.find({})")).await.unwrap();
+        let p1 = d
+            .run(&cfg, &page(None, None, "db.keyset.find({})"))
+            .await
+            .unwrap();
         assert_eq!(p1.rows.len(), 1000);
         assert!(p1.truncated);
         assert_eq!(p1.auto_limited, Some(1000));
         let c1 = p1.next_cursor.clone().expect("page 1 offers a cursor");
         assert_eq!(&c1, id_cells(&p1).last().unwrap());
 
-        let p2 = d.run(&cfg, &page(Some(c1), Some(1000), "db.keyset.find({})")).await.unwrap();
+        let p2 = d
+            .run(&cfg, &page(Some(c1), Some(1000), "db.keyset.find({})"))
+            .await
+            .unwrap();
         assert_eq!(p2.rows.len(), 1000);
         let c2 = p2.next_cursor.clone().expect("page 2 offers a cursor");
 
-        let p3 = d.run(&cfg, &page(Some(c2), Some(2000), "db.keyset.find({})")).await.unwrap();
+        let p3 = d
+            .run(&cfg, &page(Some(c2), Some(2000), "db.keyset.find({})"))
+            .await
+            .unwrap();
         assert_eq!(p3.rows.len(), 500);
         assert!(!p3.truncated);
         assert!(p3.next_cursor.is_none(), "the last page offers no cursor");
@@ -3872,14 +4014,27 @@ mod sql_e2e {
 
         // "Prev" from page 3 is offset-based (no cursor) and must reproduce page 2
         // exactly — the forced `{_id: 1}` makes both paths walk one order.
-        let prev = d.run(&cfg, &page(None, Some(1000), "db.keyset.find({})")).await.unwrap();
+        let prev = d
+            .run(&cfg, &page(None, Some(1000), "db.keyset.find({})"))
+            .await
+            .unwrap();
         assert_eq!(id_cells(&prev), id_cells(&p2));
         assert_eq!(prev.next_cursor, p2.next_cursor);
 
         // A filter + cursor keeps the filter (`$and`) — the even half only.
-        let e1 = d.run(&cfg, &page(None, None, "db.keyset.find({even: true})")).await.unwrap();
+        let e1 = d
+            .run(&cfg, &page(None, None, "db.keyset.find({even: true})"))
+            .await
+            .unwrap();
         let e2 = d
-            .run(&cfg, &page(e1.next_cursor.clone(), Some(1000), "db.keyset.find({even: true})"))
+            .run(
+                &cfg,
+                &page(
+                    e1.next_cursor.clone(),
+                    Some(1000),
+                    "db.keyset.find({even: true})",
+                ),
+            )
             .await
             .unwrap();
         assert_eq!(e2.rows.len(), 250);
@@ -3888,11 +4043,17 @@ mod sql_e2e {
 
         // Not eligible (sort on another field): the cursor is ignored, `skip`
         // pages, and no cursor is offered.
-        let s1 = d.run(&cfg, &page(None, None, "db.keyset.find({}).sort({n: -1})")).await.unwrap();
+        let s1 = d
+            .run(&cfg, &page(None, None, "db.keyset.find({}).sort({n: -1})"))
+            .await
+            .unwrap();
         assert!(s1.next_cursor.is_none());
         let bogus = id_cells(&s1)[0].clone();
         let s2 = d
-            .run(&cfg, &page(Some(bogus), Some(2000), "db.keyset.find({}).sort({n: -1})"))
+            .run(
+                &cfg,
+                &page(Some(bogus), Some(2000), "db.keyset.find({}).sort({n: -1})"),
+            )
             .await
             .unwrap();
         assert_eq!(s2.rows.len(), 500);
@@ -3924,7 +4085,11 @@ mod sql_e2e {
     async fn wait_for_mongo(uri: &str) -> Client {
         for _ in 0..60 {
             if let Ok(c) = Client::with_uri_str(uri).await {
-                if c.database("admin").run_command(doc! {"ping": 1}).await.is_ok() {
+                if c.database("admin")
+                    .run_command(doc! {"ping": 1})
+                    .await
+                    .is_ok()
+                {
                     return c;
                 }
             }
@@ -3960,7 +4125,9 @@ mod sql_e2e {
     #[tokio::test]
     #[ignore = "requires docker"]
     async fn sql_to_mongo_e2e() {
-        let _ = Command::new("docker").args(["rm", "-f", CONTAINER]).output();
+        let _ = Command::new("docker")
+            .args(["rm", "-f", CONTAINER])
+            .output();
         let out = Command::new("docker")
             .args([
                 "run",
@@ -4004,25 +4171,69 @@ mod sql_e2e {
 
         // 3. COUNT(*) + `=`.
         assert_eq!(
-            run_sql(&d, "SELECT COUNT(*) FROM players WHERE country = 'US'").await.rows[0][0],
+            run_sql(&d, "SELECT COUNT(*) FROM players WHERE country = 'US'")
+                .await
+                .rows[0][0],
             json!(3)
         );
 
         // 4–8. IN / NOT IN / LIKE / NOT(...) / BETWEEN.
-        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE country IN ('CA','UK')").await.rows.len(), 2);
-        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE country NOT IN ('US')").await.rows.len(), 2);
-        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE name LIKE 'a%'").await.rows.len(), 2);
-        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE NOT (country = 'US')").await.rows.len(), 2);
-        assert_eq!(run_sql(&d, "SELECT * FROM players WHERE age BETWEEN 26 AND 36").await.rows.len(), 2);
+        assert_eq!(
+            run_sql(&d, "SELECT * FROM players WHERE country IN ('CA','UK')")
+                .await
+                .rows
+                .len(),
+            2
+        );
+        assert_eq!(
+            run_sql(&d, "SELECT * FROM players WHERE country NOT IN ('US')")
+                .await
+                .rows
+                .len(),
+            2
+        );
+        assert_eq!(
+            run_sql(&d, "SELECT * FROM players WHERE name LIKE 'a%'")
+                .await
+                .rows
+                .len(),
+            2
+        );
+        assert_eq!(
+            run_sql(&d, "SELECT * FROM players WHERE NOT (country = 'US')")
+                .await
+                .rows
+                .len(),
+            2
+        );
+        assert_eq!(
+            run_sql(&d, "SELECT * FROM players WHERE age BETWEEN 26 AND 36")
+                .await
+                .rows
+                .len(),
+            2
+        );
 
         // 9. GROUP BY aggregate → 3 country groups.
         assert_eq!(
-            run_sql(&d, "SELECT country, COUNT(*) AS n FROM players GROUP BY country").await.rows.len(),
+            run_sql(
+                &d,
+                "SELECT country, COUNT(*) AS n FROM players GROUP BY country"
+            )
+            .await
+            .rows
+            .len(),
             3
         );
 
         // 10. global aggregate (no GROUP BY).
-        assert_eq!(run_sql(&d, "SELECT AVG(age) AS avg_age FROM players").await.rows.len(), 1);
+        assert_eq!(
+            run_sql(&d, "SELECT AVG(age) AS avg_age FROM players")
+                .await
+                .rows
+                .len(),
+            1
+        );
 
         // 11. INNER JOIN — only accounts with balance > 100 (alice 500, carol 150).
         assert_eq!(
@@ -4049,15 +4260,20 @@ mod sql_e2e {
         );
 
         // 13. updateOne by field — value actually changes.
-        run_sql(&d, r#"db.players.updateOne({"id": 1}, {"$set": {"age": 99}})"#).await;
+        run_sql(
+            &d,
+            r#"db.players.updateOne({"id": 1}, {"$set": {"age": 99}})"#,
+        )
+        .await;
         assert_eq!(
-            run_sql(&d, "SELECT age FROM players WHERE id = 1").await.rows[0]
-                [run_sql(&d, "SELECT age FROM players WHERE id = 1")
-                    .await
-                    .columns
-                    .iter()
-                    .position(|c| c.name == "age")
-                    .unwrap()],
+            run_sql(&d, "SELECT age FROM players WHERE id = 1")
+                .await
+                .rows[0][run_sql(&d, "SELECT age FROM players WHERE id = 1")
+                .await
+                .columns
+                .iter()
+                .position(|c| c.name == "age")
+                .unwrap()],
             json!(99)
         );
 
@@ -4095,7 +4311,10 @@ mod sql_e2e {
         )
         .await;
         assert_eq!(
-            run_sql(&d, "SELECT * FROM players WHERE country = 'ZZ'").await.rows.len(),
+            run_sql(&d, "SELECT * FROM players WHERE country = 'ZZ'")
+                .await
+                .rows
+                .len(),
             1
         );
 

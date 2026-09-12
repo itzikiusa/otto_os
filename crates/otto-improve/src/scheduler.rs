@@ -82,7 +82,13 @@ impl Scheduler {
                                 continue;
                             }
                         }
-                        if self.engine.improvements.has_running(&ws.id).await.unwrap_or(false) {
+                        if self
+                            .engine
+                            .improvements
+                            .has_running(&ws.id)
+                            .await
+                            .unwrap_or(false)
+                        {
                             continue;
                         }
                         in_flight.lock().await.insert(ws.id.clone());
@@ -91,8 +97,9 @@ impl Scheduler {
                         let ws_id = ws.id.clone();
                         info!(workspace = %ws_id, "self-improvement: starting scheduled run");
                         tokio::spawn(async move {
-                            if let Err(e) =
-                                engine.run_for_workspace(&ws_id, ImprovementTrigger::Scheduled).await
+                            if let Err(e) = engine
+                                .run_for_workspace(&ws_id, ImprovementTrigger::Scheduled)
+                                .await
                             {
                                 warn!(workspace = %ws_id, "self-improvement run failed: {e}");
                             }

@@ -164,7 +164,10 @@ pub fn bundled_body(name: &str) -> Option<String> {
 /// (e.g. `references/review-rubric.md`). Returns `None` for unsafe paths or
 /// missing files.
 pub fn bundled_file(name: &str, rel: &str) -> Option<String> {
-    if rel.split(['/', '\\']).any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+    if rel
+        .split(['/', '\\'])
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
         return None;
     }
     let (dir, _cat) = bundled_dir(name)?;
@@ -201,7 +204,9 @@ pub fn install_state(library: &Library, name: &str) -> Option<InstallState> {
     Some(match installed_version(library, name) {
         None => InstallState::NotInstalled,
         Some(installed) if installed == bundled => InstallState::UpToDate,
-        Some(installed) if installed < bundled => InstallState::UpdateAvailable { installed, bundled },
+        Some(installed) if installed < bundled => {
+            InstallState::UpdateAvailable { installed, bundled }
+        }
         Some(installed) => InstallState::Ahead { installed, bundled },
     })
 }
@@ -266,7 +271,9 @@ fn is_safe_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Recursively copy an embedded skill `Dir` into `dest`, creating parents.
@@ -274,7 +281,9 @@ fn is_safe_skill_name(name: &str) -> bool {
 fn seed_dir(src: &Dir<'_>, dest: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for file in src.files() {
-        let Some(name) = file.path().file_name() else { continue };
+        let Some(name) = file.path().file_name() else {
+            continue;
+        };
         let out = dest.join(name);
         std::fs::write(&out, file.contents())?;
         #[cfg(unix)]
@@ -284,7 +293,9 @@ fn seed_dir(src: &Dir<'_>, dest: &Path) -> io::Result<()> {
         }
     }
     for sub in src.dirs() {
-        let Some(name) = sub.path().file_name() else { continue };
+        let Some(name) = sub.path().file_name() else {
+            continue;
+        };
         seed_dir(sub, &dest.join(name))?;
     }
     Ok(())
@@ -297,9 +308,15 @@ mod tests {
     #[test]
     fn frontmatter_parses_scalars() {
         let body = "---\ndescription: Hunt bugs\ncategory: review\nversion: 3\n---\n# body";
-        assert_eq!(frontmatter_value(body, "category").as_deref(), Some("review"));
+        assert_eq!(
+            frontmatter_value(body, "category").as_deref(),
+            Some("review")
+        );
         assert_eq!(frontmatter_value(body, "version").as_deref(), Some("3"));
-        assert_eq!(frontmatter_value(body, "description").as_deref(), Some("Hunt bugs"));
+        assert_eq!(
+            frontmatter_value(body, "description").as_deref(),
+            Some("Hunt bugs")
+        );
         assert_eq!(frontmatter_value(body, "missing"), None);
         assert_eq!(frontmatter_value("no frontmatter", "version"), None);
     }
@@ -339,7 +356,10 @@ mod tests {
             "evals/fixtures/static-link-violations/broken.md",
             "evals/fixtures/static-link-violations/targets/index.md",
         ] {
-            assert!(files.iter().any(|path| path == expected), "missing {expected}");
+            assert!(
+                files.iter().any(|path| path == expected),
+                "missing {expected}"
+            );
         }
 
         let evals = bundled_file("okf-authoring", "evals/evals.json").expect("evals");
@@ -351,7 +371,9 @@ mod tests {
     fn bundled_review_skills_are_well_formed() {
         let all = list_bundled();
         // The review category exists and includes grill.
-        assert!(all.iter().any(|s| s.name == "grill" && s.category == "review"));
+        assert!(all
+            .iter()
+            .any(|s| s.name == "grill" && s.category == "review"));
         // Every bundled skill has a non-empty description and a version >= 1.
         for s in &all {
             assert!(!s.description.is_empty(), "{} missing description", s.name);
@@ -395,8 +417,14 @@ mod tests {
         // d2-diagram must trigger on generic "work on a diagram" asks and defer
         // Canvas-scene work to otto-canvas (the two skills split that boundary).
         let d2 = all.iter().find(|s| s.name == "d2-diagram").unwrap();
-        assert!(d2.description.contains("diagram"), "d2-diagram trigger wording");
-        assert!(d2.description.contains("otto-canvas"), "d2-diagram canvas deferral");
+        assert!(
+            d2.description.contains("diagram"),
+            "d2-diagram trigger wording"
+        );
+        assert!(
+            d2.description.contains("otto-canvas"),
+            "d2-diagram canvas deferral"
+        );
     }
 
     #[test]
@@ -416,12 +444,27 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} not bundled"));
             assert_eq!(skill.category, "development", "{name} wrong category");
             let files = bundled_files(name);
-            assert!(files.iter().any(|path| path == "SKILL.md"), "{name} missing SKILL.md");
-            assert!(files.iter().any(|path| path.starts_with("references/")), "{name} missing checklist");
-            assert!(files.iter().any(|path| path.starts_with("examples/")), "{name} missing example");
-            assert!(files.iter().any(|path| path == "evals/evals.json"), "{name} missing evals");
+            assert!(
+                files.iter().any(|path| path == "SKILL.md"),
+                "{name} missing SKILL.md"
+            );
+            assert!(
+                files.iter().any(|path| path.starts_with("references/")),
+                "{name} missing checklist"
+            );
+            assert!(
+                files.iter().any(|path| path.starts_with("examples/")),
+                "{name} missing example"
+            );
+            assert!(
+                files.iter().any(|path| path == "evals/evals.json"),
+                "{name} missing evals"
+            );
             let body = bundled_body(name).expect("reviewer body");
-            assert!(body.contains("JSON"), "{name} missing JSON finding contract");
+            assert!(
+                body.contains("JSON"),
+                "{name} missing JSON finding contract"
+            );
             assert!(body.contains("[]"), "{name} missing clean verdict contract");
         }
     }
@@ -453,7 +496,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lib = Library::new(dir.path());
 
-        assert_eq!(install_state(&lib, "grill"), Some(InstallState::NotInstalled));
+        assert_eq!(
+            install_state(&lib, "grill"),
+            Some(InstallState::NotInstalled)
+        );
         assert!(install_into(&lib, "grill").unwrap());
 
         // SKILL.md + references + scripts copied; script is executable.
@@ -511,7 +557,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_ne!(std::fs::metadata(script).unwrap().permissions().mode() & 0o111, 0);
+            assert_ne!(
+                std::fs::metadata(script).unwrap().permissions().mode() & 0o111,
+                0
+            );
         }
     }
 }

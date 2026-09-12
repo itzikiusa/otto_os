@@ -220,20 +220,38 @@ mod tests {
         // A low-priority (0) allow must NOT override a deny — most-restrictive-wins.
         let rules = vec![
             rule("allow_all", 0, "allow", json!({})),
-            rule("deny_danger", 100, "deny", json!({"risk_label": "dangerous"})),
+            rule(
+                "deny_danger",
+                100,
+                "deny",
+                json!({"risk_label": "dangerous"}),
+            ),
         ];
         assert!(matches!(evaluate(&rules, &ctx()), Effect::Deny(_)));
     }
 
     #[test]
     fn require_approval_for_glob() {
-        let rules = vec![rule("approve_deletes", 50, "require_approval", json!({"tool_glob": "delete_*"}))];
-        assert!(matches!(evaluate(&rules, &ctx()), Effect::RequireApproval(_)));
+        let rules = vec![rule(
+            "approve_deletes",
+            50,
+            "require_approval",
+            json!({"tool_glob": "delete_*"}),
+        )];
+        assert!(matches!(
+            evaluate(&rules, &ctx()),
+            Effect::RequireApproval(_)
+        ));
     }
 
     #[test]
     fn min_injection_matches_at_or_above() {
-        let rules = vec![rule("dry_high_injection", 10, "require_dry_run", json!({"min_injection_risk": "high"}))];
+        let rules = vec![rule(
+            "dry_high_injection",
+            10,
+            "require_dry_run",
+            json!({"min_injection_risk": "high"}),
+        )];
         assert!(matches!(evaluate(&rules, &ctx()), Effect::RequireDryRun(_)));
         // A medium-injection context shouldn't match a high threshold.
         let mut c = ctx();
@@ -249,7 +267,10 @@ mod tests {
             rule("b", 2, "require_approval", json!({})),
             rule("c", 3, "allow", json!({})),
         ];
-        assert!(matches!(evaluate(&rules, &ctx()), Effect::RequireApproval(_)));
+        assert!(matches!(
+            evaluate(&rules, &ctx()),
+            Effect::RequireApproval(_)
+        ));
     }
 
     #[test]

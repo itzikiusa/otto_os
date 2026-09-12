@@ -130,7 +130,10 @@ impl ChannelManager {
     }
 
     /// Wire the swarm-launch hook (otto-server provides the implementation).
-    pub fn with_swarm_trigger(mut self, trigger: Arc<dyn crate::swarm_trigger::SwarmTrigger>) -> Self {
+    pub fn with_swarm_trigger(
+        mut self,
+        trigger: Arc<dyn crate::swarm_trigger::SwarmTrigger>,
+    ) -> Self {
         self.swarm_trigger = Some(trigger);
         self
     }

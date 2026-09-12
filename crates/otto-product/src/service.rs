@@ -7,8 +7,14 @@ use otto_core::auth::authorize_owner;
 use otto_core::domain::{IssueAccount, User};
 use otto_core::secrets::SecretStore;
 use otto_core::{Error, Id, Result};
-use otto_issues::{markdown_to_storage, storage_to_markdown, CommentRef, ConfluenceClient, JiraClient, PageComment, IssueComment};
-use otto_state::{IssuesRepo, NewEvent, NewStory, NewVersion, ProductQuestion, ProductRepo, QuestionPatch, StoryPatch};
+use otto_issues::{
+    markdown_to_storage, storage_to_markdown, CommentRef, ConfluenceClient, IssueComment,
+    JiraClient, PageComment,
+};
+use otto_state::{
+    IssuesRepo, NewEvent, NewStory, NewVersion, ProductQuestion, ProductRepo, QuestionPatch,
+    StoryPatch,
+};
 use tracing;
 
 use crate::types::{ImportStoryReq, InjectBundle, InjectSection, ProductStoryDetail, StoryCounts};
@@ -117,14 +123,9 @@ impl ProductService {
 
     /// Load the API token for `account` from the secret store.
     fn account_token(&self, account: &IssueAccount) -> Result<String> {
-        self.secrets
-            .get(&account.token_ref)?
-            .ok_or_else(|| {
-                Error::Invalid(format!(
-                    "missing token for issue account {}",
-                    account.id
-                ))
-            })
+        self.secrets.get(&account.token_ref)?.ok_or_else(|| {
+            Error::Invalid(format!("missing token for issue account {}", account.id))
+        })
     }
 
     /// Load the source document from the issue tracker and convert to Markdown.
@@ -185,9 +186,7 @@ impl ProductService {
                     issue_type: Some("page".into()),
                 })
             }
-            other => Err(Error::Invalid(format!(
-                "unsupported source_kind: {other}"
-            ))),
+            other => Err(Error::Invalid(format!("unsupported source_kind: {other}"))),
         }
     }
 
@@ -287,10 +286,7 @@ impl ProductService {
                 story_id: story.id.clone(),
                 section: "source".into(),
                 kind: "imported".into(),
-                summary: format!(
-                    "Imported {} {}",
-                    req.source_kind, req.source_key
-                ),
+                summary: format!("Imported {} {}", req.source_kind, req.source_key),
                 actor_id: Some(user_id.clone()),
                 meta_json: None,
             })
@@ -312,7 +308,9 @@ impl ProductService {
         user_id: &Id,
     ) -> Result<ProductStoryDetail> {
         let account = self.issues.get_account(&req.account_id).await?;
-        let src = self.fetch_source(&account, &req.source_kind, &req.source_key).await?;
+        let src = self
+            .fetch_source(&account, &req.source_kind, &req.source_key)
+            .await?;
         self.record_import(workspace_id, req, user_id, src).await
     }
 
@@ -320,11 +318,7 @@ impl ProductService {
     ///
     /// Re-fetches the source document. If the body changed (or there is no prior
     /// source version), adds a new `'source'` version and a `'refreshed'` event.
-    pub async fn refresh_story(
-        &self,
-        story_id: &Id,
-        user_id: &Id,
-    ) -> Result<ProductStoryDetail> {
+    pub async fn refresh_story(&self, story_id: &Id, user_id: &Id) -> Result<ProductStoryDetail> {
         let story = self.repo.get_story(story_id).await?;
         let account = self.issues.get_account(&story.account_id).await?;
         let src = self
@@ -355,10 +349,7 @@ impl ProductService {
                     story_id: story_id.clone(),
                     section: "source".into(),
                     kind: "refreshed".into(),
-                    summary: format!(
-                        "Refreshed {} {}",
-                        story.source_kind, story.source_key
-                    ),
+                    summary: format!("Refreshed {} {}", story.source_kind, story.source_key),
                     actor_id: Some(user_id.clone()),
                     meta_json: None,
                 })
@@ -562,11 +553,7 @@ impl ProductService {
     ///
     /// On success, records a `published` version and a `publish` event, and
     /// returns `(url, ref)` where `ref` is the story's `source_key`.
-    pub async fn publish_version(
-        &self,
-        version_id: &Id,
-        by: &Id,
-    ) -> Result<(String, String)> {
+    pub async fn publish_version(&self, version_id: &Id, by: &Id) -> Result<(String, String)> {
         // 1. Load version and its story.
         let version = self.repo.get_version(version_id).await?;
         let story = self.repo.get_story(&version.story_id).await?;
@@ -766,9 +753,7 @@ impl ProductService {
             .filter(|c| c.status == "approved")
             .collect();
         if approved.is_empty() {
-            return Err(Error::Invalid(
-                "no approved test cases to publish".into(),
-            ));
+            return Err(Error::Invalid("no approved test cases to publish".into()));
         }
 
         // 3. Render content.
@@ -780,8 +765,7 @@ impl ProductService {
         let resolved_space: String = if let Some(sk) = space_key {
             sk.to_string()
         } else if story.source_kind == "confluence" {
-            let conf_client =
-                ConfluenceClient::new(&account.base_url, &account.email, &token);
+            let conf_client = ConfluenceClient::new(&account.base_url, &account.email, &token);
             let src_page = conf_client.get_page(&story.source_key).await?;
             src_page.space_key
         } else {
@@ -796,12 +780,7 @@ impl ProductService {
             // Update existing page.
             let existing_page = conf_client.get_page(existing_pid).await?;
             conf_client
-                .update_page(
-                    existing_pid,
-                    &page_title,
-                    &storage,
-                    existing_page.version,
-                )
+                .update_page(existing_pid, &page_title, &storage, existing_page.version)
                 .await?
         } else {
             // Create a new page.
@@ -818,9 +797,11 @@ impl ProductService {
         // 7. If the story is a Jira issue, add a best-effort comment.
         if story.source_kind == "jira" {
             let jira_client = JiraClient::new(&account.base_url, &account.email, &token);
-            let comment_body =
-                format!("Otto test cases published: {}", page.url);
-            if let Err(e) = jira_client.add_comment(&story.source_key, &comment_body).await {
+            let comment_body = format!("Otto test cases published: {}", page.url);
+            if let Err(e) = jira_client
+                .add_comment(&story.source_key, &comment_body)
+                .await
+            {
                 tracing::warn!(
                     "publish_testcases: failed to add Jira comment on {}: {e}",
                     story.source_key
@@ -846,10 +827,7 @@ impl ProductService {
                 story_id: story.id.clone(),
                 section: "publish".into(),
                 kind: "tests_published".into(),
-                summary: format!(
-                    "Test cases published to Confluence: {}",
-                    page.url
-                ),
+                summary: format!("Test cases published to Confluence: {}", page.url),
                 actor_id: Some(by.clone()),
                 meta_json: None,
             })
@@ -918,11 +896,7 @@ impl ProductService {
             let mut body = String::new();
             for q in &answered {
                 let answer = q.answer.as_deref().unwrap_or("").trim();
-                body.push_str(&format!(
-                    "**Q:** {}\n**A:** {}\n\n",
-                    q.text.trim(),
-                    answer
-                ));
+                body.push_str(&format!("**Q:** {}\n**A:** {}\n\n", q.text.trim(), answer));
             }
             let body = body.trim_end().to_string();
             sections.push(InjectSection {
@@ -1022,11 +996,7 @@ impl ProductService {
     ///   (last 20), and attachment list. On any Jira fetch error: log + skip section.
     /// - `## Learnings` — active workspace learnings grouped by kind.
     /// - `## FOCUS` (near the top, before Story) when `focus` is non-empty.
-    pub async fn build_agent_context(
-        &self,
-        story_id: &Id,
-        focus: Option<&str>,
-    ) -> Result<String> {
+    pub async fn build_agent_context(&self, story_id: &Id, focus: Option<&str>) -> Result<String> {
         let story = self.repo.get_story(story_id).await?;
 
         // Best content version: newest suggested, else newest source.
@@ -1086,122 +1056,129 @@ impl ProductService {
             let jira_section: Option<String> = if let Some(s) = cached_section {
                 Some(s)
             } else {
-            // Load account + token; tolerate missing account gracefully.
-            let fetched: Option<String> = async {
-                let account = self.issues.get_account(&story.account_id).await.ok()?;
-                let token = self.account_token(&account).ok()?;
-                let client = JiraClient::new(&account.base_url, &account.email, &token);
-                match client.get_issue_full(&story.source_key).await {
-                    Err(e) => {
-                        tracing::warn!(
-                            "build_agent_context: get_issue_full({}) failed: {e}",
-                            story.source_key
-                        );
-                        None
-                    }
-                    Ok(full) => {
-                        let mut s = String::from("## Full Jira context\n\n");
+                // Load account + token; tolerate missing account gracefully.
+                let fetched: Option<String> = async {
+                    let account = self.issues.get_account(&story.account_id).await.ok()?;
+                    let token = self.account_token(&account).ok()?;
+                    let client = JiraClient::new(&account.base_url, &account.email, &token);
+                    match client.get_issue_full(&story.source_key).await {
+                        Err(e) => {
+                            tracing::warn!(
+                                "build_agent_context: get_issue_full({}) failed: {e}",
+                                story.source_key
+                            );
+                            None
+                        }
+                        Ok(full) => {
+                            let mut s = String::from("## Full Jira context\n\n");
 
-                        // Basic metadata
-                        s.push_str(&format!("**Status:** {}  \n", full.status));
-                        if let Some(ref a) = full.assignee {
-                            s.push_str(&format!("**Assignee:** {}  \n", a.display_name));
-                        }
-                        if let Some(ref r) = full.reporter {
-                            s.push_str(&format!("**Reporter:** {}  \n", r.display_name));
-                        }
-                        if let Some(ref p) = full.priority {
-                            s.push_str(&format!("**Priority:** {}  \n", p));
-                        }
-                        if !full.labels.is_empty() {
-                            s.push_str(&format!("**Labels:** {}  \n", full.labels.join(", ")));
-                        }
-                        s.push('\n');
-
-                        // Custom / non-empty fields table
-                        let nonempty_fields: Vec<&otto_issues::JiraField> =
-                            full.fields.iter().filter(|f| !f.value.trim().is_empty()).collect();
-                        if !nonempty_fields.is_empty() {
-                            s.push_str("### Fields\n\n");
-                            s.push_str("| Field | Value |\n|---|---|\n");
-                            for f in nonempty_fields.iter().take(50) {
-                                // Escape pipes so the table doesn't break
-                                let val = f.value.replace('|', "\\|").replace('\n', " ");
-                                s.push_str(&format!("| {} | {} |\n", f.name, val));
+                            // Basic metadata
+                            s.push_str(&format!("**Status:** {}  \n", full.status));
+                            if let Some(ref a) = full.assignee {
+                                s.push_str(&format!("**Assignee:** {}  \n", a.display_name));
+                            }
+                            if let Some(ref r) = full.reporter {
+                                s.push_str(&format!("**Reporter:** {}  \n", r.display_name));
+                            }
+                            if let Some(ref p) = full.priority {
+                                s.push_str(&format!("**Priority:** {}  \n", p));
+                            }
+                            if !full.labels.is_empty() {
+                                s.push_str(&format!("**Labels:** {}  \n", full.labels.join(", ")));
                             }
                             s.push('\n');
-                        }
 
-                        // Linked issues
-                        if !full.links.is_empty() {
-                            s.push_str("### Linked issues\n\n");
-                            for l in &full.links {
-                                s.push_str(&format!(
-                                    "- **{}** {} — {} *({})*\n",
-                                    l.rel, l.key, l.summary, l.status
-                                ));
+                            // Custom / non-empty fields table
+                            let nonempty_fields: Vec<&otto_issues::JiraField> = full
+                                .fields
+                                .iter()
+                                .filter(|f| !f.value.trim().is_empty())
+                                .collect();
+                            if !nonempty_fields.is_empty() {
+                                s.push_str("### Fields\n\n");
+                                s.push_str("| Field | Value |\n|---|---|\n");
+                                for f in nonempty_fields.iter().take(50) {
+                                    // Escape pipes so the table doesn't break
+                                    let val = f.value.replace('|', "\\|").replace('\n', " ");
+                                    s.push_str(&format!("| {} | {} |\n", f.name, val));
+                                }
+                                s.push('\n');
                             }
-                            s.push('\n');
-                        }
 
-                        // Comments (most recent 20)
-                        if !full.comments.is_empty() {
-                            s.push_str("### Comments\n\n");
-                            let start = full.comments.len().saturating_sub(20);
-                            for c in &full.comments[start..] {
-                                s.push_str(&format!(
-                                    "**{}** ({}):\n{}\n\n",
-                                    c.author, c.created, c.body_md
-                                ));
-                            }
-                        }
-
-                        // Change history (last 20 entries)
-                        if !full.history.is_empty() {
-                            s.push_str("### Change history\n\n");
-                            let start = full.history.len().saturating_sub(20);
-                            for entry in &full.history[start..] {
-                                for item in &entry.items {
+                            // Linked issues
+                            if !full.links.is_empty() {
+                                s.push_str("### Linked issues\n\n");
+                                for l in &full.links {
                                     s.push_str(&format!(
-                                        "- {} changed **{}**: `{}` → `{}` ({})\n",
-                                        entry.author, item.field, item.from, item.to, entry.created
+                                        "- **{}** {} — {} *({})*\n",
+                                        l.rel, l.key, l.summary, l.status
+                                    ));
+                                }
+                                s.push('\n');
+                            }
+
+                            // Comments (most recent 20)
+                            if !full.comments.is_empty() {
+                                s.push_str("### Comments\n\n");
+                                let start = full.comments.len().saturating_sub(20);
+                                for c in &full.comments[start..] {
+                                    s.push_str(&format!(
+                                        "**{}** ({}):\n{}\n\n",
+                                        c.author, c.created, c.body_md
                                     ));
                                 }
                             }
-                            s.push('\n');
-                        }
 
-                        // Attachments (list only — no binary content)
-                        if !full.attachments.is_empty() {
-                            s.push_str("### Attachments\n\n");
-                            for att in &full.attachments {
-                                s.push_str(&format!(
-                                    "- {} · {} · {} bytes\n",
-                                    att.filename, att.mime, att.size
-                                ));
+                            // Change history (last 20 entries)
+                            if !full.history.is_empty() {
+                                s.push_str("### Change history\n\n");
+                                let start = full.history.len().saturating_sub(20);
+                                for entry in &full.history[start..] {
+                                    for item in &entry.items {
+                                        s.push_str(&format!(
+                                            "- {} changed **{}**: `{}` → `{}` ({})\n",
+                                            entry.author,
+                                            item.field,
+                                            item.from,
+                                            item.to,
+                                            entry.created
+                                        ));
+                                    }
+                                }
+                                s.push('\n');
                             }
-                            s.push('\n');
-                        }
 
-                        Some(s)
-                    }
-                }
-            }
-            .await;
-            // Store in cache, evicting oldest when at cap.
-            if let Some(ref s) = fetched {
-                if let Ok(mut map) = self.context_cache.lock() {
-                    const CACHE_CAP: usize = 64;
-                    if map.len() >= CACHE_CAP {
-                        // Simple FIFO: remove one arbitrary entry.
-                        if let Some(k) = map.keys().next().cloned() {
-                            map.remove(&k);
+                            // Attachments (list only — no binary content)
+                            if !full.attachments.is_empty() {
+                                s.push_str("### Attachments\n\n");
+                                for att in &full.attachments {
+                                    s.push_str(&format!(
+                                        "- {} · {} · {} bytes\n",
+                                        att.filename, att.mime, att.size
+                                    ));
+                                }
+                                s.push('\n');
+                            }
+
+                            Some(s)
                         }
                     }
-                    map.insert(cache_key, s.clone());
                 }
-            }
-            fetched
+                .await;
+                // Store in cache, evicting oldest when at cap.
+                if let Some(ref s) = fetched {
+                    if let Ok(mut map) = self.context_cache.lock() {
+                        const CACHE_CAP: usize = 64;
+                        if map.len() >= CACHE_CAP {
+                            // Simple FIFO: remove one arbitrary entry.
+                            if let Some(k) = map.keys().next().cloned() {
+                                map.remove(&k);
+                            }
+                        }
+                        map.insert(cache_key, s.clone());
+                    }
+                }
+                fetched
             }; // end cache-miss branch
 
             if let Some(section) = jira_section {
@@ -1214,12 +1191,21 @@ impl ProductService {
         if !learnings.is_empty() {
             doc.push_str("## Learnings\n\n");
             for l in &learnings {
-                doc.push_str(&format!("### [{}] {}\n\n{}\n\n", l.kind, l.title, l.body.trim()));
+                doc.push_str(&format!(
+                    "### [{}] {}\n\n{}\n\n",
+                    l.kind,
+                    l.title,
+                    l.body.trim()
+                ));
             }
         }
 
         // --- Transcripts ---
-        let transcripts = self.repo.list_transcripts(story_id).await.unwrap_or_default();
+        let transcripts = self
+            .repo
+            .list_transcripts(story_id)
+            .await
+            .unwrap_or_default();
         if !transcripts.is_empty() {
             doc.push_str("## Transcripts\n\n");
             for t in &transcripts {
@@ -1269,7 +1255,8 @@ impl ProductService {
         by: &Id,
         title: Option<&str>,
     ) -> Result<ProductStoryDetail> {
-        self.create_draft_in_tree(ws, by, title, "story", None, "").await
+        self.create_draft_in_tree(ws, by, title, "story", None, "")
+            .await
     }
 
     /// Create a draft story at a given place in the epic tree. `tree_kind` is
@@ -1694,8 +1681,7 @@ impl ProductService {
 
             // If original is Confluence, add a best-effort comment with the Jira link.
             if story.source_kind == "confluence" {
-                let conf_client =
-                    ConfluenceClient::new(&account.base_url, &account.email, &token);
+                let conf_client = ConfluenceClient::new(&account.base_url, &account.email, &token);
                 let comment_md = format!("Linked Jira story: {issue_url}");
                 if let Err(e) = conf_client
                     .add_comment(&story.source_key, &markdown_to_storage(&comment_md))
@@ -1719,10 +1705,7 @@ impl ProductService {
 /// filter dropped them forever).
 pub(crate) fn parse_watch_cursor(cursor: &str) -> (&str, std::collections::HashSet<&str>) {
     match cursor.split_once('|') {
-        Some((ts, ids)) => (
-            ts,
-            ids.split(',').filter(|s| !s.is_empty()).collect(),
-        ),
+        Some((ts, ids)) => (ts, ids.split(',').filter(|s| !s.is_empty()).collect()),
         None => (cursor, std::collections::HashSet::new()),
     }
 }
@@ -1742,7 +1725,6 @@ pub fn build_watch_cursor(comments: &[CommentInfo]) -> Option<String> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
 
 /// Accept only Otto's three tree roles. Anything else is a 400 — never silently
 /// coerced, so a typo in `--kind` surfaces instead of filing a mislabeled row.
@@ -1990,7 +1972,9 @@ mod tests {
         // (message deliberately omits the body — it flows from account/token
         // fixtures and must not end up in test logs)
         assert!(
-            source_ver.body_md.contains("As a user I want to reset my password."),
+            source_ver
+                .body_md
+                .contains("As a user I want to reset my password."),
             "body_md did not contain expected text"
         );
 
@@ -2236,8 +2220,14 @@ mod tests {
             "missing header; got: {body:?}"
         );
         // Both questions appear, numbered
-        assert!(body.contains("1. What is the acceptance criteria?"), "q1 missing; got: {body:?}");
-        assert!(body.contains("2. Who is the target user?"), "q2 missing; got: {body:?}");
+        assert!(
+            body.contains("1. What is the acceptance criteria?"),
+            "q1 missing; got: {body:?}"
+        );
+        assert!(
+            body.contains("2. Who is the target user?"),
+            "q2 missing; got: {body:?}"
+        );
         // Correct ordering (1 before 2)
         let pos1 = body.find("1.").unwrap();
         let pos2 = body.find("2.").unwrap();
@@ -2263,8 +2253,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/rest/api/3/issue/PROJ-10"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(canned_jira_issue_json("PROJ-10")),
+                ResponseTemplate::new(200).set_body_json(canned_jira_issue_json("PROJ-10")),
             )
             .mount(&server)
             .await;
@@ -2356,8 +2345,15 @@ mod tests {
         );
 
         // A single 'question_posted' event should exist in the "questions" section.
-        let events = repo.list_events(&story_id, Some("questions")).await.unwrap();
-        assert_eq!(events.len(), 1, "expected exactly one question_posted event");
+        let events = repo
+            .list_events(&story_id, Some("questions"))
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "expected exactly one question_posted event"
+        );
         assert_eq!(events[0].kind, "question_posted");
         assert!(
             events[0].summary.contains("PROJ-10"),
@@ -2374,7 +2370,11 @@ mod tests {
             .iter()
             .filter(|r| r.method == wiremock::http::Method::POST)
             .collect();
-        assert_eq!(comment_posts.len(), 1, "should have called add_comment exactly once");
+        assert_eq!(
+            comment_posts.len(),
+            1,
+            "should have called add_comment exactly once"
+        );
 
         // The request body should contain BOTH question texts.
         let body_bytes = &comment_posts[0].body;
@@ -2458,23 +2458,47 @@ mod tests {
         );
 
         // Test case titles
-        assert!(md.contains("### Happy path login"), "tc title missing; got:\n{md}");
-        assert!(md.contains("### Wrong password"), "tc title missing; got:\n{md}");
+        assert!(
+            md.contains("### Happy path login"),
+            "tc title missing; got:\n{md}"
+        );
+        assert!(
+            md.contains("### Wrong password"),
+            "tc title missing; got:\n{md}"
+        );
 
         // Priority
-        assert!(md.contains("**Priority:** high"), "priority missing; got:\n{md}");
+        assert!(
+            md.contains("**Priority:** high"),
+            "priority missing; got:\n{md}"
+        );
 
         // Preconditions
-        assert!(md.contains("- User is registered"), "precondition missing; got:\n{md}");
+        assert!(
+            md.contains("- User is registered"),
+            "precondition missing; got:\n{md}"
+        );
 
         // Steps (numbered)
-        assert!(md.contains("1. Open login page"), "step 1 missing; got:\n{md}");
-        assert!(md.contains("2. Enter credentials"), "step 2 missing; got:\n{md}");
+        assert!(
+            md.contains("1. Open login page"),
+            "step 1 missing; got:\n{md}"
+        );
+        assert!(
+            md.contains("2. Enter credentials"),
+            "step 2 missing; got:\n{md}"
+        );
         assert!(md.contains("3. Click submit"), "step 3 missing; got:\n{md}");
 
         // Expected
-        assert!(md.contains("**Expected:** User is logged in"), "expected missing; got:\n{md}");
-        assert!(md.contains("**Expected:** Error message shown"), "expected missing; got:\n{md}");
+        assert!(
+            md.contains("**Expected:** User is logged in"),
+            "expected missing; got:\n{md}"
+        );
+        assert!(
+            md.contains("**Expected:** Error message shown"),
+            "expected missing; got:\n{md}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2500,9 +2524,15 @@ mod tests {
             "title missing even with bad json; got:\n{md}"
         );
         // Category heading should appear.
-        assert!(md.contains("## Edge"), "category heading missing; got:\n{md}");
+        assert!(
+            md.contains("## Edge"),
+            "category heading missing; got:\n{md}"
+        );
         // Priority should appear.
-        assert!(md.contains("**Priority:** low"), "priority missing; got:\n{md}");
+        assert!(
+            md.contains("**Priority:** low"),
+            "priority missing; got:\n{md}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2563,9 +2593,14 @@ mod tests {
             })
             .await
             .unwrap();
-        repo.set_analysis_status(&analysis.id, "done", Some("Key insight: needs testing."), true)
-            .await
-            .unwrap();
+        repo.set_analysis_status(
+            &analysis.id,
+            "done",
+            Some("Key insight: needs testing."),
+            true,
+        )
+        .await
+        .unwrap();
 
         // Add an answered question.
         let q_answered = repo
@@ -2628,7 +2663,8 @@ mod tests {
                 title: "Approved test case title".into(),
                 category: "happy".into(),
                 priority: "high".into(),
-                steps_json: r#"{"preconditions":[],"steps":["Do the thing"],"expected":"It works"}"#.into(),
+                steps_json:
+                    r#"{"preconditions":[],"steps":["Do the thing"],"expected":"It works"}"#.into(),
                 order_idx: 0,
             })
             .await
@@ -2668,7 +2704,10 @@ mod tests {
         let md = &bundle.markdown;
 
         // Story title appears.
-        assert!(md.contains("Bundle Test Story"), "story title missing;\n{md}");
+        assert!(
+            md.contains("Bundle Test Story"),
+            "story title missing;\n{md}"
+        );
 
         // The answered question's answer appears.
         assert!(
@@ -2752,7 +2791,12 @@ mod tests {
         assert_eq!(detail.counts.versions, 1);
 
         let detail2 = svc
-            .update_draft_body(&story_id, "Updated Title", "# New body\n\nSome content.", &user_id)
+            .update_draft_body(
+                &story_id,
+                "Updated Title",
+                "# New body\n\nSome content.",
+                &user_id,
+            )
             .await
             .unwrap();
 
@@ -2860,10 +2904,7 @@ mod tests {
         assert_eq!(result.story.stage, "refined");
         assert!(result.story.issue_type.as_deref() == Some("Story"));
 
-        let events = repo
-            .list_events(&story_id, Some("publish"))
-            .await
-            .unwrap();
+        let events = repo.list_events(&story_id, Some("publish")).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "published_story");
     }

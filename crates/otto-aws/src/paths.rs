@@ -71,7 +71,10 @@ mod tests {
         let id = otto_core::new_id();
         let p = owned_file(dir, &id, "yaml").unwrap();
         assert_eq!(p.parent(), Some(dir));
-        assert_eq!(p.file_name().unwrap().to_str().unwrap(), format!("{id}.yaml"));
+        assert_eq!(
+            p.file_name().unwrap().to_str().unwrap(),
+            format!("{id}.yaml")
+        );
         assert!(owned_file(dir, &id, "").unwrap().ends_with(&id));
         for bad in ["../etc", "x/y", "01ARZ3NDEKTSV4RRFFQ69G5FA.", "", "abc"] {
             assert!(owned_file(dir, bad, "yaml").is_err(), "{bad}");

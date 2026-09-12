@@ -4,9 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
-use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 
 use otto_core::{Error, Result};
@@ -184,10 +182,7 @@ pub async fn test_pool() -> SqlitePool {
         .connect_with(opts)
         .await
         .expect("open in-memory sqlite");
-    sqlx::migrate!()
-        .run(&pool)
-        .await
-        .expect("run migrations");
+    sqlx::migrate!().run(&pool).await.expect("run migrations");
     pool
 }
 
@@ -268,7 +263,9 @@ mod tests {
             (117, "transcript index"),
         ])
         .await;
-        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        repair_renumbered_migrations(&pool, RENUMBERED)
+            .await
+            .unwrap();
         assert_eq!(versions(&pool).await, vec![114, 121, 122, 123]);
         // sqlx will now apply 115 (workflow runs) .. 120 as genuinely pending.
 
@@ -280,12 +277,16 @@ mod tests {
             (117, "database changes"),
         ])
         .await;
-        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        repair_renumbered_migrations(&pool, RENUMBERED)
+            .await
+            .unwrap();
         assert_eq!(versions(&pool).await, vec![115, 119, 120]);
 
         // Population D ran the product-design-arena build (0115 = epic tree).
         let pool = migrations_pool(&[(114, "x"), (115, "product epic tree")]).await;
-        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        repair_renumbered_migrations(&pool, RENUMBERED)
+            .await
+            .unwrap();
         assert_eq!(versions(&pool).await, vec![114, 124]);
 
         // Population C is a correct main install: nothing moves.
@@ -296,10 +297,14 @@ mod tests {
             (119, "resource access"),
         ])
         .await;
-        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        repair_renumbered_migrations(&pool, RENUMBERED)
+            .await
+            .unwrap();
         assert_eq!(versions(&pool).await, vec![115, 116, 117, 119]);
         // Idempotent.
-        repair_renumbered_migrations(&pool, RENUMBERED).await.unwrap();
+        repair_renumbered_migrations(&pool, RENUMBERED)
+            .await
+            .unwrap();
         assert_eq!(versions(&pool).await, vec![115, 116, 117, 119]);
     }
 

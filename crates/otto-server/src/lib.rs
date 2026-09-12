@@ -3,11 +3,9 @@
 //! otto-connections / otto-git are mounted via `build_router`'s extras at
 //! integration time.
 
-pub mod database_changes;
-pub mod resource_sessions;
 pub mod agent_run;
-pub mod agent_tasks_nudge;
 pub mod agent_session;
+pub mod agent_tasks_nudge;
 pub mod api_helpers;
 pub mod api_scripts;
 pub mod api_secrets;
@@ -15,16 +13,15 @@ pub mod auth;
 pub mod browser_login_throttle;
 pub mod cadence;
 pub mod canvas_assist;
+pub mod canvas_refs;
+pub mod cli_update;
+pub mod context_packet;
+pub mod database_changes;
+pub mod db_assist;
+pub mod db_drafter;
 pub mod design_blender;
 pub mod design_format;
 pub mod design_scene3d;
-pub mod canvas_refs;
-pub mod db_assist;
-pub mod mockup_assist;
-pub mod context_packet;
-pub mod db_drafter;
-pub mod memory_gov;
-pub mod cli_update;
 pub mod error;
 pub mod eval_lab_routes;
 pub mod eval_score;
@@ -37,27 +34,30 @@ pub mod goal_loop_workspace;
 pub mod history_index;
 pub mod improve_channels;
 pub mod insights;
+pub mod k8s_monitor_scheduler;
 pub mod login_throttle;
 pub mod lsp;
 pub mod mcp_capabilities;
 pub mod mcp_http;
 pub mod mcp_outward;
+pub mod memory_gov;
+pub mod mockup_assist;
 pub mod model_catalog;
 pub mod modules;
 pub mod monitor;
-pub mod plugins;
 pub mod personal_agents_engine;
-pub mod k8s_monitor_scheduler;
 pub mod personal_agents_scheduler;
+pub mod plugins;
 pub mod policy;
-pub mod proof;
 pub mod product_chat;
 pub mod product_media;
 pub mod product_refine;
 pub mod product_run;
 pub mod product_swarm;
 pub mod product_watcher;
+pub mod proof;
 pub mod report_delivery;
+pub mod resource_sessions;
 pub mod review_fallback;
 pub mod review_session;
 pub mod routes;
@@ -106,8 +106,8 @@ pub use monitor::{
     spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
     spawn_usage_recorder, AuthScanner, CredentialMonitor,
 };
-pub use workflow_trigger_scheduler::spawn_workflow_event_trigger_listener;
 pub use state::ServerCtx;
+pub use workflow_trigger_scheduler::spawn_workflow_event_trigger_listener;
 
 /// Build the full daemon router.
 ///
@@ -184,10 +184,7 @@ pub fn build_router(
 fn cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _parts| {
-            origin
-                .to_str()
-                .map(is_allowed_origin)
-                .unwrap_or(false)
+            origin.to_str().map(is_allowed_origin).unwrap_or(false)
         }))
         .allow_methods([
             Method::GET,

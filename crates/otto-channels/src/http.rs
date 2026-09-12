@@ -231,7 +231,10 @@ async fn test_integration<S: ChannelsCtx>(
             .send_formatted("test", None, "Otto is connected \u{2705}")
             .await
         {
-            Ok(_) => Ok(Json(TestMessageResp { ok: true, error: None })),
+            Ok(_) => Ok(Json(TestMessageResp {
+                ok: true,
+                error: None,
+            })),
             Err(e) => Ok(Json(TestMessageResp {
                 ok: false,
                 error: Some(e.to_string()),
@@ -242,7 +245,9 @@ async fn test_integration<S: ChannelsCtx>(
     if integ.channel_id.trim().is_empty() {
         return Ok(Json(TestMessageResp {
             ok: false,
-            error: Some("No default chat ID configured — set one in the integration settings first.".into()),
+            error: Some(
+                "No default chat ID configured — set one in the integration settings first.".into(),
+            ),
         }));
     }
 
@@ -286,7 +291,10 @@ async fn test_integration<S: ChannelsCtx>(
 
     let chat = integ.channel_id.trim();
     match adapter.send(chat, None, "Otto is connected \u{2705}").await {
-        Ok(_) => Ok(Json(TestMessageResp { ok: true, error: None })),
+        Ok(_) => Ok(Json(TestMessageResp {
+            ok: true,
+            error: None,
+        })),
         Err(e) => Ok(Json(TestMessageResp {
             ok: false,
             error: Some(e.to_string()),

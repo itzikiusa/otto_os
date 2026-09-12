@@ -71,7 +71,9 @@ impl ReviewProofPacksRepo {
                 Ok(ReviewProofPackExport {
                     id: r.get("id"),
                     review_id: r.get("review_id"),
-                    format: r.try_get("format").unwrap_or_else(|_| "markdown".to_string()),
+                    format: r
+                        .try_get("format")
+                        .unwrap_or_else(|_| "markdown".to_string()),
                     markdown: r.try_get("content").unwrap_or_default(),
                     created_at: r.try_get("created_at").unwrap_or_default(),
                 })
@@ -101,7 +103,14 @@ mod tests {
     async fn create_and_list_snapshots() {
         let repo = ReviewProofPacksRepo::new(mem_pool().await);
         let pack = repo
-            .create("rev1", "ws1", "markdown", "# Proof Pack\n...", "{\"total\":3}", "u1")
+            .create(
+                "rev1",
+                "ws1",
+                "markdown",
+                "# Proof Pack\n...",
+                "{\"total\":3}",
+                "u1",
+            )
             .await
             .unwrap();
         assert_eq!(pack.format, "markdown");

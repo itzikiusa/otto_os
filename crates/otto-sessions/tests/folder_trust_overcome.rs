@@ -93,7 +93,14 @@ fn run_provider(provider: &str) -> Result<(), String> {
         }
 
         if Instant::now() >= deadline {
-            let tail: String = screen.chars().rev().take(600).collect::<String>().chars().rev().collect();
+            let tail: String = screen
+                .chars()
+                .rev()
+                .take(600)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
             let _ = handle.kill();
             return Err(format!(
                 "timed out before sentinel (injected={injected}). last screen tail:\n{tail}"

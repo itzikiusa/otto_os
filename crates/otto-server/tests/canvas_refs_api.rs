@@ -73,7 +73,9 @@ impl otto_connections::Spawner for NoopSpawner {
 // ---------------------------------------------------------------------------
 
 async fn mem_pool() -> SqlitePool {
-    let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
+    let opts = SqliteConnectOptions::new()
+        .in_memory(true)
+        .foreign_keys(true);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)
@@ -188,7 +190,9 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         improvements: otto_state::ImprovementsRepo::new(pool.clone()),
         sessions: SessionsRepo::new(pool.clone()),
         workspaces: WorkspacesRepo::new(pool.clone()),
-        producer: Arc::new(otto_improve::RealProposalProducer::new(orchestrator.clone())),
+        producer: Arc::new(otto_improve::RealProposalProducer::new(
+            orchestrator.clone(),
+        )),
         events: events.clone(),
         library_root: PathBuf::from("/tmp/otto-test-lib-canvas-refs"),
     });
@@ -263,7 +267,7 @@ async fn test_ctx(pool: &SqlitePool) -> ServerCtx {
         skill_eval_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
         skill_review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        review_agent_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         review_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         orchestrator,
         improve_engine,
@@ -317,15 +321,30 @@ fn canvas_refs_router(ctx: ServerCtx) -> Router {
 }
 
 async fn get_as(app: &Router, caller: &User, uri: &str) -> (StatusCode, Vec<u8>) {
-    let mut req = Request::builder().method(Method::GET).uri(uri).body(Body::empty()).unwrap();
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
     req.extensions_mut().insert(AuthUser(caller.clone()));
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
-    let body = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     (status, body)
 }
 
-async fn post_json_as(app: &Router, caller: &User, uri: &str, body: serde_json::Value) -> StatusCode {
+async fn post_json_as(
+    app: &Router,
+    caller: &User,
+    uri: &str,
+    body: serde_json::Value,
+) -> StatusCode {
     let mut req = Request::builder()
         .method(Method::POST)
         .uri(uri)
@@ -337,7 +356,11 @@ async fn post_json_as(app: &Router, caller: &User, uri: &str, body: serde_json::
 }
 
 async fn delete_as(app: &Router, caller: &User, uri: &str) -> StatusCode {
-    let mut req = Request::builder().method(Method::DELETE).uri(uri).body(Body::empty()).unwrap();
+    let mut req = Request::builder()
+        .method(Method::DELETE)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
     req.extensions_mut().insert(AuthUser(caller.clone()));
     app.clone().oneshot(req).await.unwrap().status()
 }
@@ -387,7 +410,12 @@ async fn list_add_list_remove_list_roundtrip() {
     assert_eq!(refs[0]["id"], scene_id.to_string());
 
     // DELETE detaches it.
-    let del_status = delete_as(&app, &alice, &format!("/sessions/{sid}/canvas-refs/{scene_id}")).await;
+    let del_status = delete_as(
+        &app,
+        &alice,
+        &format!("/sessions/{sid}/canvas-refs/{scene_id}"),
+    )
+    .await;
     assert_eq!(del_status, StatusCode::NO_CONTENT);
 
     // GET empty again.
@@ -467,10 +495,23 @@ async fn viewer_can_list_but_not_mutate() {
         serde_json::json!({ "scene_id": scene_id }),
     )
     .await;
-    assert_eq!(post_status, StatusCode::FORBIDDEN, "viewer must not be able to attach a scene");
+    assert_eq!(
+        post_status,
+        StatusCode::FORBIDDEN,
+        "viewer must not be able to attach a scene"
+    );
 
     // Viewer cannot detach (403), even for a ref that doesn't exist yet — the
     // role check runs before the (idempotent) delete.
-    let del_status = delete_as(&app, &vince, &format!("/sessions/{sid}/canvas-refs/{scene_id}")).await;
-    assert_eq!(del_status, StatusCode::FORBIDDEN, "viewer must not be able to detach a scene");
+    let del_status = delete_as(
+        &app,
+        &vince,
+        &format!("/sessions/{sid}/canvas-refs/{scene_id}"),
+    )
+    .await;
+    assert_eq!(
+        del_status,
+        StatusCode::FORBIDDEN,
+        "viewer must not be able to detach a scene"
+    );
 }

@@ -101,7 +101,10 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
             // Trust a first-time host on first connect (adds its key to
             // known_hosts), matching what a user does by answering "yes" to the
             // authenticity prompt; a *changed* known key is still refused.
-            let mut args = vec!["-o".to_string(), "StrictHostKeyChecking=accept-new".to_string()];
+            let mut args = vec![
+                "-o".to_string(),
+                "StrictHostKeyChecking=accept-new".to_string(),
+            ];
             if let Some(identity) = opt_str(p, "identity_file") {
                 args.push("-i".into());
                 args.push(identity.into());
@@ -428,7 +431,10 @@ mod tests {
     fn ssh_minimal_and_missing_host() {
         let c = conn(ConnectionKind::Ssh, json!({"host":"h1"}));
         let (spec, _) = build_command(&c, None).unwrap();
-        assert_eq!(spec.args, vec!["-o", "StrictHostKeyChecking=accept-new", "h1"]);
+        assert_eq!(
+            spec.args,
+            vec!["-o", "StrictHostKeyChecking=accept-new", "h1"]
+        );
 
         // No host: we don't validate — fall back to a login shell so a
         // user-supplied first_command can run there.
@@ -474,9 +480,21 @@ mod tests {
         assert_eq!(spec.program, "psql");
         assert_eq!(
             spec.args,
-            vec!["-h", "127.0.0.1", "-p", "15432", "-U", "otto", "-d", "shopdb"]
+            vec![
+                "-h",
+                "127.0.0.1",
+                "-p",
+                "15432",
+                "-U",
+                "otto",
+                "-d",
+                "shopdb"
+            ]
         );
-        assert_eq!(spec.env, vec![("PGPASSWORD".to_string(), "s3cret".to_string())]);
+        assert_eq!(
+            spec.env,
+            vec![("PGPASSWORD".to_string(), "s3cret".to_string())]
+        );
         assert!(!warn);
         assert!(
             !spec.args.iter().any(|a| a.contains("s3cret")),

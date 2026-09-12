@@ -558,7 +558,14 @@ mod tests {
             "collections must not appear after WHERE"
         );
         // Index fields out-rank the plain field and the keywords/functions.
-        let score_of = |label: &str| items.iter().find(|i| i.label == label).unwrap().score.unwrap();
+        let score_of = |label: &str| {
+            items
+                .iter()
+                .find(|i| i.label == label)
+                .unwrap()
+                .score
+                .unwrap()
+        };
         assert!(score_of("_id") > score_of("note"));
         let kw = items
             .iter()

@@ -151,7 +151,7 @@ pub async fn require_session_owner_or_admin(
     user: &User,
     session: &Session,
 ) -> Result<(), ApiError> {
-    crate::resource_sessions::check(ctx,user,session).await?;
+    crate::resource_sessions::check(ctx, user, session).await?;
     check_session_owner_or_admin(ctx.roles.as_ref(), user, session).await
 }
 
@@ -258,15 +258,13 @@ mod session_owner_tests {
     }
 
     async fn set_member(pool: &SqlitePool, ws_id: &str, user_id: &str, role: &str) {
-        sqlx::query(
-            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)",
-        )
-        .bind(ws_id)
-        .bind(user_id)
-        .bind(role)
-        .execute(pool)
-        .await
-        .expect("set member");
+        sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)")
+            .bind(ws_id)
+            .bind(user_id)
+            .bind(role)
+            .execute(pool)
+            .await
+            .expect("set member");
     }
 
     // ---- tests -------------------------------------------------------------
@@ -324,7 +322,10 @@ mod session_owner_tests {
         let repo = RbacRoleChecker::new(pool.clone());
 
         let result = super::check_session_owner_or_admin(&repo, &alice, &session).await;
-        assert!(result.is_ok(), "workspace admin must be allowed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "workspace admin must be allowed: {result:?}"
+        );
     }
 
     /// Root is always allowed, with no DB round-trip needed.

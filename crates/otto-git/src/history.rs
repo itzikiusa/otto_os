@@ -373,7 +373,11 @@ mod tests {
         };
         assert_eq!(git.log_with(&grep("NEEDLE-XYZ")).await.unwrap().len(), 1);
         // Literal: the regex metacharacters match nothing instead of everything.
-        assert!(git.log_with(&grep("needle.*lands")).await.unwrap().is_empty());
+        assert!(git
+            .log_with(&grep("needle.*lands"))
+            .await
+            .unwrap()
+            .is_empty());
         // An option-like pattern stays a pattern (it rides inside `--grep=`).
         assert!(git.log_with(&grep("--all")).await.unwrap().is_empty());
 

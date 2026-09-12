@@ -117,11 +117,19 @@ async fn team_shares_one_memory_across_instances() {
 
     // Alice (on her machine) writes a shared fact + a private note.
     alice
-        .save(&ws, "ignored", vec![nm("shared", "settlement runs nightly at 02:00 UTC")])
+        .save(
+            &ws,
+            "ignored",
+            vec![nm("shared", "settlement runs nightly at 02:00 UTC")],
+        )
         .await
         .unwrap();
     alice
-        .save(&ws, "ignored", vec![nm("private", "alice private todo about settlement")])
+        .save(
+            &ws,
+            "ignored",
+            vec![nm("private", "alice private todo about settlement")],
+        )
         .await
         .unwrap();
 
@@ -139,11 +147,15 @@ async fn team_shares_one_memory_across_instances() {
         .await
         .unwrap();
     assert!(
-        bob_hits.iter().any(|h| h.memory.body.contains("nightly at 02:00")),
+        bob_hits
+            .iter()
+            .any(|h| h.memory.body.contains("nightly at 02:00")),
         "bob should see alice's SHARED memory across instances"
     );
     assert!(
-        !bob_hits.iter().any(|h| h.memory.body.contains("private todo")),
+        !bob_hits
+            .iter()
+            .any(|h| h.memory.body.contains("private todo")),
         "bob must NOT see alice's private memory"
     );
 
@@ -161,5 +173,8 @@ async fn team_shares_one_memory_across_instances() {
         )
         .await
         .unwrap();
-    assert!(all.len() >= 2, "host holds both memories (the single shared store)");
+    assert!(
+        all.len() >= 2,
+        "host holds both memories (the single shared store)"
+    );
 }

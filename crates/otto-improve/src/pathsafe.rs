@@ -13,7 +13,8 @@ fn is_safe_segment(s: &str) -> bool {
     !s.is_empty()
         && s != "."
         && s != ".."
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// A memory `target_ref` must be a single safe `*.md` filename.
@@ -63,9 +64,17 @@ mod tests {
 
     #[test]
     fn skill_ref_resolves_under_workspace_without_library() {
-        let p = resolve_target("/ws", ImprovementTarget::Skill, "support-triage-router", None)
-            .unwrap();
-        assert!(p.ends_with(".claude/skills/support-triage-router/SKILL.md"), "got {p:?}");
+        let p = resolve_target(
+            "/ws",
+            ImprovementTarget::Skill,
+            "support-triage-router",
+            None,
+        )
+        .unwrap();
+        assert!(
+            p.ends_with(".claude/skills/support-triage-router/SKILL.md"),
+            "got {p:?}"
+        );
     }
 
     #[test]
@@ -85,8 +94,13 @@ mod tests {
         assert_eq!(p, skill.join("SKILL.md"));
 
         // Falls back to the workspace when the library has no such skill.
-        let p2 = resolve_target("/ws", ImprovementTarget::Skill, "other", Some(lib.as_path()))
-            .unwrap();
+        let p2 = resolve_target(
+            "/ws",
+            ImprovementTarget::Skill,
+            "other",
+            Some(lib.as_path()),
+        )
+        .unwrap();
         assert!(p2.ends_with(".claude/skills/other/SKILL.md"), "got {p2:?}");
     }
 

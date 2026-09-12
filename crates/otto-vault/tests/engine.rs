@@ -52,7 +52,12 @@ async fn fixture_vault(eng: &Arc<VaultEngine>) -> (tempfile::TempDir, i64) {
     let td = tempfile::tempdir().unwrap();
     write_fixture(td.path());
     let v = eng
-        .register(WS, "Test Vault", Some(td.path().to_string_lossy().to_string()), true)
+        .register(
+            WS,
+            "Test Vault",
+            Some(td.path().to_string_lossy().to_string()),
+            true,
+        )
         .await
         .unwrap();
     eng.scan(v.id).await.unwrap();
@@ -83,10 +88,17 @@ async fn scan_indexes_notes_links_tags() {
     assert_eq!(embed.dst_path.as_deref(), Some("assets/arch.png"));
 
     // Backlinks of orders-api: auth-api links to it.
-    let bl = eng.backlinks(WS, id, "services/orders-api.md").await.unwrap();
+    let bl = eng
+        .backlinks(WS, id, "services/orders-api.md")
+        .await
+        .unwrap();
     assert_eq!(bl.len(), 1);
     assert_eq!(bl[0].path, "services/auth-api.md");
-    assert!(bl[0].context.contains("Orders API"), "context: {}", bl[0].context);
+    assert!(
+        bl[0].context.contains("Orders API"),
+        "context: {}",
+        bl[0].context
+    );
 
     // Tags aggregate.
     let tags = eng.tags(WS, id).await.unwrap();
@@ -100,7 +112,11 @@ async fn wikilink_basename_resolution() {
     let (_td, id) = fixture_vault(&eng).await;
     // [[auth-api]] in runbooks/deploy.md resolves by unique basename.
     let deploy = eng.note(WS, id, "runbooks/deploy.md").await.unwrap();
-    let l = deploy.outgoing.iter().find(|l| l.raw_target == "auth-api").unwrap();
+    let l = deploy
+        .outgoing
+        .iter()
+        .find(|l| l.raw_target == "auth-api")
+        .unwrap();
     assert_eq!(l.dst_path.as_deref(), Some("services/auth-api.md"));
 }
 
@@ -110,8 +126,11 @@ async fn dir_listing_and_switcher_and_search() {
     let (_td, id) = fixture_vault(&eng).await;
 
     let root = eng.dir(WS, id, "").await.unwrap();
-    let names: Vec<(&str, &str)> =
-        root.entries.iter().map(|e| (e.kind.as_str(), e.name.as_str())).collect();
+    let names: Vec<(&str, &str)> = root
+        .entries
+        .iter()
+        .map(|e| (e.kind.as_str(), e.name.as_str()))
+        .collect();
     assert!(names.contains(&("dir", "services")));
     assert!(names.contains(&("note", "index.md")));
     let services = eng.dir(WS, id, "services").await.unwrap();
@@ -121,11 +140,21 @@ async fn dir_listing_and_switcher_and_search() {
     let hits = eng.switcher(WS, id, "auth").await.unwrap();
     assert_eq!(hits[0].path, "services/auth-api.md");
     let alias_hits = eng.switcher(WS, id, "the auth service").await.unwrap();
-    assert!(alias_hits.iter().any(|h| h.alias.is_some()), "{alias_hits:?}");
+    assert!(
+        alias_hits.iter().any(|h| h.alias.is_some()),
+        "{alias_hits:?}"
+    );
 
     // FTS search finds body text; reserved files excluded from switcher.
     let res = eng
-        .search(WS, id, &SearchReq { query: "charging".into(), ..Default::default() })
+        .search(
+            WS,
+            id,
+            &SearchReq {
+                query: "charging".into(),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(res.len(), 1);
@@ -133,13 +162,27 @@ async fn dir_listing_and_switcher_and_search() {
 
     // Operator filters.
     let res = eng
-        .search(WS, id, &SearchReq { query: "tag:oncall".into(), ..Default::default() })
+        .search(
+            WS,
+            id,
+            &SearchReq {
+                query: "tag:oncall".into(),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].path, "runbooks/deploy.md");
     let res = eng
-        .search(WS, id, &SearchReq { query: "type:Runbook".into(), ..Default::default() })
+        .search(
+            WS,
+            id,
+            &SearchReq {
+                query: "type:Runbook".into(),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(res.len(), 1, "{res:?}");
@@ -152,7 +195,13 @@ async fn write_read_conflict_delete_roundtrip() {
 
     // Create (with parent folder auto-created).
     let meta = eng
-        .write_note(WS, id, "notes/new one.md", "---\ntype: Reference\n---\n\nHello [[auth-api]].\n", Some(""))
+        .write_note(
+            WS,
+            id,
+            "notes/new one.md",
+            "---\ntype: Reference\n---\n\nHello [[auth-api]].\n",
+            Some(""),
+        )
         .await
         .unwrap();
     assert_eq!(meta.title, "new one");
@@ -160,7 +209,10 @@ async fn write_read_conflict_delete_roundtrip() {
 
     // Its link resolved immediately (write triggers a scan).
     let n = eng.note(WS, id, "notes/new one.md").await.unwrap();
-    assert_eq!(n.outgoing[0].dst_path.as_deref(), Some("services/auth-api.md"));
+    assert_eq!(
+        n.outgoing[0].dst_path.as_deref(),
+        Some("services/auth-api.md")
+    );
 
     // Optimistic concurrency: stale hash → Conflict.
     let err = eng
@@ -206,7 +258,10 @@ async fn write_text_file_is_guarded_versioned_and_scanned() {
             .await
             .unwrap_or_else(|e| panic!(".{extension} must be writable: {e}"));
         assert_eq!(written.path, path);
-        assert_eq!(std::fs::read_to_string(td.path().join(&path)).unwrap(), extension);
+        assert_eq!(
+            std::fs::read_to_string(td.path().join(&path)).unwrap(),
+            extension
+        );
     }
 
     let err = eng
@@ -214,11 +269,22 @@ async fn write_text_file_is_guarded_versioned_and_scanned() {
         .await
         .unwrap_err();
     assert!(matches!(err, otto_core::Error::Conflict(_)), "{err:?}");
-    eng.write_text_file(WS, id, "api/openapi.yaml", "openapi: 3.1.1\n", Some(&out.hash))
-        .await
-        .unwrap();
+    eng.write_text_file(
+        WS,
+        id,
+        "api/openapi.yaml",
+        "openapi: 3.1.1\n",
+        Some(&out.hash),
+    )
+    .await
+    .unwrap();
 
-    for bad in ["notes/no.md", "bin/app.exe", "../escape.yaml", ".trash/x.json"] {
+    for bad in [
+        "notes/no.md",
+        "bin/app.exe",
+        "../escape.yaml",
+        ".trash/x.json",
+    ] {
         assert!(
             eng.write_text_file(WS, id, bad, "x", None).await.is_err(),
             "text artifact path must be rejected: {bad}"
@@ -229,7 +295,10 @@ async fn write_text_file_is_guarded_versioned_and_scanned() {
         .write_text_file(WS, id, "api/huge.json", &oversized, None)
         .await
         .unwrap_err();
-    assert!(matches!(err, otto_core::Error::PayloadTooLarge(_)), "{err:?}");
+    assert!(
+        matches!(err, otto_core::Error::PayloadTooLarge(_)),
+        "{err:?}"
+    );
 
     #[cfg(unix)]
     {
@@ -277,7 +346,10 @@ async fn concurrent_text_file_writes_with_one_hash_yield_exactly_one_conflict() 
         .count();
     let successes = [&a, &b].into_iter().filter(|r| r.is_ok()).count();
     assert_eq!(successes, 1, "one writer must win: a={a:?}, b={b:?}");
-    assert_eq!(conflicts, 1, "one writer must observe a stale hash: a={a:?}, b={b:?}");
+    assert_eq!(
+        conflicts, 1,
+        "one writer must observe a stale hash: a={a:?}, b={b:?}"
+    );
     assert_eq!(
         std::fs::metadata(td.path().join("api/concurrent.json"))
             .unwrap()
@@ -304,7 +376,10 @@ async fn create_only_text_write_does_not_replace_an_unreadable_existing_file() {
         .await;
 
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(result.is_err(), "an unreadable existing file must not look absent");
+    assert!(
+        result.is_err(),
+        "an unreadable existing file must not look absent"
+    );
     assert_eq!(std::fs::read_to_string(target).unwrap(), "protected");
 }
 
@@ -321,7 +396,10 @@ async fn parent_swap_after_validation_cannot_redirect_text_write_outside_vault()
     let outside = tempfile::tempdir().unwrap();
     let fifo = parent.join("race.json");
     std::fs::create_dir(&parent).unwrap();
-    let status = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
     assert!(status.success(), "mkfifo failed: {status}");
 
     let seed = b"existing";
@@ -353,7 +431,10 @@ async fn parent_swap_after_validation_cannot_redirect_text_write_outside_vault()
     .unwrap();
 
     let result = write.await.unwrap();
-    assert!(result.is_ok(), "capability-held parent write failed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "capability-held parent write failed: {result:?}"
+    );
     assert!(
         !outside.path().join("race.json").exists(),
         "a swapped parent symlink redirected the write outside the vault"
@@ -385,7 +466,10 @@ async fn rename_rewrites_links_on_disk() {
     assert!(index.contains("services/identity-api.md"), "{index}");
 
     // Backlinks follow the new path.
-    let bl = eng.backlinks(WS, id, "services/identity-api.md").await.unwrap();
+    let bl = eng
+        .backlinks(WS, id, "services/identity-api.md")
+        .await
+        .unwrap();
     assert_eq!(bl.len(), 3);
 }
 
@@ -405,7 +489,11 @@ async fn folder_rename_updates_absolute_and_relative_links() {
     assert!(auth.contains("/platform/orders-api.md"), "{auth}");
     // basename wikilink from runbooks still resolves (basename unchanged).
     let deploy = eng.note(WS, id, "runbooks/deploy.md").await.unwrap();
-    let l = deploy.outgoing.iter().find(|l| l.raw_target == "auth-api").unwrap();
+    let l = deploy
+        .outgoing
+        .iter()
+        .find(|l| l.raw_target == "auth-api")
+        .unwrap();
     assert_eq!(l.dst_path.as_deref(), Some("platform/auth-api.md"));
 }
 
@@ -413,7 +501,13 @@ async fn folder_rename_updates_absolute_and_relative_links() {
 async fn path_traversal_rejected() {
     let eng = engine().await;
     let (_td, id) = fixture_vault(&eng).await;
-    for bad in ["../escape.md", "/etc/passwd", "a/../../b.md", ".trash/x.md", "notes/.hidden.md"] {
+    for bad in [
+        "../escape.md",
+        "/etc/passwd",
+        "a/../../b.md",
+        ".trash/x.md",
+        "notes/.hidden.md",
+    ] {
         assert!(
             eng.note(WS, id, bad).await.is_err(),
             "path must be rejected: {bad}"
@@ -441,12 +535,25 @@ async fn graph_full_local_and_flags() {
     let (_td, id) = fixture_vault(&eng).await;
 
     let g = eng
-        .graph(WS, id, &GraphOpts { ghosts: true, tags: true, reserved: false, ..Default::default() })
+        .graph(
+            WS,
+            id,
+            &GraphOpts {
+                ghosts: true,
+                tags: true,
+                reserved: false,
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert!(!g.truncated);
     // Reserved files excluded by default.
-    assert!(!g.paths.iter().any(|p| p == "index.md" || p == "log.md"), "{:?}", g.paths);
+    assert!(
+        !g.paths.iter().any(|p| p == "index.md" || p == "log.md"),
+        "{:?}",
+        g.paths
+    );
     // Ghost node for the unresolved wikilinks.
     assert!(g.flags.iter().any(|f| f & NODE_GHOST != 0));
     // Tag nodes present.
@@ -458,7 +565,10 @@ async fn graph_full_local_and_flags() {
     assert_eq!(g.types.len(), g.paths.len());
     assert_eq!(g.services.len(), g.paths.len());
     assert!(g.types.iter().all(|t| (*t as usize) < g.type_labels.len()));
-    assert!(g.services.iter().all(|s| (*s as usize) < g.service_labels.len()));
+    assert!(g
+        .services
+        .iter()
+        .all(|s| (*s as usize) < g.service_labels.len()));
     // Tags are CSR: n + 1 offsets, the last one closing the id list.
     assert_eq!(g.tag_off.len(), g.paths.len() + 1);
     assert_eq!(g.tag_off[g.paths.len()] as usize, g.tag_ids.len());
@@ -491,7 +601,11 @@ async fn graph_full_local_and_flags() {
 
     // The auth-api note's own tags ride along as an attribute, independent of
     // the tag NODES the `tags` flag draws.
-    let ai = g.paths.iter().position(|p| p == "services/auth-api.md").unwrap();
+    let ai = g
+        .paths
+        .iter()
+        .position(|p| p == "services/auth-api.md")
+        .unwrap();
     let auth_tags: Vec<&str> = (g.tag_off[ai]..g.tag_off[ai + 1])
         .map(|t| g.tag_labels[g.tag_ids[t as usize] as usize].as_str())
         .collect();
@@ -518,7 +632,14 @@ async fn graph_full_local_and_flags() {
 
     // Edge budget truncation flag.
     let tg = eng
-        .graph(WS, id, &GraphOpts { edge_budget: 1, ..Default::default() })
+        .graph(
+            WS,
+            id,
+            &GraphOpts {
+                edge_budget: 1,
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert!(tg.truncated);
@@ -537,22 +658,51 @@ async fn graph_attributes_survive_pruning_and_fold_type_case() {
         "---\ntype: service\ntitle: Legacy API\ndescription: Old one.\n---\n\nSee [[auth-api]].\n",
     )
     .unwrap();
-    std::fs::write(td.path().join("stray.md"), "# Stray\n\nNo frontmatter here.\n").unwrap();
+    std::fs::write(
+        td.path().join("stray.md"),
+        "# Stray\n\nNo frontmatter here.\n",
+    )
+    .unwrap();
     eng.scan(id).await.unwrap();
 
-    let g = eng.graph(WS, id, &GraphOpts { tags: true, ..Default::default() }).await.unwrap();
+    let g = eng
+        .graph(
+            WS,
+            id,
+            &GraphOpts {
+                tags: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let label_count = |want: &str| {
-        g.type_labels.iter().filter(|l| l.eq_ignore_ascii_case(want)).count()
+        g.type_labels
+            .iter()
+            .filter(|l| l.eq_ignore_ascii_case(want))
+            .count()
     };
     assert_eq!(label_count("service"), 1, "{:?}", g.type_labels);
-    assert!(g.type_labels.iter().any(|l| l == TYPE_UNTYPED), "{:?}", g.type_labels);
+    assert!(
+        g.type_labels.iter().any(|l| l == TYPE_UNTYPED),
+        "{:?}",
+        g.type_labels
+    );
     // Root-level notes group under the root service bucket.
     let si = g.paths.iter().position(|p| p == "stray.md").unwrap();
     assert_eq!(g.service_labels[g.services[si] as usize], SERVICE_ROOT);
 
     // Orphan pruning remaps every parallel array in lockstep, not just paths.
     let pruned = eng
-        .graph(WS, id, &GraphOpts { orphans: Some(false), tags: true, ..Default::default() })
+        .graph(
+            WS,
+            id,
+            &GraphOpts {
+                orphans: Some(false),
+                tags: true,
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert!(pruned.paths.len() < g.paths.len());
@@ -560,8 +710,15 @@ async fn graph_attributes_survive_pruning_and_fold_type_case() {
     assert_eq!(pruned.types.len(), pruned.paths.len());
     assert_eq!(pruned.services.len(), pruned.paths.len());
     assert_eq!(pruned.tag_off.len(), pruned.paths.len() + 1);
-    assert_eq!(pruned.tag_off[pruned.paths.len()] as usize, pruned.tag_ids.len());
-    let ai = pruned.paths.iter().position(|p| p == "services/auth-api.md").unwrap();
+    assert_eq!(
+        pruned.tag_off[pruned.paths.len()] as usize,
+        pruned.tag_ids.len()
+    );
+    let ai = pruned
+        .paths
+        .iter()
+        .position(|p| p == "services/auth-api.md")
+        .unwrap();
     let auth_tags: Vec<&str> = (pruned.tag_off[ai]..pruned.tag_off[ai + 1])
         .map(|t| pruned.tag_labels[pruned.tag_ids[t as usize] as usize].as_str())
         .collect();
@@ -586,7 +743,10 @@ async fn graph_attributes_survive_pruning_and_fold_type_case() {
     assert_eq!(lg.services.len(), lg.paths.len());
     assert_eq!(lg.tag_off.len(), lg.paths.len() + 1);
     assert_eq!(lg.tag_off[lg.paths.len()] as usize, lg.tag_ids.len());
-    assert!(lg.tag_ids.iter().all(|t| (*t as usize) < lg.tag_labels.len()));
+    assert!(lg
+        .tag_ids
+        .iter()
+        .all(|t| (*t as usize) < lg.tag_labels.len()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -603,8 +763,16 @@ async fn okf_validation_and_indexes() {
     // Break it: concept without frontmatter (E1), concept without type (E2),
     // index.md with frontmatter (E3), log with a bad date (W5).
     std::fs::write(td.path().join("services/raw.md"), "no frontmatter here\n").unwrap();
-    std::fs::write(td.path().join("services/untyped.md"), "---\ntitle: X\n---\nbody\n").unwrap();
-    std::fs::write(td.path().join("services/index.md"), "---\ntype: nope\n---\n# S\n").unwrap();
+    std::fs::write(
+        td.path().join("services/untyped.md"),
+        "---\ntitle: X\n---\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        td.path().join("services/index.md"),
+        "---\ntype: nope\n---\n# S\n",
+    )
+    .unwrap();
     std::fs::write(
         td.path().join("log.md"),
         "# Log\n\n## July 10th\n* **Update**: bad date.\n",
@@ -625,10 +793,16 @@ async fn okf_validation_and_indexes() {
     let written = eng.okf_indexes(WS, id).await.unwrap();
     assert!(written >= 3, "root + services + runbooks, got {written}");
     let sidx = std::fs::read_to_string(td.path().join("services/index.md")).unwrap();
-    assert!(sidx.contains("[Auth API](auth-api.md) - Issues and verifies JWTs."), "{sidx}");
+    assert!(
+        sidx.contains("[Auth API](auth-api.md) - Issues and verifies JWTs."),
+        "{sidx}"
+    );
     let root_idx = std::fs::read_to_string(td.path().join("index.md")).unwrap();
     assert!(root_idx.contains("okf_version"), "{root_idx}");
-    assert!(root_idx.contains("[services](services/index.md)"), "{root_idx}");
+    assert!(
+        root_idx.contains("[services](services/index.md)"),
+        "{root_idx}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -650,6 +824,10 @@ async fn external_edit_is_picked_up_by_rescan() {
     eng.scan(id).await.unwrap();
     let n = eng.note(WS, id, "services/orders-api.md").await.unwrap();
     assert_eq!(n.meta.title, "Orders API v2");
-    let l = n.outgoing.iter().find(|l| l.raw_target == "deploy").unwrap();
+    let l = n
+        .outgoing
+        .iter()
+        .find(|l| l.raw_target == "deploy")
+        .unwrap();
     assert_eq!(l.dst_path.as_deref(), Some("runbooks/deploy.md"));
 }

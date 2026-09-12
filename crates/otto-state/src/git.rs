@@ -232,10 +232,14 @@ impl GitStore {
             Ok(_) => self.get_repo(&id).await,
             // Lost a concurrent-create race against the unique index — the
             // other row is the repo; return it.
-            Err(e) if e.to_string().contains("UNIQUE constraint failed: repos.path") => self
-                .get_repo_by_path(&path)
-                .await?
-                .ok_or_else(|| Error::Internal("repo vanished after unique-path race".into())),
+            Err(e)
+                if e.to_string()
+                    .contains("UNIQUE constraint failed: repos.path") =>
+            {
+                self.get_repo_by_path(&path)
+                    .await?
+                    .ok_or_else(|| Error::Internal("repo vanished after unique-path race".into()))
+            }
             Err(e) => Err(dberr("create repo")(e)),
         }
     }
@@ -337,7 +341,8 @@ impl GitStore {
         if raw.trim().is_empty() {
             return Ok(Default::default());
         }
-        serde_json::from_str(&raw).map_err(|e| Error::Internal(format!("bad proof_config_json: {e}")))
+        serde_json::from_str(&raw)
+            .map_err(|e| Error::Internal(format!("bad proof_config_json: {e}")))
     }
 
     /// Write a repo's proof requirements.
@@ -448,14 +453,16 @@ mod tests {
         // observable across the workspace boundary.
         let now = fmt(Utc::now());
         for ws in ["ws-a", "ws-b"] {
-            sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
-                .bind(ws)
-                .bind(ws)
-                .bind("/tmp")
-                .bind(&now)
-                .execute(&pool)
-                .await
-                .unwrap();
+            sqlx::query(
+                "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(ws)
+            .bind(ws)
+            .bind("/tmp")
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         for (ws, name, path) in [
             ("ws-a", "zebra", "/tmp/zebra"),
@@ -590,7 +597,10 @@ mod tests {
         assert_eq!(a.id, b.id, "duplicate registration returns the original");
         assert_eq!(b.workspace_id, "ws1", "row keeps its original workspace");
         // Symlink variant (/var vs /private/var style) also dedupes.
-        let c = store.create_repo(mk("ws2", dir.path().to_str().unwrap())).await.unwrap();
+        let c = store
+            .create_repo(mk("ws2", dir.path().to_str().unwrap()))
+            .await
+            .unwrap();
         assert_eq!(a.id, c.id);
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM repos")
             .fetch_one(&pool)

@@ -52,7 +52,13 @@ pub struct LaunchOpts {
 /// by default (the cwd-mode default), so several can share the repo safely.
 pub async fn launch(ctx: &ServerCtx, swarm: &Swarm, opts: LaunchOpts) -> Result<String> {
     let name = opts.name.clone().unwrap_or_else(|| {
-        opts.goal.lines().next().unwrap_or("Channel task").chars().take(80).collect()
+        opts.goal
+            .lines()
+            .next()
+            .unwrap_or("Channel task")
+            .chars()
+            .take(80)
+            .collect()
     });
     let project = ctx
         .swarm_repo
@@ -136,8 +142,10 @@ pub async fn launch(ctx: &ServerCtx, swarm: &Swarm, opts: LaunchOpts) -> Result<
 
 /// Reply/escalate back to the channel that launched `project` (if any). Best-effort.
 pub async fn notify_origin(ctx: &ServerCtx, project: &SwarmProject, text: &str) {
-    let (Some(channel), Some(chat)) = (project.origin_channel.as_deref(), project.origin_chat.as_deref())
-    else {
+    let (Some(channel), Some(chat)) = (
+        project.origin_channel.as_deref(),
+        project.origin_chat.as_deref(),
+    ) else {
         return;
     };
     let thread = project.origin_thread.as_deref();
@@ -148,9 +156,20 @@ pub async fn notify_origin(ctx: &ServerCtx, project: &SwarmProject, text: &str) 
             let _ = adapter.send_formatted(&project.id, thread, text).await;
         }
         "slack" | "telegram" => {
-            let ch = if channel == "slack" { Channel::Slack } else { Channel::Telegram };
+            let ch = if channel == "slack" {
+                Channel::Slack
+            } else {
+                Channel::Telegram
+            };
             if let Ok(Some(integ)) = ctx.integrations_store.get(&project.workspace_id, ch).await {
-                let _ = otto_channels::improve_notify::send_to(&ctx.secrets, &integ, chat, thread, text).await;
+                let _ = otto_channels::improve_notify::send_to(
+                    &ctx.secrets,
+                    &integ,
+                    chat,
+                    thread,
+                    text,
+                )
+                .await;
             }
         }
         _ => {}
@@ -209,7 +228,11 @@ impl SwarmTrigger for SwarmTriggerImpl {
                 repo_path: t.repo_path.clone(),
                 goals: Vec::new(),
                 origin: if t.reply {
-                    Some(Origin { channel: channel.to_string(), chat: chat.to_string(), thread: thread.map(str::to_string) })
+                    Some(Origin {
+                        channel: channel.to_string(),
+                        chat: chat.to_string(),
+                        thread: thread.map(str::to_string),
+                    })
                 } else {
                     None
                 },
@@ -228,7 +251,9 @@ impl SwarmTrigger for SwarmTriggerImpl {
                 }
                 Err(e) => {
                     tracing::warn!("swarm trigger launch failed: {e}");
-                    return Some(LaunchAck { reply: format!("⚠️ Could not launch the swarm: {e}") });
+                    return Some(LaunchAck {
+                        reply: format!("⚠️ Could not launch the swarm: {e}"),
+                    });
                 }
             }
         }

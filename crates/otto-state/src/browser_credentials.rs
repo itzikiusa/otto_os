@@ -96,9 +96,9 @@ impl BrowserCredentialsRepo {
             "create browser credential",
             "a credential for this domain and username already exists",
         ))?;
-        self.get(&new.id)
-            .await?
-            .ok_or_else(|| otto_core::Error::Internal("browser credential vanished after insert".into()))
+        self.get(&new.id).await?.ok_or_else(|| {
+            otto_core::Error::Internal("browser credential vanished after insert".into())
+        })
     }
 
     pub async fn list(&self, workspace_id: &str) -> Result<Vec<BrowserCredential>> {
@@ -121,7 +121,11 @@ impl BrowserCredentialsRepo {
         .map_err(dberr("browser credential"))
     }
 
-    pub async fn update(&self, id: &Id, patch: BrowserCredentialPatch) -> Result<BrowserCredential> {
+    pub async fn update(
+        &self,
+        id: &Id,
+        patch: BrowserCredentialPatch,
+    ) -> Result<BrowserCredential> {
         let existing = self
             .get(id)
             .await?

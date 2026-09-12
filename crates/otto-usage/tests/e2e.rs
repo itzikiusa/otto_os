@@ -17,7 +17,15 @@ use otto_usage::{
     UsageEvent,
 };
 
-fn event(provider: &str, session: &str, model: &str, kind: &str, inp: u64, out: u64, cost: f64) -> UsageEvent {
+fn event(
+    provider: &str,
+    session: &str,
+    model: &str,
+    kind: &str,
+    inp: u64,
+    out: u64,
+    cost: f64,
+) -> UsageEvent {
     UsageEvent {
         workspace_id: "ws1".into(),
         session_id: session.into(),
@@ -62,7 +70,6 @@ fn event_with_dims(
     }
 }
 
-
 /// Tests that boot a *real* ClickHouse server are serialized: several servers
 /// starting at once (install checks, dir adoption, port hunting) slow each
 /// other past the `wait_ready` windows and flake.
@@ -92,7 +99,10 @@ async fn usage_engine_end_to_end() {
 
     let engine = UsageEngine::start(config, data_dir.clone()).await;
     engine.wait_ready(Duration::from_secs(30)).await;
-    assert!(engine.available(), "engine should be available with a real clickhouse");
+    assert!(
+        engine.available(),
+        "engine should be available with a real clickhouse"
+    );
 
     // ── Record usage (synchronous insert for determinism) ──────────────────
     engine
@@ -107,22 +117,48 @@ async fn usage_engine_end_to_end() {
         .expect("insert events");
 
     // ── Also exercise the buffered fire-and-forget path ─────────────────────
-    engine.record(event("claude", "s2", "claude-sonnet-4", "completion", 0, 300, 0.01));
+    engine.record(event(
+        "claude",
+        "s2",
+        "claude-sonnet-4",
+        "completion",
+        0,
+        300,
+        0.01,
+    ));
     // The background writer flushes on a ~2s timer; give it room.
     tokio::time::sleep(Duration::from_millis(2500)).await;
 
     // ── Provider rollup ─────────────────────────────────────────────────────
-    let providers = engine.provider_usage(30, false).await.expect("provider usage");
+    let providers = engine
+        .provider_usage(30, false)
+        .await
+        .expect("provider usage");
     assert_eq!(providers.len(), 2, "two providers recorded");
-    let claude = providers.iter().find(|p| p.provider == "claude").expect("claude row");
+    let claude = providers
+        .iter()
+        .find(|p| p.provider == "claude")
+        .expect("claude row");
     // 3 claude events: (1000+500) + (800) + (400+200) + buffered (300) = 4 events total now.
     assert_eq!(claude.events, 4, "claude events (incl. buffered)");
-    assert_eq!(claude.input_tokens, 1400, "claude input tokens (1000+0+400+0)");
-    assert_eq!(claude.output_tokens, 1800, "claude output tokens (500+800+200+300)");
+    assert_eq!(
+        claude.input_tokens, 1400,
+        "claude input tokens (1000+0+400+0)"
+    );
+    assert_eq!(
+        claude.output_tokens, 1800,
+        "claude output tokens (500+800+200+300)"
+    );
     assert_eq!(claude.total_tokens, 3200, "claude total tokens");
-    assert!((claude.cost_usd - 0.07).abs() < 1e-9, "claude cost = 0.06 + 0.01");
+    assert!(
+        (claude.cost_usd - 0.07).abs() < 1e-9,
+        "claude cost = 0.06 + 0.01"
+    );
 
-    let codex = providers.iter().find(|p| p.provider == "codex").expect("codex row");
+    let codex = providers
+        .iter()
+        .find(|p| p.provider == "codex")
+        .expect("codex row");
     assert_eq!(codex.events, 2);
     assert_eq!(codex.total_tokens, 2100);
 
@@ -185,7 +221,10 @@ async fn usage_engine_end_to_end() {
     .await;
     engine2.wait_ready(Duration::from_secs(30)).await;
     assert!(engine2.available());
-    let reopened = engine2.summary(30, false).await.expect("summary after reopen");
+    let reopened = engine2
+        .summary(30, false)
+        .await
+        .expect("summary after reopen");
     assert_eq!(reopened.total_events, 6, "data persisted across restart");
     assert_eq!(reopened.total_tokens, 5300);
     engine2.shutdown().await; // stop the server (no orphan when the test exits)
@@ -205,7 +244,10 @@ async fn disabled_engine_is_a_noop() {
     assert!(!engine.available());
     // Recording / querying a disabled engine must not error.
     engine.record(event("claude", "s1", "m", "prompt", 1, 1, 0.0));
-    engine.insert_events(&[event("claude", "s1", "m", "prompt", 1, 1, 0.0)]).await.unwrap();
+    engine
+        .insert_events(&[event("claude", "s1", "m", "prompt", 1, 1, 0.0)])
+        .await
+        .unwrap();
     assert_eq!(engine.summary(7, false).await.unwrap().total_events, 0);
     assert!(!engine.status().await.available);
 }
@@ -249,7 +291,7 @@ fn usage_event_workref_round_trip() {
     assert_eq!(back.origin, "review");
     assert_eq!(back.repo_id, "repo-abc");
     assert_eq!(back.branch, "feature/b1");
-    assert_eq!(back.pr_number, "");  // defaulted to empty on missing key
+    assert_eq!(back.pr_number, ""); // defaulted to empty on missing key
     assert_eq!(back.story_id, "");
 }
 
@@ -300,7 +342,10 @@ async fn attribution_groups_by_dimension() {
         review.cost_usd
     );
 
-    let product = rows.iter().find(|r| r.key == "product").expect("product row");
+    let product = rows
+        .iter()
+        .find(|r| r.key == "product")
+        .expect("product row");
     assert_eq!(product.sessions, 1, "product: 1 session");
     assert!((product.cost_usd - 0.08).abs() < 1e-6);
 
@@ -384,7 +429,10 @@ async fn forecast_with_est_tokens_prices_directly() {
 
     // Must price 1000 in + 1000 out at claude rates (whatever that comes to;
     // we just check it's non-zero and the basis explains it).
-    assert!(resp.projected_cost_usd > 0.0, "should produce a non-zero estimate");
+    assert!(
+        resp.projected_cost_usd > 0.0,
+        "should produce a non-zero estimate"
+    );
     assert!(
         resp.basis.contains("2000"),
         "basis must mention token count: {}",
@@ -444,7 +492,11 @@ async fn explicit_ts_inserts_and_tailer_purge() {
         .iter()
         .find(|d| d.day == day(5).to_string())
         .expect("a bucket on the backdated day");
-    assert_eq!(hist.total_tokens, 110 + 440 + 880, "backdated rows on that day");
+    assert_eq!(
+        hist.total_tokens,
+        110 + 440 + 880,
+        "backdated rows on that day"
+    );
 
     // Purge from 10 days back: both tailer-shaped rows go, everything else stays.
     engine

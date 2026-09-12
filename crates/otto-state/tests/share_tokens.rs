@@ -29,10 +29,11 @@ async fn mem_pool() -> SqlitePool {
 #[tokio::test]
 async fn auth_sessions_has_share_scope_columns() {
     let pool = mem_pool().await;
-    let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('auth_sessions')")
-        .fetch_all(&pool)
-        .await
-        .expect("pragma_table_info(auth_sessions)");
+    let cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('auth_sessions')")
+            .fetch_all(&pool)
+            .await
+            .expect("pragma_table_info(auth_sessions)");
 
     for c in ["session_scope", "scope_role", "revoked"] {
         assert!(

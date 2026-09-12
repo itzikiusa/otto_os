@@ -125,7 +125,12 @@ impl SkillReviewsRepo {
 
     /// Atomically replace a single agent's row (element `index`) — see the
     /// [`crate::reviews::ReviewsRepo::set_agent_at`] rationale.
-    pub async fn set_agent_at(&self, id: &Id, index: usize, agent: &SkillReviewAgent) -> Result<()> {
+    pub async fn set_agent_at(
+        &self,
+        id: &Id,
+        index: usize,
+        agent: &SkillReviewAgent,
+    ) -> Result<()> {
         let elem = serde_json::to_string(agent)
             .map_err(|e| Error::Internal(format!("serialize agent: {e}")))?;
         let path = format!("$[{index}]");
@@ -224,7 +229,14 @@ mod tests {
         let repo = SkillReviewsRepo::new(pool().await);
         let ws: Id = "ws1".into();
         let rev = repo
-            .create(&ws, "grill", "bundled", "agents", "focus on trigger precision", Some("root"))
+            .create(
+                &ws,
+                "grill",
+                "bundled",
+                "agents",
+                "focus on trigger precision",
+                Some("root"),
+            )
             .await
             .unwrap();
         assert_eq!(rev.status, "running");
@@ -234,30 +246,71 @@ mod tests {
 
         // Seed two agent rows + summarizer.
         let agents = vec![
-            SkillReviewAgent { name: "claude".into(), provider: "claude".into(), model: "".into(), status: "pending".into(), note: "".into(), session_id: None, findings: vec![] },
-            SkillReviewAgent { name: "summarizer".into(), provider: "claude".into(), model: "".into(), status: "pending".into(), note: "".into(), session_id: None, findings: vec![] },
+            SkillReviewAgent {
+                name: "claude".into(),
+                provider: "claude".into(),
+                model: "".into(),
+                status: "pending".into(),
+                note: "".into(),
+                session_id: None,
+                findings: vec![],
+            },
+            SkillReviewAgent {
+                name: "summarizer".into(),
+                provider: "claude".into(),
+                model: "".into(),
+                status: "pending".into(),
+                note: "".into(),
+                session_id: None,
+                findings: vec![],
+            },
         ];
         repo.set_agents(&rev.id, &agents).await.unwrap();
         // Update index 0 atomically.
         let mut a0 = agents[0].clone();
         a0.status = "done".into();
         a0.session_id = Some("sess-1".into());
-        a0.findings = vec![SkillFinding { severity: "High".into(), code: "NO_EXAMPLES".into(), title: "no examples".into(), evidence: "SKILL.md".into(), why: "w".into(), fix: "f".into() }];
+        a0.findings = vec![SkillFinding {
+            severity: "High".into(),
+            code: "NO_EXAMPLES".into(),
+            title: "no examples".into(),
+            evidence: "SKILL.md".into(),
+            why: "w".into(),
+            fix: "f".into(),
+        }];
         repo.set_agent_at(&rev.id, 0, &a0).await.unwrap();
 
         let stat = SkillStaticReport {
             verdict: "Ready with fixes".into(),
             average_score: 4.2,
-            scorecard: vec![SkillScoreRow { area: "examples".into(), score: 3, notes: "n".into() }],
+            scorecard: vec![SkillScoreRow {
+                area: "examples".into(),
+                score: 3,
+                notes: "n".into(),
+            }],
             findings: vec![],
         };
         repo.set_static(&rev.id, &stat).await.unwrap();
-        let sum = SkillReviewSummary { verdict: "Ready with fixes".into(), average_score: 4.2, scorecard: vec![], findings: vec![], patch_plan: vec!["add examples".into()] };
+        let sum = SkillReviewSummary {
+            verdict: "Ready with fixes".into(),
+            average_score: 4.2,
+            scorecard: vec![],
+            findings: vec![],
+            patch_plan: vec!["add examples".into()],
+        };
         repo.set_summary(&rev.id, &sum).await.unwrap();
         repo.set_status(&rev.id, "done", None).await.unwrap();
 
         // Apply-fixes agent round-trip.
-        let fixer = SkillReviewAgent { name: "fixer".into(), provider: "claude".into(), model: "".into(), status: "running".into(), note: "".into(), session_id: Some("sess-fix".into()), findings: vec![] };
+        let fixer = SkillReviewAgent {
+            name: "fixer".into(),
+            provider: "claude".into(),
+            model: "".into(),
+            status: "running".into(),
+            note: "".into(),
+            session_id: Some("sess-fix".into()),
+            findings: vec![],
+        };
         repo.set_fix(&rev.id, &fixer).await.unwrap();
 
         let got = repo.get(&rev.id).await.unwrap();
@@ -272,7 +325,10 @@ mod tests {
         assert_eq!(got.agents[0].findings.len(), 1);
         assert_eq!(got.agents[1].status, "pending"); // untouched
         assert_eq!(got.static_report.unwrap().verdict, "Ready with fixes");
-        assert_eq!(got.summary.unwrap().patch_plan, vec!["add examples".to_string()]);
+        assert_eq!(
+            got.summary.unwrap().patch_plan,
+            vec!["add examples".to_string()]
+        );
 
         let list = repo.list(&ws).await.unwrap();
         assert_eq!(list.len(), 1);

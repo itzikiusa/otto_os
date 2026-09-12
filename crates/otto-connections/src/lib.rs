@@ -9,7 +9,10 @@ mod keyperms;
 pub mod service;
 
 pub use builders::build_command;
-pub use http::{api_router, owner_private_enabled, require_conn_owner_or_root, ConnectionsCtx, OpenConnectionReq};
+pub use http::{
+    api_router, owner_private_enabled, require_conn_owner_or_root, ConnectionsCtx,
+    OpenConnectionReq,
+};
 pub use service::{ConnectionsService, DbTester, Spawner};
 
 mod access;

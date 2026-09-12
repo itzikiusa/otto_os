@@ -130,12 +130,14 @@ impl UsageEngine {
                                 // tables created before B1. IF NOT EXISTS makes this
                                 // idempotent; errors are warnings so a quirky build
                                 // doesn't prevent the engine from starting.
-                                if let Err(e) =
-                                    ch.exec(&schema::add_workref_columns_sql()).await
-                                {
-                                    tracing::warn!("usage: add workref columns failed (non-fatal): {e}");
+                                if let Err(e) = ch.exec(&schema::add_workref_columns_sql()).await {
+                                    tracing::warn!(
+                                        "usage: add workref columns failed (non-fatal): {e}"
+                                    );
                                 }
-                                if let Err(e) = ch.exec(&schema::alter_ttl_sql(config.retention_days)).await {
+                                if let Err(e) =
+                                    ch.exec(&schema::alter_ttl_sql(config.retention_days)).await
+                                {
                                     tracing::warn!("usage: modify ttl failed (non-fatal): {e}");
                                 }
                                 let (tx, rx) = mpsc::unbounded_channel();
@@ -261,7 +263,13 @@ impl UsageEngine {
             && min_event_date
                 .chars()
                 .zip("0000-00-00".chars())
-                .all(|(c, m)| if m == '-' { c == '-' } else { c.is_ascii_digit() });
+                .all(|(c, m)| {
+                    if m == '-' {
+                        c == '-'
+                    } else {
+                        c.is_ascii_digit()
+                    }
+                });
         if !valid {
             return Err(otto_core::Error::Internal(format!(
                 "purge: bad min_event_date {min_event_date:?}"
@@ -294,7 +302,9 @@ impl UsageEngine {
             "process_cpu_pct": m.process_cpu_pct,
             "active_sessions": m.active_sessions,
         });
-        let res = ch.insert_ndjson("system_metrics", &format!("{row}\n")).await;
+        let res = ch
+            .insert_ndjson("system_metrics", &format!("{row}\n"))
+            .await;
         if res.is_err() && !ch.server_alive() {
             self.heal.store(true, Ordering::SeqCst);
         }
@@ -460,7 +470,12 @@ impl UsageEngine {
     }
 
     /// Top sessions by token volume over the last `days`.
-    pub async fn session_usage(&self, days: u32, limit: u32, otto_only: bool) -> Result<Vec<SessionUsage>> {
+    pub async fn session_usage(
+        &self,
+        days: u32,
+        limit: u32,
+        otto_only: bool,
+    ) -> Result<Vec<SessionUsage>> {
         self.rows(&format!(
             "SELECT session_id,
                     any(workspace_id) AS workspace_id,
@@ -527,10 +542,12 @@ impl UsageEngine {
             std::collections::HashMap::new();
         for t in &totals {
             let feature = classify(t);
-            let b = buckets.entry(feature.clone()).or_insert_with(|| FeatureUsage {
-                feature,
-                ..Default::default()
-            });
+            let b = buckets
+                .entry(feature.clone())
+                .or_insert_with(|| FeatureUsage {
+                    feature,
+                    ..Default::default()
+                });
             b.events += t.events;
             b.input_tokens += t.input_tokens;
             b.output_tokens += t.output_tokens;
@@ -812,9 +829,7 @@ impl UsageEngine {
             });
 
         // Deserialize each result set into its typed Vec (same decoding as `rows()`).
-        fn decode<T: serde::de::DeserializeOwned>(
-            raw: Vec<serde_json::Value>,
-        ) -> Vec<T> {
+        fn decode<T: serde::de::DeserializeOwned>(raw: Vec<serde_json::Value>) -> Vec<T> {
             raw.into_iter()
                 .filter_map(|v| match serde_json::from_value(v) {
                     Ok(t) => Some(t),
@@ -917,7 +932,9 @@ impl UsageEngine {
 
     /// Run a query and deserialize each row into `T`.
     async fn rows<T: serde::de::DeserializeOwned>(&self, sql: &str) -> Result<Vec<T>> {
-        let Some(ch) = self.ch() else { return Ok(Vec::new()) };
+        let Some(ch) = self.ch() else {
+            return Ok(Vec::new());
+        };
         let raw = ch.query_rows(sql).await?;
         let mut out = Vec::with_capacity(raw.len());
         for v in raw {

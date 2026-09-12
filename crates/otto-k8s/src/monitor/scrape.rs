@@ -281,7 +281,11 @@ async fn fetch_forward(
             Err(e) => Err(Error::Upstream(format!(
                 "{}: {}",
                 p.name,
-                if e.is_timeout() { "timeout".to_string() } else { e.to_string() }
+                if e.is_timeout() {
+                    "timeout".to_string()
+                } else {
+                    e.to_string()
+                }
             ))),
         };
         out.push(r);
@@ -294,7 +298,10 @@ async fn fetch_forward(
 /// `default_port`, the container's first declared port). Probes with no
 /// resolvable port are returned separately so the caller can count them as
 /// failed.
-pub fn group_by_port(probes: &[Probe], default_port: Option<u16>) -> (BTreeMap<u16, Vec<Probe>>, Vec<String>) {
+pub fn group_by_port(
+    probes: &[Probe],
+    default_port: Option<u16>,
+) -> (BTreeMap<u16, Vec<Probe>>, Vec<String>) {
     let mut by_port: BTreeMap<u16, Vec<Probe>> = BTreeMap::new();
     let mut unresolved = Vec::new();
     for p in probes {
@@ -313,8 +320,14 @@ mod tests {
 
     #[test]
     fn forward_port_parse() {
-        assert_eq!(parse_forward_port("Forwarding from 127.0.0.1:54321 -> 9000"), Some(54321));
-        assert_eq!(parse_forward_port("Forwarding from [::1]:54321 -> 9000"), Some(54321));
+        assert_eq!(
+            parse_forward_port("Forwarding from 127.0.0.1:54321 -> 9000"),
+            Some(54321)
+        );
+        assert_eq!(
+            parse_forward_port("Forwarding from [::1]:54321 -> 9000"),
+            Some(54321)
+        );
         assert_eq!(parse_forward_port("error: unable to forward"), None);
         assert_eq!(parse_forward_port(""), None);
     }
@@ -344,7 +357,10 @@ mod tests {
             exclude: vec![],
             timeout_ms: 1000,
         };
-        let (g, un) = group_by_port(&[mk("a", Some(9000)), mk("b", None), mk("c", Some(8080))], Some(9000));
+        let (g, un) = group_by_port(
+            &[mk("a", Some(9000)), mk("b", None), mk("c", Some(8080))],
+            Some(9000),
+        );
         assert_eq!(g[&9000].len(), 2);
         assert_eq!(g[&8080].len(), 1);
         assert!(un.is_empty());

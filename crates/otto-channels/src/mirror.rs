@@ -795,7 +795,10 @@ mod tests {
 
     #[test]
     fn render_tool_line_plain_step_is_just_the_display() {
-        assert_eq!(render_tool_line("📖 read: ~/x.md", None, true), "📖 read: ~/x.md");
+        assert_eq!(
+            render_tool_line("📖 read: ~/x.md", None, true),
+            "📖 read: ~/x.md"
+        );
     }
 
     #[test]
@@ -866,7 +869,12 @@ mod tests {
     #[test]
     fn classify_send_error_matches_slack_error_codes() {
         // Slack API errors embedded by the adapter (verbatim error code).
-        for code in ["cannot_reply_to_message", "thread_not_found", "channel_not_found", "is_archived"] {
+        for code in [
+            "cannot_reply_to_message",
+            "thread_not_found",
+            "channel_not_found",
+            "is_archived",
+        ] {
             let e = anyhow::anyhow!("slack chat.postMessage: {code}");
             assert_eq!(classify_send_error(&e), FeedSend::Permanent, "{code}");
         }
@@ -887,7 +895,10 @@ mod tests {
         let mut feed = FeedHealth::new();
         assert!(feed.can_send());
         feed.apply(FeedSend::Permanent);
-        assert!(!feed.can_send(), "permanent error kills the feed for the turn");
+        assert!(
+            !feed.can_send(),
+            "permanent error kills the feed for the turn"
+        );
     }
 
     #[test]
@@ -902,7 +913,10 @@ mod tests {
         for _ in 0..MAX_FEED_FAILURES {
             feed.apply(FeedSend::Transient);
         }
-        assert!(!feed.can_send(), "cap on consecutive failures trips the feed");
+        assert!(
+            !feed.can_send(),
+            "cap on consecutive failures trips the feed"
+        );
     }
 
     #[test]
@@ -928,7 +942,10 @@ mod tests {
             out.chars().count() <= FEED_CHAR_BUDGET + 64,
             "stays within the channel char budget (plus the elision note)"
         );
-        assert!(out.contains("earlier step"), "notes how many steps were elided");
+        assert!(
+            out.contains("earlier step"),
+            "notes how many steps were elided"
+        );
         assert!(out.contains("step 199:"), "keeps the most recent step");
         assert!(!out.contains("step 0:"), "drops the oldest step");
     }

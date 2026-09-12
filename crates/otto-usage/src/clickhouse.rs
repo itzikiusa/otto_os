@@ -26,7 +26,8 @@ use tokio::process::{Child, Command};
 /// emit 64-bit ints as numbers (not strings), and resolve bare identifiers to
 /// columns rather than same-named SELECT aliases (avoids ILLEGAL_AGGREGATION on
 /// `sum(a+b) AS total` next to `sum(a) AS a`). Verified equivalent over HTTP.
-const QUERY_SETTINGS: &str = "output_format_json_quote_64bit_integers=0&prefer_column_name_to_alias=1";
+const QUERY_SETTINGS: &str =
+    "output_format_json_quote_64bit_integers=0&prefer_column_name_to_alias=1";
 
 /// Handle to a persistent ClickHouse server backing an on-disk `--path` dataset.
 pub struct ClickHouse {
@@ -51,7 +52,10 @@ impl ClickHouse {
                 return Some(pb);
             }
         }
-        if let Ok(out) = std::process::Command::new("which").arg("clickhouse").output() {
+        if let Ok(out) = std::process::Command::new("which")
+            .arg("clickhouse")
+            .output()
+        {
             if out.status.success() {
                 let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !s.is_empty() && Path::new(&s).is_file() {
@@ -99,8 +103,8 @@ impl ClickHouse {
 
         let mut last_err = String::new();
         for attempt in 0..3 {
-            let port = free_loopback_port()
-                .map_err(|e| Error::Internal(format!("pick port: {e}")))?;
+            let port =
+                free_loopback_port().map_err(|e| Error::Internal(format!("pick port: {e}")))?;
             let cfg = write_server_config(&data_dir, port)?;
             let base_url = format!("http://127.0.0.1:{port}");
             tracing::info!(
@@ -130,11 +134,16 @@ impl ClickHouse {
             if ch.wait_ping(Duration::from_secs(45)).await {
                 return Ok(ch);
             }
-            last_err = format!("server did not answer /ping on port {port} (attempt {})", attempt + 1);
+            last_err = format!(
+                "server did not answer /ping on port {port} (attempt {})",
+                attempt + 1
+            );
             tracing::warn!("usage: {last_err} — retrying");
             ch.shutdown().await; // kill the failed child before retrying
         }
-        Err(Error::Internal(format!("clickhouse server failed to start: {last_err}")))
+        Err(Error::Internal(format!(
+            "clickhouse server failed to start: {last_err}"
+        )))
     }
 
     /// Whether the spawned `clickhouse server` child is still running. `false`
@@ -188,7 +197,10 @@ impl ClickHouse {
         if ok {
             Ok(body)
         } else {
-            Err(Error::Internal(format!("clickhouse query failed: {}", body.trim())))
+            Err(Error::Internal(format!(
+                "clickhouse query failed: {}",
+                body.trim()
+            )))
         }
     }
 
@@ -196,7 +208,11 @@ impl ClickHouse {
     /// binary's `--version` if the server isn't reachable.
     pub async fn version(&self) -> Result<String> {
         if let Ok(rows) = self.query_rows("SELECT version() AS v").await {
-            if let Some(v) = rows.first().and_then(|r| r.get("v")).and_then(|v| v.as_str()) {
+            if let Some(v) = rows
+                .first()
+                .and_then(|r| r.get("v"))
+                .and_then(|v| v.as_str())
+            {
                 return Ok(format!("ClickHouse server version {v}"));
             }
         }
@@ -287,7 +303,10 @@ impl ClickHouse {
         if ok {
             Ok(())
         } else {
-            Err(Error::Internal(format!("clickhouse insert failed: {}", body.trim())))
+            Err(Error::Internal(format!(
+                "clickhouse insert failed: {}",
+                body.trim()
+            )))
         }
     }
 
@@ -439,13 +458,16 @@ fn ensure_default_metadata(data_dir: &Path) -> Result<()> {
         .to_string();
     if uuid.len() != 36 {
         // Not a UUID-named store dir — leave it to ClickHouse.
-        tracing::warn!("usage: default db link target not a uuid ({uuid:?}); skipping metadata synth");
+        tracing::warn!(
+            "usage: default db link target not a uuid ({uuid:?}); skipping metadata synth"
+        );
         return Ok(());
     }
     let body = format!("ATTACH DATABASE _ UUID '{uuid}'\nENGINE = Atomic\n");
-    std::fs::write(&sql, body)
-        .map_err(|e| Error::Internal(format!("write default.sql: {e}")))?;
-    tracing::info!("usage: synthesized metadata/default.sql for in-place server adoption (uuid {uuid})");
+    std::fs::write(&sql, body).map_err(|e| Error::Internal(format!("write default.sql: {e}")))?;
+    tracing::info!(
+        "usage: synthesized metadata/default.sql for in-place server adoption (uuid {uuid})"
+    );
     Ok(())
 }
 
@@ -479,7 +501,11 @@ async fn reclaim_dir(data_dir: &Path) {
         return; // stale status file / PID reused by an unrelated process
     }
     tracing::warn!("usage: reclaiming clickhouse data dir from stale server pid {pid}");
-    let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).output().await;
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .output()
+        .await;
     // Wait up to 5s for it to exit, then SIGKILL.
     for _ in 0..50 {
         let alive = Command::new("kill")
@@ -494,7 +520,11 @@ async fn reclaim_dir(data_dir: &Path) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output().await;
+    let _ = Command::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .output()
+        .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
@@ -536,16 +566,23 @@ mod tests {
 
     #[test]
     fn urlencode_reserved() {
-        assert_eq!(urlencode("INSERT INTO t FORMAT JSONEachRow"),
-                   "INSERT%20INTO%20t%20FORMAT%20JSONEachRow");
+        assert_eq!(
+            urlencode("INSERT INTO t FORMAT JSONEachRow"),
+            "INSERT%20INTO%20t%20FORMAT%20JSONEachRow"
+        );
         assert_eq!(urlencode("abc-_.~"), "abc-_.~");
     }
 
     #[test]
     fn xml_escape_specials() {
-        assert_eq!(xml_escape("/a&b/<c>/\"d\"/'e'"), "/a&amp;b/&lt;c&gt;/&quot;d&quot;/&apos;e&apos;");
-        assert_eq!(xml_escape("/Users/me/Application Support/Otto"),
-                   "/Users/me/Application Support/Otto");
+        assert_eq!(
+            xml_escape("/a&b/<c>/\"d\"/'e'"),
+            "/a&amp;b/&lt;c&gt;/&quot;d&quot;/&apos;e&apos;"
+        );
+        assert_eq!(
+            xml_escape("/Users/me/Application Support/Otto"),
+            "/Users/me/Application Support/Otto"
+        );
     }
 
     #[test]
@@ -573,7 +610,9 @@ mod tests {
     fn ensure_default_metadata_synthesizes_from_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let meta = dir.path().join("metadata");
-        let store = dir.path().join("store/125/12529a29-611a-4836-91b1-4d7b8c8863fd");
+        let store = dir
+            .path()
+            .join("store/125/12529a29-611a-4836-91b1-4d7b8c8863fd");
         std::fs::create_dir_all(&store).unwrap();
         std::fs::create_dir_all(&meta).unwrap();
         std::os::unix::fs::symlink(&store, meta.join("default")).unwrap();

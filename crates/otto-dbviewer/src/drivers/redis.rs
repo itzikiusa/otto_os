@@ -154,9 +154,13 @@ impl Driver for RedisDriver {
                 saw_db0 = true;
             }
             nodes.push(
-                SchemaNode::new(format!("kdb:{index}"), format!("db{index}"), NodeKind::Keyspace)
-                    .with_detail(format!("{keys} keys"))
-                    .expandable(),
+                SchemaNode::new(
+                    format!("kdb:{index}"),
+                    format!("db{index}"),
+                    NodeKind::Keyspace,
+                )
+                .with_detail(format!("{keys} keys"))
+                .expandable(),
             );
         }
 
@@ -225,7 +229,11 @@ impl Driver for RedisDriver {
                 let mut nodes = Vec::with_capacity(namespaces.len() + bare.len() + 1);
                 for (prefix, count) in namespaces {
                     // Count is from the sample; mark it approximate when truncated.
-                    let detail = if scan.more { format!("{count}+") } else { count.to_string() };
+                    let detail = if scan.more {
+                        format!("{count}+")
+                    } else {
+                        count.to_string()
+                    };
                     nodes.push(
                         SchemaNode::new(
                             format!("kdb:{db}/ns:{prefix}"),
@@ -238,10 +246,16 @@ impl Driver for RedisDriver {
                 }
                 bare.sort();
                 bare.truncate(KEY_LIST_CAP);
-                let bare_scan = ScanOutcome { more: scan.more, keys: bare };
+                let bare_scan = ScanOutcome {
+                    more: scan.more,
+                    keys: bare,
+                };
                 nodes.extend(build_key_nodes(&mut conn, db, bare_scan).await);
                 if scan.more {
-                    nodes.push(truncation_hint(db, "Showing a sample — type a prefix to filter"));
+                    nodes.push(truncation_hint(
+                        db,
+                        "Showing a sample — type a prefix to filter",
+                    ));
                 }
                 Ok(nodes)
             }
@@ -308,7 +322,11 @@ impl Driver for RedisDriver {
         let db = req
             .node
             .as_deref()
-            .and_then(|node| NodePath::parse(node).get("kdb").and_then(|s| s.parse::<i64>().ok()))
+            .and_then(|node| {
+                NodePath::parse(node)
+                    .get("kdb")
+                    .and_then(|s| s.parse::<i64>().ok())
+            })
             .unwrap_or_else(|| default_db(cfg));
         let mut conn = self.connect(cfg, db).await?;
 
@@ -386,7 +404,9 @@ impl Driver for RedisDriver {
         // every keystroke and stalled completion for seconds on large databases.
         let items: Vec<CompletionItem> = REDIS_COMMANDS
             .iter()
-            .map(|(name, summary)| CompletionItem::detailed(*name, CompletionKind::Command, *summary))
+            .map(|(name, summary)| {
+                CompletionItem::detailed(*name, CompletionKind::Command, *summary)
+            })
             .collect();
 
         Ok(CompletionResponse { items })
@@ -437,7 +457,11 @@ fn build_client(cfg: &ResolvedConfig, db: i64) -> Result<Client> {
     // (system roots for verified TLS, or plain TCP).
     let needs_custom_tls = tls
         && (cfg.tls.ca_cert.as_deref().is_some_and(|s| !s.is_empty())
-            || (cfg.tls.client_cert.as_deref().is_some_and(|s| !s.is_empty())
+            || (cfg
+                .tls
+                .client_cert
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
                 && cfg.tls.client_key.as_deref().is_some_and(|s| !s.is_empty())));
 
     if needs_custom_tls {
@@ -517,7 +541,11 @@ async fn scan_keys(
     pattern: Option<&str>,
     key_cap: usize,
 ) -> Result<ScanOutcome> {
-    let count = if pattern.is_some() { SCAN_COUNT_FILTER } else { SCAN_COUNT };
+    let count = if pattern.is_some() {
+        SCAN_COUNT_FILTER
+    } else {
+        SCAN_COUNT
+    };
     let mut cursor: u64 = 0;
     let mut keys: Vec<String> = Vec::new();
     let mut rounds = 0usize;
@@ -579,7 +607,11 @@ async fn build_key_nodes(
 /// A passive (non-clickable, non-expandable) hint row appended to a truncated
 /// key listing. Rendered as a `Folder` so the tree treats it as a label only.
 fn truncation_hint(db: i64, msg: &str) -> SchemaNode {
-    SchemaNode::new(format!("kdb:{db}/hint:{msg}"), format!("⋯ {msg}"), NodeKind::Folder)
+    SchemaNode::new(
+        format!("kdb:{db}/hint:{msg}"),
+        format!("⋯ {msg}"),
+        NodeKind::Folder,
+    )
 }
 
 /// Escape Redis glob metacharacters (`* ? [ ] \`) so a user-typed prefix is
@@ -923,7 +955,10 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
     ("UNLINK", "UNLINK key [key ...] — async delete keys"),
     ("EXISTS", "EXISTS key [key ...] — count existing keys"),
     ("EXPIRE", "EXPIRE key seconds — set a key's TTL"),
-    ("PEXPIRE", "PEXPIRE key ms — set a key's TTL in milliseconds"),
+    (
+        "PEXPIRE",
+        "PEXPIRE key ms — set a key's TTL in milliseconds",
+    ),
     ("EXPIREAT", "EXPIREAT key unix-time — expire at a timestamp"),
     ("TTL", "TTL key — remaining TTL in seconds"),
     ("PTTL", "PTTL key — remaining TTL in milliseconds"),
@@ -932,15 +967,33 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
     ("RENAME", "RENAME key newkey — rename a key"),
     ("RENAMENX", "RENAMENX key newkey — rename if newkey absent"),
     ("RANDOMKEY", "RANDOMKEY — return a random key"),
-    ("KEYS", "KEYS pattern — keys matching a pattern (avoid in prod)"),
-    ("SCAN", "SCAN cursor [MATCH pat] [COUNT n] — incrementally iterate keys"),
+    (
+        "KEYS",
+        "KEYS pattern — keys matching a pattern (avoid in prod)",
+    ),
+    (
+        "SCAN",
+        "SCAN cursor [MATCH pat] [COUNT n] — incrementally iterate keys",
+    ),
     ("DUMP", "DUMP key — serialized value of a key"),
-    ("RESTORE", "RESTORE key ttl value — create a key from a dump"),
-    ("OBJECT", "OBJECT ENCODING|REFCOUNT|IDLETIME key — introspect a key"),
+    (
+        "RESTORE",
+        "RESTORE key ttl value — create a key from a dump",
+    ),
+    (
+        "OBJECT",
+        "OBJECT ENCODING|REFCOUNT|IDLETIME key — introspect a key",
+    ),
     ("HGET", "HGET key field — get a hash field"),
-    ("HSET", "HSET key field value [field value ...] — set hash fields"),
+    (
+        "HSET",
+        "HSET key field value [field value ...] — set hash fields",
+    ),
     ("HSETNX", "HSETNX key field value — set field if absent"),
-    ("HMGET", "HMGET key field [field ...] — get multiple hash fields"),
+    (
+        "HMGET",
+        "HMGET key field [field ...] — get multiple hash fields",
+    ),
     ("HGETALL", "HGETALL key — all fields and values of a hash"),
     ("HDEL", "HDEL key field [field ...] — delete hash fields"),
     ("HEXISTS", "HEXISTS key field — does a hash field exist"),
@@ -953,8 +1006,14 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
     ("RPUSH", "RPUSH key value [value ...] — append to a list"),
     ("LPUSHX", "LPUSHX key value — prepend only if list exists"),
     ("RPUSHX", "RPUSHX key value — append only if list exists"),
-    ("LPOP", "LPOP key [count] — remove and return head element(s)"),
-    ("RPOP", "RPOP key [count] — remove and return tail element(s)"),
+    (
+        "LPOP",
+        "LPOP key [count] — remove and return head element(s)",
+    ),
+    (
+        "RPOP",
+        "RPOP key [count] — remove and return tail element(s)",
+    ),
     ("LRANGE", "LRANGE key start stop — a range of list elements"),
     ("LLEN", "LLEN key — length of a list"),
     ("LINDEX", "LINDEX key index — element at an index"),
@@ -966,23 +1025,50 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
     ("SMEMBERS", "SMEMBERS key — all members of a set"),
     ("SCARD", "SCARD key — number of members in a set"),
     ("SISMEMBER", "SISMEMBER key member — is member of a set"),
-    ("SPOP", "SPOP key [count] — remove and return random member(s)"),
+    (
+        "SPOP",
+        "SPOP key [count] — remove and return random member(s)",
+    ),
     ("SRANDMEMBER", "SRANDMEMBER key [count] — random member(s)"),
     ("SINTER", "SINTER key [key ...] — intersect sets"),
     ("SUNION", "SUNION key [key ...] — union sets"),
     ("SDIFF", "SDIFF key [key ...] — difference of sets"),
     ("SSCAN", "SSCAN key cursor — incrementally iterate a set"),
-    ("ZADD", "ZADD key score member [score member ...] — add to a sorted set"),
-    ("ZREM", "ZREM key member [member ...] — remove from a sorted set"),
-    ("ZRANGE", "ZRANGE key start stop [WITHSCORES] — range by rank"),
-    ("ZREVRANGE", "ZREVRANGE key start stop — range by reverse rank"),
-    ("ZRANGEBYSCORE", "ZRANGEBYSCORE key min max — range by score"),
+    (
+        "ZADD",
+        "ZADD key score member [score member ...] — add to a sorted set",
+    ),
+    (
+        "ZREM",
+        "ZREM key member [member ...] — remove from a sorted set",
+    ),
+    (
+        "ZRANGE",
+        "ZRANGE key start stop [WITHSCORES] — range by rank",
+    ),
+    (
+        "ZREVRANGE",
+        "ZREVRANGE key start stop — range by reverse rank",
+    ),
+    (
+        "ZRANGEBYSCORE",
+        "ZRANGEBYSCORE key min max — range by score",
+    ),
     ("ZSCORE", "ZSCORE key member — score of a member"),
     ("ZRANK", "ZRANK key member — rank of a member"),
     ("ZCARD", "ZCARD key — number of members in a sorted set"),
-    ("ZINCRBY", "ZINCRBY key n member — increment a member's score"),
-    ("ZCOUNT", "ZCOUNT key min max — count members in a score range"),
-    ("ZSCAN", "ZSCAN key cursor — incrementally iterate a sorted set"),
+    (
+        "ZINCRBY",
+        "ZINCRBY key n member — increment a member's score",
+    ),
+    (
+        "ZCOUNT",
+        "ZCOUNT key min max — count members in a score range",
+    ),
+    (
+        "ZSCAN",
+        "ZSCAN key cursor — incrementally iterate a sorted set",
+    ),
     ("INCR", "INCR key — increment an integer value by 1"),
     ("DECR", "DECR key — decrement an integer value by 1"),
     ("INCRBY", "INCRBY key n — increment an integer value by n"),
@@ -990,26 +1076,50 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
     ("INCRBYFLOAT", "INCRBYFLOAT key n — increment a float value"),
     ("MGET", "MGET key [key ...] — get multiple string values"),
     ("MSET", "MSET key value [key value ...] — set multiple keys"),
-    ("MSETNX", "MSETNX key value [key value ...] — set only if none exist"),
-    ("SETRANGE", "SETRANGE key offset value — overwrite part of a string"),
-    ("GETRANGE", "GETRANGE key start end — substring of a string value"),
-    ("INFO", "INFO [section] — server statistics and configuration"),
+    (
+        "MSETNX",
+        "MSETNX key value [key value ...] — set only if none exist",
+    ),
+    (
+        "SETRANGE",
+        "SETRANGE key offset value — overwrite part of a string",
+    ),
+    (
+        "GETRANGE",
+        "GETRANGE key start end — substring of a string value",
+    ),
+    (
+        "INFO",
+        "INFO [section] — server statistics and configuration",
+    ),
     ("DBSIZE", "DBSIZE — number of keys in the current database"),
     ("SELECT", "SELECT index — switch to a logical database"),
-    ("FLUSHDB", "FLUSHDB — remove all keys from the current database"),
+    (
+        "FLUSHDB",
+        "FLUSHDB — remove all keys from the current database",
+    ),
     ("FLUSHALL", "FLUSHALL — remove all keys from all databases"),
     ("PING", "PING [message] — health-check the server"),
     ("ECHO", "ECHO message — echo a message back"),
     ("TIME", "TIME — current server time"),
-    ("CONFIG", "CONFIG GET|SET parameter — read or set server config"),
-    ("CLIENT", "CLIENT subcommand — inspect/manage client connections"),
+    (
+        "CONFIG",
+        "CONFIG GET|SET parameter — read or set server config",
+    ),
+    (
+        "CLIENT",
+        "CLIENT subcommand — inspect/manage client connections",
+    ),
     ("COMMAND", "COMMAND [COUNT|INFO|DOCS] — command metadata"),
     ("MEMORY", "MEMORY USAGE key — estimate memory used by a key"),
     ("WAIT", "WAIT numreplicas timeout — wait for replication"),
     ("MULTI", "MULTI — start a transaction"),
     ("EXEC", "EXEC — execute a queued transaction"),
     ("DISCARD", "DISCARD — discard a queued transaction"),
-    ("SUBSCRIBE", "SUBSCRIBE channel [channel ...] — subscribe to channels"),
+    (
+        "SUBSCRIBE",
+        "SUBSCRIBE channel [channel ...] — subscribe to channels",
+    ),
     ("PUBLISH", "PUBLISH channel message — publish to a channel"),
 ];
 
@@ -1025,7 +1135,10 @@ mod tests {
         let v = bytes_to_json(vec![0xff, 0xfe, 0x00, 0x01]);
         assert_eq!(v, JsonValue::String("//4AAQ==".to_string()));
         // UTF-8 stays plain text.
-        assert_eq!(bytes_to_json(b"hello".to_vec()), JsonValue::String("hello".into()));
+        assert_eq!(
+            bytes_to_json(b"hello".to_vec()),
+            JsonValue::String("hello".into())
+        );
     }
 
     #[test]

@@ -13,8 +13,8 @@ use otto_core::auth::{AuthUser, RoleChecker};
 use otto_core::domain::WorkspaceRole;
 use otto_core::event::Event;
 use otto_core::{Error, Id};
-use otto_state::{RunFilter, Swarm, SwarmAgent, SwarmMessage, SwarmProject, SwarmRun, SwarmTask};
 use otto_state::WorkspacesRepo;
+use otto_state::{RunFilter, Swarm, SwarmAgent, SwarmMessage, SwarmProject, SwarmRun, SwarmTask};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
@@ -77,7 +77,9 @@ pub fn router<S: SwarmCtx>() -> Router<S> {
         )
         .route(
             "/swarm/swarms/{sid}",
-            get(get_swarm::<S>).patch(update_swarm::<S>).delete(delete_swarm::<S>),
+            get(get_swarm::<S>)
+                .patch(update_swarm::<S>)
+                .delete(delete_swarm::<S>),
         )
         // Agents
         .route(
@@ -175,7 +177,10 @@ async fn create_swarm<S: SwarmCtx>(
     // Preset instantiation (Phase 5) maps providers to installed CLIs; for a blank
     // create or when the preset is unknown we just create the swarm row.
     let preset = req.preset_slug.clone();
-    let swarm = s.swarm().create_swarm(&ws, &user.0.id, req, &default).await?;
+    let swarm = s
+        .swarm()
+        .create_swarm(&ws, &user.0.id, req, &default)
+        .await?;
     if let Some(slug) = preset {
         // Best-effort: ignore unknown presets (blank swarm remains usable).
         let _ = crate::presets::instantiate(
@@ -288,7 +293,9 @@ async fn create_project<S: SwarmCtx>(
 ) -> ApiResult<Json<SwarmProject>> {
     let swarm = s.swarm().get_swarm(&sid).await?;
     check(&s, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
-    Ok(Json(s.swarm().create_project(&swarm, &user.0.id, req).await?))
+    Ok(Json(
+        s.swarm().create_project(&swarm, &user.0.id, req).await?,
+    ))
 }
 
 async fn update_project<S: SwarmCtx>(
@@ -429,7 +436,10 @@ async fn post_board<S: SwarmCtx>(
 ) -> ApiResult<Json<SwarmMessage>> {
     let swarm = s.swarm().get_swarm(&sid).await?;
     check(&s, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
-    let msg = s.swarm().post_human_message(&swarm, &user.0.id, req).await?;
+    let msg = s
+        .swarm()
+        .post_human_message(&swarm, &user.0.id, req)
+        .await?;
     let _ = s.events().send(Event::SwarmMessagePosted {
         workspace_id: swarm.workspace_id.clone(),
         swarm_id: swarm.id.clone(),
@@ -469,7 +479,10 @@ async fn task_story_link<S: SwarmCtx>(
 
     let Some(product_repo) = s.product_repo() else {
         // Host application has no product layer; return empty link.
-        return Ok(Json(TaskStoryLink { story: None, acceptance: None }));
+        return Ok(Json(TaskStoryLink {
+            story: None,
+            acceptance: None,
+        }));
     };
 
     // Find the swarm project for this task, then look up its source story.

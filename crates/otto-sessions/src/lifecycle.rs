@@ -58,11 +58,7 @@ pub fn claude_transcript_path(home: &Path, cwd: &str, provider_session_id: &str)
 /// string): scan every immediate subdirectory of `~/.claude/projects` for a
 /// `<provider_session_id>.jsonl`. Returns `Exists`/`Gone`; never `Unknown`
 /// (the caller decides `Unknown` when it has no home/session id).
-pub fn claude_transcript_exists(
-    home: &Path,
-    cwd: &str,
-    provider_session_id: &str,
-) -> Resumability {
+pub fn claude_transcript_exists(home: &Path, cwd: &str, provider_session_id: &str) -> Resumability {
     // Fast path: exact encoded location.
     if claude_transcript_path(home, cwd, provider_session_id).is_file() {
         return Resumability::Exists;
@@ -145,7 +141,8 @@ pub fn transcript_path_in_roots(
             }
             Err(R::TranscriptMissing)
         }
-        _ => crate::manager::codex_rollout_path_under(codex_root, psid).ok_or(R::CodexRolloutUnresolved),
+        _ => crate::manager::codex_rollout_path_under(codex_root, psid)
+            .ok_or(R::CodexRolloutUnresolved),
     }
 }
 
@@ -297,17 +294,32 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let sid = "11111111-2222-3333-4444-555555555555";
         // No id → NoProviderSessionId; shell/agy → ProviderUnsupported.
-        assert_eq!(transcript_path(home.path(), "claude", "/x", None), Err(R::NoProviderSessionId));
-        assert_eq!(transcript_path(home.path(), "shell", "/x", Some(sid)), Err(R::ProviderUnsupported));
-        assert_eq!(transcript_path(home.path(), "agy", "/x", Some(sid)), Err(R::ProviderUnsupported));
+        assert_eq!(
+            transcript_path(home.path(), "claude", "/x", None),
+            Err(R::NoProviderSessionId)
+        );
+        assert_eq!(
+            transcript_path(home.path(), "shell", "/x", Some(sid)),
+            Err(R::ProviderUnsupported)
+        );
+        assert_eq!(
+            transcript_path(home.path(), "agy", "/x", Some(sid)),
+            Err(R::ProviderUnsupported)
+        );
         // Missing file → TranscriptMissing; present (even under a differently
         // encoded project dir) → the path.
-        assert_eq!(transcript_path(home.path(), "claude", "/x", Some(sid)), Err(R::TranscriptMissing));
+        assert_eq!(
+            transcript_path(home.path(), "claude", "/x", Some(sid)),
+            Err(R::TranscriptMissing)
+        );
         let dir = home.path().join(".claude").join("projects").join("-other");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(format!("{sid}.jsonl"));
         std::fs::write(&file, b"{}").unwrap();
-        assert_eq!(transcript_path(home.path(), "claude", "/x", Some(sid)), Ok(file));
+        assert_eq!(
+            transcript_path(home.path(), "claude", "/x", Some(sid)),
+            Ok(file)
+        );
     }
 
     #[test]

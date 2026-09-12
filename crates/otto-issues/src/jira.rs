@@ -1304,9 +1304,7 @@ impl JiraClient {
                 arr.iter()
                     .filter(|t| {
                         // Filter out subtask types
-                        !t.get("subtask")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
+                        !t.get("subtask").and_then(|v| v.as_bool()).unwrap_or(false)
                     })
                     .filter_map(|t| {
                         t.get("name")
@@ -1444,8 +1442,8 @@ pub(crate) fn parse_editmeta(body: &serde_json::Value) -> Vec<EditableField> {
         "description",
         "status",
         "issuetype",
-        "assignee",  // assignee has its own card + assignable search flow
-        "reporter",  // reporter has its own read-only row; generic editor is wrong for it
+        "assignee", // assignee has its own card + assignable search flow
+        "reporter", // reporter has its own read-only row; generic editor is wrong for it
         "issuelinks",
         "comment",
         "attachment",
@@ -1619,10 +1617,7 @@ pub fn parse_issue_full(
                         .and_then(|v| v.as_str())
                         .unwrap_or("application/octet-stream")
                         .to_string();
-                    let size = a
-                        .get("size")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
+                    let size = a.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
                     let created = a
                         .get("created")
                         .and_then(|v| v.as_str())
@@ -2227,7 +2222,11 @@ pub(crate) fn merge_dev_detail(out: &mut DevStatus, body: &serde_json::Value) {
                         t
                     } else {
                         let t = dev_str(c, "timestamp");
-                        if !t.is_empty() { t } else { dev_str(c, "date") }
+                        if !t.is_empty() {
+                            t
+                        } else {
+                            dev_str(c, "date")
+                        }
                     }
                 };
                 out.commits.push(DevCommit {
@@ -2410,13 +2409,22 @@ mod tests {
         assert!(keys.contains(&"priority"));
         // Sorted by display name: Labels, Priority, Severity, Story Points.
         let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, vec!["Labels", "Priority", "Severity", "Story Points"]);
+        assert_eq!(
+            names,
+            vec!["Labels", "Priority", "Severity", "Story Points"]
+        );
 
-        let sp = fields.iter().find(|f| f.key == "customfield_10016").unwrap();
+        let sp = fields
+            .iter()
+            .find(|f| f.key == "customfield_10016")
+            .unwrap();
         assert_eq!(sp.schema_type, "number");
         assert!(sp.allowed_values.is_empty());
 
-        let severity = fields.iter().find(|f| f.key == "customfield_10020").unwrap();
+        let severity = fields
+            .iter()
+            .find(|f| f.key == "customfield_10020")
+            .unwrap();
         assert_eq!(severity.schema_type, "option");
         assert!(severity.required);
         assert_eq!(severity.allowed_values.len(), 2);
@@ -2546,10 +2554,7 @@ mod tests {
         assert_eq!(issue.summary, "Login page crashes on mobile");
         assert_eq!(issue.status, "In Progress");
         assert_eq!(issue.issue_type, "Bug");
-        assert_eq!(
-            issue.url,
-            "https://example.atlassian.net/browse/PROJ-123"
-        );
+        assert_eq!(issue.url, "https://example.atlassian.net/browse/PROJ-123");
         assert_eq!(issue.priority, Some("High".to_string()));
         assert_eq!(issue.labels, vec!["mobile", "crash"]);
     }

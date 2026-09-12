@@ -154,7 +154,11 @@ async fn clickhouse_run() {
         .run(&cfg, &query("SELECT count() AS c FROM analytics.events"))
         .await
         .expect("run count()");
-    assert_eq!(result.rows.len(), 1, "count() should return exactly one row");
+    assert_eq!(
+        result.rows.len(),
+        1,
+        "count() should return exactly one row"
+    );
     let cell = &result.rows[0][0];
     let count_ok = cell.as_i64() == Some(5)
         || cell.as_u64() == Some(5)
@@ -300,7 +304,10 @@ async fn clickhouse_native_e2e() {
     let d = ClickhouseDriver::default();
 
     // test() connects over native and reports the server version.
-    let test = d.test(&native_cfg).await.expect("native test() should not error");
+    let test = d
+        .test(&native_cfg)
+        .await
+        .expect("native test() should not error");
     assert!(test.ok, "native test() expected ok, got: {}", test.message);
     assert!(
         test.server_version.is_some(),
@@ -313,7 +320,10 @@ async fn clickhouse_native_e2e() {
 
     // run() count rows in events; expect 5, over native.
     let result = d
-        .run(&native_cfg, &query("SELECT count() AS c FROM analytics.events"))
+        .run(
+            &native_cfg,
+            &query("SELECT count() AS c FROM analytics.events"),
+        )
         .await
         .expect("native run count()");
     assert_eq!(
@@ -332,7 +342,10 @@ async fn clickhouse_native_e2e() {
     assert_eq!(result.columns[0].name, "c", "column should be named c");
 
     // schema_root lists the analytics database over native.
-    let roots = d.schema_root(&native_cfg).await.expect("native schema_root");
+    let roots = d
+        .schema_root(&native_cfg)
+        .await
+        .expect("native schema_root");
     assert!(
         roots.iter().any(|n| n.label == "analytics"),
         "native schema_root should contain 'analytics', got: {:?}",

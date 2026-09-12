@@ -31,8 +31,8 @@ pub struct McpServersRepo {
 }
 
 fn row_to_server(r: &sqlx::sqlite::SqliteRow) -> Result<McpServer> {
-    let args: Vec<String> = serde_json::from_value(json(&r.get::<String, _>("args_json"))?)
-        .unwrap_or_default();
+    let args: Vec<String> =
+        serde_json::from_value(json(&r.get::<String, _>("args_json"))?).unwrap_or_default();
     let env: BTreeMap<String, String> =
         serde_json::from_value(json(&r.get::<String, _>("env_json"))?).unwrap_or_default();
     // Control-plane columns (0077) shared by this surface: key NAMES of the
@@ -301,9 +301,23 @@ mod tests {
         // Enabling a governed resource must never distribute raw upstream secrets.
         assert!(repo.list_enabled(&ws).await.unwrap().is_empty());
         let access = crate::ResourceAccessRepo::new(pool.clone());
-        let old = access.get_policy(otto_core::access::ResourceKind::McpServer,&s.id).await.unwrap();
-        let mut legacy = old.clone(); legacy.mode = otto_core::access::AccessMode::Legacy;
-        access.put_policy(&legacy,old.revision,&otto_core::access::AccessActor {real_user_id:user.clone(),effective_user_id:None}).await.unwrap();
+        let old = access
+            .get_policy(otto_core::access::ResourceKind::McpServer, &s.id)
+            .await
+            .unwrap();
+        let mut legacy = old.clone();
+        legacy.mode = otto_core::access::AccessMode::Legacy;
+        access
+            .put_policy(
+                &legacy,
+                old.revision,
+                &otto_core::access::AccessActor {
+                    real_user_id: user.clone(),
+                    effective_user_id: None,
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(repo.list_enabled(&ws).await.unwrap().len(), 1);
 
         // Rename + retarget args.
@@ -319,7 +333,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.name, "linear-mcp");
-        assert_eq!(s.args.last().map(String::as_str), Some("@linear/mcp@latest"));
+        assert_eq!(
+            s.args.last().map(String::as_str),
+            Some("@linear/mcp@latest")
+        );
 
         repo.delete(&s.id).await.unwrap();
         assert!(repo.list_for_ws(&ws).await.unwrap().is_empty());

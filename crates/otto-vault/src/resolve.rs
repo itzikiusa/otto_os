@@ -33,7 +33,10 @@ impl ResolveIndex {
     pub fn insert(&mut self, path: String) {
         let lower = path.to_lowercase();
         if let Some(base) = lower.rsplit('/').next() {
-            self.by_basename.entry(base.to_string()).or_default().push(path.clone());
+            self.by_basename
+                .entry(base.to_string())
+                .or_default()
+                .push(path.clone());
         }
         self.by_path.insert(lower, path);
     }
@@ -96,7 +99,11 @@ impl ResolveIndex {
 /// Join `dir` + `rel`, normalizing `.` / `..` — returns None if it escapes the
 /// vault root.
 pub fn join_normalize(dir: &str, rel: &str) -> Option<String> {
-    let mut parts: Vec<&str> = if dir.is_empty() { Vec::new() } else { dir.split('/').collect() };
+    let mut parts: Vec<&str> = if dir.is_empty() {
+        Vec::new()
+    } else {
+        dir.split('/').collect()
+    };
     for seg in rel.split('/') {
         match seg {
             "" | "." => {}
@@ -148,7 +155,10 @@ mod tests {
             ix().resolve("services/auth-api.md", "../tables/Customers.md"),
             Some("tables/Customers.md".into())
         );
-        assert_eq!(ix().resolve("services/auth-api.md", "../../escape.md"), None);
+        assert_eq!(
+            ix().resolve("services/auth-api.md", "../../escape.md"),
+            None
+        );
     }
 
     #[test]
@@ -165,7 +175,10 @@ mod tests {
             ix().resolve("index.md", "unique note"),
             Some("notes/deep/Unique Note.md".into())
         );
-        assert_eq!(ix().resolve("index.md", "customers"), Some("tables/Customers.md".into()));
+        assert_eq!(
+            ix().resolve("index.md", "customers"),
+            Some("tables/Customers.md".into())
+        );
     }
 
     #[test]
@@ -175,6 +188,9 @@ mod tests {
 
     #[test]
     fn attachment_with_extension() {
-        assert_eq!(ix().resolve("index.md", "img.png"), Some("assets/img.png".into()));
+        assert_eq!(
+            ix().resolve("index.md", "img.png"),
+            Some("assets/img.png".into())
+        );
     }
 }

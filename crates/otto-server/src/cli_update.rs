@@ -104,7 +104,12 @@ fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
 }
 
 /// The scheduled instant for "today" (UTC or local per `use_utc`), as UTC.
-fn scheduled_today(now: DateTime<Utc>, use_utc: bool, hour: u32, minute: u32) -> Option<DateTime<Utc>> {
+fn scheduled_today(
+    now: DateTime<Utc>,
+    use_utc: bool,
+    hour: u32,
+    minute: u32,
+) -> Option<DateTime<Utc>> {
     if use_utc {
         let naive = now.date_naive().and_hms_opt(hour, minute, 0)?;
         Some(Utc.from_utc_datetime(&naive))

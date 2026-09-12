@@ -16,10 +16,7 @@ use crate::state::ServerCtx;
 /// to a never-existing name instead of escaping it.
 fn worktree_dir(ctx: &ServerCtx, loop_id: &str) -> std::path::PathBuf {
     let id = otto_core::paths::safe_component(loop_id).unwrap_or("invalid");
-    ctx.data_dir
-        .join("goal-loops")
-        .join(id)
-        .join("work")
+    ctx.data_dir.join("goal-loops").join(id).join("work")
 }
 
 /// Ensure the loop has an isolated worktree + branch, returning
@@ -30,7 +27,10 @@ fn worktree_dir(ctx: &ServerCtx, loop_id: &str) -> std::path::PathBuf {
 /// preserved). Otherwise a fresh worktree is created from the repo's current
 /// HEAD. A pre-existing path with no record is an error (we never reuse foreign
 /// or stale trees, and never force-reset a branch).
-pub async fn provision_worktree(ctx: &ServerCtx, loop_: &GoalLoop) -> Result<(String, String, String)> {
+pub async fn provision_worktree(
+    ctx: &ServerCtx,
+    loop_: &GoalLoop,
+) -> Result<(String, String, String)> {
     let git = otto_git::LocalGit::new(&loop_.repo_path);
     let path = worktree_dir(ctx, &loop_.id);
     let path_str = path.to_string_lossy().to_string();

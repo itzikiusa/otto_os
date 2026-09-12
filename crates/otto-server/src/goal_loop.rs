@@ -18,11 +18,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use otto_core::api::CreateSessionReq;
 use otto_core::domain::{
     GoalLoop, GoalLoopAgentCfg, GoalLoopEvaluation, GoalLoopPhase, GoalLoopRoleCfg, GoalLoopStatus,
     LoopAgentState, SessionKind,
 };
-use otto_core::api::CreateSessionReq;
 use otto_core::event::Event;
 use otto_core::{Error, Id, Result};
 
@@ -106,7 +106,15 @@ pub async fn start_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
     }
     let loop_id = loop_id.clone();
     let ws = loop_.workspace_id.clone();
-    emit(ctx, &ws, &loop_id, GoalLoopStatus::Running, GoalLoopPhase::Planning, loop_.current_iteration, loop_.progress_pct);
+    emit(
+        ctx,
+        &ws,
+        &loop_id,
+        GoalLoopStatus::Running,
+        GoalLoopPhase::Planning,
+        loop_.current_iteration,
+        loop_.progress_pct,
+    );
     let ctx2 = ctx.clone();
     tokio::spawn(async move {
         controller(ctx2, loop_id, handle).await;
@@ -122,7 +130,9 @@ pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
         let secs = (Utc::now() - started).num_seconds().max(0) as u64;
         ctx.goal_loops_repo.add_elapsed(loop_id, secs).await?;
     }
-    ctx.goal_loops_repo.set_run_started_at(loop_id, None).await?;
+    ctx.goal_loops_repo
+        .set_run_started_at(loop_id, None)
+        .await?;
     ctx.goal_loops_repo
         .update_runtime(
             loop_id,
@@ -135,7 +145,15 @@ pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
     if let Some(h) = ctx.goal_loops.lock().unwrap().get(&loop_id.to_string()) {
         h.paused.store(true, Ordering::Relaxed);
     }
-    emit(ctx, &loop_.workspace_id, loop_id, GoalLoopStatus::Paused, loop_.phase, loop_.current_iteration, loop_.progress_pct);
+    emit(
+        ctx,
+        &loop_.workspace_id,
+        loop_id,
+        GoalLoopStatus::Paused,
+        loop_.phase,
+        loop_.current_iteration,
+        loop_.progress_pct,
+    );
     Ok(())
 }
 
@@ -162,7 +180,14 @@ pub async fn stop_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
     cleanup_executor_sessions(ctx, &loop_.workspace_id, loop_id).await;
     if !had_controller {
         // No live controller (e.g. Blocked/Exhausted) — finalize directly.
-        finalize(ctx, loop_id, GoalLoopStatus::Stopped, Some("stopped by user"), None).await;
+        finalize(
+            ctx,
+            loop_id,
+            GoalLoopStatus::Stopped,
+            Some("stopped by user"),
+            None,
+        )
+        .await;
     }
     Ok(())
 }
@@ -242,7 +267,14 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             // handle and cancelled ours; in that case the new controller owns
             // the loop and must NOT have its run torn down by us.
             if is_current(&ctx, &loop_id, &handle) {
-                finalize(&ctx, &loop_id, GoalLoopStatus::Stopped, Some("stopped by user"), None).await;
+                finalize(
+                    &ctx,
+                    &loop_id,
+                    GoalLoopStatus::Stopped,
+                    Some("stopped by user"),
+                    None,
+                )
+                .await;
             }
             deregister(&ctx, &loop_id, &handle);
             return;
@@ -252,7 +284,14 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             continue;
         }
         if started.elapsed() >= HARD_CAP {
-            finalize(&ctx, &loop_id, GoalLoopStatus::Exhausted, Some("controller lifetime cap reached"), None).await;
+            finalize(
+                &ctx,
+                &loop_id,
+                GoalLoopStatus::Exhausted,
+                Some("controller lifetime cap reached"),
+                None,
+            )
+            .await;
             deregister(&ctx, &loop_id, &handle);
             return;
         }
@@ -271,18 +310,39 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
 
         // ---- HARD-LIMIT GATE (before starting an iteration) ----
         if loop_.iterations_started >= limits.max_iterations {
-            finalize(&ctx, &loop_id, GoalLoopStatus::Exhausted, Some("iteration cap reached"), None).await;
+            finalize(
+                &ctx,
+                &loop_id,
+                GoalLoopStatus::Exhausted,
+                Some("iteration cap reached"),
+                None,
+            )
+            .await;
             deregister(&ctx, &loop_id, &handle);
             return;
         }
         if loop_.elapsed_secs_at(Utc::now()) >= limits.max_runtime_secs {
-            finalize(&ctx, &loop_id, GoalLoopStatus::Exhausted, Some("time cap reached"), None).await;
+            finalize(
+                &ctx,
+                &loop_id,
+                GoalLoopStatus::Exhausted,
+                Some("time cap reached"),
+                None,
+            )
+            .await;
             deregister(&ctx, &loop_id, &handle);
             return;
         }
         if let Some(cap) = limits.max_cost_usd {
             if loop_.cost_usd >= cap {
-                finalize(&ctx, &loop_id, GoalLoopStatus::Exhausted, Some("cost cap reached"), None).await;
+                finalize(
+                    &ctx,
+                    &loop_id,
+                    GoalLoopStatus::Exhausted,
+                    Some("cost cap reached"),
+                    None,
+                )
+                .await;
                 deregister(&ctx, &loop_id, &handle);
                 return;
             }
@@ -293,7 +353,14 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(loop = %loop_id, "goal-loop: bump failed: {e}");
-                finalize(&ctx, &loop_id, GoalLoopStatus::Failed, None, Some(&e.to_string())).await;
+                finalize(
+                    &ctx,
+                    &loop_id,
+                    GoalLoopStatus::Failed,
+                    None,
+                    Some(&e.to_string()),
+                )
+                .await;
                 deregister(&ctx, &loop_id, &handle);
                 return;
             }
@@ -307,16 +374,34 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             Ok(it) => it,
             Err(e) => {
                 tracing::warn!(loop = %loop_id, "goal-loop: add_iteration failed: {e}");
-                finalize(&ctx, &loop_id, GoalLoopStatus::Failed, None, Some(&e.to_string())).await;
+                finalize(
+                    &ctx,
+                    &loop_id,
+                    GoalLoopStatus::Failed,
+                    None,
+                    Some(&e.to_string()),
+                )
+                .await;
                 deregister(&ctx, &loop_id, &handle);
                 return;
             }
         };
-        let wt = loop_.worktree_path.clone().unwrap_or_else(|| loop_.repo_path.clone());
+        let wt = loop_
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| loop_.repo_path.clone());
 
         // ---- PLAN ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Planning, idx).await;
-        let plan = match run_role(&ctx, &loop_.config.planner, planner_prompt(&loop_, &context_in, prior_eval.as_ref(), idx), &wt, limits.per_phase_timeout_secs).await {
+        let plan = match run_role(
+            &ctx,
+            &loop_.config.planner,
+            planner_prompt(&loop_, &context_in, prior_eval.as_ref(), idx),
+            &wt,
+            limits.per_phase_timeout_secs,
+        )
+        .await
+        {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(loop = %loop_id, "goal-loop: planner failed: {e}");
@@ -330,7 +415,10 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
 
         // ---- EXECUTE (sequential) ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Executing, idx).await;
-        let _ = ctx.goal_loops_repo.update_iteration_status(&iter.id, "executing", false).await;
+        let _ = ctx
+            .goal_loops_repo
+            .update_iteration_status(&iter.id, "executing", false)
+            .await;
         let mut exec_summaries: Vec<String> = Vec::new();
         for (i, exec) in loop_.config.executors.iter().enumerate() {
             if stop_requested(&handle) {
@@ -338,9 +426,26 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             }
             let out_path = executor_out_path(&loop_id, idx, i);
             let _ = std::fs::remove_file(&out_path);
-            let prompt = executor_prompt(&loop_, exec, &plan, &context_in, &out_path.to_string_lossy());
+            let prompt = executor_prompt(
+                &loop_,
+                exec,
+                &plan,
+                &context_in,
+                &out_path.to_string_lossy(),
+            );
             let _ = std::fs::write(prompt_path(&loop_id, idx, i), &prompt);
-            let summary = run_executor(&ctx, &loop_, &iter.id, idx, i, exec, &wt, &prompt, Some(&handle.cancel)).await;
+            let summary = run_executor(
+                &ctx,
+                &loop_,
+                &iter.id,
+                idx,
+                i,
+                exec,
+                &wt,
+                &prompt,
+                Some(&handle.cancel),
+            )
+            .await;
             exec_summaries.push(format!("{}: {}", exec.name, summary));
         }
         if stop_requested(&handle) {
@@ -349,25 +454,70 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
 
         // ---- EVALUATE ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Evaluating, idx).await;
-        let _ = ctx.goal_loops_repo.update_iteration_status(&iter.id, "evaluating", false).await;
-        let (eval, verify_caps) = evaluate(&ctx, &loop_, &wt, &exec_summaries, limits.per_phase_timeout_secs).await;
-        let _ = ctx.goal_loops_repo.set_iter_evaluation(&iter.id, &eval).await;
+        let _ = ctx
+            .goal_loops_repo
+            .update_iteration_status(&iter.id, "evaluating", false)
+            .await;
+        let (eval, verify_caps) = evaluate(
+            &ctx,
+            &loop_,
+            &wt,
+            &exec_summaries,
+            limits.per_phase_timeout_secs,
+        )
+        .await;
+        let _ = ctx
+            .goal_loops_repo
+            .set_iter_evaluation(&iter.id, &eval)
+            .await;
         let progress = eval.progress_pct.min(100);
         let _ = ctx
             .goal_loops_repo
-            .update_runtime(&loop_id, GoalLoopStatus::Running, GoalLoopPhase::Evaluating, idx, progress)
+            .update_runtime(
+                &loop_id,
+                GoalLoopStatus::Running,
+                GoalLoopPhase::Evaluating,
+                idx,
+                progress,
+            )
             .await;
-        emit(&ctx, &ws, &loop_id, GoalLoopStatus::Running, GoalLoopPhase::Evaluating, idx, progress);
+        emit(
+            &ctx,
+            &ws,
+            &loop_id,
+            GoalLoopStatus::Running,
+            GoalLoopPhase::Evaluating,
+            idx,
+            progress,
+        );
 
         // ---- DIGEST ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Digesting, idx).await;
-        let _ = ctx.goal_loops_repo.update_iteration_status(&iter.id, "digesting", false).await;
-        let digest = run_role(&ctx, &loop_.config.digester, digester_prompt(&context_in, &plan, &exec_summaries, &eval), &wt, limits.per_phase_timeout_secs)
-            .await
-            .unwrap_or(context_in);
-        let _ = ctx.goal_loops_repo.set_iter_context_out(&iter.id, &digest).await;
-        let _ = ctx.goal_loops_repo.set_context_digest(&loop_id, &digest).await;
-        let _ = ctx.goal_loops_repo.update_iteration_status(&iter.id, "done", true).await;
+        let _ = ctx
+            .goal_loops_repo
+            .update_iteration_status(&iter.id, "digesting", false)
+            .await;
+        let digest = run_role(
+            &ctx,
+            &loop_.config.digester,
+            digester_prompt(&context_in, &plan, &exec_summaries, &eval),
+            &wt,
+            limits.per_phase_timeout_secs,
+        )
+        .await
+        .unwrap_or(context_in);
+        let _ = ctx
+            .goal_loops_repo
+            .set_iter_context_out(&iter.id, &digest)
+            .await;
+        let _ = ctx
+            .goal_loops_repo
+            .set_context_digest(&loop_id, &digest)
+            .await;
+        let _ = ctx
+            .goal_loops_repo
+            .update_iteration_status(&iter.id, "done", true)
+            .await;
         prior_eval = Some(eval.clone());
 
         // ---- DECISION ----
@@ -376,7 +526,8 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             // Package this iteration's evidence into a proof pack (diff, verify
             // commands, self-review, criteria summary) and read back its derived
             // status. Always attached — this is the "no done without evidence" record.
-            let proof_status = assemble_goal_loop_proof(&ctx, &loop_, &eval, &verify_caps, &wt).await;
+            let proof_status =
+                assemble_goal_loop_proof(&ctx, &loop_, &eval, &verify_caps, &wt).await;
 
             // Teeth (opt-in via OTTO_PROOF_REQUIRE_GOAL_LOOP): refuse to finalize
             // "achieved" without a passing machine-checked test, unless this is the
@@ -398,7 +549,9 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                 let _ = ctx.events.send(Event::Notice {
                     level: "warn".into(),
                     title: "Goal loop: proof required".into(),
-                    body: "Reported done without passing test evidence — continuing to gather proof.".into(),
+                    body:
+                        "Reported done without passing test evidence — continuing to gather proof."
+                            .into(),
                 });
                 continue;
             }
@@ -410,8 +563,18 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                 }
                 _ => "",
             };
-            let summary = format!("Goal achieved in {idx} iteration(s). {}{}", eval.rationale, proof_note);
-            finalize(&ctx, &loop_id, GoalLoopStatus::Succeeded, Some(&summary), None).await;
+            let summary = format!(
+                "Goal achieved in {idx} iteration(s). {}{}",
+                eval.rationale, proof_note
+            );
+            finalize(
+                &ctx,
+                &loop_id,
+                GoalLoopStatus::Succeeded,
+                Some(&summary),
+                None,
+            )
+            .await;
             deregister(&ctx, &loop_id, &handle);
             return;
         }
@@ -419,7 +582,15 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             let summary = format!("Blocked — needs input. {}", eval.feedback);
             // Bank the active window and stop ticking; resume requires user action.
             block(&ctx, &loop_id, &summary).await;
-            emit(&ctx, &ws, &loop_id, GoalLoopStatus::Blocked, GoalLoopPhase::Done, idx, progress);
+            emit(
+                &ctx,
+                &ws,
+                &loop_id,
+                GoalLoopStatus::Blocked,
+                GoalLoopPhase::Done,
+                idx,
+                progress,
+            );
             // Surface a free-form notice so the user knows to intervene.
             let _ = ctx.events.send(Event::Notice {
                 level: "warn".into(),
@@ -462,9 +633,23 @@ fn deregister(ctx: &ServerCtx, loop_id: &Id, handle: &LoopHandle) {
 async fn set_phase(ctx: &ServerCtx, ws: &Id, loop_: &GoalLoop, phase: GoalLoopPhase, idx: u32) {
     let _ = ctx
         .goal_loops_repo
-        .update_runtime(&loop_.id, GoalLoopStatus::Running, phase, idx, loop_.progress_pct)
+        .update_runtime(
+            &loop_.id,
+            GoalLoopStatus::Running,
+            phase,
+            idx,
+            loop_.progress_pct,
+        )
         .await;
-    emit(ctx, ws, &loop_.id, GoalLoopStatus::Running, phase, idx, loop_.progress_pct);
+    emit(
+        ctx,
+        ws,
+        &loop_.id,
+        GoalLoopStatus::Running,
+        phase,
+        idx,
+        loop_.progress_pct,
+    );
 }
 
 /// Bank the final active window, mark the loop terminal, remove the worktree
@@ -484,7 +669,10 @@ async fn finalize(
         let secs = (Utc::now() - started).num_seconds().max(0) as u64;
         let _ = ctx.goal_loops_repo.add_elapsed(loop_id, secs).await;
     }
-    let _ = ctx.goal_loops_repo.finalize(loop_id, status, summary, error).await;
+    let _ = ctx
+        .goal_loops_repo
+        .finalize(loop_id, status, summary, error)
+        .await;
     // Remove the worktree only for TRULY terminal states. Exhausted is
     // resumable (raise limits + Resume), so keep its worktree — recreating it
     // later would `-B`-reset the branch and destroy the loop's commits.
@@ -495,7 +683,15 @@ async fn finalize(
         crate::goal_loop_workspace::remove_worktree(ctx, &loop_).await;
     }
     cleanup_executor_sessions(ctx, &loop_.workspace_id, loop_id).await;
-    emit(ctx, &loop_.workspace_id, loop_id, status, GoalLoopPhase::Done, loop_.current_iteration, loop_.progress_pct);
+    emit(
+        ctx,
+        &loop_.workspace_id,
+        loop_id,
+        status,
+        GoalLoopPhase::Done,
+        loop_.current_iteration,
+        loop_.progress_pct,
+    );
 }
 
 /// Block the loop (awaiting user) without treating it as terminal-finished: bank
@@ -566,7 +762,9 @@ async fn run_role(
         .run_agent(&prompt, cwd, model_opt(&role.model), ROLE_NO_PROGRESS);
     match tokio::time::timeout(Duration::from_secs(per_phase_secs), fut).await {
         Ok(r) => r,
-        Err(_) => Err(Error::Internal("role turn exceeded per-phase timeout".into())),
+        Err(_) => Err(Error::Internal(
+            "role turn exceeded per-phase timeout".into(),
+        )),
     }
 }
 
@@ -602,14 +800,33 @@ fn goal_context(loop_: &GoalLoop) -> String {
     s
 }
 
-fn planner_prompt(loop_: &GoalLoop, context_in: &str, prior: Option<&GoalLoopEvaluation>, idx: u32) -> String {
-    let mut s = format!("{}\n\n{}\n\n", loop_.config.planner.prompt, goal_context(loop_));
-    s.push_str(&format!("This is iteration {idx} of at most {}.\n", loop_.limits.max_iterations));
+fn planner_prompt(
+    loop_: &GoalLoop,
+    context_in: &str,
+    prior: Option<&GoalLoopEvaluation>,
+    idx: u32,
+) -> String {
+    let mut s = format!(
+        "{}\n\n{}\n\n",
+        loop_.config.planner.prompt,
+        goal_context(loop_)
+    );
+    s.push_str(&format!(
+        "This is iteration {idx} of at most {}.\n",
+        loop_.limits.max_iterations
+    ));
     if !context_in.is_empty() {
-        s.push_str(&format!("\n## Context so far (auxiliary memory)\n{context_in}\n"));
+        s.push_str(&format!(
+            "\n## Context so far (auxiliary memory)\n{context_in}\n"
+        ));
     }
     if let Some(p) = prior {
-        let unmet: Vec<&str> = p.criteria.iter().filter(|c| !c.met).map(|c| c.id.as_str()).collect();
+        let unmet: Vec<&str> = p
+            .criteria
+            .iter()
+            .filter(|c| !c.met)
+            .map(|c| c.id.as_str())
+            .collect();
         s.push_str(&format!(
             "\n## Previous evaluation\nprogress: {}% · verdict: {}\nunmet criteria: {}\nfeedback: {}\n",
             p.progress_pct, p.verdict, unmet.join(", "), p.feedback
@@ -619,7 +836,13 @@ fn planner_prompt(loop_: &GoalLoop, context_in: &str, prior: Option<&GoalLoopEva
     s
 }
 
-fn executor_prompt(loop_: &GoalLoop, exec: &GoalLoopAgentCfg, plan: &str, context_in: &str, out_path: &str) -> String {
+fn executor_prompt(
+    loop_: &GoalLoop,
+    exec: &GoalLoopAgentCfg,
+    plan: &str,
+    context_in: &str,
+    out_path: &str,
+) -> String {
     let mut s = format!(
         "You are \"{}\", an executor on an autonomous goal loop working in THIS git repository (an isolated worktree — make changes freely).\n\n{}\n\n",
         exec.name,
@@ -641,7 +864,12 @@ fn executor_prompt(loop_: &GoalLoop, exec: &GoalLoopAgentCfg, plan: &str, contex
     s
 }
 
-fn digester_prompt(context_in: &str, plan: &str, exec_summaries: &[String], eval: &GoalLoopEvaluation) -> String {
+fn digester_prompt(
+    context_in: &str,
+    plan: &str,
+    exec_summaries: &[String],
+    eval: &GoalLoopEvaluation,
+) -> String {
     format!(
         "Compress the running context plus this iteration into a concise summary (a few hundred words max): what is done, current state, what remains, key decisions, blockers. The git worktree is the source of truth; this is auxiliary memory.\n\n## Prior context\n{context_in}\n\n## This iteration plan\n{plan}\n\n## Executor results\n{}\n\n## Evaluation\nprogress {}% · verdict {} · feedback: {}\n\nReply with ONLY the updated summary text.",
         exec_summaries.join("\n"),
@@ -668,7 +896,8 @@ async fn evaluate(
         exec_summaries.join("\n"),
     );
     let mut eval = match run_role(ctx, &loop_.config.evaluator, prompt, wt, per_phase_secs).await {
-        Ok(text) => parse_evaluation(&text).unwrap_or_else(|| fallback_eval("evaluator produced no parseable verdict")),
+        Ok(text) => parse_evaluation(&text)
+            .unwrap_or_else(|| fallback_eval("evaluator produced no parseable verdict")),
         Err(e) => fallback_eval(&format!("evaluator turn failed: {e}")),
     };
 
@@ -683,7 +912,11 @@ async fn evaluate(
                     &mut eval,
                     &crit.id,
                     run.success,
-                    if run.success { "verify command exited 0" } else { "verify command failed" },
+                    if run.success {
+                        "verify command exited 0"
+                    } else {
+                        "verify command failed"
+                    },
                 );
                 captures.push((crit.id.clone(), cmd.clone(), run));
             }
@@ -705,7 +938,10 @@ async fn evaluate(
     let all_met = !eval.criteria.is_empty() && eval.criteria.iter().all(|c| c.met);
     if eval.verdict == "achieved" && !all_met {
         eval.verdict = "continue".into();
-        eval.rationale = format!("{} (coerced: verdict was 'achieved' but not all criteria met)", eval.rationale);
+        eval.rationale = format!(
+            "{} (coerced: verdict was 'achieved' but not all criteria met)",
+            eval.rationale
+        );
     }
     (eval, captures)
 }
@@ -753,7 +989,17 @@ async fn assemble_goal_loop_proof(
             "test_kind": "test", "criterion_id": crit_id,
             "exit_code": run.exit_code, "duration_ms": run.duration_ms,
         });
-        let _ = crate::proof::upsert_content_artifact(ctx, &pack, K::Command, cmd, &run.output, status, meta, "otto").await;
+        let _ = crate::proof::upsert_content_artifact(
+            ctx,
+            &pack,
+            K::Command,
+            cmd,
+            &run.output,
+            status,
+            meta,
+            "otto",
+        )
+        .await;
     }
 
     // Working-tree diff vs the loop's base commit.
@@ -763,7 +1009,14 @@ async fn assemble_goal_loop_proof(
     let crit_lines: Vec<String> = eval
         .criteria
         .iter()
-        .map(|c| format!("- [{}] {}: {}", if c.met { "x" } else { " " }, c.id, c.evidence))
+        .map(|c| {
+            format!(
+                "- [{}] {}: {}",
+                if c.met { "x" } else { " " },
+                c.id,
+                c.evidence
+            )
+        })
         .collect();
     let selfreview = format!(
         "Feedback: {}\n\nRationale: {}\n\nCriteria:\n{}",
@@ -771,7 +1024,17 @@ async fn assemble_goal_loop_proof(
         eval.rationale,
         crit_lines.join("\n")
     );
-    let _ = crate::proof::upsert_content_artifact(ctx, &pack, K::SelfReview, "Goal-loop self-review", &selfreview, S::Info, serde_json::json!({}), "otto").await;
+    let _ = crate::proof::upsert_content_artifact(
+        ctx,
+        &pack,
+        K::SelfReview,
+        "Goal-loop self-review",
+        &selfreview,
+        S::Info,
+        serde_json::json!({}),
+        "otto",
+    )
+    .await;
 
     // Acceptance-criteria review summary.
     let unmet = eval.criteria.iter().filter(|c| !c.met).count();
@@ -833,11 +1096,17 @@ fn safe_loop_id(loop_id: &str) -> &str {
 }
 
 fn executor_out_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
-    tmp_dir().join(format!("otto-goalloop-{}-{idx}-{exec}.json", safe_loop_id(loop_id)))
+    tmp_dir().join(format!(
+        "otto-goalloop-{}-{idx}-{exec}.json",
+        safe_loop_id(loop_id)
+    ))
 }
 
 fn prompt_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
-    tmp_dir().join(format!("otto-goalloop-{}-{idx}-{exec}.prompt", safe_loop_id(loop_id)))
+    tmp_dir().join(format!(
+        "otto-goalloop-{}-{idx}-{exec}.prompt",
+        safe_loop_id(loop_id)
+    ))
 }
 
 fn never(_: &str) -> bool {
@@ -868,7 +1137,9 @@ async fn run_executor(
         &[EXECUTOR_RETRY_BACKOFF],
         cancel,
         |_attempt| {
-            run_executor_attempt(ctx, loop_, iter_id, idx, exec_index, exec, cwd, prompt, &out_path, timeout)
+            run_executor_attempt(
+                ctx, loop_, iter_id, idx, exec_index, exec, cwd, prompt, &out_path, timeout,
+            )
         },
     )
     .await;
@@ -895,7 +1166,17 @@ async fn run_executor(
         summary
     } else {
         let note = executor_error_note(outcome.reason);
-        persist_agent(ctx, iter_id, exec_index, exec, "error", &note, outcome.session_id.clone(), None).await;
+        persist_agent(
+            ctx,
+            iter_id,
+            exec_index,
+            exec,
+            "error",
+            &note,
+            outcome.session_id.clone(),
+            None,
+        )
+        .await;
         format!("(error: {note})")
     }
 }
@@ -974,7 +1255,17 @@ async fn run_executor_attempt(
         }
     };
     let sid = session.id.clone();
-    persist_agent(ctx, iter_id, exec_index, exec, "running", "", Some(sid.clone()), None).await;
+    persist_agent(
+        ctx,
+        iter_id,
+        exec_index,
+        exec,
+        "running",
+        "",
+        Some(sid.clone()),
+        None,
+    )
+    .await;
 
     if wait_for_tui(&ctx.manager, &sid).await {
         let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
@@ -1014,9 +1305,27 @@ async fn run_executor_attempt(
                     ),
                     WatchStatus::Resumed => ("running", String::new(), GoalLoopPhase::Executing),
                 };
-                persist_agent(&ctx, &iter_id, exec_index, &exec, status, &note, Some(sid), None).await;
+                persist_agent(
+                    &ctx,
+                    &iter_id,
+                    exec_index,
+                    &exec,
+                    status,
+                    &note,
+                    Some(sid),
+                    None,
+                )
+                .await;
                 let _ = ctx.goal_loops_repo.set_phase(&loop_id, phase).await;
-                emit(&ctx, &ws, &loop_id, GoalLoopStatus::Running, phase, idx, progress);
+                emit(
+                    &ctx,
+                    &ws,
+                    &loop_id,
+                    GoalLoopStatus::Running,
+                    phase,
+                    idx,
+                    progress,
+                );
             }
         },
     )
@@ -1043,7 +1352,10 @@ async fn persist_agent(
         session_id,
         output_summary,
     };
-    let _ = ctx.goal_loops_repo.set_iter_agent_at(iter_id, index, &st).await;
+    let _ = ctx
+        .goal_loops_repo
+        .set_iter_agent_at(iter_id, index, &st)
+        .await;
 }
 
 fn executor_error_note(reason: Option<FailReason>) -> String {

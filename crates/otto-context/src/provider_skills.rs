@@ -10,7 +10,9 @@ use std::path::PathBuf;
 
 use otto_core::api::{ProviderSkillContent, ProviderSkillInfo, SkillFileContentResp};
 
-use crate::library::{collect_files, is_binary, is_safe_segment, parse_category, parse_description, safe_rel};
+use crate::library::{
+    collect_files, is_binary, is_safe_segment, parse_category, parse_description, safe_rel,
+};
 
 /// Largest single provider-skill file returned to the viewer (2 MiB).
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
@@ -25,7 +27,10 @@ pub fn provider_root(provider: &str) -> Option<PathBuf> {
     if !PROVIDERS.contains(&provider) {
         return None;
     }
-    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty()).map(PathBuf::from)?;
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)?;
     if provider == "codex" {
         let base = std::env::var("CODEX_HOME")
             .ok()
@@ -73,7 +78,11 @@ pub fn list() -> Vec<ProviderSkillInfo> {
                 name,
                 category: {
                     let c = parse_category(&body);
-                    if c.is_empty() { "provider".to_string() } else { c }
+                    if c.is_empty() {
+                        "provider".to_string()
+                    } else {
+                        c
+                    }
                 },
                 description: parse_description(&body),
             });
@@ -95,7 +104,11 @@ pub fn content(provider: &str, name: &str) -> Option<ProviderSkillContent> {
         name: name.to_string(),
         category: {
             let c = parse_category(&body);
-            if c.is_empty() { "provider".to_string() } else { c }
+            if c.is_empty() {
+                "provider".to_string()
+            } else {
+                c
+            }
         },
         description: parse_description(&body),
         body,

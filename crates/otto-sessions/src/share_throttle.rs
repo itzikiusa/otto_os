@@ -83,7 +83,9 @@ impl ShareThrottle {
             return;
         }
         let entry = store.entry(key).or_default();
-        entry.failures.retain(|t| now.duration_since(*t) < FAILURE_WINDOW);
+        entry
+            .failures
+            .retain(|t| now.duration_since(*t) < FAILURE_WINDOW);
         entry.failures.push(now);
         if entry.failures.len() as u32 >= FAILURE_THRESHOLD {
             entry.locked_until = Some(now + LOCKOUT_DURATION);
@@ -157,10 +159,7 @@ mod tests {
 
         // A successful redemption clears the lockout.
         store.clear(addr);
-        assert!(
-            store.check(addr).is_ok(),
-            "clear() must reset the lockout"
-        );
+        assert!(store.check(addr).is_ok(), "clear() must reset the lockout");
     }
 
     #[test]

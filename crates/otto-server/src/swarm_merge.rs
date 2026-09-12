@@ -24,7 +24,12 @@ pub struct MergeOutcome {
 
 impl MergeOutcome {
     fn err(integration_branch: String, note: impl Into<String>) -> Self {
-        Self { status: "error".into(), conflicted_files: Vec::new(), integration_branch, note: Some(note.into()) }
+        Self {
+            status: "error".into(),
+            conflicted_files: Vec::new(),
+            integration_branch,
+            note: Some(note.into()),
+        }
     }
 }
 
@@ -60,7 +65,11 @@ pub async fn merge_task_branch(
             }
         };
 
-    let repo_key = format!("{}::{}", project.repo_path.clone().unwrap_or_default(), integration_branch);
+    let repo_key = format!(
+        "{}::{}",
+        project.repo_path.clone().unwrap_or_default(),
+        integration_branch
+    );
     let lock = branch_lock(&repo_key);
     let _guard = lock.lock().await;
 
@@ -81,7 +90,12 @@ pub async fn merge_task_branch(
 
     // The integration worktree is Otto-owned and kept clean, so auto_stash:false.
     match git
-        .merge_branch(agent_branch, &integration_branch, LocalMergeStrategy::MergeCommit, false)
+        .merge_branch(
+            agent_branch,
+            &integration_branch,
+            LocalMergeStrategy::MergeCommit,
+            false,
+        )
         .await
     {
         Ok(res) => {

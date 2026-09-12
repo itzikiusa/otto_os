@@ -120,7 +120,10 @@ impl RemoteClient {
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(Error::Upstream(format!("remote memory delete {}", resp.status())))
+            Err(Error::Upstream(format!(
+                "remote memory delete {}",
+                resp.status()
+            )))
         }
     }
 

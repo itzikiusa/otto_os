@@ -109,11 +109,13 @@ impl ReviewsRepo {
     /// `running` from a previous run is orphaned and would otherwise spin in
     /// the UI forever. Returns the number of rows updated.
     pub async fn fail_running(&self, error: &str) -> Result<u64> {
-        let res = sqlx::query("UPDATE pr_reviews SET status = 'error', error = ? WHERE status = 'running'")
-            .bind(error)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("fail running reviews"))?;
+        let res = sqlx::query(
+            "UPDATE pr_reviews SET status = 'error', error = ? WHERE status = 'running'",
+        )
+        .bind(error)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("fail running reviews"))?;
         Ok(res.rows_affected())
     }
 
@@ -488,21 +490,36 @@ mod tests {
         assert_eq!(repo.get_agent_prompt(&review.id, 0).await.unwrap(), None);
         assert_eq!(repo.get_diff(&review.id).await.unwrap(), None);
 
-        repo.set_agent_prompt(&review.id, 0, "prompt-a").await.unwrap();
-        repo.set_agent_prompt(&review.id, 1, "prompt-b").await.unwrap();
-        repo.set_agent_prompt(&review.id, 0, "prompt-a2").await.unwrap(); // upsert
+        repo.set_agent_prompt(&review.id, 0, "prompt-a")
+            .await
+            .unwrap();
+        repo.set_agent_prompt(&review.id, 1, "prompt-b")
+            .await
+            .unwrap();
+        repo.set_agent_prompt(&review.id, 0, "prompt-a2")
+            .await
+            .unwrap(); // upsert
         repo.set_diff(&review.id, "diff-1").await.unwrap();
         repo.set_diff(&review.id, "diff-2").await.unwrap(); // upsert
 
         assert_eq!(
-            repo.get_agent_prompt(&review.id, 0).await.unwrap().as_deref(),
+            repo.get_agent_prompt(&review.id, 0)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("prompt-a2")
         );
         assert_eq!(
-            repo.get_agent_prompt(&review.id, 1).await.unwrap().as_deref(),
+            repo.get_agent_prompt(&review.id, 1)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("prompt-b")
         );
-        assert_eq!(repo.get_diff(&review.id).await.unwrap().as_deref(), Some("diff-2"));
+        assert_eq!(
+            repo.get_diff(&review.id).await.unwrap().as_deref(),
+            Some("diff-2")
+        );
 
         repo.delete_run_artifacts(&review.id).await.unwrap();
         assert_eq!(repo.get_agent_prompt(&review.id, 0).await.unwrap(), None);
@@ -519,10 +536,16 @@ mod tests {
         let repo = ReviewsRepo::new(pool.clone());
         let review = repo.create_review(&"r".to_string(), 2).await.unwrap();
 
-        repo.set_agents(&review.id, &[agent("a", "done"), agent("Summarizer", "done")])
-            .await
-            .unwrap();
-        assert_eq!(repo.get_review(&review.id).await.unwrap().summary_fallback, None);
+        repo.set_agents(
+            &review.id,
+            &[agent("a", "done"), agent("Summarizer", "done")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.get_review(&review.id).await.unwrap().summary_fallback,
+            None
+        );
 
         let mut summarizer = agent("Summarizer", "done");
         summarizer.fallback = true;

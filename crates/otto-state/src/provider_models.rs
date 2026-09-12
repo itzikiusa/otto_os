@@ -71,7 +71,11 @@ impl ProviderModelsRepo {
             )));
         }
         let now = fmt(Utc::now());
-        let mut tx = self.pool.begin().await.map_err(dberr("begin models upsert"))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin models upsert"))?;
         sqlx::query("DELETE FROM provider_models WHERE provider = ? AND source != 'manual'")
             .bind(provider)
             .execute(&mut *tx)
@@ -184,14 +188,24 @@ mod tests {
     #[tokio::test]
     async fn upsert_replaces_fetched_preserves_manual_and_order() {
         let repo = ProviderModelsRepo::new(mem_pool().await);
-        repo.add_manual("claude", "my-alias", "My Alias", "hand-added").await.unwrap();
-        repo.upsert_batch("claude", "scrape", &pairs(&["claude-fable-5", "claude-opus-5"]))
+        repo.add_manual("claude", "my-alias", "My Alias", "hand-added")
             .await
             .unwrap();
+        repo.upsert_batch(
+            "claude",
+            "scrape",
+            &pairs(&["claude-fable-5", "claude-opus-5"]),
+        )
+        .await
+        .unwrap();
         // Second refresh replaces the fetched set; manual row survives.
-        repo.upsert_batch("claude", "scrape", &pairs(&["claude-opus-5", "claude-sonnet-5"]))
-            .await
-            .unwrap();
+        repo.upsert_batch(
+            "claude",
+            "scrape",
+            &pairs(&["claude-opus-5", "claude-sonnet-5"]),
+        )
+        .await
+        .unwrap();
         let rows = repo.list_for("claude").await.unwrap();
         let ids: Vec<&str> = rows.iter().map(|m| m.model_id.as_str()).collect();
         // manual first (oldest rowid), then fetch order of appearance.
@@ -202,8 +216,12 @@ mod tests {
     #[tokio::test]
     async fn manual_shadows_fetched_duplicate() {
         let repo = ProviderModelsRepo::new(mem_pool().await);
-        repo.add_manual("codex", "gpt-5.4", "my gpt", "pinned label").await.unwrap();
-        repo.upsert_batch("codex", "scrape", &pairs(&["gpt-5.4", "gpt-5.5"])).await.unwrap();
+        repo.add_manual("codex", "gpt-5.4", "my gpt", "pinned label")
+            .await
+            .unwrap();
+        repo.upsert_batch("codex", "scrape", &pairs(&["gpt-5.4", "gpt-5.5"]))
+            .await
+            .unwrap();
         let rows = repo.list_for("codex").await.unwrap();
         let mine = rows.iter().find(|m| m.model_id == "gpt-5.4").unwrap();
         assert_eq!(mine.source, "manual");
@@ -214,7 +232,9 @@ mod tests {
     #[tokio::test]
     async fn empty_batch_rejected_last_good_kept() {
         let repo = ProviderModelsRepo::new(mem_pool().await);
-        repo.upsert_batch("agy", "cli", &pairs(&["gemini-3.1-pro-high"])).await.unwrap();
+        repo.upsert_batch("agy", "cli", &pairs(&["gemini-3.1-pro-high"]))
+            .await
+            .unwrap();
         assert!(repo.upsert_batch("agy", "cli", &[]).await.is_err());
         assert_eq!(repo.list_for("agy").await.unwrap().len(), 1);
     }
@@ -222,8 +242,12 @@ mod tests {
     #[tokio::test]
     async fn delete_and_list_all_grouping() {
         let repo = ProviderModelsRepo::new(mem_pool().await);
-        repo.upsert_batch("claude", "scrape", &pairs(&["claude-fable-5"])).await.unwrap();
-        repo.upsert_batch("agy", "cli", &pairs(&["gemini-3.1-pro-high"])).await.unwrap();
+        repo.upsert_batch("claude", "scrape", &pairs(&["claude-fable-5"]))
+            .await
+            .unwrap();
+        repo.upsert_batch("agy", "cli", &pairs(&["gemini-3.1-pro-high"]))
+            .await
+            .unwrap();
         repo.delete("claude", "claude-fable-5").await.unwrap();
         let all = repo.list_all().await.unwrap();
         assert_eq!(all.len(), 1);

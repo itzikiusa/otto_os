@@ -11,24 +11,40 @@ use serde_json::Value;
 
 /// The labels produced for one tool.
 pub struct Labels {
-    pub risk_label: String,    // "read" | "write" | "dangerous"
+    pub risk_label: String,     // "read" | "write" | "dangerous"
     pub injection_risk: String, // "low" | "medium" | "high"
     pub mutating: bool,
     pub supports_dry_run: bool,
 }
 
 const DANGEROUS_KW: &[&str] = &[
-    "delete", "drop", "remove", "destroy", "exec", "execute", "deploy", "kill",
-    "terminate", "purge", "wipe", "truncate", "shutdown", "revoke", "payment",
-    "charge", "transfer", "send_money", "rm_",
+    "delete",
+    "drop",
+    "remove",
+    "destroy",
+    "exec",
+    "execute",
+    "deploy",
+    "kill",
+    "terminate",
+    "purge",
+    "wipe",
+    "truncate",
+    "shutdown",
+    "revoke",
+    "payment",
+    "charge",
+    "transfer",
+    "send_money",
+    "rm_",
 ];
 const WRITE_KW: &[&str] = &[
-    "create", "update", "write", "set_", "put_", "post_", "send", "edit", "modify",
-    "insert", "upload", "patch", "rename", "move", "add_", "publish", "merge",
+    "create", "update", "write", "set_", "put_", "post_", "send", "edit", "modify", "insert",
+    "upload", "patch", "rename", "move", "add_", "publish", "merge",
 ];
 const INJECTION_KW: &[&str] = &[
-    "fetch", "browse", "web", "url", "http", "search", "read_url", "scrape",
-    "crawl", "download", "open_url", "request", "email", "inbox", "rss", "feed",
+    "fetch", "browse", "web", "url", "http", "search", "read_url", "scrape", "crawl", "download",
+    "open_url", "request", "email", "inbox", "rss", "feed",
 ];
 
 fn ann_bool(annotations: &Value, key: &str) -> Option<bool> {
@@ -98,7 +114,11 @@ mod tests {
 
     #[test]
     fn read_only_hint_is_read_low() {
-        let l = label_tool("get_weather", Some("returns the forecast"), &json!({"readOnlyHint": true}));
+        let l = label_tool(
+            "get_weather",
+            Some("returns the forecast"),
+            &json!({"readOnlyHint": true}),
+        );
         assert_eq!(l.risk_label, "read");
         assert!(!l.mutating);
         assert_eq!(l.injection_risk, "low");
@@ -120,14 +140,22 @@ mod tests {
 
     #[test]
     fn open_world_hint_is_high_injection() {
-        let l = label_tool("call_api", None, &json!({"openWorldHint": true, "readOnlyHint": true}));
+        let l = label_tool(
+            "call_api",
+            None,
+            &json!({"openWorldHint": true, "readOnlyHint": true}),
+        );
         assert_eq!(l.injection_risk, "high");
         assert_eq!(l.risk_label, "read");
     }
 
     #[test]
     fn fetch_keyword_is_medium_injection() {
-        let l = label_tool("fetch_url", Some("download a web page"), &json!({"readOnlyHint": true}));
+        let l = label_tool(
+            "fetch_url",
+            Some("download a web page"),
+            &json!({"readOnlyHint": true}),
+        );
         assert_eq!(l.injection_risk, "medium");
     }
 

@@ -29,7 +29,9 @@ pub struct ParsedNote {
 /// Split a document into `(frontmatter_yaml, body)`. The frontmatter block is
 /// a `---` line at byte 0 closed by a `---`/`...` line.
 pub fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
-    let rest = content.strip_prefix("---").map(|r| r.strip_prefix('\r').unwrap_or(r));
+    let rest = content
+        .strip_prefix("---")
+        .map(|r| r.strip_prefix('\r').unwrap_or(r));
     let Some(rest) = rest.and_then(|r| r.strip_prefix('\n')) else {
         return (None, content);
     };
@@ -154,7 +156,11 @@ fn parse_heading(line: &str, line_no: u32) -> Option<Heading> {
     }
     let rest = &s[hashes..];
     let text = rest.strip_prefix(' ').or_else(|| rest.strip_prefix('\t'))?;
-    Some(Heading { level: hashes as u8, text: text.trim().to_string(), line: line_no })
+    Some(Heading {
+        level: hashes as u8,
+        text: text.trim().to_string(),
+        line: line_no,
+    })
 }
 
 /// One line: extract wikilinks, markdown links and `#tags`, skipping inline
@@ -227,7 +233,11 @@ fn scan_line(line: &str, _line_no: u32, out: &mut ParsedNote) {
             }
         }
         // Advance one CHARACTER (not byte) to stay on UTF-8 boundaries.
-        let ch_len = line[i..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(1);
+        let ch_len = line[i..]
+            .chars()
+            .next()
+            .map(|ch| ch.len_utf8())
+            .unwrap_or(1);
         i += ch_len;
     }
 }
@@ -288,7 +298,10 @@ fn md_link(s: &str) -> Option<(Option<OutgoingLink>, usize)> {
         return Some((None, consumed));
     }
     // Strip optional angle brackets and a title suffix (`path "title"`).
-    let mut t = target_raw.trim_start_matches('<').trim_end_matches('>').trim();
+    let mut t = target_raw
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim();
     if let Some(sp) = t.find(" \"") {
         t = t[..sp].trim();
     }
@@ -438,7 +451,11 @@ fn rewrite_line(line: &str, f: &mut impl FnMut(&str, &str) -> Option<String>) ->
                         let close = chunk[1..].find(']').unwrap() + 1;
                         let text = &chunk[1..close];
                         let enc = percent_encode_spaces(&new_raw);
-                        let anchor = link.anchor.as_deref().map(|a| format!("#{a}")).unwrap_or_default();
+                        let anchor = link
+                            .anchor
+                            .as_deref()
+                            .map(|a| format!("#{a}"))
+                            .unwrap_or_default();
                         out.push('[');
                         out.push_str(text);
                         out.push_str("](");
@@ -504,15 +521,26 @@ pub fn derive_title(parsed: &ParsedNote, rel: &str) -> String {
     if let Some(t) = &parsed.title {
         return t.clone();
     }
-    if let Some(h1) = parsed.headings.iter().find(|h| h.level == 1 && !h.text.trim().is_empty()) {
+    if let Some(h1) = parsed
+        .headings
+        .iter()
+        .find(|h| h.level == 1 && !h.text.trim().is_empty())
+    {
         return h1.text.trim().to_string();
     }
     let base = rel.rsplit('/').next().unwrap_or(rel);
-    let stem = base.strip_suffix(".md").or_else(|| base.strip_suffix(".MD")).unwrap_or(base);
+    let stem = base
+        .strip_suffix(".md")
+        .or_else(|| base.strip_suffix(".MD"))
+        .unwrap_or(base);
     let lower = stem.to_ascii_lowercase();
     if lower == "index" || lower == "log" {
         if let Some(parent) = rel.rsplit('/').nth(1).filter(|p| !p.is_empty()) {
-            return if lower == "log" { format!("{parent} log") } else { parent.to_string() };
+            return if lower == "log" {
+                format!("{parent} log")
+            } else {
+                parent.to_string()
+            };
         }
     }
     stem.to_string()
@@ -532,7 +560,10 @@ mod tests {
         assert_eq!(n.description.as_deref(), Some("Issues JWTs."));
         assert_eq!(n.tags, vec!["auth", "security"]);
         assert_eq!(n.aliases, vec!["Auth"]);
-        assert_eq!(n.frontmatter.get("custom_key").and_then(|v| v.as_str()), Some("kept"));
+        assert_eq!(
+            n.frontmatter.get("custom_key").and_then(|v| v.as_str()),
+            Some("kept")
+        );
         assert_eq!(n.word_count, 2);
     }
 
@@ -601,7 +632,9 @@ mod tests {
 
     #[test]
     fn tags_inline_nested_and_not_headings() {
-        let n = parse_note("# Heading not tag\nwork on #project/alpha and (#beta) but not#inline nor #123\n");
+        let n = parse_note(
+            "# Heading not tag\nwork on #project/alpha and (#beta) but not#inline nor #123\n",
+        );
         assert_eq!(n.tags, vec!["project/alpha", "beta"]);
     }
 
@@ -609,7 +642,10 @@ mod tests {
     fn headings_collected() {
         let n = parse_note("# One\ntext\n## Two\n```\n# not a heading\n```\n### Three\n");
         assert_eq!(
-            n.headings.iter().map(|h| (h.level, h.text.as_str())).collect::<Vec<_>>(),
+            n.headings
+                .iter()
+                .map(|h| (h.level, h.text.as_str()))
+                .collect::<Vec<_>>(),
             vec![(1, "One"), (2, "Two"), (3, "Three")]
         );
     }
@@ -619,7 +655,11 @@ mod tests {
         let src = "---\ntitle: T\n---\nA [[Old Note|alias]] and [[Old Note#H]] and [txt](old%20note.md#s) here.\n```\n[[Old Note]] untouched\n```\nInline `[[Old Note]]` untouched, ![[Old Note]] embed.\n";
         let out = rewrite_links(src, |kind, raw| {
             if raw.eq_ignore_ascii_case("old note") || raw.eq_ignore_ascii_case("old note.md") {
-                Some(if kind == "md" { "new note.md".into() } else { "New Note".into() })
+                Some(if kind == "md" {
+                    "new note.md".into()
+                } else {
+                    "New Note".into()
+                })
             } else {
                 None
             }
@@ -656,17 +696,29 @@ mod tests {
     #[test]
     fn derive_title_h1_fallback_for_reserved_index() {
         let n = parse_note("# koala-smartsoft-go\n\nGroove reverse-integration host.\n");
-        assert_eq!(derive_title(&n, "koala-smartsoft-go/index.md"), "koala-smartsoft-go");
+        assert_eq!(
+            derive_title(&n, "koala-smartsoft-go/index.md"),
+            "koala-smartsoft-go"
+        );
         let nested = parse_note("# Endpoints\n\n* [x](x.md)\n");
-        assert_eq!(derive_title(&nested, "koala-smartsoft-go/endpoints/index.md"), "Endpoints");
+        assert_eq!(
+            derive_title(&nested, "koala-smartsoft-go/endpoints/index.md"),
+            "Endpoints"
+        );
     }
 
     #[test]
     fn derive_title_parent_dir_for_reserved_without_h1() {
         let log = parse_note("## 2026-07-20\n\n* entry\n");
-        assert_eq!(derive_title(&log, "koala-smartsoft-go/log.md"), "koala-smartsoft-go log");
+        assert_eq!(
+            derive_title(&log, "koala-smartsoft-go/log.md"),
+            "koala-smartsoft-go log"
+        );
         let idx = parse_note("just text, no headings\n");
-        assert_eq!(derive_title(&idx, "koala-smartsoft-go/index.md"), "koala-smartsoft-go");
+        assert_eq!(
+            derive_title(&idx, "koala-smartsoft-go/index.md"),
+            "koala-smartsoft-go"
+        );
     }
 
     #[test]

@@ -69,11 +69,15 @@ pub(crate) fn binding(session: &Session) -> Option<(ResourceRef, &'static str)> 
     None
 }
 
-pub async fn check(ctx: &ServerCtx,user:&User,session:&Session)->Result<()> {
-    check_with_pool(&ctx.pool,user,session).await
+pub async fn check(ctx: &ServerCtx, user: &User, session: &Session) -> Result<()> {
+    check_with_pool(&ctx.pool, user, session).await
 }
 
-pub(crate) async fn check_with_pool(pool:&otto_state::SqlitePool,user:&User,session:&Session)->Result<()> {
+pub(crate) async fn check_with_pool(
+    pool: &otto_state::SqlitePool,
+    user: &User,
+    session: &Session,
+) -> Result<()> {
     let Some((resource, op)) = binding(session) else {
         if session.meta.get("k8s").is_some()
             || session.meta.get("aws").is_some()
@@ -90,8 +94,15 @@ pub(crate) async fn check_with_pool(pool:&otto_state::SqlitePool,user:&User,sess
         return Err(Error::Forbidden("account disabled".into()));
     }
     check_page(pool, &current, &resource, op).await?;
-    if op=="db_query" {
-        otto_state::GrantsRepo::new(pool.clone()).check_global(&current,otto_core::domain::Feature::Agents,otto_core::domain::Capability::Edit,"DB Assistant host-agent access was revoked").await?;
+    if op == "db_query" {
+        otto_state::GrantsRepo::new(pool.clone())
+            .check_global(
+                &current,
+                otto_core::domain::Feature::Agents,
+                otto_core::domain::Capability::Edit,
+                "DB Assistant host-agent access was revoked",
+            )
+            .await?;
     }
 
     match resource.kind {
@@ -132,7 +143,11 @@ pub(crate) async fn check_with_pool(pool:&otto_state::SqlitePool,user:&User,sess
                 )
                 .await?;
             if let Some(ws) = &connection.workspace_id {
-                if otto_state::WorkspacesRepo::new(pool.clone()).role_of(&current, ws).await?.is_none() {
+                if otto_state::WorkspacesRepo::new(pool.clone())
+                    .role_of(&current, ws)
+                    .await?
+                    .is_none()
+                {
                     return Err(Error::NotFound("connection".into()));
                 }
             }

@@ -86,7 +86,12 @@ fn sensitive_key_kind(key_lower: &str) -> Option<&'static str> {
 /// Trim a small set of surrounding punctuation that commonly wraps tokens in
 /// prose, without stripping characters that are part of tokens (`.-_/+=@`).
 fn trim_punct(w: &str) -> &str {
-    w.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';' | ':' | '<' | '>' | '{' | '}'))
+    w.trim_matches(|c: char| {
+        matches!(
+            c,
+            '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';' | ':' | '<' | '>' | '{' | '}'
+        )
+    })
 }
 
 fn is_b64url_dotted(s: &str) -> bool {
@@ -106,7 +111,9 @@ fn looks_like_email(w: &str) -> bool {
         && domain.contains('.')
         && !domain.starts_with('.')
         && !domain.ends_with('.')
-        && domain.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
         && local
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
@@ -120,7 +127,9 @@ fn classify_word(w: &str, after_bearer_kw: bool) -> Option<&'static str> {
     }
     if w.len() == 20
         && w.starts_with("AKIA")
-        && w[4..].chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && w[4..]
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
     {
         return Some("aws_key");
     }
@@ -173,27 +182,31 @@ fn redact_text_into(input: &str, tally: &mut Tally) -> String {
     let mut out = String::with_capacity(s.len());
     let mut word = String::new();
     let mut after_bearer = false;
-    let flush = |word: &mut String, out: &mut String, after_bearer: &mut bool, tally: &mut Tally| {
-        if word.is_empty() {
-            return;
-        }
-        let trimmed = trim_punct(word);
-        let next_after_bearer = matches!(trimmed, "Bearer" | "bearer");
-        match classify_word(trimmed, *after_bearer) {
-            Some(kind) => {
-                // Preserve any leading/trailing punctuation we trimmed.
-                let lead = &word[..word.find(trimmed).unwrap_or(0)];
-                let tail_start = word.find(trimmed).map(|i| i + trimmed.len()).unwrap_or(word.len());
-                out.push_str(lead);
-                out.push_str(PLACEHOLDER);
-                out.push_str(&word[tail_start..]);
-                tally.bump(kind);
+    let flush =
+        |word: &mut String, out: &mut String, after_bearer: &mut bool, tally: &mut Tally| {
+            if word.is_empty() {
+                return;
             }
-            None => out.push_str(word),
-        }
-        *after_bearer = next_after_bearer;
-        word.clear();
-    };
+            let trimmed = trim_punct(word);
+            let next_after_bearer = matches!(trimmed, "Bearer" | "bearer");
+            match classify_word(trimmed, *after_bearer) {
+                Some(kind) => {
+                    // Preserve any leading/trailing punctuation we trimmed.
+                    let lead = &word[..word.find(trimmed).unwrap_or(0)];
+                    let tail_start = word
+                        .find(trimmed)
+                        .map(|i| i + trimmed.len())
+                        .unwrap_or(word.len());
+                    out.push_str(lead);
+                    out.push_str(PLACEHOLDER);
+                    out.push_str(&word[tail_start..]);
+                    tally.bump(kind);
+                }
+                None => out.push_str(word),
+            }
+            *after_bearer = next_after_bearer;
+            word.clear();
+        };
     for ch in s.chars() {
         if ch.is_whitespace() {
             flush(&mut word, &mut out, &mut after_bearer, tally);
@@ -286,7 +299,10 @@ mod tests {
         assert_eq!(r.value["username"], json!("alice"));
         assert_eq!(r.value["password"], json!(PLACEHOLDER));
         assert_eq!(r.value["config"]["api_key"], json!(PLACEHOLDER));
-        assert!(r.value["config"]["note"].as_str().unwrap().contains(PLACEHOLDER));
+        assert!(r.value["config"]["note"]
+            .as_str()
+            .unwrap()
+            .contains(PLACEHOLDER));
         assert_eq!(r.value["items"][0]["Authorization"], json!(PLACEHOLDER));
         let total: usize = r.hits.iter().map(|h| h.count).sum();
         assert!(total >= 4);

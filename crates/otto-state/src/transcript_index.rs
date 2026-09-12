@@ -62,7 +62,12 @@ impl TranscriptIndexRepo {
             .map_err(dberr("transcript index"))?;
         Ok(rows
             .iter()
-            .map(|r| (r.get::<String, _>("path"), (r.get::<i64, _>("mtime"), r.get::<i64, _>("size"))))
+            .map(|r| {
+                (
+                    r.get::<String, _>("path"),
+                    (r.get::<i64, _>("mtime"), r.get::<i64, _>("size")),
+                )
+            })
             .collect())
     }
 
@@ -124,7 +129,11 @@ impl TranscriptIndexRepo {
 
     /// Newest `limit` rows active strictly before `before` (RFC3339 text
     /// compare — the History page cursor).
-    pub async fn list_page(&self, before: Option<&str>, limit: i64) -> Result<Vec<TranscriptIndexRow>> {
+    pub async fn list_page(
+        &self,
+        before: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TranscriptIndexRow>> {
         let rows = sqlx::query(
             "SELECT * FROM transcript_index
               WHERE (? IS NULL OR last_active_at < ?)
@@ -165,12 +174,16 @@ impl TranscriptIndexRepo {
         let mut out = Vec::new();
         for chunk in ids.chunks(200) {
             let marks = vec!["?"; chunk.len()].join(",");
-            let sql = format!("SELECT * FROM transcript_index WHERE provider_session_id IN ({marks})");
+            let sql =
+                format!("SELECT * FROM transcript_index WHERE provider_session_id IN ({marks})");
             let mut q = sqlx::query(&sql);
             for id in chunk {
                 q = q.bind(id);
             }
-            let rows = q.fetch_all(&self.pool).await.map_err(dberr("transcript index"))?;
+            let rows = q
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("transcript index"))?;
             out.extend(rows.iter().map(row));
         }
         Ok(out)
@@ -227,11 +240,20 @@ mod tests {
         assert_eq!(repo.stamps().await.unwrap()[&a.path], (11, 100));
         let list = repo.list().await.unwrap();
         assert_eq!(list[0].path, b.path, "newest first");
-        let page = repo.list_page(Some("2026-01-03T00:00:00Z"), 10).await.unwrap();
+        let page = repo
+            .list_page(Some("2026-01-03T00:00:00Z"), 10)
+            .await
+            .unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].path, a.path);
         assert_eq!(repo.list_page(None, 1).await.unwrap().len(), 1);
-        assert_eq!(repo.by_provider_session_ids(&["b".to_string()]).await.unwrap().len(), 1);
+        assert_eq!(
+            repo.by_provider_session_ids(&["b".to_string()])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         let keep: std::collections::HashSet<String> = [b.path.clone()].into_iter().collect();
         assert_eq!(repo.retain(&keep).await.unwrap(), 1);
         assert!(repo.get(&a.path).await.unwrap().is_none());

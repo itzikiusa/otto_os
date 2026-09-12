@@ -69,12 +69,7 @@ impl MemoryService {
 
     /// Re-index a (possibly externally edited / git-synced) vault directory into
     /// the store. Returns the number of notes ingested.
-    pub async fn reindex_vault(
-        &self,
-        ws: &str,
-        by: &str,
-        dir: &std::path::Path,
-    ) -> Result<usize> {
+    pub async fn reindex_vault(&self, ws: &str, by: &str, dir: &std::path::Path) -> Result<usize> {
         let notes = crate::vault::read_dir_notes(dir)?;
         let n = notes.len();
         self.save(ws, by, notes).await?;
@@ -100,7 +95,8 @@ impl MemoryService {
             FTS_NO => false,
             _ => {
                 let ok = self.repo.ensure_fts().await.unwrap_or(false);
-                self.fts.store(if ok { FTS_YES } else { FTS_NO }, Ordering::Relaxed);
+                self.fts
+                    .store(if ok { FTS_YES } else { FTS_NO }, Ordering::Relaxed);
                 ok
             }
         }
@@ -109,7 +105,10 @@ impl MemoryService {
     /// Keep the FTS index in sync for a saved/updated memory.
     async fn fts_index_one(&self, m: &Memory) {
         if self.fts_ready().await {
-            let _ = self.repo.fts_index(&m.id, &m.workspace_id, &m.title, &m.body).await;
+            let _ = self
+                .repo
+                .fts_index(&m.id, &m.workspace_id, &m.title, &m.body)
+                .await;
         }
     }
 
@@ -213,7 +212,9 @@ impl MemoryService {
         }
         let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for n in &g.nodes {
-            let created = self.save(ws, by, vec![crate::ingest::node_to_memory(collection, n)]).await?;
+            let created = self
+                .save(ws, by, vec![crate::ingest::node_to_memory(collection, n)])
+                .await?;
             if let Some(m) = created.into_iter().next() {
                 map.insert(n.id.clone(), m.id);
             }
@@ -222,7 +223,13 @@ impl MemoryService {
         for e in &g.edges {
             if let (Some(s), Some(t)) = (map.get(&e.source), map.get(&e.target)) {
                 self.repo
-                    .link(s, t, e.rel.as_deref().unwrap_or("relates_to"), 1.0, e.certainty.as_deref())
+                    .link(
+                        s,
+                        t,
+                        e.rel.as_deref().unwrap_or("relates_to"),
+                        1.0,
+                        e.certainty.as_deref(),
+                    )
                     .await?;
                 edges += 1;
             }
@@ -311,7 +318,8 @@ impl MemoryService {
             if !q.kinds.is_empty() && !q.kinds.contains(&m.kind) {
                 continue;
             }
-            let scope_match = q.story_id.is_some() && q.story_id.as_deref() == m.story_id.as_deref();
+            let scope_match =
+                q.story_id.is_some() && q.story_id.as_deref() == m.story_id.as_deref();
             let sig = RerankSignals {
                 recency_days: 0.0,
                 access_count: m.access_count,
@@ -324,7 +332,11 @@ impl MemoryService {
             // Explainability: why did this surface?
             let mut reasons: Vec<ContextReason> = Vec::new();
             if !text.trim().is_empty() {
-                reasons.push(ContextReason::new("keyword", format!("matched \"{}\"", text.trim()), 1.0));
+                reasons.push(ContextReason::new(
+                    "keyword",
+                    format!("matched \"{}\"", text.trim()),
+                    1.0,
+                ));
             }
             if scope_match {
                 reasons.push(ContextReason::new("scope", "same story", 0.15));
@@ -334,12 +346,21 @@ impl MemoryService {
             }
             let why: Vec<String> = reasons.iter().map(|r| r.detail.clone()).collect();
 
-            hits.push(MemoryHit { memory: m, score, why, reasons });
+            hits.push(MemoryHit {
+                memory: m,
+                score,
+                why,
+                reasons,
+            });
             if hits.len() >= limit * 3 {
                 break;
             }
         }
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         // Bump access counts in the BACKGROUND — it's non-critical and a write,
         // so it must never make a search wait on the SQLite write lock.
@@ -355,19 +376,31 @@ impl MemoryService {
     }
 
     /// Assemble a compact, token-budgeted background brief for a story.
-    pub async fn recall_brief(&self, ws: &str, story: &str, opts: RecallOpts) -> Result<RecallBrief> {
+    pub async fn recall_brief(
+        &self,
+        ws: &str,
+        story: &str,
+        opts: RecallOpts,
+    ) -> Result<RecallBrief> {
         if let Some(r) = &self.remote {
             return r.recall_brief(ws, story, &opts).await;
         }
         let groups: &[(&str, &[&str])] = &[
-            ("Constraints & Requirements", &[kind::CONSTRAINT, kind::REQUIREMENT]),
+            (
+                "Constraints & Requirements",
+                &[kind::CONSTRAINT, kind::REQUIREMENT],
+            ),
             ("Decisions", &[kind::DECISION]),
             ("Key Facts", &[kind::FACT]),
             ("Answered Questions", &[kind::QA]),
             ("Learnings", &[kind::LEARNING]),
             ("Background", &[kind::SUMMARY, kind::SNAPSHOT]),
         ];
-        let total = if opts.token_budget == 0 { 2000 } else { opts.token_budget };
+        let total = if opts.token_budget == 0 {
+            2000
+        } else {
+            opts.token_budget
+        };
         let mut budget = total;
         let mut sections = Vec::new();
         let mut used = Vec::new();

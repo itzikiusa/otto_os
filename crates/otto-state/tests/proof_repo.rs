@@ -7,7 +7,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
 async fn mem_pool() -> SqlitePool {
-    let opts = SqliteConnectOptions::new().in_memory(true).foreign_keys(true);
+    let opts = SqliteConnectOptions::new()
+        .in_memory(true)
+        .foreign_keys(true);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)
@@ -186,7 +188,9 @@ async fn v2_columns_persist_repo_link_done_sha_waived_at() {
     assert!(p.repo_id.is_none() && p.pr_number.is_none() && p.waived_at.is_none());
 
     // repo link (idempotent COALESCE: learn PR number later)
-    repo.set_repo_link(&p.id, Some("repo-1"), None).await.unwrap();
+    repo.set_repo_link(&p.id, Some("repo-1"), None)
+        .await
+        .unwrap();
     repo.set_repo_link(&p.id, None, Some(42)).await.unwrap();
     let linked = repo.get_pack(&p.id).await.unwrap();
     assert_eq!(linked.repo_id.as_deref(), Some("repo-1"));
@@ -235,7 +239,9 @@ async fn v2_columns_persist_repo_link_done_sha_waived_at() {
     assert!(u.content_sha256.is_none());
 
     // waived_at recorded
-    repo.waive(&p.id, "human-1", "reviewed end to end").await.unwrap();
+    repo.waive(&p.id, "human-1", "reviewed end to end")
+        .await
+        .unwrap();
     let w = repo.get_pack(&p.id).await.unwrap();
     assert!(w.waived_at.is_some());
     assert_eq!(w.waived_by.as_deref(), Some("human-1"));
@@ -250,11 +256,15 @@ async fn snapshots_are_monotonic_and_roundtrip() {
         .unwrap();
 
     let s1 = repo
-        .create_snapshot(&p.id, "w1", "sha-a", "passed", 90, 10, "{}", "# md", "<html>", "first", "u1")
+        .create_snapshot(
+            &p.id, "w1", "sha-a", "passed", 90, 10, "{}", "# md", "<html>", "first", "u1",
+        )
         .await
         .unwrap();
     let s2 = repo
-        .create_snapshot(&p.id, "w1", "sha-b", "passed", 95, 8, "{}", "# md2", "<html2>", "second", "u1")
+        .create_snapshot(
+            &p.id, "w1", "sha-b", "passed", 95, 8, "{}", "# md2", "<html2>", "second", "u1",
+        )
         .await
         .unwrap();
     assert_eq!(s1.seq, 1);

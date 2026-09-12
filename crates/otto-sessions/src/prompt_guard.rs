@@ -174,9 +174,7 @@ impl PromptGuard {
     /// True if we accepted a prompt for `id` within [`DEBOUNCE`].
     fn recently_approved(&self, id: &Id) -> bool {
         let guard = lock(&self.last_approved);
-        guard
-            .get(id)
-            .is_some_and(|t| t.elapsed() < DEBOUNCE)
+        guard.get(id).is_some_and(|t| t.elapsed() < DEBOUNCE)
     }
 
     fn mark_approved(&self, id: &Id) {
@@ -271,7 +269,8 @@ mod tests {
 
     #[test]
     fn detects_claude_trust_prompt_and_selects_yes() {
-        let screen = "\n  Do you trust the files in this folder?\n  1. Yes, proceed\n  2. No, exit\n";
+        let screen =
+            "\n  Do you trust the files in this folder?\n  1. Yes, proceed\n  2. No, exit\n";
         assert_eq!(
             detect_approval("claude", &screen.to_lowercase()),
             Some(SELECT_YES)
@@ -292,10 +291,19 @@ mod tests {
 
     #[test]
     fn ignores_normal_output_and_shell() {
-        assert_eq!(detect_approval("claude", "running the test suite now…"), None);
-        assert_eq!(detect_approval("claude", "the folder structure looks fine"), None);
+        assert_eq!(
+            detect_approval("claude", "running the test suite now…"),
+            None
+        );
+        assert_eq!(
+            detect_approval("claude", "the folder structure looks fine"),
+            None
+        );
         // Shell never gets synthetic keystrokes.
-        assert_eq!(detect_approval("shell", "do you trust the files in this folder"), None);
+        assert_eq!(
+            detect_approval("shell", "do you trust the files in this folder"),
+            None
+        );
     }
 
     #[test]
@@ -368,7 +376,10 @@ mod tests {
         let mut s: String = std::iter::repeat_n(glyph, TAIL_CAP).collect(); // 3×cap bytes
         trim_tail(&mut s, TAIL_CAP); // must not panic on a mid-char byte index
         assert!(s.len() <= TAIL_CAP);
-        assert!(s.chars().all(|c| c == glyph), "no split/garbled code points");
+        assert!(
+            s.chars().all(|c| c == glyph),
+            "no split/garbled code points"
+        );
     }
 
     /// A multi-byte trust dialog drives the full scanner path without panicking
@@ -380,8 +391,12 @@ mod tests {
         // 2 KB of Powerline glyphs (over TAIL_CAP) → forces a mid-char trim.
         let glyphs: String = std::iter::repeat_n('\u{e0b0}', 700).collect();
         guard.on_output(&id, "claude", glyphs.as_bytes()); // must not panic
-        // The real prompt then arrives; with no manager wired the guard simply
-        // returns, but it must process the tail without panicking.
-        guard.on_output(&id, "claude", b"\n  Do you trust the files in this folder?\n  1. Yes, proceed\n");
+                                                           // The real prompt then arrives; with no manager wired the guard simply
+                                                           // returns, but it must process the tail without panicking.
+        guard.on_output(
+            &id,
+            "claude",
+            b"\n  Do you trust the files in this folder?\n  1. Yes, proceed\n",
+        );
     }
 }

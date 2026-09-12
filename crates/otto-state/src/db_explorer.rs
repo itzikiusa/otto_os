@@ -359,7 +359,12 @@ impl DbExplorerRepo {
         row_to_dashboard(&row)
     }
 
-    pub async fn create_dashboard(&self, ws: &Id, name: &str, created_by: &Id) -> Result<Dashboard> {
+    pub async fn create_dashboard(
+        &self,
+        ws: &Id,
+        name: &str,
+        created_by: &Id,
+    ) -> Result<Dashboard> {
         let id = new_id();
         let now = fmt(Utc::now());
         sqlx::query(
@@ -425,11 +430,12 @@ impl DbExplorerRepo {
 
     /// All widgets for a workspace — root / ws-Admin view.
     pub async fn list_widgets(&self, ws: &Id) -> Result<Vec<Widget>> {
-        let rows = sqlx::query("SELECT * FROM db_widgets WHERE workspace_id = ? ORDER BY created_at")
-            .bind(ws)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(dberr("list widgets"))?;
+        let rows =
+            sqlx::query("SELECT * FROM db_widgets WHERE workspace_id = ? ORDER BY created_at")
+                .bind(ws)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(dberr("list widgets"))?;
         rows.iter().map(row_to_widget).collect()
     }
 
@@ -501,8 +507,12 @@ impl DbExplorerRepo {
         let title = title.unwrap_or(&existing.title);
         let statement = statement.unwrap_or(&existing.statement);
         let viz = viz.unwrap_or(&existing.viz);
-        let mapping_json = mapping.map(|v| v.to_string()).unwrap_or_else(|| existing.mapping.to_string());
-        let options_json = options.map(|v| v.to_string()).unwrap_or_else(|| existing.options.to_string());
+        let mapping_json = mapping
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| existing.mapping.to_string());
+        let options_json = options
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| existing.options.to_string());
         let now = fmt(Utc::now());
         sqlx::query(
             "UPDATE db_widgets SET dashboard_id = ?, title = ?, statement = ?, viz = ?,
@@ -580,16 +590,14 @@ mod tests {
     async fn seed_workspace(pool: &SqlitePool) -> Id {
         let ws_id = otto_core::new_id();
         let now = crate::convert::fmt(Utc::now());
-        sqlx::query(
-            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&ws_id)
-        .bind("test-ws")
-        .bind("/tmp/test-ws")
-        .bind(&now)
-        .execute(pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
+            .bind(&ws_id)
+            .bind("test-ws")
+            .bind("/tmp/test-ws")
+            .bind(&now)
+            .execute(pool)
+            .await
+            .unwrap();
         ws_id
     }
 
@@ -766,12 +774,18 @@ mod tests {
             .unwrap();
 
         // Rename only — statement unchanged.
-        let renamed = repo.update_saved(&saved.id, Some("renamed"), None).await.unwrap();
+        let renamed = repo
+            .update_saved(&saved.id, Some("renamed"), None)
+            .await
+            .unwrap();
         assert_eq!(renamed.name, "renamed");
         assert_eq!(renamed.statement, "SELECT 1");
 
         // Update statement only — name unchanged.
-        let restmt = repo.update_saved(&saved.id, None, Some("SELECT 2")).await.unwrap();
+        let restmt = repo
+            .update_saved(&saved.id, None, Some("SELECT 2"))
+            .await
+            .unwrap();
         assert_eq!(restmt.name, "renamed");
         assert_eq!(restmt.statement, "SELECT 2");
 

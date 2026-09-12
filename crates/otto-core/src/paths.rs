@@ -69,7 +69,11 @@ pub fn resolves_under(root: &Path, candidate: &Path) -> Option<PathBuf> {
 /// a user-supplied path as a cwd. Unknown home (no `$HOME`/`$USERPROFILE`)
 /// returns the input unchanged.
 pub fn expand_tilde(p: &str) -> String {
-    let home = || std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
+    let home = || {
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()
+    };
     if p == "~" {
         return home().unwrap_or_else(|| p.to_string());
     }
@@ -89,7 +93,10 @@ mod tests {
     fn expands_home_forms() {
         let home = std::env::var("HOME").expect("HOME set in tests");
         assert_eq!(expand_tilde("~"), home);
-        assert_eq!(expand_tilde("~/ikariam_style4"), format!("{home}/ikariam_style4"));
+        assert_eq!(
+            expand_tilde("~/ikariam_style4"),
+            format!("{home}/ikariam_style4")
+        );
     }
 
     #[test]
@@ -104,8 +111,14 @@ mod tests {
     #[test]
     fn confine_join_stays_under_root() {
         let root = Path::new("/data/store");
-        assert_eq!(confine_join(root, "a/b.txt"), Some(PathBuf::from("/data/store/a/b.txt")));
-        assert_eq!(confine_join(root, "./a"), Some(PathBuf::from("/data/store/a")));
+        assert_eq!(
+            confine_join(root, "a/b.txt"),
+            Some(PathBuf::from("/data/store/a/b.txt"))
+        );
+        assert_eq!(
+            confine_join(root, "./a"),
+            Some(PathBuf::from("/data/store/a"))
+        );
         for bad in ["../a", "a/../../b", "/etc/passwd", "a/../../../b"] {
             assert_eq!(confine_join(root, bad), None, "{bad:?} must be rejected");
         }

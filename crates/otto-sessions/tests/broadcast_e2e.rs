@@ -49,8 +49,13 @@ async fn manager() -> (Arc<SessionManager>, Workspace, Id) {
         .bind(&user).bind("u").bind("x").bind("U").bind(&now)
         .execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
-        .bind(&ws_id).bind("w").bind("/tmp").bind(&now)
-        .execute(&pool).await.unwrap();
+        .bind(&ws_id)
+        .bind("w")
+        .bind("/tmp")
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let repo = SessionsRepo::new(pool);
     let (events, _rx) = broadcast::channel(64);
@@ -88,7 +93,8 @@ async fn wait_ready(mgr: &SessionManager, id: &Id) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(h) = mgr.live_handle(id) {
-            if !h.scrollback(4).is_empty() && h.last_output_at().elapsed() >= Duration::from_millis(400)
+            if !h.scrollback(4).is_empty()
+                && h.last_output_at().elapsed() >= Duration::from_millis(400)
             {
                 return;
             }
@@ -143,7 +149,11 @@ async fn broadcast_delivers_submits_and_targets() {
         .broadcast_message(&ws.id, "echo OTTO_OK > sent.txt", Some(&targets))
         .await
         .expect("broadcast");
-    assert_eq!(hit.len(), 2, "targeted broadcast should hit exactly 2 sessions");
+    assert_eq!(
+        hit.len(),
+        2,
+        "targeted broadcast should hit exactly 2 sessions"
+    );
     assert!(hit.contains(&s0) && hit.contains(&s1));
 
     let f0 = d0.path().join("sent.txt");
@@ -159,14 +169,21 @@ async fn broadcast_delivers_submits_and_targets() {
     );
     // Give the untargeted shell the same window; it must NOT have run anything.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(!f2.exists(), "s2 was not targeted and must not run the command");
+    assert!(
+        !f2.exists(),
+        "s2 was not targeted and must not run the command"
+    );
 
     // 2. Broadcast to ALL (targets = None) reaches the previously-untargeted s2.
     let hit_all = mgr
         .broadcast_message(&ws.id, "echo OTTO_ALL > all.txt", None)
         .await
         .expect("broadcast all");
-    assert_eq!(hit_all.len(), 3, "broadcast-to-all should hit every live agent");
+    assert_eq!(
+        hit_all.len(),
+        3,
+        "broadcast-to-all should hit every live agent"
+    );
 
     let a2 = d2.path().join("all.txt");
     assert!(

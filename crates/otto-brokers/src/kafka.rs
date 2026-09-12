@@ -10,8 +10,8 @@
 use crate::types::{
     BrokerNode, ClusterOverview, ConfigKv, ConsumeReq, CreateTopicReq, GroupDetail, GroupMember,
     GroupOffset, GroupSummary, OffsetResetMode, PartitionInfo, PartitionRange, ProduceReq,
-    ProduceResp, SaslMechanism, SecurityProtocol, StartPosition, TestClusterResp,
-    TopicConfigEntry, TopicPartition, TopicSummary,
+    ProduceResp, SaslMechanism, SecurityProtocol, StartPosition, TestClusterResp, TopicConfigEntry,
+    TopicPartition, TopicSummary,
 };
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -242,8 +242,8 @@ impl KafkaClient {
             let counts: Vec<f64> = brokers.iter().map(|b| b.partition_leaders as f64).collect();
             let mean = counts.iter().sum::<f64>() / counts.len() as f64;
             if mean > 0.0 {
-                let variance = counts.iter().map(|&c| (c - mean).powi(2)).sum::<f64>()
-                    / counts.len() as f64;
+                let variance =
+                    counts.iter().map(|&c| (c - mean).powi(2)).sum::<f64>() / counts.len() as f64;
                 Some((variance.sqrt() / mean * 100.0).round() / 100.0)
             } else {
                 None
@@ -516,8 +516,7 @@ impl KafkaClient {
 
         // Pre-compile the key filter to lowercase once (raw bytes are interpreted
         // as UTF-8 best-effort; non-UTF-8 keys never match the filter).
-        let key_filter_lower: Option<String> =
-            req.key_filter.as_ref().map(|f| f.to_lowercase());
+        let key_filter_lower: Option<String> = req.key_filter.as_ref().map(|f| f.to_lowercase());
 
         // When a key filter is active the want quota counts only matching messages
         // so we may scan more than `limit` raw messages from the broker. Use a
@@ -546,7 +545,9 @@ impl KafkaClient {
                     // paying the cost of allocation / pushing to results.
                     if let Some(ref filter) = key_filter_lower {
                         let matches = m.key().is_some_and(|k| {
-                            String::from_utf8_lossy(k).to_lowercase().contains(filter.as_str())
+                            String::from_utf8_lossy(k)
+                                .to_lowercase()
+                                .contains(filter.as_str())
                         });
                         if !matches {
                             if offset + 1 >= high_of.get(&part).copied().unwrap_or(i64::MAX) {
@@ -714,11 +715,7 @@ impl KafkaClient {
     /// This is a destructive write: a consumer group that is actively consuming will
     /// have its committed offset overwritten. The caller is responsible for requiring
     /// `guard()` + a typed UI confirm before invoking this.
-    pub fn reset_offsets(
-        &self,
-        group: &str,
-        positions: HashMap<(String, i32), i64>,
-    ) -> Result<()> {
+    pub fn reset_offsets(&self, group: &str, positions: HashMap<(String, i32), i64>) -> Result<()> {
         if positions.is_empty() {
             return Ok(());
         }

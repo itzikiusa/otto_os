@@ -66,11 +66,7 @@ impl ImprovementEngine {
     /// scheduled callers should pre-check `config::is_due`.
     /// Create the run row, then execute it to completion. Used by the
     /// scheduler (awaited fully). `Manual` runs ignore `enabled`.
-    pub async fn run_for_workspace(
-        &self,
-        ws_id: &Id,
-        trigger: ImprovementTrigger,
-    ) -> Result<Id> {
+    pub async fn run_for_workspace(&self, ws_id: &Id, trigger: ImprovementTrigger) -> Result<Id> {
         let run = self.improvements.create_run(ws_id, trigger).await?;
         let id = run.id;
         self.execute_run(&id, ws_id, trigger).await?;
@@ -86,7 +82,8 @@ impl ImprovementEngine {
         ws_id: &Id,
         trigger: ImprovementTrigger,
     ) -> Result<()> {
-        self.execute_run_inner(run_id, ws_id, trigger, None, None).await
+        self.execute_run_inner(run_id, ws_id, trigger, None, None)
+            .await
     }
 
     /// Like [`Self::execute_run`] but forces a specific [`Autonomy`] for THIS run,
@@ -154,18 +151,25 @@ impl ImprovementEngine {
             advance_schedule(&mut cfg);
             self.persist_config(ws_id, &ws.settings, &cfg).await?;
             self.improvements
-                .finish_run(run_id, ImprovementRunStatus::Skipped, "no sessions in window", 0, 0, 0, None)
+                .finish_run(
+                    run_id,
+                    ImprovementRunStatus::Skipped,
+                    "no sessions in window",
+                    0,
+                    0,
+                    0,
+                    None,
+                )
                 .await?;
             self.emit_finished(ws_id, run_id, "skipped", 0, 0);
             return Ok(());
         }
 
         // Detect candidate skills (used in-window ∩ allow-list) and read files.
-        let used: Vec<String> = digests
-            .iter()
-            .flat_map(|d| d.skills_used.clone())
-            .collect();
-        let current_skills = self.read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist).await;
+        let used: Vec<String> = digests.iter().flat_map(|d| d.skills_used.clone()).collect();
+        let current_skills = self
+            .read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist)
+            .await;
         let current_memory = self.read_memory(&ws.root_path).await;
 
         let skill_instructions = load_skill_instructions(&ws.root_path);
@@ -191,7 +195,11 @@ impl ImprovementEngine {
         let mut summaries: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
         for provider in &providers {
-            match self.producer.produce(&prompt, &ws.root_path, provider).await {
+            match self
+                .producer
+                .produce(&prompt, &ws.root_path, provider)
+                .await
+            {
                 Ok(mut p) => {
                     for e in &mut p.edits {
                         e.rationale = label_provider(provider, &e.rationale);
@@ -202,7 +210,10 @@ impl ImprovementEngine {
                     edits.extend(p.edits);
                 }
                 Err(e) => {
-                    tracing::warn!(provider, "self-improvement: provider produced no proposal: {e}");
+                    tracing::warn!(
+                        provider,
+                        "self-improvement: provider produced no proposal: {e}"
+                    );
                     errors.push(format!("{provider}: {e}"));
                 }
             }
@@ -214,7 +225,15 @@ impl ImprovementEngine {
             self.persist_config(ws_id, &ws.settings, &cfg).await?;
             let msg = errors.join("; ");
             self.improvements
-                .finish_run(run_id, ImprovementRunStatus::Failed, "", digests.len() as i64, 0, 0, Some(&msg))
+                .finish_run(
+                    run_id,
+                    ImprovementRunStatus::Failed,
+                    "",
+                    digests.len() as i64,
+                    0,
+                    0,
+                    Some(&msg),
+                )
                 .await?;
             self.emit_finished(ws_id, run_id, "failed", 0, 0);
             return Ok(());
@@ -283,14 +302,24 @@ impl ImprovementEngine {
 
         let Some(digest) = build_digest(&session) else {
             self.improvements
-                .finish_run(run_id, ImprovementRunStatus::Skipped, "no transcript yet", 0, 0, 0, None)
+                .finish_run(
+                    run_id,
+                    ImprovementRunStatus::Skipped,
+                    "no transcript yet",
+                    0,
+                    0,
+                    0,
+                    None,
+                )
                 .await?;
             self.emit_finished(&ws.id, run_id, "skipped", 0, 0);
             return Ok(());
         };
 
         let used = digest.skills_used.clone();
-        let current_skills = self.read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist).await;
+        let current_skills = self
+            .read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist)
+            .await;
         let current_memory = self.read_memory(&ws.root_path).await;
         let skill_instructions = load_skill_instructions(&ws.root_path);
         let mut prompt = build_prompt(
@@ -311,13 +340,32 @@ impl ImprovementEngine {
             .next()
             .unwrap_or_else(|| "claude".to_string());
 
-        match self.producer.produce(&prompt, &ws.root_path, &provider).await {
+        match self
+            .producer
+            .produce(&prompt, &ws.root_path, &provider)
+            .await
+        {
             Ok(proposal) => {
                 let (applied, pending) = self
-                    .process_edits(&ws.id, &ws.root_path, run_id, &proposal, &cfg.skill_allowlist, cfg.autonomy)
+                    .process_edits(
+                        &ws.id,
+                        &ws.root_path,
+                        run_id,
+                        &proposal,
+                        &cfg.skill_allowlist,
+                        cfg.autonomy,
+                    )
                     .await;
                 self.improvements
-                    .finish_run(run_id, ImprovementRunStatus::Done, &proposal.run_summary, 1, applied, pending, None)
+                    .finish_run(
+                        run_id,
+                        ImprovementRunStatus::Done,
+                        &proposal.run_summary,
+                        1,
+                        applied,
+                        pending,
+                        None,
+                    )
                     .await?;
                 self.emit_finished(&ws.id, run_id, "done", applied, pending);
                 let _ = self.events.send(Event::ImprovementUpdated {
@@ -328,7 +376,15 @@ impl ImprovementEngine {
             Err(e) => {
                 let msg = e.to_string();
                 self.improvements
-                    .finish_run(run_id, ImprovementRunStatus::Failed, "", 1, 0, 0, Some(&msg))
+                    .finish_run(
+                        run_id,
+                        ImprovementRunStatus::Failed,
+                        "",
+                        1,
+                        0,
+                        0,
+                        Some(&msg),
+                    )
                     .await?;
                 self.emit_finished(&ws.id, run_id, "failed", 0, 0);
             }
@@ -409,7 +465,10 @@ impl ImprovementEngine {
         let ws = self.workspaces.get(&session.workspace_id).await?;
         let cfg = effective_config(&ws.settings);
 
-        let run = self.improvements.create_run(&ws.id, ImprovementTrigger::Live).await?;
+        let run = self
+            .improvements
+            .create_run(&ws.id, ImprovementTrigger::Live)
+            .await?;
         let run_id = run.id.clone();
         let _ = self.events.send(Event::ImprovementRunStarted {
             workspace_id: ws.id.clone(),
@@ -418,14 +477,24 @@ impl ImprovementEngine {
 
         let Some(digest) = build_digest(&session) else {
             self.improvements
-                .finish_run(&run_id, ImprovementRunStatus::Skipped, "no transcript yet", 0, 0, 0, None)
+                .finish_run(
+                    &run_id,
+                    ImprovementRunStatus::Skipped,
+                    "no transcript yet",
+                    0,
+                    0,
+                    0,
+                    None,
+                )
                 .await?;
             self.emit_finished(&ws.id, &run_id, "skipped", 0, 0);
             return Ok(run_id);
         };
 
         let used = digest.skills_used.clone();
-        let current_skills = self.read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist).await;
+        let current_skills = self
+            .read_candidate_skills(&ws.root_path, &used, &cfg.skill_allowlist)
+            .await;
         let current_memory = self.read_memory(&ws.root_path).await;
         let skill_instructions = load_skill_instructions(&ws.root_path);
         let mut prompt = build_prompt(
@@ -449,20 +518,47 @@ impl ImprovementEngine {
             .next()
             .unwrap_or_else(|| "claude".to_string());
 
-        match self.producer.produce(&prompt, &ws.root_path, &provider).await {
+        match self
+            .producer
+            .produce(&prompt, &ws.root_path, &provider)
+            .await
+        {
             Ok(proposal) => {
                 let (applied, pending) = self
-                    .process_edits(&ws.id, &ws.root_path, &run_id, &proposal, &cfg.skill_allowlist, cfg.autonomy)
+                    .process_edits(
+                        &ws.id,
+                        &ws.root_path,
+                        &run_id,
+                        &proposal,
+                        &cfg.skill_allowlist,
+                        cfg.autonomy,
+                    )
                     .await;
                 self.improvements
-                    .finish_run(&run_id, ImprovementRunStatus::Done, &proposal.run_summary, 1, applied, pending, None)
+                    .finish_run(
+                        &run_id,
+                        ImprovementRunStatus::Done,
+                        &proposal.run_summary,
+                        1,
+                        applied,
+                        pending,
+                        None,
+                    )
                     .await?;
                 self.emit_finished(&ws.id, &run_id, "done", applied, pending);
             }
             Err(e) => {
                 let msg = e.to_string();
                 self.improvements
-                    .finish_run(&run_id, ImprovementRunStatus::Failed, "", 1, 0, 0, Some(&msg))
+                    .finish_run(
+                        &run_id,
+                        ImprovementRunStatus::Failed,
+                        "",
+                        1,
+                        0,
+                        0,
+                        Some(&msg),
+                    )
                     .await?;
                 self.emit_finished(&ws.id, &run_id, "failed", 0, 0);
             }
@@ -586,11 +682,15 @@ impl ImprovementEngine {
     pub async fn rollback_edit(&self, edit_id: &Id, actor: &str) -> Result<ImprovementEdit> {
         let edit = self.improvements.get_edit(edit_id).await?;
         if edit.status != ImprovementEditStatus::Applied {
-            return Err(Error::Invalid("only applied edits can be rolled back".into()));
+            return Err(Error::Invalid(
+                "only applied edits can be rolled back".into(),
+            ));
         }
         let current = tokio::fs::read_to_string(&edit.target_path).await.ok();
         // If the file changed since we wrote it, don't clobber — flag conflict.
-        if edit.kind != ImprovementEditKind::Remove && current.as_deref() != Some(edit.after_content.as_str()) {
+        if edit.kind != ImprovementEditKind::Remove
+            && current.as_deref() != Some(edit.after_content.as_str())
+        {
             return self
                 .improvements
                 .set_edit_status(edit_id, ImprovementEditStatus::Conflict, Some(actor))
@@ -686,8 +786,9 @@ impl ImprovementEngine {
             .filter(|s| cfg.skill_allowlist.iter().any(|a| a == *s))
             .cloned()
             .collect();
-        let current_skills =
-            self.read_candidate_skills(&ws.root_path, &candidates, &cfg.skill_allowlist).await;
+        let current_skills = self
+            .read_candidate_skills(&ws.root_path, &candidates, &cfg.skill_allowlist)
+            .await;
         let current_memory = self.read_memory(&ws.root_path).await;
         let skill_instructions = load_skill_instructions(&ws.root_path);
         // The prompt's "allow-list" section reflects what may actually auto-apply
@@ -708,7 +809,11 @@ impl ImprovementEngine {
         let mut summaries: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
         for provider in &providers {
-            match self.producer.produce(&prompt, &ws.root_path, provider).await {
+            match self
+                .producer
+                .produce(&prompt, &ws.root_path, provider)
+                .await
+            {
                 Ok(mut p) => {
                     for e in &mut p.edits {
                         e.rationale = label_provider(provider, &e.rationale);
@@ -719,7 +824,10 @@ impl ImprovementEngine {
                     edits.extend(p.edits);
                 }
                 Err(e) => {
-                    tracing::warn!(provider, "run_for_narrative: provider produced no proposal: {e}");
+                    tracing::warn!(
+                        provider,
+                        "run_for_narrative: provider produced no proposal: {e}"
+                    );
                     errors.push(format!("{provider}: {e}"));
                 }
             }
@@ -746,7 +854,14 @@ impl ImprovementEngine {
         // able to authorize edits to a skill the workspace hasn't allow-listed.
         // Edits to non-allow-listed skills still get queued by `process_edits`.
         let (applied, pending) = self
-            .process_edits(ws_id, &ws.root_path, &id, &proposal, &candidates, cfg.autonomy)
+            .process_edits(
+                ws_id,
+                &ws.root_path,
+                &id,
+                &proposal,
+                &candidates,
+                cfg.autonomy,
+            )
             .await;
 
         let mut summary = proposal.run_summary.clone();
@@ -754,7 +869,15 @@ impl ImprovementEngine {
             summary.push_str(&format!("\n\n(skipped: {})", errors.join("; ")));
         }
         self.improvements
-            .finish_run(&id, ImprovementRunStatus::Done, &summary, 1, applied, pending, None)
+            .finish_run(
+                &id,
+                ImprovementRunStatus::Done,
+                &summary,
+                1,
+                applied,
+                pending,
+                None,
+            )
             .await?;
         self.emit_finished(ws_id, &id, "done", applied, pending);
         let _ = self.events.send(Event::ImprovementUpdated {
@@ -815,7 +938,11 @@ fn blocking_read_candidate_skills(
         }
         if let Ok(path) = resolve_target(root, ImprovementTarget::Skill, name, Some(library_root)) {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                let content = if content.len() > 8000 { cap_bytes(&content, 8000).to_string() } else { content };
+                let content = if content.len() > 8000 {
+                    cap_bytes(&content, 8000).to_string()
+                } else {
+                    content
+                };
                 out.push((name.clone(), content));
             }
         }
@@ -845,10 +972,15 @@ fn blocking_read_memory(root: &str) -> Vec<(String, String)> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                if let (Some(name), Ok(content)) =
-                    (path.file_name().and_then(|n| n.to_str()), std::fs::read_to_string(&path))
-                {
-                    let content = if content.len() > 8000 { cap_bytes(&content, 8000).to_string() } else { content };
+                if let (Some(name), Ok(content)) = (
+                    path.file_name().and_then(|n| n.to_str()),
+                    std::fs::read_to_string(&path),
+                ) {
+                    let content = if content.len() > 8000 {
+                        cap_bytes(&content, 8000).to_string()
+                    } else {
+                        content
+                    };
                     out.push((name.to_string(), content));
                 }
             }
@@ -1035,7 +1167,10 @@ mod tests {
             let p = provider.to_string();
             Box::pin(async move {
                 seen.lock().unwrap().push(p);
-                Ok(ImprovementProposal { run_summary: "s".into(), edits: vec![] })
+                Ok(ImprovementProposal {
+                    run_summary: "s".into(),
+                    edits: vec![],
+                })
             })
         }
     }
@@ -1049,10 +1184,16 @@ mod tests {
         let workspaces = WorkspacesRepo::new(pool.clone());
         let users = otto_state::UsersRepo::new(pool.clone());
         let uid = users.create("root", "pw", "root", true).await.unwrap().id;
-        let ws = workspaces.create("t", dir.path().to_str().unwrap(), &uid).await.unwrap();
+        let ws = workspaces
+            .create("t", dir.path().to_str().unwrap(), &uid)
+            .await
+            .unwrap();
         // Configure the workspace's self-improvement providers to codex.
         let settings = serde_json::json!({ "self_improvement": { "providers": ["codex"] } });
-        workspaces.update(&ws.id, None, None, Some(&settings), None).await.unwrap();
+        workspaces
+            .update(&ws.id, None, None, Some(&settings), None)
+            .await
+            .unwrap();
 
         // Seed a session with a transcript so the run has something to analyze.
         let psid = "22222222-2222-4222-8222-222222222222";
@@ -1091,7 +1232,11 @@ mod tests {
             .unwrap();
 
         // Override with grok + agy → those run, NOT the configured codex.
-        let run = engine.improvements.create_run(&ws.id, ImprovementTrigger::Manual).await.unwrap();
+        let run = engine
+            .improvements
+            .create_run(&ws.id, ImprovementTrigger::Manual)
+            .await
+            .unwrap();
         engine
             .execute_run_with_autonomy_providers(
                 &run.id,
@@ -1102,11 +1247,18 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(*seen.lock().unwrap(), vec!["grok".to_string(), "agy".to_string()]);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["grok".to_string(), "agy".to_string()]
+        );
 
         // Empty override → falls back to the configured set (codex).
         seen.lock().unwrap().clear();
-        let run2 = engine.improvements.create_run(&ws.id, ImprovementTrigger::Manual).await.unwrap();
+        let run2 = engine
+            .improvements
+            .create_run(&ws.id, ImprovementTrigger::Manual)
+            .await
+            .unwrap();
         engine
             .execute_run_with_autonomy_providers(
                 &run2.id,
@@ -1131,7 +1283,10 @@ mod tests {
         // session's created_by FK), so create one and reuse its id.
         let users = otto_state::UsersRepo::new(pool.clone());
         let uid = users.create("root", "pw", "root", true).await.unwrap().id;
-        let ws = workspaces.create("t", dir.path().to_str().unwrap(), &uid).await.unwrap();
+        let ws = workspaces
+            .create("t", dir.path().to_str().unwrap(), &uid)
+            .await
+            .unwrap();
         let (events, _) = broadcast::channel(16);
         let proposal = ImprovementProposal {
             run_summary: "s".into(),
@@ -1145,7 +1300,10 @@ mod tests {
                 evidence: vec!["sess".into()],
                 dedup_checked: true,
                 dedup_quote: None,
-                patch: EditPatch { before: None, after: "# notes\n- learned X\n".into() },
+                patch: EditPatch {
+                    before: None,
+                    after: "# notes\n- learned X\n".into(),
+                },
             }],
         };
         let engine = ImprovementEngine {
@@ -1206,11 +1364,21 @@ mod tests {
         assert_eq!(run.applied, 1);
 
         let mem_path = proj.join("memory").join("MEMORY.md");
-        assert_eq!(std::fs::read_to_string(&mem_path).unwrap(), "# notes\n- learned X\n");
+        assert_eq!(
+            std::fs::read_to_string(&mem_path).unwrap(),
+            "# notes\n- learned X\n"
+        );
 
         // Roll it back → file deleted (before_content was None).
-        let edits = engine.improvements.list_edits_by_run(&run_id).await.unwrap();
-        let applied = edits.iter().find(|e| e.status == ImprovementEditStatus::Applied).unwrap();
+        let edits = engine
+            .improvements
+            .list_edits_by_run(&run_id)
+            .await
+            .unwrap();
+        let applied = edits
+            .iter()
+            .find(|e| e.status == ImprovementEditStatus::Applied)
+            .unwrap();
         engine.rollback_edit(&applied.id, "u").await.unwrap();
         assert!(!mem_path.exists());
         let after = engine.improvements.get_edit(&applied.id).await.unwrap();
@@ -1230,7 +1398,10 @@ mod tests {
         let workspaces = WorkspacesRepo::new(pool.clone());
         let users = otto_state::UsersRepo::new(pool.clone());
         let uid = users.create("root", "pw", "root", true).await.unwrap().id;
-        let ws = workspaces.create("t", dir.path().to_str().unwrap(), &uid).await.unwrap();
+        let ws = workspaces
+            .create("t", dir.path().to_str().unwrap(), &uid)
+            .await
+            .unwrap();
 
         // Configure the workspace's self-improvement allow-list + tiered autonomy.
         let settings = serde_json::json!({
@@ -1239,7 +1410,10 @@ mod tests {
                 "autonomy": "tiered",
             }
         });
-        workspaces.update(&ws.id, None, None, Some(&settings), None).await.unwrap();
+        workspaces
+            .update(&ws.id, None, None, Some(&settings), None)
+            .await
+            .unwrap();
 
         let (events, _) = broadcast::channel(16);
         let proposal = ImprovementProposal {
@@ -1254,7 +1428,10 @@ mod tests {
                 evidence: vec!["narr".into()],
                 dedup_checked: true,
                 dedup_quote: None,
-                patch: EditPatch { before: None, after: "NEW SKILL BODY\n".into() },
+                patch: EditPatch {
+                    before: None,
+                    after: "NEW SKILL BODY\n".into(),
+                },
             }],
         };
         let engine = ImprovementEngine {
@@ -1283,7 +1460,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let edits = engine.improvements.list_edits_by_run(&run_id).await.unwrap();
+        let edits = engine
+            .improvements
+            .list_edits_by_run(&run_id)
+            .await
+            .unwrap();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].status, ImprovementEditStatus::Pending);
         let run = engine.improvements.get_run(&run_id).await.unwrap();
@@ -1312,10 +1493,17 @@ mod tests {
             )
             .await
             .unwrap();
-        let edits = engine.improvements.list_edits_by_run(&run_id).await.unwrap();
+        let edits = engine
+            .improvements
+            .list_edits_by_run(&run_id)
+            .await
+            .unwrap();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].status, ImprovementEditStatus::Applied);
-        assert_eq!(std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(), "NEW SKILL BODY\n");
+        assert_eq!(
+            std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
+            "NEW SKILL BODY\n"
+        );
     }
 
     // ---- atomic auto-apply write (conflict / backup / rename) ----
@@ -1331,7 +1519,10 @@ mod tests {
             evidence: vec![],
             dedup_checked: true,
             dedup_quote: None,
-            patch: EditPatch { before: None, after: after.into() },
+            patch: EditPatch {
+                before: None,
+                after: after.into(),
+            },
         }
     }
 
@@ -1371,15 +1562,26 @@ mod tests {
         let bak = std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()
-            .find(|e| e.file_name().to_str().unwrap().starts_with(".MEMORY.md.bak-"))
+            .find(|e| {
+                e.file_name()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(".MEMORY.md.bak-")
+            })
             .unwrap();
-        assert_eq!(std::fs::read_to_string(bak.path()).unwrap(), "OLD CONTENT\n");
+        assert_eq!(
+            std::fs::read_to_string(bak.path()).unwrap(),
+            "OLD CONTENT\n"
+        );
         // No leftover temp file from the atomic-rename write.
         let leftover_tmp = std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()
             .any(|e| e.file_name().to_str().unwrap().contains(".otto-tmp-"));
-        assert!(!leftover_tmp, "temp file should be renamed away, not left behind");
+        assert!(
+            !leftover_tmp,
+            "temp file should be renamed away, not left behind"
+        );
     }
 
     #[tokio::test]
@@ -1397,7 +1599,10 @@ mod tests {
         assert!(matches!(outcome, ApplyOutcome::Conflict));
 
         // File is untouched; no backup written for a conflict (we never wrote).
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "CHANGED BY SOMEONE ELSE\n");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "CHANGED BY SOMEONE ELSE\n"
+        );
         assert_eq!(backup_count(dir.path(), "MEMORY.md"), 0);
     }
 

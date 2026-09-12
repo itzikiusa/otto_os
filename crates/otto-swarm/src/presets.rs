@@ -93,7 +93,12 @@ struct PresetAgentDef {
 fn parse_all() -> Vec<PresetFile> {
     PRESETS
         .files()
-        .filter(|f| f.path().extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false))
+        .filter(|f| {
+            f.path()
+                .extension()
+                .map(|e| e == "yaml" || e == "yml")
+                .unwrap_or(false)
+        })
         .filter_map(|f| f.contents_utf8())
         .filter_map(|s| match serde_yaml::from_str::<PresetFile>(s) {
             Ok(p) => Some(p),
@@ -163,7 +168,10 @@ pub async fn instantiate(
     // and apply the preset's budget guardrails to the swarm row.
     let mut config = swarm.config.clone();
     if let Some(obj) = config.as_object_mut() {
-        obj.insert("max_parallel_sessions".into(), json!(preset.max_parallel_sessions));
+        obj.insert(
+            "max_parallel_sessions".into(),
+            json!(preset.max_parallel_sessions),
+        );
         obj.entry("cwd_mode").or_insert(json!("scratch"));
     }
     let _ = repo
@@ -208,7 +216,11 @@ pub async fn instantiate(
             .iter()
             .map(|s| json!({"name": s.name, "must_use": s.must_use}))
             .collect::<Vec<_>>());
-        let soul_md = if a.soul.trim().is_empty() { None } else { Some(a.soul.clone()) };
+        let soul_md = if a.soul.trim().is_empty() {
+            None
+        } else {
+            Some(a.soul.clone())
+        };
         match repo
             .create_agent(NewAgent {
                 swarm_id: swarm.id.clone(),

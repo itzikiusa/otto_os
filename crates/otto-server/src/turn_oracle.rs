@@ -284,7 +284,13 @@ pub fn scan_claude(jsonl: &str) -> ClaudeScan {
             if let Some(id) = task_id(tur.get("resumedAgentId")) {
                 s.notified.remove(&id);
                 s.notified_at.remove(&id);
-                push_pending(&mut s.pending, id, TaskKind::Agent, "resumed sub-agent".into(), i);
+                push_pending(
+                    &mut s.pending,
+                    id,
+                    TaskKind::Agent,
+                    "resumed sub-agent".into(),
+                    i,
+                );
             }
         }
 
@@ -368,7 +374,12 @@ fn push_pending(
     if pending.iter().any(|p| p.id == id) {
         return;
     }
-    pending.push(PendingTask { id, kind, description, since_line });
+    pending.push(PendingTask {
+        id,
+        kind,
+        description,
+        since_line,
+    });
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -447,7 +458,9 @@ pub fn scan_codex(rollout: &str, after_ordinal: u64) -> CodexScan {
             continue;
         }
         s.last_event_ordinal = s.last_event_ordinal.max(ordinal);
-        let Some(payload) = v.get("payload") else { continue };
+        let Some(payload) = v.get("payload") else {
+            continue;
+        };
         let turn_id = payload.get("turn_id").and_then(|t| t.as_str());
         match payload.get("type").and_then(|t| t.as_str()).unwrap_or("") {
             "task_started" => {
@@ -497,8 +510,12 @@ pub fn subagents(project_dir: &Path, psid: &str, scan: &ClaudeScan) -> Vec<Subag
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            let Some(stem) = name.strip_suffix(".meta.json") else { continue };
-            let Some(id) = stem.strip_prefix("agent-") else { continue };
+            let Some(stem) = name.strip_suffix(".meta.json") else {
+                continue;
+            };
+            let Some(id) = stem.strip_prefix("agent-") else {
+                continue;
+            };
             if !valid_id(id) {
                 continue;
             }
@@ -615,7 +632,10 @@ pub fn verdict(
     // only positive signal; otherwise the caller's `quiet_done` channel decides.
     if claude.is_none() && codex.is_none() {
         return match handoff_text {
-            Some(t) => Verdict::Complete { text: t, via: CompleteVia::HandoffAndIdleTurn },
+            Some(t) => Verdict::Complete {
+                text: t,
+                via: CompleteVia::HandoffAndIdleTurn,
+            },
             None => Verdict::Working(Phase::Working),
         };
     }
@@ -679,9 +699,14 @@ pub fn verdict(
             } else {
                 CompleteVia::HandoffAndIdleTurn
             };
-            return Verdict::Complete { text: handoff_text.unwrap_or_default(), via };
+            return Verdict::Complete {
+                text: handoff_text.unwrap_or_default(),
+                via,
+            };
         }
-        return Verdict::Working(Phase::IdleConfirming { left: IDLE_CONFIRM - elapsed });
+        return Verdict::Working(Phase::IdleConfirming {
+            left: IDLE_CONFIRM - elapsed,
+        });
     }
     clock.idle_since = None;
 
@@ -694,7 +719,10 @@ pub fn verdict(
                 .and_then(|c| c.last_turn_text.clone())
                 .or_else(|| codex.and_then(|x| x.last_agent_message.clone()))
                 .unwrap_or_default();
-            return Verdict::Complete { text, via: CompleteVia::IdleTurnNoHandoff };
+            return Verdict::Complete {
+                text,
+                via: CompleteVia::IdleTurnNoHandoff,
+            };
         }
         return Verdict::Working(Phase::HandoffMissingGrace {
             left: HANDOFF_MISSING_GRACE - elapsed,
@@ -717,7 +745,10 @@ pub fn verdict(
                     .clone()
                     .or_else(|| c.last_turn_text.clone())
                     .unwrap_or_default();
-                return Verdict::Complete { text, via: CompleteVia::BashLingerCap };
+                return Verdict::Complete {
+                    text,
+                    via: CompleteVia::BashLingerCap,
+                };
             }
             return Verdict::Working(Phase::BashLinger {
                 pending: c.pending.len(),
@@ -740,7 +771,10 @@ pub fn verdict(
             now.checked_sub(age).unwrap_or(now)
         });
         if now.saturating_duration_since(since) >= HANDOFF_LINGER_CAP {
-            return Verdict::Complete { text, via: CompleteVia::HandoffLingerCap };
+            return Verdict::Complete {
+                text,
+                via: CompleteVia::HandoffLingerCap,
+            };
         }
         let pending = claude.map(|c| c.pending.len()).unwrap_or(0);
         return Verdict::Working(Phase::HandoffWrittenWaiting { pending });
@@ -753,7 +787,12 @@ pub fn verdict(
     // 🧩 line and the chip disagree.
     let running = claude.map(|c| c.pending.len()).unwrap_or(0);
     let done = claude
-        .map(|c| c.notified.values().filter(|s| s.as_str() == "completed").count())
+        .map(|c| {
+            c.notified
+                .values()
+                .filter(|s| s.as_str() == "completed")
+                .count()
+        })
         .unwrap_or(0);
     if running > 0 || done > 0 {
         return Verdict::Working(Phase::Subagents { running, done });
@@ -923,7 +962,9 @@ mod tests {
             )
         }
         pub fn codex(ordinal: u64, ts: &str, payload: &str) -> String {
-            format!(r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"event_msg","payload":{payload}}}"#)
+            format!(
+                r#"{{"timestamp":"{ts}","ordinal":{ordinal},"type":"event_msg","payload":{payload}}}"#
+            )
         }
     }
     use fixtures::*;
@@ -960,7 +1001,10 @@ mod tests {
         let mut clock = OracleClock::default();
         assert_eq!(
             verdict("claude", Some(&scan), None, None, &mut clock, t0(), &opts()),
-            Verdict::Working(Phase::Subagents { running: 4, done: 0 })
+            Verdict::Working(Phase::Subagents {
+                running: 4,
+                done: 0
+            })
         );
     }
 
@@ -975,7 +1019,11 @@ mod tests {
         jsonl.push_str(&end_turn("2026-09-12T08:12:30Z", "waiting on the sweeps"));
         jsonl.push('\n');
         for (i, id) in ids.iter().enumerate() {
-            jsonl.push_str(&notif_user(&format!("2026-09-12T08:1{i}:00Z"), id, "completed"));
+            jsonl.push_str(&notif_user(
+                &format!("2026-09-12T08:1{i}:00Z"),
+                id,
+                "completed",
+            ));
             jsonl.push('\n');
             let scan = scan_claude(&jsonl);
             assert_eq!(scan.pending.len(), 3 - i, "after {id}");
@@ -1008,7 +1056,15 @@ mod tests {
         // Turn not ended → not complete even with a handoff on disk.
         let mut clock = OracleClock::default();
         assert!(matches!(
-            verdict("claude", Some(&scan), None, Some("done"), &mut clock, t0(), &opts()),
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("done"),
+                &mut clock,
+                t0(),
+                &opts()
+            ),
             Verdict::Working(Phase::HandoffWrittenWaiting { pending: 0 })
         ));
     }
@@ -1022,7 +1078,10 @@ mod tests {
         );
         let scan = scan_claude(&jsonl);
         assert!(scan.pending.is_empty());
-        assert_eq!(scan.notified.get("ac").map(String::as_str), Some("completed"));
+        assert_eq!(
+            scan.notified.get("ac").map(String::as_str),
+            Some("completed")
+        );
     }
 
     #[test]
@@ -1041,12 +1100,28 @@ mod tests {
         let mut clock = OracleClock::default();
         let t = t0();
         assert!(matches!(
-            verdict("claude", Some(&scan), None, Some("handoff"), &mut clock, t, &opts()),
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t,
+                &opts()
+            ),
             Verdict::Working(Phase::HandoffWrittenWaiting { .. })
         ));
         let later = t + QUEUE_ONLY_BOUND + Duration::from_secs(1);
         assert!(matches!(
-            verdict("claude", Some(&scan), None, Some("handoff"), &mut clock, later, &opts()),
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                later,
+                &opts()
+            ),
             Verdict::Working(Phase::IdleConfirming { .. })
         ));
     }
@@ -1099,7 +1174,10 @@ mod tests {
         let scan = scan_claude(&resumed);
         assert_eq!(scan.pending.len(), 1);
         assert!(!scan.notified.contains_key("aa"));
-        let done = format!("{resumed}{}\n", notif_user("2026-09-12T08:14:00Z", "aa", "completed"));
+        let done = format!(
+            "{resumed}{}\n",
+            notif_user("2026-09-12T08:14:00Z", "aa", "completed")
+        );
         assert!(scan_claude(&done).pending.is_empty());
     }
 
@@ -1129,20 +1207,37 @@ mod tests {
         let scan = scan_claude(&working);
         assert!(matches!(
             verdict("claude", Some(&scan), None, None, &mut clock, t, &opts()),
-            Verdict::Working(Phase::Subagents { running: 1, done: 0 })
+            Verdict::Working(Phase::Subagents {
+                running: 1,
+                done: 0
+            })
         ));
         assert!(clock.bash_only_since.is_none());
 
-        let idle = format!("{working}{}\n", end_turn("2026-09-12T08:21:00Z", "all done"));
+        let idle = format!(
+            "{working}{}\n",
+            end_turn("2026-09-12T08:21:00Z", "all done")
+        );
         let scan = scan_claude(&idle);
         assert!(matches!(
             verdict("claude", Some(&scan), None, None, &mut clock, t, &opts()),
             Verdict::Working(Phase::BashLinger { pending: 1, .. })
         ));
         // A notification waking the parent resets the clock.
-        let woken = format!("{idle}{}\n", notif_user("2026-09-12T08:22:00Z", "other", "completed"));
+        let woken = format!(
+            "{idle}{}\n",
+            notif_user("2026-09-12T08:22:00Z", "other", "completed")
+        );
         let woken_scan = scan_claude(&woken);
-        let _ = verdict("claude", Some(&woken_scan), None, None, &mut clock, t, &opts());
+        let _ = verdict(
+            "claude",
+            Some(&woken_scan),
+            None,
+            None,
+            &mut clock,
+            t,
+            &opts(),
+        );
         assert!(clock.bash_only_since.is_none());
 
         // …and at the cap the step moves on, with and without a handoff.
@@ -1152,13 +1247,35 @@ mod tests {
         let late = t + BASH_LINGER_CAP + Duration::from_secs(1);
         assert_eq!(
             verdict("claude", Some(&scan), None, None, &mut clock, late, &opts()),
-            Verdict::Complete { text: "all done".into(), via: CompleteVia::BashLingerCap }
+            Verdict::Complete {
+                text: "all done".into(),
+                via: CompleteVia::BashLingerCap
+            }
         );
         let mut clock = OracleClock::default();
-        let _ = verdict("claude", Some(&scan), None, Some("handoff"), &mut clock, t, &opts());
+        let _ = verdict(
+            "claude",
+            Some(&scan),
+            None,
+            Some("handoff"),
+            &mut clock,
+            t,
+            &opts(),
+        );
         assert_eq!(
-            verdict("claude", Some(&scan), None, Some("handoff"), &mut clock, late, &opts()),
-            Verdict::Complete { text: "handoff".into(), via: CompleteVia::BashLingerCap }
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                late,
+                &opts()
+            ),
+            Verdict::Complete {
+                text: "handoff".into(),
+                via: CompleteVia::BashLingerCap
+            }
         );
     }
 
@@ -1189,13 +1306,32 @@ mod tests {
         let mut clock = OracleClock::default();
         let t = t0();
         assert_eq!(
-            verdict("claude", Some(&scan), None, Some("handoff text"), &mut clock, t, &opts()),
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff text"),
+                &mut clock,
+                t,
+                &opts()
+            ),
             Verdict::Working(Phase::HandoffWrittenWaiting { pending: 2 })
         );
         let late = t + HANDOFF_LINGER_CAP + Duration::from_secs(1);
         assert_eq!(
-            verdict("claude", Some(&scan), None, Some("handoff text"), &mut clock, late, &opts()),
-            Verdict::Complete { text: "handoff text".into(), via: CompleteVia::HandoffLingerCap }
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff text"),
+                &mut clock,
+                late,
+                &opts()
+            ),
+            Verdict::Complete {
+                text: "handoff text".into(),
+                via: CompleteVia::HandoffLingerCap
+            }
         );
     }
 
@@ -1212,7 +1348,10 @@ mod tests {
         let late = t + HANDOFF_MISSING_GRACE;
         assert_eq!(
             verdict("claude", Some(&scan), None, None, &mut clock, late, &opts()),
-            Verdict::Complete { text: "Review complete.".into(), via: CompleteVia::IdleTurnNoHandoff }
+            Verdict::Complete {
+                text: "Review complete.".into(),
+                via: CompleteVia::IdleTurnNoHandoff
+            }
         );
     }
 
@@ -1223,7 +1362,15 @@ mod tests {
         let mut clock = OracleClock::default();
         let t = t0();
         assert!(matches!(
-            verdict("claude", Some(&scan), None, Some("handoff"), &mut clock, t, &opts()),
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t,
+                &opts()
+            ),
             Verdict::Working(Phase::IdleConfirming { .. })
         ));
         // A non-message line appended (attachment / queue bookkeeping) does not
@@ -1236,8 +1383,19 @@ mod tests {
         assert_eq!(scan2.last_message_at, scan.last_message_at);
         let late = t + IDLE_CONFIRM;
         assert_eq!(
-            verdict("claude", Some(&scan2), None, Some("handoff"), &mut clock, late, &opts()),
-            Verdict::Complete { text: "handoff".into(), via: CompleteVia::HandoffAndIdleTurn }
+            verdict(
+                "claude",
+                Some(&scan2),
+                None,
+                Some("handoff"),
+                &mut clock,
+                late,
+                &opts()
+            ),
+            Verdict::Complete {
+                text: "handoff".into(),
+                via: CompleteVia::HandoffAndIdleTurn
+            }
         );
     }
 
@@ -1250,21 +1408,48 @@ mod tests {
         let mut o = opts();
         o.subagent_moved_at = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000));
         assert!(matches!(
-            verdict("claude", Some(&scan), None, Some("handoff"), &mut clock, t, &o),
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                t,
+                &o
+            ),
             Verdict::Working(Phase::IdleConfirming { .. })
         ));
         // A grandchild wrote to its jsonl → the window restarts.
         o.subagent_moved_at = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_010));
         let late = t + IDLE_CONFIRM;
         assert!(matches!(
-            verdict("claude", Some(&scan), None, Some("handoff"), &mut clock, late, &o),
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                late,
+                &o
+            ),
             Verdict::Working(Phase::IdleConfirming { .. })
         ));
         // …and only then does the quiet window complete it.
         let later = late + IDLE_CONFIRM;
         assert!(matches!(
-            verdict("claude", Some(&scan), None, Some("handoff"), &mut clock, later, &o),
-            Verdict::Complete { via: CompleteVia::HandoffAndIdleTurn, .. }
+            verdict(
+                "claude",
+                Some(&scan),
+                None,
+                Some("handoff"),
+                &mut clock,
+                later,
+                &o
+            ),
+            Verdict::Complete {
+                via: CompleteVia::HandoffAndIdleTurn,
+                ..
+            }
         ));
     }
 
@@ -1291,7 +1476,10 @@ mod tests {
         assert!(stamp >= main_m);
         // Files of other extensions in those dirs contribute nothing.
         std::fs::write(subs.join("agent-aa.meta.json"), "{}").unwrap();
-        assert_eq!(progress_stamp(&main, Some(&subs), Some(&tasks)).unwrap(), stamp);
+        assert_eq!(
+            progress_stamp(&main, Some(&subs), Some(&tasks)).unwrap(),
+            stamp
+        );
         // A missing dir is "no contribution", never an error.
         assert!(progress_stamp(&main, Some(&dir.path().join("nope")), None).is_some());
         // Nothing at all → None (never "no progress").
@@ -1302,7 +1490,11 @@ mod tests {
     fn codex_task_complete_matches_latest_turn() {
         let rollout = format!(
             "{}\n{}\n",
-            codex(10, "2026-09-12T08:00:00Z", r#"{"type":"task_started","turn_id":"T1"}"#),
+            codex(
+                10,
+                "2026-09-12T08:00:00Z",
+                r#"{"type":"task_started","turn_id":"T1"}"#
+            ),
             codex(
                 20,
                 "2026-09-12T08:05:00Z",
@@ -1319,12 +1511,31 @@ mod tests {
         let mut clock = OracleClock::default();
         let t = t0();
         assert!(matches!(
-            verdict("codex", None, Some(&scan), Some("handoff"), &mut clock, t, &opts()),
+            verdict(
+                "codex",
+                None,
+                Some(&scan),
+                Some("handoff"),
+                &mut clock,
+                t,
+                &opts()
+            ),
             Verdict::Working(Phase::IdleConfirming { .. })
         ));
         assert_eq!(
-            verdict("codex", None, Some(&scan), Some("handoff"), &mut clock, t + IDLE_CONFIRM, &opts()),
-            Verdict::Complete { text: "handoff".into(), via: CompleteVia::CodexTaskComplete }
+            verdict(
+                "codex",
+                None,
+                Some(&scan),
+                Some("handoff"),
+                &mut clock,
+                t + IDLE_CONFIRM,
+                &opts()
+            ),
+            Verdict::Complete {
+                text: "handoff".into(),
+                via: CompleteVia::CodexTaskComplete
+            }
         );
     }
 
@@ -1332,8 +1543,16 @@ mod tests {
     fn codex_aborted_turn_then_new_turn_completes() {
         let aborted = format!(
             "{}\n{}\n",
-            codex(10, "2026-09-12T08:00:00Z", r#"{"type":"task_started","turn_id":"T1"}"#),
-            codex(11, "2026-09-12T08:01:00Z", r#"{"type":"turn_aborted","turn_id":"T1"}"#),
+            codex(
+                10,
+                "2026-09-12T08:00:00Z",
+                r#"{"type":"task_started","turn_id":"T1"}"#
+            ),
+            codex(
+                11,
+                "2026-09-12T08:01:00Z",
+                r#"{"type":"turn_aborted","turn_id":"T1"}"#
+            ),
         );
         let scan = scan_codex(&aborted, 0);
         assert!(scan.latest_turn.is_none());
@@ -1342,13 +1561,25 @@ mod tests {
         let t = t0();
         let _ = verdict("codex", None, Some(&scan), None, &mut clock, t, &opts());
         assert_eq!(
-            verdict("codex", None, Some(&scan), None, &mut clock, t + HANDOFF_MISSING_GRACE, &opts()),
+            verdict(
+                "codex",
+                None,
+                Some(&scan),
+                None,
+                &mut clock,
+                t + HANDOFF_MISSING_GRACE,
+                &opts()
+            ),
             Verdict::Failed("codex turn aborted".into())
         );
         // A NEW turn after the abort completes normally.
         let restarted = format!(
             "{aborted}{}\n{}\n",
-            codex(12, "2026-09-12T08:02:00Z", r#"{"type":"task_started","turn_id":"T2"}"#),
+            codex(
+                12,
+                "2026-09-12T08:02:00Z",
+                r#"{"type":"task_started","turn_id":"T2"}"#
+            ),
             codex(
                 13,
                 "2026-09-12T08:03:00Z",
@@ -1365,13 +1596,21 @@ mod tests {
         // The baseline skips the PREVIOUS turn entirely (a resumed rollout).
         let rollout = format!(
             "{}\n{}\n{}\n",
-            codex(1, "2026-09-12T07:00:00Z", r#"{"type":"task_started","turn_id":"T0"}"#),
+            codex(
+                1,
+                "2026-09-12T07:00:00Z",
+                r#"{"type":"task_started","turn_id":"T0"}"#
+            ),
             codex(
                 2,
                 "2026-09-12T07:01:00Z",
                 r#"{"type":"task_complete","turn_id":"T0","last_agent_message":"old"}"#
             ),
-            codex(3, "2026-09-12T08:00:00Z", r#"{"type":"task_started","turn_id":"T1"}"#),
+            codex(
+                3,
+                "2026-09-12T08:00:00Z",
+                r#"{"type":"task_started","turn_id":"T1"}"#
+            ),
         );
         let scan = scan_codex(&rollout, 2);
         assert!(!scan.turn_complete);
@@ -1415,10 +1654,17 @@ mod tests {
         assert_eq!(logs[0], "▶ agent_prompt started");
         assert!(logs.iter().any(|l| l.starts_with('↻')));
         assert!(logs.iter().any(|l| l.starts_with('⚠')));
-        assert_eq!(logs.last().unwrap(), "✓ step complete (handoff + idle turn)");
+        assert_eq!(
+            logs.last().unwrap(),
+            "✓ step complete (handoff + idle turn)"
+        );
         // The OLDEST 🧩 lines went first.
-        assert!(!logs.iter().any(|l| l == "🧩 sub-agents: 0 running · 0 done"));
-        assert!(logs.iter().any(|l| l == "🧩 sub-agents: 299 running · 0 done"));
+        assert!(!logs
+            .iter()
+            .any(|l| l == "🧩 sub-agents: 0 running · 0 done"));
+        assert!(logs
+            .iter()
+            .any(|l| l == "🧩 sub-agents: 299 running · 0 done"));
         // Below the cap nothing is evicted; above it with no phase lines left,
         // the decision lines all survive.
         let mut only_decisions: Vec<String> = (0..10).map(|i| format!("✓ {i}")).collect();
@@ -1430,8 +1676,19 @@ mod tests {
     fn other_providers_complete_on_handoff_only() {
         let mut clock = OracleClock::default();
         assert_eq!(
-            verdict("agy", None, None, Some(" reply "), &mut clock, t0(), &opts()),
-            Verdict::Complete { text: "reply".into(), via: CompleteVia::HandoffAndIdleTurn }
+            verdict(
+                "agy",
+                None,
+                None,
+                Some(" reply "),
+                &mut clock,
+                t0(),
+                &opts()
+            ),
+            Verdict::Complete {
+                text: "reply".into(),
+                via: CompleteVia::HandoffAndIdleTurn
+            }
         );
         assert_eq!(
             verdict("agy", None, None, None, &mut clock, t0(), &opts()),
@@ -1441,15 +1698,32 @@ mod tests {
 
     #[test]
     fn phase_lines_are_the_documented_texts() {
-        assert_eq!(phase_line(&Phase::Booting, "claude"), "⏳ starting claude session");
-        assert_eq!(phase_line(&Phase::PromptAccepted, "claude"), "✉ prompt accepted");
+        assert_eq!(
+            phase_line(&Phase::Booting, "claude"),
+            "⏳ starting claude session"
+        );
+        assert_eq!(
+            phase_line(&Phase::PromptAccepted, "claude"),
+            "✉ prompt accepted"
+        );
         assert_eq!(phase_line(&Phase::Working, "claude"), "⚙ working");
         assert_eq!(
-            phase_line(&Phase::Subagents { running: 2, done: 1 }, "claude"),
+            phase_line(
+                &Phase::Subagents {
+                    running: 2,
+                    done: 1
+                },
+                "claude"
+            ),
             "🧩 sub-agents: 2 running · 1 done"
         );
         assert_eq!(
-            phase_line(&Phase::IdleConfirming { left: Duration::from_secs(12) }, "claude"),
+            phase_line(
+                &Phase::IdleConfirming {
+                    left: Duration::from_secs(12)
+                },
+                "claude"
+            ),
             "⏸ agent idle — confirming completion (20s)"
         );
         assert_eq!(
@@ -1462,21 +1736,42 @@ mod tests {
             "📄 handoff written — waiting for the turn to end (up to 15m)"
         );
         assert_eq!(
-            phase_line(&Phase::HandoffMissingGrace { left: Duration::from_secs(5) }, "claude"),
+            phase_line(
+                &Phase::HandoffMissingGrace {
+                    left: Duration::from_secs(5)
+                },
+                "claude"
+            ),
             "⏸ handoff file missing — waiting up to 90s for the agent's final reply"
         );
         assert_eq!(
-            phase_line(&Phase::BashLinger { pending: 1, left: Duration::from_secs(5) }, "claude"),
+            phase_line(
+                &Phase::BashLinger {
+                    pending: 1,
+                    left: Duration::from_secs(5)
+                },
+                "claude"
+            ),
             "⏸ background task still running — waiting up to 15m"
         );
         // Identity ignores the countdown, so a ticking window logs once.
         assert_eq!(
-            phase_key(&Phase::IdleConfirming { left: Duration::from_secs(19) }),
-            phase_key(&Phase::IdleConfirming { left: Duration::from_secs(3) })
+            phase_key(&Phase::IdleConfirming {
+                left: Duration::from_secs(19)
+            }),
+            phase_key(&Phase::IdleConfirming {
+                left: Duration::from_secs(3)
+            })
         );
         assert_ne!(
-            phase_key(&Phase::Subagents { running: 2, done: 0 }),
-            phase_key(&Phase::Subagents { running: 1, done: 1 })
+            phase_key(&Phase::Subagents {
+                running: 2,
+                done: 0
+            }),
+            phase_key(&Phase::Subagents {
+                running: 1,
+                done: 1
+            })
         );
         assert!(is_phase_line("📄 handoff file written"));
         assert!(!is_phase_line("✓ step complete (handoff + idle turn)"));

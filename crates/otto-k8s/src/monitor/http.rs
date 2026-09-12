@@ -111,7 +111,10 @@ fn presets_out() -> Vec<PresetOut> {
         .collect()
 }
 
-async fn load<S: K8sCtx>(ctx: &S, id: &Id) -> ApiResult<(K8sCluster, MonitorConfig, Option<K8sMonitorStatusRow>)> {
+async fn load<S: K8sCtx>(
+    ctx: &S,
+    id: &Id,
+) -> ApiResult<(K8sCluster, MonitorConfig, Option<K8sMonitorStatusRow>)> {
     let cluster = Clusters::new(ctx).get(id).await?;
     let repo = K8sMonitorRepo::new(ctx.pool());
     let cfg = repo
@@ -127,7 +130,10 @@ fn monitor_resp(cfg: &MonitorConfig, status: Option<&K8sMonitorStatusRow>) -> Va
     json!({ "config": cfg, "status": status, "presets": presets_out() })
 }
 
-async fn get_monitor<S: K8sCtx>(State(ctx): State<S>, Path(id): Path<Id>) -> ApiResult<Json<Value>> {
+async fn get_monitor<S: K8sCtx>(
+    State(ctx): State<S>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Value>> {
     let (_, cfg, status) = load(&ctx, &id).await?;
     Ok(Json(monitor_resp(&cfg, status.as_ref())))
 }
@@ -150,7 +156,9 @@ async fn put_monitor<S: K8sCtx>(
         }
     }
     let repo = K8sMonitorRepo::new(ctx.pool());
-    let saved = repo.upsert_config(&probes::to_row(id.as_str(), &cfg)).await?;
+    let saved = repo
+        .upsert_config(&probes::to_row(id.as_str(), &cfg))
+        .await?;
     audit(
         &ctx,
         &user,
@@ -163,7 +171,10 @@ async fn put_monitor<S: K8sCtx>(
     )
     .await;
     let status = repo.get_status(id.as_str()).await?;
-    Ok(Json(monitor_resp(&probes::from_row(&saved), status.as_ref())))
+    Ok(Json(monitor_resp(
+        &probes::from_row(&saved),
+        status.as_ref(),
+    )))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -190,7 +201,9 @@ async fn test_probes<S: K8sCtx>(
         .or_else(|| namespaces.first().cloned())
         .ok_or_else(|| Error::Invalid("namespace is required".into()))?;
     let k = kubectl_for(&ctx, &cluster).await?;
-    let list = k.json(["get", "pods", "-n", ns.as_str(), "-o", "json"]).await?;
+    let list = k
+        .json(["get", "pods", "-n", ns.as_str(), "-o", "json"])
+        .await?;
     let snap = classify::snapshot_from_pod_list(&list);
     let pod = match req.pod.filter(|p| !p.trim().is_empty()) {
         Some(name) => snap
@@ -250,7 +263,12 @@ async fn test_probes<S: K8sCtx>(
             match res {
                 Ok(r) => {
                     let parsed = match probe.format {
-                        ProbeFormat::Prometheus => parse::parse_prometheus(&r.body, &probe.include, &probe.exclude, cfg.series_cap as usize),
+                        ProbeFormat::Prometheus => parse::parse_prometheus(
+                            &r.body,
+                            &probe.include,
+                            &probe.exclude,
+                            cfg.series_cap as usize,
+                        ),
                         ProbeFormat::Json => parse::parse_json(&r.body, &probe.mappings),
                         ProbeFormat::Health => parse::parse_health(r.status),
                     };
@@ -267,7 +285,9 @@ async fn test_probes<S: K8sCtx>(
                         "body_preview": r.body.chars().take(400).collect::<String>(),
                     }));
                 }
-                Err(e) => out.push(json!({"name": probe.name, "ok": false, "port": port, "error": e.to_string()})),
+                Err(e) => out.push(
+                    json!({"name": probe.name, "ok": false, "port": port, "error": e.to_string()}),
+                ),
             }
         }
     }
@@ -278,14 +298,18 @@ async fn test_probes<S: K8sCtx>(
 }
 
 /// `POST /k8s/clusters/{id}/monitor/run` — one cycle inline.
-async fn run_now<S: K8sCtx>(State(ctx): State<S>, Path(id): Path<Id>) -> ApiResult<Json<K8sMonitorStatusRow>> {
+async fn run_now<S: K8sCtx>(
+    State(ctx): State<S>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<K8sMonitorStatusRow>> {
     let (cluster, cfg, status) = load(&ctx, &id).await?;
     cfg.validate(cluster.default_namespace.as_deref())?;
     let sink = ctx
         .monitor_sink()
         .filter(|s| s.available())
         .ok_or_else(|| Error::Conflict("usage engine (ClickHouse) is not available".into()))?;
-    sink.exec(&super::schema::schema_sql(cfg.retention_days)).await?;
+    sink.exec(&super::schema::schema_sql(cfg.retention_days))
+        .await?;
     let prev: Snapshot = status
         .as_ref()
         .map(|s| serde_json::from_value(s.snapshot.clone()).unwrap_or_default())
@@ -296,7 +320,9 @@ async fn run_now<S: K8sCtx>(State(ctx): State<S>, Path(id): Path<Id>) -> ApiResu
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         .map(|t| t.with_timezone(&Utc));
     let out = collector::run_cycle(&ctx, &cluster, &cfg, &prev, prev_at, sink.as_ref()).await;
-    K8sMonitorRepo::new(ctx.pool()).upsert_status(&out.status).await?;
+    K8sMonitorRepo::new(ctx.pool())
+        .upsert_status(&out.status)
+        .await?;
     Ok(Json(out.status))
 }
 
@@ -326,23 +352,36 @@ fn check_ident(name: &str, v: Option<&str>) -> ApiResult<()> {
 }
 
 /// `healthy` | `degraded` | `incident` | `off` | `unknown`.
-pub fn health_badge(enabled: bool, status: Option<&K8sMonitorStatusRow>, stats: &[WorkloadStat], pods: &Value) -> &'static str {
+pub fn health_badge(
+    enabled: bool,
+    status: Option<&K8sMonitorStatusRow>,
+    stats: &[WorkloadStat],
+    pods: &Value,
+) -> &'static str {
     if !enabled {
         return "off";
     }
     let Some(st) = status else { return "unknown" };
     if st.last_ok_at.is_none() {
-        return if st.last_error.is_empty() { "unknown" } else { "degraded" };
+        return if st.last_error.is_empty() {
+            "unknown"
+        } else {
+            "degraded"
+        };
     }
     let unplanned: u32 = stats.iter().map(|s| s.restarts.total()).sum();
-    let oom_crash: u32 = stats.iter().map(|s| s.restarts.oom + s.restarts.crash).sum();
+    let oom_crash: u32 = stats
+        .iter()
+        .map(|s| s.restarts.oom + s.restarts.crash)
+        .sum();
     let (mem, err, lat) = health::outliers(stats);
     let failed = pods.get("failed").and_then(Value::as_u64).unwrap_or(0);
     let crashloop = pods.get("crashloop").and_then(Value::as_u64).unwrap_or(0);
     if crashloop > 0 || failed > 0 || (oom_crash > 0 && !err.is_empty()) {
         return "incident";
     }
-    let scrape_fail = st.pods_failed > 0 && st.pods_failed * 5 >= (st.pods_scraped + st.pods_failed).max(1);
+    let scrape_fail =
+        st.pods_failed > 0 && st.pods_failed * 5 >= (st.pods_scraped + st.pods_failed).max(1);
     if unplanned > 0 || !mem.is_empty() || !err.is_empty() || !lat.is_empty() || scrape_fail {
         return "degraded";
     }
@@ -361,7 +400,10 @@ fn pods_json(snap: &Snapshot) -> Value {
             "Failed" => failed += 1,
             _ => {}
         }
-        if p.containers.values().any(|c| c.waiting_reason == "CrashLoopBackOff") {
+        if p.containers
+            .values()
+            .any(|c| c.waiting_reason == "CrashLoopBackOff")
+        {
             crashloop += 1;
         }
     }
@@ -369,7 +411,10 @@ fn pods_json(snap: &Snapshot) -> Value {
 }
 
 /// `GET /k8s/monitor/overview?window=` — one row per registered cluster.
-async fn overview<S: K8sCtx>(State(ctx): State<S>, Query(q): Query<WindowQuery>) -> ApiResult<Json<Vec<Value>>> {
+async fn overview<S: K8sCtx>(
+    State(ctx): State<S>,
+    Query(q): Query<WindowQuery>,
+) -> ApiResult<Json<Vec<Value>>> {
     let window_label = q.window.clone().unwrap_or_else(|| "24h".into());
     let window = queries::parse_window(&window_label)?;
     let repo = K8sMonitorRepo::new(ctx.pool());
@@ -391,9 +436,11 @@ async fn overview<S: K8sCtx>(State(ctx): State<S>, Query(q): Query<WindowQuery>)
         let snap = snapshot_of(status.as_ref());
         let pods = pods_json(&snap);
         let stats: Vec<WorkloadStat> = match (&sink, cfg.enabled, status.as_ref()) {
-            (Some(s), true, Some(_)) if s.available() => health::workload_stats(s.as_ref(), cluster.id.as_str(), &snap, None, window)
-                .await
-                .unwrap_or_default(),
+            (Some(s), true, Some(_)) if s.available() => {
+                health::workload_stats(s.as_ref(), cluster.id.as_str(), &snap, None, window)
+                    .await
+                    .unwrap_or_default()
+            }
             _ => vec![],
         };
         let mut restarts = health::RestartCounts::default();
@@ -450,7 +497,12 @@ async fn workloads<S: K8sCtx>(
     let window = queries::parse_window(&window_label)?;
     check_ident("ns", q.ns.as_deref())?;
     let (cluster, cfg, status) = load(&ctx, &id).await?;
-    let ck = format!("wl:{}:{}:{}", cluster.id, window_label, q.ns.as_deref().unwrap_or(""));
+    let ck = format!(
+        "wl:{}:{}:{}",
+        cluster.id,
+        window_label,
+        q.ns.as_deref().unwrap_or("")
+    );
     let cycle = cycle_key(status.as_ref());
     if let Some(v) = cache::get(&ck, &cycle) {
         return Ok(Json(v));
@@ -466,29 +518,53 @@ async fn workloads<S: K8sCtx>(
     all_namespaces.sort();
     all_namespaces.dedup();
     let ns = q.ns.as_deref().filter(|n| !n.is_empty());
-    let mut stats = health::workload_stats(sink.as_ref(), cluster.id.as_str(), &snap, ns, window).await?;
+    let mut stats =
+        health::workload_stats(sink.as_ref(), cluster.id.as_str(), &snap, ns, window).await?;
     stats.sort_by(|a, b| a.workload.cmp(&b.workload));
 
     // Sparklines: memory (gauge) + rps (counter) per workload, ~40 buckets —
     // but never finer than 3 collection cycles, or a counter bucket flips
     // between one sample (Δ = 0) and two (Δ > 0) and draws a sawtooth.
-    let step = ((window.num_seconds() / 40).clamp(30, 3600) as u32).max(cfg.interval_secs.saturating_mul(3));
+    let step = ((window.num_seconds() / 40).clamp(30, 3600) as u32)
+        .max(cfg.interval_secs.saturating_mul(3));
     let mut spark_mem: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let mut spark_rps: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let mem_rows = sink
-        .query_rows(&queries::workload_spark_sql(cluster.id.as_str(), ns, &queries::MEMORY_GAUGES, window, step, false))
+        .query_rows(&queries::workload_spark_sql(
+            cluster.id.as_str(),
+            ns,
+            &queries::MEMORY_GAUGES,
+            window,
+            step,
+            false,
+        ))
         .await
         .unwrap_or_default();
     for r in mem_rows {
-        let wl = r.get("workload").and_then(Value::as_str).unwrap_or("").to_string();
+        let wl = r
+            .get("workload")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         spark_mem.entry(wl).or_default().push(num(&r, "v"));
     }
     let rps_rows = sink
-        .query_rows(&queries::workload_spark_sql(cluster.id.as_str(), ns, &queries::REQUEST_COUNTERS, window, step, true))
+        .query_rows(&queries::workload_spark_sql(
+            cluster.id.as_str(),
+            ns,
+            &queries::REQUEST_COUNTERS,
+            window,
+            step,
+            true,
+        ))
         .await
         .unwrap_or_default();
     for r in rps_rows {
-        let wl = r.get("workload").and_then(Value::as_str).unwrap_or("").to_string();
+        let wl = r
+            .get("workload")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         spark_rps.entry(wl).or_default().push(num(&r, "v"));
     }
     let rows: Vec<Value> = stats
@@ -512,7 +588,10 @@ async fn workloads<S: K8sCtx>(
 
 fn num(v: &Value, k: &str) -> f64 {
     v.get(k)
-        .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|x| {
+            x.as_f64()
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(0.0)
 }
 
@@ -641,7 +720,15 @@ async fn health_digest<S: K8sCtx>(
     if let Some(v) = cache::get(&ck, &cycle) {
         return Ok(Json(v));
     }
-    let v = health::health(sink.as_ref(), &cluster, &status, cfg.enabled, window, &label).await?;
+    let v = health::health(
+        sink.as_ref(),
+        &cluster,
+        &status,
+        cfg.enabled,
+        window,
+        &label,
+    )
+    .await?;
     cache::put(ck, &cycle, &v);
     Ok(Json(v))
 }

@@ -54,7 +54,8 @@ pub(crate) fn is_safe_segment(s: &str) -> bool {
     !s.is_empty()
         && s != "."
         && s != ".."
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Validate a relative path *within* a skill dir: non-empty, no absolute root,
@@ -105,7 +106,11 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
 
 /// Recursively collect files under `root` as [`SkillFileEntry`] with paths
 /// relative to `base`. Symlinks and unreadable entries are skipped.
-pub(crate) fn collect_files(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<SkillFileEntry>) {
+pub(crate) fn collect_files(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut Vec<SkillFileEntry>,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -115,7 +120,9 @@ pub(crate) fn collect_files(base: &std::path::Path, dir: &std::path::Path, out: 
         if ft.is_dir() {
             collect_files(base, &path, out);
         } else if ft.is_file() {
-            let Ok(rel) = path.strip_prefix(base) else { continue };
+            let Ok(rel) = path.strip_prefix(base) else {
+                continue;
+            };
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             // Sniff only a small head for the binary flag.
             let binary = {
@@ -199,7 +206,10 @@ fn parse_version(body: &str) -> u32 {
 
 impl Library {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), skill_cache: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            root: root.into(),
+            skill_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     // -- skills --------------------------------------------------------------
@@ -340,10 +350,13 @@ impl Library {
         let root = self
             .skill_dir(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
-        let target =
-            confined(&root, rel).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
+        let target = confined(&root, rel)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
         if content.len() > MAX_SKILL_FILE_BYTES {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "file too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file too large",
+            ));
         }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
@@ -359,16 +372,16 @@ impl Library {
         let root = self
             .skill_dir(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
-        let rel_path =
-            safe_rel(rel).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
+        let rel_path = safe_rel(rel)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
         if rel_path.as_os_str() == "SKILL.md" {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SKILL.md cannot be deleted",
             ));
         }
-        let target =
-            confined(&root, rel).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
+        let target = confined(&root, rel)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"))?;
         match fs::remove_file(target) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -417,7 +430,9 @@ impl Library {
             let f = zip
                 .by_index(i)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-            let Some(name) = f.enclosed_name() else { continue };
+            let Some(name) = f.enclosed_name() else {
+                continue;
+            };
             if name.file_name().and_then(|s| s.to_str()) == Some("SKILL.md") {
                 let prefix = name
                     .parent()
@@ -458,14 +473,20 @@ impl Library {
                 continue;
             }
             let Some(entry) = f.enclosed_name() else {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe zip entry"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unsafe zip entry",
+                ));
             };
             let entry = entry.to_string_lossy().replace('\\', "/");
             let Some(rel) = entry.strip_prefix(&strip) else {
                 continue; // outside the package root
             };
             let Some(out) = confined(&dest_root, rel) else {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe zip entry"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unsafe zip entry",
+                ));
             };
             total += f.size();
             if total > MAX_SKILL_IMPORT_BYTES {
@@ -509,7 +530,10 @@ impl Library {
 
     pub fn get_soul(&self, name: &str) -> Option<LibrarySoul> {
         let body = fs::read_to_string(md_entry_path(&self.souls_dir(), name)?).ok()?;
-        Some(LibrarySoul { name: name.to_string(), body })
+        Some(LibrarySoul {
+            name: name.to_string(),
+            body,
+        })
     }
 
     pub fn put_soul(&self, name: &str, body: &str) -> io::Result<()> {
@@ -535,7 +559,10 @@ impl Library {
 
     pub fn get_context(&self, name: &str) -> Option<LibraryContext> {
         let body = fs::read_to_string(md_entry_path(&self.context_dir(), name)?).ok()?;
-        Some(LibraryContext { name: name.to_string(), body })
+        Some(LibraryContext {
+            name: name.to_string(),
+            body,
+        })
     }
 
     pub fn put_context(&self, name: &str, body: &str) -> io::Result<()> {
@@ -634,7 +661,8 @@ mod tests {
     #[test]
     fn skill_round_trip_and_description() {
         let (_d, lib) = lib();
-        let body = "---\ndescription: Triage support tickets\ncategory: review\nversion: 4\n---\n# body\n";
+        let body =
+            "---\ndescription: Triage support tickets\ncategory: review\nversion: 4\n---\n# body\n";
         lib.put_skill("support-triage", body).unwrap();
 
         let got = lib.get_skill("support-triage").unwrap();
@@ -733,21 +761,37 @@ mod tests {
     #[test]
     fn skill_file_crud_round_trip_and_cache_evict() {
         let (_d, lib) = lib();
-        lib.create_skill("editable", "review", "Reviews stuff", None).unwrap();
+        lib.create_skill("editable", "review", "Reviews stuff", None)
+            .unwrap();
         // Starter SKILL.md is well-formed and cached.
         let got = lib.get_skill("editable").unwrap();
         assert_eq!(got.category, "review");
         assert_eq!(got.description, "Reviews stuff");
 
         // Add a reference file, then it shows up in the tree.
-        lib.write_skill_file("editable", "references/notes.md", "# notes").unwrap();
-        let files: Vec<String> = lib.list_skill_files("editable").into_iter().map(|f| f.path).collect();
+        lib.write_skill_file("editable", "references/notes.md", "# notes")
+            .unwrap();
+        let files: Vec<String> = lib
+            .list_skill_files("editable")
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
         assert!(files.contains(&"SKILL.md".to_string()));
         assert!(files.contains(&"references/notes.md".to_string()));
-        assert_eq!(lib.read_skill_file("editable", "references/notes.md").unwrap().0, "# notes");
+        assert_eq!(
+            lib.read_skill_file("editable", "references/notes.md")
+                .unwrap()
+                .0,
+            "# notes"
+        );
 
         // Overwriting SKILL.md evicts the cache so metadata re-parses.
-        lib.write_skill_file("editable", "SKILL.md", "---\ndescription: New desc\ncategory: design\nversion: 2\n---\n# x").unwrap();
+        lib.write_skill_file(
+            "editable",
+            "SKILL.md",
+            "---\ndescription: New desc\ncategory: design\nversion: 2\n---\n# x",
+        )
+        .unwrap();
         let got2 = lib.get_skill("editable").unwrap();
         assert_eq!(got2.description, "New desc");
         assert_eq!(got2.category, "design");
@@ -755,12 +799,17 @@ mod tests {
 
         // SKILL.md cannot be deleted; other files can.
         assert!(lib.delete_skill_file("editable", "SKILL.md").is_err());
-        lib.delete_skill_file("editable", "references/notes.md").unwrap();
-        assert!(lib.read_skill_file("editable", "references/notes.md").is_none());
+        lib.delete_skill_file("editable", "references/notes.md")
+            .unwrap();
+        assert!(lib
+            .read_skill_file("editable", "references/notes.md")
+            .is_none());
 
         // Unsafe paths rejected.
         assert!(lib.write_skill_file("editable", "../evil.md", "x").is_err());
-        assert!(lib.read_skill_file("editable", "../../etc/passwd").is_none());
+        assert!(lib
+            .read_skill_file("editable", "../../etc/passwd")
+            .is_none());
     }
 
     #[test]
@@ -779,10 +828,11 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-            let opts: zip::write::FileOptions<()> =
-                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
             zw.start_file("my-skill/SKILL.md", opts).unwrap();
-            zw.write_all(b"---\ndescription: Imported\ncategory: review\nversion: 1\n---\n# body").unwrap();
+            zw.write_all(b"---\ndescription: Imported\ncategory: review\nversion: 1\n---\n# body")
+                .unwrap();
             zw.start_file("my-skill/references/x.md", opts).unwrap();
             zw.write_all(b"ref").unwrap();
             zw.finish().unwrap();
@@ -790,7 +840,12 @@ mod tests {
         let name = lib.import_zip(&buf, None).unwrap();
         assert_eq!(name, "my-skill");
         assert_eq!(lib.get_skill("my-skill").unwrap().description, "Imported");
-        assert_eq!(lib.read_skill_file("my-skill", "references/x.md").unwrap().0, "ref");
+        assert_eq!(
+            lib.read_skill_file("my-skill", "references/x.md")
+                .unwrap()
+                .0,
+            "ref"
+        );
     }
 
     #[test]
@@ -800,8 +855,8 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-            let opts: zip::write::FileOptions<()> =
-                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
             zw.start_file("nope/readme.md", opts).unwrap();
             zw.write_all(b"x").unwrap();
             zw.finish().unwrap();

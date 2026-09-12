@@ -100,7 +100,13 @@ pub fn parse(conn: &Connection, secret: Option<String>) -> Result<ParsedProfile>
         database,
         tls,
         // Internal authorization flags never come from stored/user JSON.
-        params: { let mut params=conn.params.clone(); if let Some(map)=params.as_object_mut(){map.retain(|key,_|!key.starts_with("__"));} params },
+        params: {
+            let mut params = conn.params.clone();
+            if let Some(map) = params.as_object_mut() {
+                map.retain(|key, _| !key.starts_with("__"));
+            }
+            params
+        },
     };
 
     Ok(ParsedProfile { config, ssh })
@@ -172,14 +178,20 @@ mod tests {
 
     #[test]
     fn port_as_string() {
-        let c = conn(ConnectionKind::Clickhouse, json!({"host":"h","port":"18123"}));
+        let c = conn(
+            ConnectionKind::Clickhouse,
+            json!({"host":"h","port":"18123"}),
+        );
         let parsed = parse(&c, None).unwrap();
         assert_eq!(parsed.config.port, 18123);
     }
 
     #[test]
     fn secure_shorthand_enables_tls() {
-        let c = conn(ConnectionKind::Clickhouse, json!({"host":"h","secure":true}));
+        let c = conn(
+            ConnectionKind::Clickhouse,
+            json!({"host":"h","secure":true}),
+        );
         let parsed = parse(&c, None).unwrap();
         assert!(parsed.config.tls.required());
     }
@@ -211,10 +223,12 @@ mod tests {
     }
     #[test]
     fn profile_json_cannot_supply_internal_execution_authority() {
-        let c=conn(ConnectionKind::Postgres,json!({"host":"h","__read_only_execution":false,"__access_scope":"fake"}));
-        let parsed=parse(&c,None).unwrap();
+        let c = conn(
+            ConnectionKind::Postgres,
+            json!({"host":"h","__read_only_execution":false,"__access_scope":"fake"}),
+        );
+        let parsed = parse(&c, None).unwrap();
         assert!(parsed.config.params.get("__read_only_execution").is_none());
         assert!(parsed.config.params.get("__access_scope").is_none());
     }
-
 }

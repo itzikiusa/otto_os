@@ -196,7 +196,9 @@ impl<'a> Parser<'a> {
             }
             if b == b'\\' {
                 self.pos += 1;
-                let e = self.bump().ok_or_else(|| err("dangling escape in string"))?;
+                let e = self
+                    .bump()
+                    .ok_or_else(|| err("dangling escape in string"))?;
                 match e {
                     b'n' => out.push('\n'),
                     b't' => out.push('\t'),
@@ -257,7 +259,8 @@ impl<'a> Parser<'a> {
     fn number(&mut self) -> Result<Value> {
         let tok = self.number_token();
         if let Some(hex) = tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")) {
-            let n = i64::from_str_radix(hex, 16).map_err(|_| err(format!("bad hex number '{tok}'")))?;
+            let n =
+                i64::from_str_radix(hex, 16).map_err(|_| err(format!("bad hex number '{tok}'")))?;
             return Ok(Value::Number(n.into()));
         }
         if let Ok(i) = tok.parse::<i64>() {
@@ -281,8 +284,7 @@ impl<'a> Parser<'a> {
             self.pos += 1;
         }
         while let Some(b) = self.at() {
-            if b.is_ascii_hexdigit()
-                || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-' | b'x' | b'X')
+            if b.is_ascii_hexdigit() || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-' | b'x' | b'X')
             {
                 self.pos += 1;
             } else {
@@ -415,7 +417,9 @@ impl<'a> Parser<'a> {
             Err(err(format!(
                 "expected '{}' but found {}",
                 b as char,
-                self.at().map(|c| format!("'{}'", c as char)).unwrap_or_else(|| "end of input".into())
+                self.at()
+                    .map(|c| format!("'{}'", c as char))
+                    .unwrap_or_else(|| "end of input".into())
             )))
         }
     }
@@ -436,7 +440,9 @@ fn build_constructor(name: &str, args: Vec<Value>) -> Result<Value> {
                 None => chrono::Utc::now().to_rfc3339(),
                 Some(Value::String(s)) => s.clone(),
                 Some(Value::Number(n)) => {
-                    let ms = n.as_i64().ok_or_else(|| err("Date(millis) must be an integer"))?;
+                    let ms = n
+                        .as_i64()
+                        .ok_or_else(|| err("Date(millis) must be an integer"))?;
                     chrono::DateTime::from_timestamp_millis(ms)
                         .ok_or_else(|| err("Date(millis) out of range"))?
                         .to_rfc3339()
@@ -453,9 +459,15 @@ fn build_constructor(name: &str, args: Vec<Value>) -> Result<Value> {
             };
             Ok(sentinel("$oid", Value::String(hex)))
         }
-        "NumberLong" => Ok(sentinel("$numberLong", Value::String(num_arg(&args, name)?))),
+        "NumberLong" => Ok(sentinel(
+            "$numberLong",
+            Value::String(num_arg(&args, name)?),
+        )),
         "NumberInt" => Ok(sentinel("$numberInt", Value::String(num_arg(&args, name)?))),
-        "NumberDecimal" => Ok(sentinel("$numberDecimal", Value::String(num_arg(&args, name)?))),
+        "NumberDecimal" => Ok(sentinel(
+            "$numberDecimal",
+            Value::String(num_arg(&args, name)?),
+        )),
         "UUID" => Ok(sentinel("$uuid", Value::String(str_arg(&args, name)?))),
         other => Err(err(format!("unsupported constructor '{other}(…)'"))),
     }
@@ -517,7 +529,8 @@ mod tests {
 
     #[test]
     fn backtick_preserves_sql_with_parens_and_quotes() {
-        let v = parse_value("{ query: `SELECT a FROM t WHERE x IN ('A','B') AND f(y) > 1` }").unwrap();
+        let v =
+            parse_value("{ query: `SELECT a FROM t WHERE x IN ('A','B') AND f(y) > 1` }").unwrap();
         assert_eq!(
             v["query"],
             json!("SELECT a FROM t WHERE x IN ('A','B') AND f(y) > 1")
@@ -582,10 +595,7 @@ mod tests {
         assert_eq!(v, json!({ "a": "日本語" }));
         // Regex literal with an escaped multibyte char.
         let v = parse_value("{ r: /a\\éb/i }").unwrap();
-        assert_eq!(
-            v["r"]["$regularExpression"]["pattern"],
-            json!("a\\éb")
-        );
+        assert_eq!(v["r"]["$regularExpression"]["pattern"], json!("a\\éb"));
     }
 
     #[test]
@@ -622,6 +632,9 @@ mod tests {
         assert!(v["createdAt"]["$date"].is_string());
         assert_eq!(v["filters"][0]["id"], json!(false));
         assert_eq!(v["filters"][1]["id"], json!(1));
-        assert!(v["widgets"][0]["query"].as_str().unwrap().contains("multiIf"));
+        assert!(v["widgets"][0]["query"]
+            .as_str()
+            .unwrap()
+            .contains("multiIf"));
     }
 }

@@ -3,8 +3,8 @@
 //! This crate is the contract of record for the Otto workspace. It has no I/O
 //! and no async; every other crate depends on it and codes against these types.
 
-pub mod api;
 pub mod access;
+pub mod api;
 pub mod auth;
 pub mod domain;
 pub mod error;

@@ -142,7 +142,10 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
             "/issue/{account_id}/{key}/transitions",
             get(list_transitions::<S>).post(do_transition::<S>),
         )
-        .route("/issue/{account_id}/{key}/assignable", get(list_assignable::<S>))
+        .route(
+            "/issue/{account_id}/{key}/assignable",
+            get(list_assignable::<S>),
+        )
         .route("/issue/{account_id}/{key}/assignee", put(assign_issue::<S>))
         .route(
             "/issue/{account_id}/{key}/attachment/{attachment_id}",
@@ -152,10 +155,7 @@ pub fn router<S: IssuesCtx>() -> Router<S> {
             "/issue/{account_id}/{project_key}/issue-types",
             get(list_issue_types_handler::<S>),
         )
-        .route(
-            "/issue/{account_id}/{key}/comment",
-            post(add_comment::<S>),
-        )
+        .route("/issue/{account_id}/{key}/comment", post(add_comment::<S>))
         .route(
             "/issue/{account_id}/{key}/editmeta",
             get(list_editmeta::<S>),
@@ -481,7 +481,11 @@ async fn create_page_cf<S: IssuesCtx>(
         return Err(Error::Invalid("title must not be empty".into()).into());
     }
     let client = confluence_client_for(&s, &params, &user).await?;
-    let storage = resolve_body(req.body_md.as_deref(), req.body_html.as_deref(), "create page")?;
+    let storage = resolve_body(
+        req.body_md.as_deref(),
+        req.body_html.as_deref(),
+        "create page",
+    )?;
     let page = client
         .create_page(
             req.space_key.trim(),
@@ -513,7 +517,11 @@ async fn update_page_cf<S: IssuesCtx>(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .unwrap_or(&current.title);
-    let storage = resolve_body(req.body_md.as_deref(), req.body_html.as_deref(), "update page")?;
+    let storage = resolve_body(
+        req.body_md.as_deref(),
+        req.body_html.as_deref(),
+        "update page",
+    )?;
     let page = client
         .update_page(&page_id, title, &storage, current.version)
         .await?;
@@ -889,7 +897,10 @@ mod tests {
     fn non_owner_is_forbidden() {
         let account = account_owned_by("alice");
         let err = authorize_account(&account, &user("mallory", false)).unwrap_err();
-        assert!(matches!(err, Error::Forbidden(_)), "expected Forbidden, got {err:?}");
+        assert!(
+            matches!(err, Error::Forbidden(_)),
+            "expected Forbidden, got {err:?}"
+        );
     }
 
     #[test]

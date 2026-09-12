@@ -301,16 +301,14 @@ mod tests {
     async fn seed_ws(pool: &SqlitePool) -> Id {
         let ws = new_id();
         let now = fmt(Utc::now());
-        sqlx::query(
-            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&ws)
-        .bind("ws")
-        .bind("/tmp")
-        .bind(&now)
-        .execute(pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, ?, ?, ?)")
+            .bind(&ws)
+            .bind("ws")
+            .bind("/tmp")
+            .bind(&now)
+            .execute(pool)
+            .await
+            .unwrap();
         ws
     }
 
@@ -378,9 +376,14 @@ mod tests {
         let ws = seed_ws(&pool).await;
         let repo = ConnectionsRepo::new(pool.clone());
 
-        repo.create(new_conn_ws(&user, Some(ws.clone()), Environment::Dev, false))
-            .await
-            .expect("create good connection");
+        repo.create(new_conn_ws(
+            &user,
+            Some(ws.clone()),
+            Environment::Dev,
+            false,
+        ))
+        .await
+        .expect("create good connection");
 
         // Simulate the newer-build row: bypass this build's CHECK the way a
         // widened live-DB constraint would.
@@ -474,9 +477,14 @@ mod tests {
         let repo = ConnectionsRepo::new(pool.clone());
 
         // A creates a workspace-scoped connection.
-        repo.create(new_conn_ws(&user_a, Some(ws.clone()), Environment::Dev, false))
-            .await
-            .unwrap();
+        repo.create(new_conn_ws(
+            &user_a,
+            Some(ws.clone()),
+            Environment::Dev,
+            false,
+        ))
+        .await
+        .unwrap();
 
         // B should see no connections when filtered to their own.
         let visible = repo.list_visible_for(&ws, &user_b).await.unwrap();
@@ -494,12 +502,22 @@ mod tests {
         let ws = seed_ws(&pool).await;
         let repo = ConnectionsRepo::new(pool.clone());
 
-        repo.create(new_conn_ws(&user_a, Some(ws.clone()), Environment::Dev, false))
-            .await
-            .unwrap();
-        repo.create(new_conn_ws(&user_b, Some(ws.clone()), Environment::Dev, false))
-            .await
-            .unwrap();
+        repo.create(new_conn_ws(
+            &user_a,
+            Some(ws.clone()),
+            Environment::Dev,
+            false,
+        ))
+        .await
+        .unwrap();
+        repo.create(new_conn_ws(
+            &user_b,
+            Some(ws.clone()),
+            Environment::Dev,
+            false,
+        ))
+        .await
+        .unwrap();
 
         // A only sees their own.
         let a_visible = repo.list_visible_for(&ws, &user_a).await.unwrap();
@@ -521,14 +539,28 @@ mod tests {
         let ws = seed_ws(&pool).await;
         let repo = ConnectionsRepo::new(pool.clone());
 
-        repo.create(new_conn_ws(&user_a, Some(ws.clone()), Environment::Dev, false))
-            .await
-            .unwrap();
-        repo.create(new_conn_ws(&user_b, Some(ws.clone()), Environment::Dev, false))
-            .await
-            .unwrap();
+        repo.create(new_conn_ws(
+            &user_a,
+            Some(ws.clone()),
+            Environment::Dev,
+            false,
+        ))
+        .await
+        .unwrap();
+        repo.create(new_conn_ws(
+            &user_b,
+            Some(ws.clone()),
+            Environment::Dev,
+            false,
+        ))
+        .await
+        .unwrap();
 
         let all = repo.list_visible(&ws).await.unwrap();
-        assert_eq!(all.len(), 2, "list_visible (default path) must return all connections");
+        assert_eq!(
+            all.len(),
+            2,
+            "list_visible (default path) must return all connections"
+        );
     }
 }
