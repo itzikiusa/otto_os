@@ -51,9 +51,15 @@ test.afterEach(async () => {
   await ctx?.dispose();
 });
 
+/** Click a sidebar row and wait for THAT session's pane. Waiting for any
+ *  `.pane` is not enough once a pane is already open: the click lands, the
+ *  route→store hop is still in flight, and the next ⌘D would clone the pane the
+ *  PREVIOUS session still holds — leaving two slots on one session. */
 async function openSession(page: Page, title: string): Promise<void> {
   await page.locator('.nav-item.nested-item', { hasText: title }).first().click();
-  await expect(page.locator('.pane').first()).toBeVisible({ timeout: 15_000 });
+  await expect(
+    page.locator(`[data-pane-key][data-session="${idByTitle[title]}"]`).first(),
+  ).toBeVisible({ timeout: 15_000 });
 }
 
 /** Two distinct sessions side by side (⌘D clones, then the sidebar replaces the
@@ -65,6 +71,16 @@ async function threePanes(page: Page): Promise<void> {
   await page.keyboard.press('Meta+d');
   await openSession(page, 'Boban');
   await expect(page.locator('[data-pane-key]')).toHaveCount(3, { timeout: 15_000 });
+}
+
+/** Focus a pane without touching a control. The header's leading padding is the
+ *  one spot no button ever occupies — its CENTRE is the segmented view control
+ *  in a roomy pane (which stops mousedown, so the click switches the view and
+ *  focuses nothing). */
+async function focusPane(page: Page, i: number): Promise<void> {
+  const pane = page.locator('[data-pane-key]').nth(i);
+  await pane.locator('.pane-head').click({ position: { x: 3, y: 3 } });
+  await expect(pane.locator('.pane.focused')).toHaveCount(1);
 }
 
 const sessionOrderOf = (page: Page) =>
@@ -120,7 +136,7 @@ test('⌘⌥→ moves the focused pane', async ({ page }) => {
   await threePanes(page);
   const before = await sessionOrderOf(page);
   // Focus the first pane, then push it right past its neighbour.
-  await page.locator('[data-pane-key]').first().locator('.pane-head').click();
+  await focusPane(page, 0);
   await page.keyboard.press('Meta+Alt+ArrowRight');
 
   await expect.poll(() => sessionOrderOf(page)).not.toEqual(before);
@@ -134,7 +150,7 @@ test('⌘⌥S swaps the focused pane with the next', async ({ page }) => {
   await threePanes(page);
   const before = await sessionOrderOf(page);
   const keysBefore = await keyOrderOf(page);
-  await page.locator('[data-pane-key]').first().locator('.pane-head').click();
+  await focusPane(page, 0);
   // `Meta+Alt+KeyS`, not `Meta+Alt+s`: with ⌥ held macOS reports `e.key === 'ß'`,
   // which is exactly the bug this chord had — the handler matches `e.code`.
   await page.keyboard.press('Meta+Alt+KeyS');

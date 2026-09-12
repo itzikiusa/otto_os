@@ -103,7 +103,7 @@ test.describe('scratch sessions', () => {
     // Archive via the row menu → leaves the group, lands in Archived.
     await scratchGroup(page).rows.filter({ hasText: TITLE }).first().click({ button: 'right' });
     await expect(page.locator('.ctx-menu')).toBeVisible();
-    await page.locator('.ctx-item', { hasText: /^Archive$/ }).first().click();
+    await page.getByRole('menuitem', { name: 'Archive', exact: true }).click();
     await expect(scratchGroup(page).rows.filter({ hasText: TITLE })).toHaveCount(0, { timeout: 10_000 });
     await expect.poll(
       async () => (await scratchSessions()).find((s) => s.id === created!.id)?.archived,

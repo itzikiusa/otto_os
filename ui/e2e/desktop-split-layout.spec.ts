@@ -45,10 +45,13 @@ test.afterEach(async () => {
   await ctx?.dispose();
 });
 
-/** Open a seeded session from the sidebar and wait for its pane. */
+/** Open a seeded session from the sidebar and wait for ITS pane — waiting for
+ *  any `.pane` races the route→store hop once one is already open. */
 async function openSession(page: Page, title: string): Promise<void> {
   await page.locator('.nav-item.nested-item', { hasText: title }).first().click();
-  await expect(page.locator('.pane').first()).toBeVisible({ timeout: 15_000 });
+  await expect(
+    page.locator(`[data-pane-key][data-session="${idByTitle[title]}"]`).first(),
+  ).toBeVisible({ timeout: 15_000 });
 }
 
 const leaves = (page: Page) => page.locator('[data-pane-key]');
