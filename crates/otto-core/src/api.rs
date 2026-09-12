@@ -1640,6 +1640,18 @@ pub struct PrSummary {
     pub reviewer_warnings: Vec<String>,
 }
 
+/// One page of `GET /repos/{id}/prs`. `has_more` is the provider's own
+/// next-page signal (never `items.len() == per_page`, which lies on a full last
+/// page); `page`/`per_page` echo the CLAMPED request so a client can build the
+/// next call without re-deriving the bounds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrListResp {
+    pub items: Vec<PrSummary>,
+    pub has_more: bool,
+    pub page: u32,
+    pub per_page: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrComment {
     pub id: String,

@@ -9,6 +9,9 @@ pub mod detect;
 pub mod github;
 pub mod gitlab;
 
+#[cfg(test)]
+mod wire_tests;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -58,10 +61,27 @@ pub struct TokenCheck {
     pub scopes: Vec<String>,
 }
 
+/// One page of a provider's PR list. `has_more` is the provider's OWN next-page
+/// signal (`Link rel="next"`, `x-next-page`, Bitbucket's `next` cursor) — never
+/// `items.len() == per_page`, which lies on a perfectly full last page.
+#[derive(Debug, Clone, Default)]
+pub struct PrPage {
+    pub items: Vec<PrSummary>,
+    pub has_more: bool,
+}
+
 /// Common operations on a hosted provider's pull/merge requests.
 #[async_trait]
 pub trait GitProvider: Send + Sync {
-    async fn list_prs(&self, r: &RemoteRef, state: PrState) -> Result<Vec<PrSummary>>;
+    /// One page of PRs. `page` is 1-based; both bounds are clamped by the
+    /// handler before they reach a URL.
+    async fn list_prs(
+        &self,
+        r: &RemoteRef,
+        state: PrState,
+        page: u32,
+        per_page: u32,
+    ) -> Result<PrPage>;
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail>;
     /// Fetch a hosted **issue** (not a PR). Default: unsupported — only GitHub
     /// overrides it (the Run with Otto github-issue source). GitLab/Bitbucket

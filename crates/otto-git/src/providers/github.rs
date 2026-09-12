@@ -41,23 +41,38 @@ fn percent_encode_query(s: &str) -> String {
 pub struct Github {
     http: Http,
     token: String,
+    /// API root. Always [`BASE`] in production; overridden only by tests
+    /// (`with_base`) so every hop can be pointed at a local stub.
+    base: String,
 }
 
 impl Github {
     pub fn new(token: String) -> Self {
+        Self::with_base(token, BASE.to_string())
+    }
+
+    /// Same client against a different API root — the wiremock tests' entry
+    /// point. Not a user-facing setting: GitHub Enterprise is out of scope.
+    pub(crate) fn with_base(token: String, base: String) -> Self {
         Self {
             http: Http::new("github"),
             token,
+            base: base.trim_end_matches('/').to_string(),
         }
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.http
             .client()
-            .request(method, format!("{BASE}{path}"))
+            .request(method, format!("{}{path}", self.base))
             .bearer_auth(&self.token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
+    }
+
+    /// `Authorization` pair for the raw-`reqwest` pagination helper.
+    fn auth_header(&self) -> (&'static str, String) {
+        ("Authorization", format!("Bearer {}", self.token))
     }
 
     fn prs_path(r: &RemoteRef) -> String {
@@ -85,7 +100,7 @@ impl Github {
             .json(
                 self.http
                     .client()
-                    .post(format!("{BASE}/graphql"))
+                    .post(format!("{}/graphql", self.base))
                     .bearer_auth(&self.token)
                     .json(&json!({ "query": query, "variables": variables })),
             )
@@ -299,66 +314,92 @@ fn apply_thread_resolution(top: &mut [PrComment], thread_nodes: &[Value]) {
 
 #[async_trait]
 impl super::GitProvider for Github {
-    async fn list_prs(&self, r: &RemoteRef, state: PrState) -> Result<Vec<PrSummary>> {
+    async fn list_prs(
+        &self,
+        r: &RemoteRef,
+        state: PrState,
+        page: u32,
+        per_page: u32,
+    ) -> Result<super::PrPage> {
         let gh_state = match state {
             PrState::Open => "open",
             PrState::Merged | PrState::Declined => "closed",
             PrState::All => "all",
         };
-        let items = self
+        // ONE request per page — the client pages, not the daemon.
+        let resp = self
             .http
-            .paginate_json(
-                self.req(reqwest::Method::GET, &Self::prs_path(r))
-                    .query(&[("state", gh_state), ("per_page", "100")]),
-                self.http.client(),
-                ("Authorization", format!("Bearer {}", self.token)),
-            )
+            .send(self.req(reqwest::Method::GET, &Self::prs_path(r)).query(&[
+                ("state", gh_state.to_string()),
+                ("per_page", per_page.to_string()),
+                ("page", page.to_string()),
+            ]))
             .await?;
-        let mut prs: Vec<PrSummary> = items.iter().map(summary_from).collect();
+        let has_more = super::client::parse_next_link(resp.headers()).is_some();
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::Upstream(format!("github: bad json: {e}")))?;
+        let mut items: Vec<PrSummary> = varr(&v, &[]).iter().map(summary_from).collect();
+        // GitHub has no "merged"/"declined" filter — both are `closed`; the
+        // split is ours, so this page may be shorter than `per_page`.
         if matches!(state, PrState::Merged | PrState::Declined) {
-            prs.retain(|p| p.state == state);
+            items.retain(|p| p.state == state);
         }
-        Ok(prs)
+        Ok(super::PrPage { items, has_more })
     }
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
         let pr = self.pr_raw(r, number).await?;
 
+        // A PR detail must be WHOLE, so every comment list follows `Link
+        // rel="next"` (capped at 20 pages inside `paginate_json`) instead of
+        // silently stopping at 100.
+        //
         // General (issue) comments — flat thread.
-        let issue_comments = self
-            .http
-            .json(
-                self.req(
-                    reqwest::Method::GET,
-                    &format!("{}/{number}/comments", Self::issues_path(r)),
+        let issue_comments = Value::Array(
+            self.http
+                .paginate_json(
+                    self.req(
+                        reqwest::Method::GET,
+                        &format!("{}/{number}/comments", Self::issues_path(r)),
+                    )
+                    .query(&[("per_page", "100")]),
+                    self.http.client(),
+                    self.auth_header(),
                 )
-                .query(&[("per_page", "100")]),
-            )
-            .await?;
+                .await?,
+        );
 
         // Inline review comments — threaded via in_reply_to_id.
-        let review_comments = self
-            .http
-            .json(
-                self.req(
-                    reqwest::Method::GET,
-                    &format!("{}/{number}/comments", Self::prs_path(r)),
+        let review_comments = Value::Array(
+            self.http
+                .paginate_json(
+                    self.req(
+                        reqwest::Method::GET,
+                        &format!("{}/{number}/comments", Self::prs_path(r)),
+                    )
+                    .query(&[("per_page", "100")]),
+                    self.http.client(),
+                    self.auth_header(),
                 )
-                .query(&[("per_page", "100")]),
-            )
-            .await?;
+                .await?,
+        );
 
         // Reviews → approvals.
-        let reviews = self
-            .http
-            .json(
-                self.req(
-                    reqwest::Method::GET,
-                    &format!("{}/{number}/reviews", Self::prs_path(r)),
+        let reviews = Value::Array(
+            self.http
+                .paginate_json(
+                    self.req(
+                        reqwest::Method::GET,
+                        &format!("{}/{number}/reviews", Self::prs_path(r)),
+                    )
+                    .query(&[("per_page", "100")]),
+                    self.http.client(),
+                    self.auth_header(),
                 )
-                .query(&[("per_page", "100")]),
-            )
-            .await?;
+                .await?,
+        );
 
         let mut comments: Vec<PrComment> = varr(&issue_comments, &[])
             .iter()

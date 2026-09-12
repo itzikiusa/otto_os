@@ -64,6 +64,11 @@ impl Gitlab {
             .header("PRIVATE-TOKEN", &self.token)
     }
 
+    /// `PRIVATE-TOKEN` pair for the raw-`reqwest` pagination helper.
+    fn auth_header(&self) -> (&'static str, String) {
+        ("PRIVATE-TOKEN", self.token.clone())
+    }
+
     fn project_id(r: &RemoteRef) -> String {
         urlencoding::encode(&format!("{}/{}", r.owner, r.repo)).into_owned()
     }
@@ -228,18 +233,39 @@ fn note_to_comment(note: &Value, id_override: Option<String>) -> PrComment {
 
 #[async_trait]
 impl super::GitProvider for Gitlab {
-    async fn list_prs(&self, r: &RemoteRef, state: PrState) -> Result<Vec<PrSummary>> {
+    async fn list_prs(
+        &self,
+        r: &RemoteRef,
+        state: PrState,
+        page: u32,
+        per_page: u32,
+    ) -> Result<super::PrPage> {
         let mut rb = self
             .req(reqwest::Method::GET, &Self::mr_path(r, ""))
-            .query(&[("per_page", "50")]);
+            .query(&[("per_page", per_page.to_string()), ("page", page.to_string())]);
         rb = match state {
             PrState::Open => rb.query(&[("state", "opened")]),
             PrState::Merged => rb.query(&[("state", "merged")]),
             PrState::Declined => rb.query(&[("state", "closed")]),
             PrState::All => rb,
         };
-        let v = self.http.json(rb).await?;
-        Ok(varr(&v, &[]).iter().map(summary_from).collect())
+        let resp = self.http.send(rb).await?;
+        // GitLab answers with `x-next-page` (empty on the last page); older /
+        // proxied instances only set `Link`, so accept either.
+        let has_more = resp
+            .headers()
+            .get("x-next-page")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| !v.trim().is_empty())
+            || super::client::parse_next_link(resp.headers()).is_some();
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| otto_core::Error::Upstream(format!("gitlab: bad json: {e}")))?;
+        Ok(super::PrPage {
+            items: varr(&v, &[]).iter().map(summary_from).collect(),
+            has_more,
+        })
     }
 
     async fn get_pr(&self, r: &RemoteRef, number: u64) -> Result<PrDetail> {
@@ -253,19 +279,22 @@ impl super::GitProvider for Gitlab {
 
         // Discussions: first non-system note is the thread head, rest replies.
         // For threads the exposed comment id is the DISCUSSION id so that
-        // replies can target it (`in_reply_to`).
+        // replies can target it (`in_reply_to`). An MR detail must be WHOLE, so
+        // follow `Link rel="next"` rather than stopping at the first 100.
         let discussions = self
             .http
-            .json(
+            .paginate_json(
                 self.req(
                     reqwest::Method::GET,
                     &Self::mr_path(r, &format!("/{number}/discussions")),
                 )
                 .query(&[("per_page", "100")]),
+                self.http.client(),
+                self.auth_header(),
             )
             .await?;
         let mut comments: Vec<PrComment> = Vec::new();
-        for d in varr(&discussions, &[]) {
+        for d in &discussions {
             let disc_id = vstr(d, &["id"]);
             let notes: Vec<&Value> = varr(d, &["notes"])
                 .iter()

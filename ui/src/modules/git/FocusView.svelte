@@ -10,6 +10,7 @@
     IssueAccount,
     IssueDetail,
     MyWorkIssue,
+    PrListResp,
     PrSummary,
     Repo,
   } from '../../lib/api/types';
@@ -50,8 +51,8 @@
       );
       const settled = await Promise.allSettled(
         candidates.map(async (repo) => {
-          const prs = await api.get<PrSummary[]>(`/repos/${repo.id}/prs?state=open`);
-          return prs.map((pr) => ({ repo, pr }));
+          const page = await api.get<PrListResp>(`/repos/${repo.id}/prs?state=open`);
+          return page.items.map((pr) => ({ repo, pr }));
         }),
       );
       const rows: PrRow[] = [];

@@ -2515,6 +2515,16 @@ export interface PrSummary {
   reviewer_warnings?: string[];
 }
 
+/** `GET /repos/{id}/prs?state=&page=&per_page=` — one page. `has_more` is the
+ *  provider's own next-page signal; `page`/`per_page` echo the clamped request
+ *  (`per_page` 1..=100, `page` 1..=10000). */
+export interface PrListResp {
+  items: PrSummary[];
+  has_more: boolean;
+  page: number;
+  per_page: number;
+}
+
 export interface PrComment {
   id: string;
   author: string;

@@ -474,7 +474,7 @@ distinction from the **"Draft message with agent"** button, which drafts the
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `GET /repos/{id}/prs?state=open\|merged\|declined\|all` | ws viewer | `PrSummary[]` |
+| `GET /repos/{id}/prs?state=open\|merged\|declined\|all&page=&per_page=` | ws viewer | `PrListResp {items, has_more, page, per_page}` (`per_page` 1..=100, default 50) |
 | `POST /repos/{id}/prs` | ws editor | `CreatePrReq` → `PrSummary` |
 | `GET /repos/{id}/prs/{number}` | ws viewer | `PrDetail` (comments, reviewers, CI, mergeable) |
 | `GET /repos/{id}/prs/{number}/diff` | ws viewer | `DiffResp` |
@@ -556,6 +556,7 @@ in **[code-review.md](./code-review.md)**.
 |---|---|
 | **Not sure a token works at all** | Use **Test** on the account row (or **Test connection** in the form) — it runs `GET /user` with the token and shows who you authenticated as + scopes, or the provider's exact error. |
 | **403 / "Bad credentials" creating or listing a PR** | Token missing the right scope. GitHub: `repo` (classic) or Contents+Pull-requests read/write (fine-grained). Bitbucket: Pull-requests read/write. GitLab: `api`. Re-add/edit the account with a fresh token. |
+| **"rate limited — retry in Ns"** | The forge throttled the token. Wait the stated time; the daemon already retried once for short waits. |
 | **"repo has no git account" (400) on PR routes** | The repo isn't bound to an account, or its provider doesn't match the account's. Bind a matching account (Add-Repository sheet or re-detect). |
 | **403 even though the token is fine** | You're not the account **owner**. A repo's credential is usable only by the owner or root (S4). Have the owner act, or bind your own account. |
 | **Push rejected / auth failed** | HTTPS token lacks write/Contents scope, or the token expired (check the expiry chip on the account). For SSH remotes, fix your SSH agent — no token is used. |
