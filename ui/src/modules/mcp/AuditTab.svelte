@@ -58,6 +58,9 @@
   <div class="head">
     <h2>Audit</h2>
     <span class="grow"></span>
+    {#if view === 'log'}
+      <span class="count">{rows.length} row{rows.length === 1 ? '' : 's'}</span>
+    {/if}
     <div class="views" role="group" aria-label="Audit view">
       <button
         class:on={view === 'log'}
@@ -111,8 +114,6 @@
             <option value="error">error</option>
           </select>
           <button class="btn small" onclick={() => void load()}>Apply</button>
-          <span class="grow"></span>
-          <span class="count">{rows.length} row{rows.length === 1 ? '' : 's'}</span>
         </div>
       {/if}
     </div>

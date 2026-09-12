@@ -255,12 +255,12 @@
         <span class="grow"></span>
         <button
           class="btn xs"
-          disabled={saving || !status || !status.enabled || !isMcpAdmin}
+          disabled={saving || !status || !isMcpAdmin}
           onclick={() => void setCategory(group.tools, true)}
         >All</button>
         <button
           class="btn xs"
-          disabled={saving || !status || !status.enabled || !isMcpAdmin}
+          disabled={saving || !status || !isMcpAdmin}
           onclick={() => void setCategory(group.tools, false)}
         >None</button>
       </div>
@@ -270,7 +270,7 @@
             <input
               type="checkbox"
               checked={tool.enabled}
-              disabled={saving || !status || !status.enabled || !isMcpAdmin}
+              disabled={saving || !status || !isMcpAdmin}
               onchange={() => void toggleTool(tool.name)}
             />
             <span class="t-meta">

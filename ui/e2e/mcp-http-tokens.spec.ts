@@ -91,71 +91,81 @@ test('HTTP transport enforces each token scope; bad token is 401', async () => {
     data: { label: 'ro-workflows', scope: { tools: ['list_workflows'], allow_writes: false } },
   })).json()) as { token: string; info: { token_prefix: string } };
   expect(tokA.token, 'token A minted').toBeTruthy();
-  // B: all tools, writes allowed.
-  const tokB = (await (await ctx.post(`${base}/api/v1/mcp/tokens`, {
-    data: { label: 'rw-all', scope: { tools: null, allow_writes: true } },
-  })).json()) as { token: string };
-  expect(tokB.token, 'token B minted').toBeTruthy();
+  // `mcp_trust_token_write_grant` defaults ON, which pre-clears the DANGEROUS
+  // decision for a writes-allowed token — with it on, B's mutating call is
+  // simply "allowed" and this flow would assert nothing about the gate. Turn it
+  // off around token B so "B reaches the approval gate" is a real assertion;
+  // restored in the `finally` (the daemon is isolated, but other specs share it).
+  await ctx.put(`${base}/api/v1/settings`, { data: { mcp_trust_token_write_grant: false } });
+  try {
+    // B: all tools, writes allowed.
+    const tokB = (await (await ctx.post(`${base}/api/v1/mcp/tokens`, {
+      data: { label: 'rw-all', scope: { tools: null, allow_writes: true } },
+    })).json()) as { token: string };
+    expect(tokB.token, 'token B minted').toBeTruthy();
 
-  // --- token A: scope-restricted, read-only --------------------------------
-  const ctxA = await tokenCtx(tokA.token);
+    // --- token A: scope-restricted, read-only --------------------------------
+    const ctxA = await tokenCtx(tokA.token);
 
-  const init = await rpc(ctxA, base, 'initialize', {
-    protocolVersion: '2025-03-26',
-    capabilities: {},
-    clientInfo: { name: 'e2e', version: '1' },
-  });
-  expect((init.result?.serverInfo as { name: string }).name, 'serverInfo.name').toBe('otto');
-  expect(init.result?.protocolVersion, 'protocol echoed').toBe('2025-03-26');
+    const init = await rpc(ctxA, base, 'initialize', {
+      protocolVersion: '2025-03-26',
+      capabilities: {},
+      clientInfo: { name: 'e2e', version: '1' },
+    });
+    expect((init.result?.serverInfo as { name: string }).name, 'serverInfo.name').toBe('otto');
+    expect(init.result?.protocolVersion, 'protocol echoed').toBe('2025-03-26');
 
-  const listA = await rpc(ctxA, base, 'tools/list');
-  const namesA = toolNames(listA);
-  expect(namesA, 'A sees its one allowed read tool').toContain('otto.list_workflows');
-  expect(namesA, 'A (read-only) never sees a mutating tool').not.toContain('otto.run_workflow');
-  expect(namesA, 'A does not see a tool outside its allow-list').not.toContain('otto.list_repos');
+    const listA = await rpc(ctxA, base, 'tools/list');
+    const namesA = toolNames(listA);
+    expect(namesA, 'A sees its one allowed read tool').toContain('otto.list_workflows');
+    expect(namesA, 'A (read-only) never sees a mutating tool').not.toContain('otto.run_workflow');
+    expect(namesA, 'A does not see a tool outside its allow-list').not.toContain('otto.list_repos');
 
-  // A read tool in scope executes and returns the seeded workflow.
-  const okCall = await rpc(ctxA, base, 'tools/call', {
-    name: 'otto.list_workflows',
-    arguments: { workspace_id: ws },
-  });
-  expect(okCall.result?.isError, 'list_workflows ok').toBeFalsy();
-  expect(callText(okCall), 'returns the seeded workflow').toContain(wf.id);
+    // A read tool in scope executes and returns the seeded workflow.
+    const okCall = await rpc(ctxA, base, 'tools/call', {
+      name: 'otto.list_workflows',
+      arguments: { workspace_id: ws },
+    });
+    expect(okCall.result?.isError, 'list_workflows ok').toBeFalsy();
+    expect(callText(okCall), 'returns the seeded workflow').toContain(wf.id);
 
-  // A mutating tool is denied by scope (read-only) — never reaches approval.
-  const mutCall = await rpc(ctxA, base, 'tools/call', {
-    name: 'otto.run_workflow',
-    arguments: { workflow_id: wf.id },
-  });
-  expect(mutCall.result?.isError, 'run_workflow blocked').toBeTruthy();
-  expect(callText(mutCall), 'denied by token scope').toContain('token scope');
+    // A mutating tool is denied by scope (read-only) — never reaches approval.
+    const mutCall = await rpc(ctxA, base, 'tools/call', {
+      name: 'otto.run_workflow',
+      arguments: { workflow_id: wf.id },
+    });
+    expect(mutCall.result?.isError, 'run_workflow blocked').toBeTruthy();
+    expect(callText(mutCall), 'denied by token scope').toContain('token scope');
 
-  // A tool outside the allow-list is denied by scope too.
-  const offCall = await rpc(ctxA, base, 'tools/call', {
-    name: 'otto.list_repos',
-    arguments: { workspace_id: ws },
-  });
-  expect(offCall.result?.isError, 'list_repos blocked').toBeTruthy();
-  expect(callText(offCall), 'denied: not in allowed set').toContain('token scope');
+    // A tool outside the allow-list is denied by scope too.
+    const offCall = await rpc(ctxA, base, 'tools/call', {
+      name: 'otto.list_repos',
+      arguments: { workspace_id: ws },
+    });
+    expect(offCall.result?.isError, 'list_repos blocked').toBeTruthy();
+    expect(callText(offCall), 'denied: not in allowed set').toContain('token scope');
 
-  await ctxA.dispose();
+    await ctxA.dispose();
 
-  // --- token B: all tools, writes allowed ----------------------------------
-  const ctxB = await tokenCtx(tokB.token);
-  const listB = await rpc(ctxB, base, 'tools/list');
-  const namesB = toolNames(listB);
-  expect(namesB, 'B sees the mutating tool').toContain('otto.run_workflow');
-  expect(namesB, 'B sees read tools too').toContain('otto.list_workflows');
+    // --- token B: all tools, writes allowed ----------------------------------
+    const ctxB = await tokenCtx(tokB.token);
+    const listB = await rpc(ctxB, base, 'tools/list');
+    const namesB = toolNames(listB);
+    expect(namesB, 'B sees the mutating tool').toContain('otto.run_workflow');
+    expect(namesB, 'B sees read tools too').toContain('otto.list_workflows');
 
-  // The mutating call is NOT a scope denial — it reaches the normal approval gate.
-  const bMut = await rpc(ctxB, base, 'tools/call', {
-    name: 'otto.run_workflow',
-    arguments: { workflow_id: wf.id },
-  });
-  const bText = callText(bMut);
-  expect(bText, 'B is not blocked by scope').not.toContain('token scope');
-  expect(bText, 'B reaches the approval gate').toContain('pending_approval');
-  await ctxB.dispose();
+    // The mutating call is NOT a scope denial — it reaches the normal approval gate.
+    const bMut = await rpc(ctxB, base, 'tools/call', {
+      name: 'otto.run_workflow',
+      arguments: { workflow_id: wf.id },
+    });
+    const bText = callText(bMut);
+    expect(bText, 'B is not blocked by scope').not.toContain('token scope');
+    expect(bText, 'B reaches the approval gate').toContain('pending_approval');
+    await ctxB.dispose();
+  } finally {
+    await ctx.put(`${base}/api/v1/settings`, { data: { mcp_trust_token_write_grant: true } });
+  }
 
   // --- a bad / blank bearer is rejected ------------------------------------
   const bad = await tokenCtx('deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
