@@ -1036,6 +1036,35 @@ pub struct ReviewAgentCfg {
     pub skill: String,
 }
 
+/// How the review engine runs its lenses: one reviewer session per
+/// lens × provider (`FanOut`, the default), or one ORCHESTRATOR session per
+/// provider that runs every lens as its own sub-agents (`Orchestrator`).
+/// Both end with the same single summarizer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewMode {
+    #[default]
+    FanOut,
+    Orchestrator,
+}
+
+impl ReviewMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewMode::FanOut => "fan_out",
+            ReviewMode::Orchestrator => "orchestrator",
+        }
+    }
+    /// Parse the wire form; anything else is `None` (callers 400 / ignore).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "fan_out" => Some(ReviewMode::FanOut),
+            "orchestrator" => Some(ReviewMode::Orchestrator),
+            _ => None,
+        }
+    }
+}
+
 /// One finding produced by a single review agent (before summarization), for
 /// the expandable per-agent view in the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1045,6 +1074,11 @@ pub struct ReviewFinding {
     /// "info" | "warn" | "bug".
     pub severity: String,
     pub body: String,
+    /// Lens slug that produced this finding (orchestrator mode writes one
+    /// per-lens file per provider and keeps the label through the merge).
+    /// Absent for fan-out reviewers and pre-field rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens: Option<String>,
 }
 
 /// Live state of one review agent during a run (stored as agents_json).

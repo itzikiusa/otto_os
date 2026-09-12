@@ -204,6 +204,39 @@ impl NodeStatus {
     }
 }
 
+/// One sub-agent / background task of a running agent step, for display.
+/// Status comes ONLY from the parent transcript (launch seen, notification
+/// seen); never from the child's own file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentActivity {
+    pub id: String,
+    /// Truncated to 80 chars.
+    pub description: String,
+    /// "running" | "done" | "failed"
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+/// Live activity of a RUNNING agent step (present only while it runs; the
+/// engine clears it on finish). Bounded: ≤ 40 sub-agents, ids ≤ 64 chars.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeActivity {
+    /// The phase log text without its prefix glyph (e.g. "waiting on 2 sub-agents").
+    pub phase: String,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_progress_at: Option<DateTime<Utc>>,
+    pub pending_tasks: u32,
+    #[serde(default)]
+    pub subagents: Vec<SubagentActivity>,
+    /// Why the engine is holding a step that looks idle, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_reason: Option<String>,
+}
+
 /// Per-node execution state, captured during a run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRunState {
@@ -231,6 +264,10 @@ pub struct NodeRunState {
     /// run view can open it while running. Empty for non-agent nodes.
     #[serde(default)]
     pub sessions: Vec<String>,
+    /// Live sub-agent / phase snapshot while the node runs; `None` once it
+    /// finished (and on rows persisted before the field existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<NodeActivity>,
 }
 
 /// One execution of a workflow.
@@ -393,6 +430,11 @@ pub struct RunWorkflowReq {
     /// Run only `start_node` itself, not its descendants.
     #[serde(default)]
     pub only_node: bool,
+    /// Per-run review-mode override (`"fan_out"` | `"orchestrator"`): seeded into
+    /// `input.review_mode`, wins over every `review_run` node's `params.mode`.
+    /// Validated by the route (400 on any other value).
+    #[serde(default)]
+    pub review_mode: Option<String>,
 }
 
 /// A ready-made example workflow the user can instantiate (e.g. game pipelines

@@ -241,9 +241,10 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"Get one workflow run's status, per-node step states and outputs by run id. Read-only.",
             "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
         json!({"name":"otto.run_workflow","mutating":true,"category":"Workflows",
-            "description":"Execute a workflow now; returns the new run. Optionally pass `input` (seed JSON) and `start_node` (run that node + downstream). DANGEROUS: spawns agents / external effects — approval-gated.",
+            "description":"Execute a workflow now; returns the new run. Optionally pass `input` (seed JSON) and `start_node` (run that node + downstream). Optional `review_mode` (\"fan_out\" | \"orchestrator\") overrides every review step's execution mode for this run. DANGEROUS: spawns agents / external effects — approval-gated.",
             "inputSchema":{"type":"object","required":["workflow_id"],"properties":{
-                "workflow_id":{"type":"string"},"input":{"type":"object"},"start_node":{"type":"string"}}}}),
+                "workflow_id":{"type":"string"},"input":{"type":"object"},"start_node":{"type":"string"},
+                "review_mode":{"type":"string","enum":["fan_out","orchestrator"]}}}}),
         json!({"name":"otto.cancel_workflow_run","mutating":true,"category":"Workflows",
             "description":"Cancel a running workflow run by id. DANGEROUS — approval-gated.",
             "inputSchema":{"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"}}}}),
@@ -1498,6 +1499,11 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             }
             if let Some(v) = args.get("start_node").and_then(Value::as_str) {
                 body["start_node"] = json!(v);
+            }
+            // Per-run review-mode override; the route 400s on anything but
+            // "fan_out" / "orchestrator".
+            if let Some(v) = args.get("review_mode").and_then(Value::as_str) {
+                body["review_mode"] = json!(v);
             }
             SelfCall::post(format!("/api/v1/workflows/{}/run", seg(&id)), body)
         }
@@ -2816,10 +2822,13 @@ mod tests {
             route_for("list_workflows", &json!({"workspace_id":"ws1"})).unwrap(),
             SelfCall { method: Method::Get, path: "/api/v1/workspaces/ws1/workflows".into(), body: None }
         );
-        let c = route_for("run_workflow", &json!({"workflow_id":"wf1","input":{"k":1},"start_node":"n2"})).unwrap();
+        let c = route_for("run_workflow", &json!({"workflow_id":"wf1","input":{"k":1},"start_node":"n2","review_mode":"fan_out"})).unwrap();
         assert_eq!(c.method, Method::Post);
         assert_eq!(c.path, "/api/v1/workflows/wf1/run");
-        assert_eq!(c.body.unwrap(), json!({"input":{"k":1},"start_node":"n2"}));
+        assert_eq!(
+            c.body.unwrap(),
+            json!({"input":{"k":1},"start_node":"n2","review_mode":"fan_out"})
+        );
         assert_eq!(
             route_for("cancel_workflow_run", &json!({"run_id":"r1"})).unwrap(),
             SelfCall { method: Method::Post, path: "/api/v1/workflow-runs/r1/cancel".into(), body: Some(json!({})) }
@@ -2834,6 +2843,28 @@ mod tests {
         let c = route_for("consume_broker_messages", &json!({"cluster_id":"c1","topic":"orders","limit":10,"value_filter":"x"})).unwrap();
         assert_eq!(c.path, "/api/v1/brokers/clusters/c1/topics/orders/consume");
         assert_eq!(c.body.unwrap(), json!({"limit":10,"value_filter":"x"}));
+    }
+
+    #[test]
+    fn run_workflow_forwards_review_mode() {
+        // The override rides alone (no input / start_node) and reaches the route
+        // verbatim — the route, not the tool, validates the value.
+        let c =
+            route_for("run_workflow", &json!({"workflow_id":"wf1","review_mode":"orchestrator"}))
+                .unwrap();
+        assert_eq!(c.body.unwrap(), json!({"review_mode":"orchestrator"}));
+        // Absent ⇒ no key at all, so pre-field callers post exactly what they did.
+        let c = route_for("run_workflow", &json!({"workflow_id":"wf1"})).unwrap();
+        assert_eq!(c.body.unwrap(), json!({}));
+        let spec = otto_tool_specs()
+            .into_iter()
+            .find(|t| t["name"] == "otto.run_workflow")
+            .expect("run_workflow spec");
+        assert_eq!(
+            spec["inputSchema"]["properties"]["review_mode"]["enum"],
+            json!(["fan_out", "orchestrator"])
+        );
+        assert!(spec["description"].as_str().unwrap().contains("review_mode"));
     }
 
     #[test]

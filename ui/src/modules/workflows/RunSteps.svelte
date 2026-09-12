@@ -64,6 +64,13 @@
     return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
   }
 
+  // Phase lines the step engine emits (turn oracle): muted, so the ▶/✓/⚠/↻
+  // lines around them stay the ones that read as events.
+  const PHASE_PREFIXES = ['⏳', '✉', '⚙', '🧩', '⏸', '📄'];
+  function isPhaseLine(l: string): boolean {
+    return PHASE_PREFIXES.some((p) => l.startsWith(p));
+  }
+
   function reply(out: unknown): string | null {
     if (out && typeof out === 'object' && typeof (out as { reply?: unknown }).reply === 'string') {
       return (out as { reply: string }).reply;
@@ -199,6 +206,17 @@
         {:else if ns.status === 'running' && elapsedMs(ns) != null}
           <span class="ms live">{fmtMs(elapsedMs(ns))}</span>
         {/if}
+        {#if ns.status === 'running' && ns.activity && ns.activity.subagents.length}
+          {@const running = ns.activity.subagents.filter((s) => s.status === 'running').length}
+          {@const done = ns.activity.subagents.filter((s) => s.status === 'done').length}
+          <span
+            class="chip subagents"
+            data-testid="subagent-chip"
+            title="Sub-agents / background tasks the step launched"
+          >
+            {ns.activity.subagents.length} sub-agent{ns.activity.subagents.length === 1 ? '' : 's'} · {running ? `${running} running` : `${done} done`}
+          </span>
+        {/if}
         <button
           class="zoom-btn"
           title="Zoom in on this step"
@@ -211,6 +229,13 @@
         >
           <Icon name="maximize" size={12} />
         </button>
+        {#if ns.status === 'running' && ns.activity?.phase}
+          <!-- What the engine is waiting for right now; `hold_reason` wins when
+               the step LOOKS idle but is deliberately being held. It belongs to
+               the CARD, not the body (design §4 "muted line under the title") —
+               a collapsed running step must still say what it is waiting on. -->
+          <div class="phase" data-testid="step-phase">{ns.activity.hold_reason ?? ns.activity.phase}</div>
+        {/if}
       </summary>
       <div class="body">
         {#if ns.error}
@@ -256,7 +281,7 @@
           </div>
         {/if}
         {#if ns.logs?.length}
-          <div class="logs">{#each ns.logs as l}<div>{l}</div>{/each}</div>
+          <div class="logs">{#each ns.logs as l}<div class:phase-line={isPhaseLine(l)} class:warn-line={l.startsWith('⚠')} class:ok-line={l.startsWith('✓')}>{l}</div>{/each}</div>
         {/if}
 
         {#if hasOutput(ns)}
@@ -340,6 +365,20 @@
     padding: 1px 7px;
     border-radius: 99px;
   }
+  /* Sub-agent chip: neutral, not the warn colour the retry chip uses. */
+  .chip.subagents {
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  /* Live phase under the step title (or why it's being held). */
+  /* Its own row under the title line (the summary wraps), so the phase reads
+     as a caption of the step rather than an item in the header row. */
+  .phase {
+    flex-basis: 100%;
+    margin-top: -2px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
   .links {
     display: flex;
     flex-wrap: wrap;
@@ -380,6 +419,7 @@
   summary {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 9px;
     padding: 9px 12px;
     cursor: pointer;
@@ -432,6 +472,17 @@
     margin: 0;
     overflow-x: auto;
     white-space: pre-wrap;
+  }
+  /* Log-line colouring by prefix: phase lines recede, ⚠/✓ stand out. There is
+     no --warn token in this file, so that one keeps a literal fallback. */
+  .logs .phase-line {
+    color: var(--text-dim);
+  }
+  .logs .warn-line {
+    color: var(--warn, #c27c0e);
+  }
+  .logs .ok-line {
+    color: var(--status-working, #28c840);
   }
   .product-h {
     display: flex;

@@ -1604,6 +1604,7 @@ async fn refine(
                     done_file: Some(done_path.clone()),
                     quiet_done: Some(QUIET_DONE),
                     kill_on_stall: false,
+                    ..Default::default()
                 },
                 on_ready,
             )
@@ -2062,6 +2063,7 @@ async fn run_docs(
                         done_file: Some(done_path.clone()),
                         quiet_done: Some(QUIET_DONE),
                         kill_on_stall: false,
+                        ..Default::default()
                     },
                     on_ready,
                 )
@@ -2350,6 +2352,7 @@ async fn run_docs(
                 done_file: Some(sum_done_path.clone()),
                 quiet_done: Some(QUIET_DONE),
                 kill_on_stall: false,
+                ..Default::default()
             },
             on_ready,
         )
@@ -2633,6 +2636,7 @@ impl ReviewTurnRunner for LiveReviewTurnRunner {
                 done_file: Some(request.done_path),
                 quiet_done: Some(QUIET_DONE),
                 kill_on_stall: false,
+                ..Default::default()
             },
             move |sid| on_ready(sid.clone()),
         )

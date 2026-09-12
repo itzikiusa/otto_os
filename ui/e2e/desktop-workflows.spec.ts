@@ -411,13 +411,18 @@ test('the implementer publishes its working directory; review_run publishes the 
     [edge('trigger', 'implement'), edge('implement', 'review')],
   );
   const run = await runToCompletion(wfId);
-  // The implementer reports where it worked.
-  expect(nodeState(run, 'implement').output.working_directory, 'agent publishes its cwd').toBe(dir);
+  // The implementer reports where it worked. The run never turns agents loose in
+  // the user's own checkout: it cuts an isolated worktree from `develop` under
+  // `workflow-runs/<run>/` and adopts THAT as the run's working directory — so
+  // the published reference is the worktree, and the whole point of this test is
+  // that the reviewer then reviews exactly it.
+  const workdir = nodeState(run, 'implement').output.working_directory as string;
+  expect(workdir, 'agent publishes its cwd').toContain(`/workflow-runs/${run.id}/`);
   // The reviewer inherits + publishes the exact reference for the PR.
   const rev = nodeState(run, 'review').output;
   expect(rev.repo_id, 'review inherits repo from the implementer').toBe(repoId);
   expect(rev.base, 'review inherits the run base').toBe('develop');
-  expect(rev.worktree, 'review reviews where the implementer worked').toBe(dir);
+  expect(rev.worktree, 'review reviews where the implementer worked').toBe(workdir);
 });
 
 test('active-runs endpoint lists an in-flight run, then drops it on completion', async () => {
@@ -554,10 +559,14 @@ test.describe('workflows page (desktop)', () => {
       [node('trigger', 'manual_trigger'), node('wait', 'delay', { ms: 6000 }), node('done', 'log')],
       [edge('trigger', 'wait'), edge('wait', 'done')],
     );
+    // Navigate FIRST so the page is up before the (short) run starts — under
+    // load a cold page boot outlasts the delay node and the run would already be
+    // finished by the time the Running section renders.
+    await page.goto('/#/workflows');
+    await expect(page.getByText('E2E Live').first()).toBeVisible({ timeout: 15_000 });
     const r = await ctx.post(`${base}${V1}/workflows/${wfId}/run`, { data: {} });
     expect(r.ok(), await r.text()).toBeTruthy();
 
-    await page.goto('/#/workflows');
     // The Running section lists the in-flight run.
     const running = page.getByTestId('running-workflows');
     await expect(running).toBeVisible({ timeout: 15_000 });
@@ -566,7 +575,7 @@ test.describe('workflows page (desktop)', () => {
     // Open it from the Running list, then watch the status flip to success IN
     // PLACE — no re-navigation — once the delay elapses (live auto-update).
     await running.getByText('E2E Live').click();
-    const label = page.locator('.timeline .tl-label');
+    const label = page.locator('.insp-bar .tl-label');
     await expect(label).toBeVisible({ timeout: 10_000 });
     await expect(label).toContainText('success', { timeout: 25_000 });
   });

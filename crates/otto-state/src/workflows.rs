@@ -848,6 +848,7 @@ mod tests {
             duration_ms: None,
             attempts: None,
             sessions: vec![],
+            activity: None,
         };
         repo.update_run(&r3.id, RunStatus::Error, &[node], Some("boom"), true).await.unwrap();
         repo.reopen_run(&r3.id).await.unwrap();

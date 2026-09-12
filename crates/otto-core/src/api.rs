@@ -1949,6 +1949,10 @@ pub struct ReviewConfig {
     /// Per-agent timeout in seconds. When set, overrides the diff-size heuristic.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Execution mode (`fan_out` | `orchestrator`). `None` ⇒ fan-out; kept
+    /// as an Option so the engine can tell "stored" from "defaulted".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<crate::domain::ReviewMode>,
 }
 
 /// A named, reusable full review configuration ("conf A" / "conf Y").

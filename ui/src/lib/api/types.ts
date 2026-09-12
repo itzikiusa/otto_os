@@ -3063,6 +3063,9 @@ export interface ReviewFinding {
   fingerprint?: string | null;
   /** Lifecycle state: open | fixing | resolved | regressed | declined (added A1). */
   state?: string | null;
+  /** Lens slug that produced the finding (orchestrator mode keeps it through the merge, so one
+   *  agent row's findings span several lenses); absent for fan-out reviewers and pre-field rows. */
+  lens?: string | null;
 }
 
 /** A persistent finding row from /reviews/{id}/findings (A1 verified-review loop). */
@@ -3141,6 +3144,9 @@ export interface ReviewAgentCfg {
   prompt: string;
 }
 
+/** Review execution mode: one reviewer per lens × provider, or one orchestrator per provider running every lens as sub-agents. */
+export type ReviewMode = 'fan_out' | 'orchestrator';
+
 export interface ReviewConfig {
   agents: ReviewAgentCfg[];
   summarizer: ReviewAgentCfg;
@@ -3149,6 +3155,9 @@ export interface ReviewConfig {
   max_attempts?: number | null;
   /** Per-agent timeout in seconds; overrides diff-size heuristic. */
   timeout_secs?: number | null;
+  /** Execution mode; absent/null ⇒ fan_out. A review_run step's `params.mode` and a run's
+   *  `review_mode` both override it. */
+  mode?: ReviewMode | null;
 }
 
 /** A named, reusable full review configuration.
@@ -4614,6 +4623,27 @@ export interface Workflow {
 export type WorkflowRunStatus = 'pending' | 'running' | 'success' | 'error' | 'canceled';
 export type NodeStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped';
 
+/** One sub-agent / background task of a running agent step (status from the parent transcript only). */
+export interface SubagentActivity {
+  id: string;
+  description: string;
+  status: 'running' | 'done' | 'failed';
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** Live phase + sub-agent snapshot of a RUNNING agent step; cleared on finish. Written at most
+ *  every 5s and bounded (≤ 40 sub-agents, descriptions ≤ 80 chars) so the WS `node` payload stays
+ *  under the 32 KiB inline limit. `phase` is the phase log text without its prefix glyph. */
+export interface NodeActivity {
+  phase: string;
+  updated_at: string;
+  last_progress_at?: string | null;
+  pending_tasks: number;
+  subagents: SubagentActivity[];
+  hold_reason?: string | null;
+}
+
 export interface NodeRunState {
   node_id: string;
   status: NodeStatus;
@@ -4628,6 +4658,8 @@ export interface NodeRunState {
   attempts?: number | null;
   /** Session ids this node drove (e.g. agent_prompt / review_run). */
   sessions?: string[];
+  /** Present only while the node runs (agent steps): phase + sub-agents. */
+  activity?: NodeActivity | null;
 }
 
 export interface WorkflowRun {
@@ -4666,6 +4698,16 @@ export interface WorkflowRun {
    *  repos.json, per-step handoff files). Present on `GET /workflow-runs/{id}`
    *  when the directory exists on disk; absent on list endpoints. */
   context_dir?: string | null;
+}
+
+/** `POST /workflows/{id}/run` body. `review_mode` seeds `input.review_mode` and overrides every
+ *  review_run step's own `params.mode` for this run (400 on an unknown value, or on a non-object
+ *  `input` combined with it). */
+export interface RunWorkflowReq {
+  input?: unknown;
+  start_node?: string;
+  only_node?: boolean;
+  review_mode?: ReviewMode;
 }
 
 /** Lightweight summary of an in-flight run for the "Running" sidebar list.

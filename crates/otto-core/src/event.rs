@@ -523,6 +523,7 @@ mod tests {
                 duration_ms: None,
                 attempts: None,
                 sessions: vec![],
+                activity: None,
             }),
             nodes_done: 2,
             nodes_total: 5,
