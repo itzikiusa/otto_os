@@ -21,6 +21,7 @@ import { personalAgents } from './stores/personalAgents.svelte';
 import { k8s } from './stores/k8s.svelte';
 import { aws } from './stores/aws.svelte';
 import { transcript } from './stores/transcript.svelte';
+import { apiClient } from './stores/apiClient.svelte';
 
 // ---------------------------------------------------------------------------
 // improvement_updated — simple reactive counter so subscribed pages refresh.
@@ -356,6 +357,10 @@ class EventsClient {
           }
         } else if (parsed.type === 'trail_appended' || parsed.type === 'tasks_updated') {
           activity.applyEvent(parsed);
+        } else if (parsed.type === 'api_history_appended') {
+          // API Client history is shared across human sends and agent MCP runs.
+          // Refresh once after a burst so the current workspace stays live.
+          apiClient.noteHistoryAppended(parsed.workspace_id);
         } else if (
           parsed.type === 'swarm_run_updated' ||
           parsed.type === 'swarm_task_updated' ||

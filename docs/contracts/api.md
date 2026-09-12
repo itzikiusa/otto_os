@@ -1797,6 +1797,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
+| GET /workspaces/{wid}/api-client/overview?q=&collection_id=&kind=all\|requests\|environments\|automations | ws viewer | — | `ApiOverview` — compact collections, saved requests, masked environments, and automation step counts |
 | GET /workspaces/{wid}/api-client/collections | ws viewer | — | `Collection[]` |
 | POST /workspaces/{wid}/api-client/collections | ws editor | CreateCollectionReq | Collection |
 | PATCH /workspaces/{wid}/api-client/collections/{id} | ws editor | UpdateCollectionReq | Collection |
@@ -1804,15 +1805,17 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | GET /workspaces/{wid}/api-client/collections/{id}/openapi | ws viewer | — | export the collection as OpenAPI |
 | GET /workspaces/{wid}/api-client/requests | ws viewer | — | `Request[]` |
 | POST /workspaces/{wid}/api-client/requests | ws editor | CreateRequestReq | Request |
-| GET /workspaces/{wid}/api-client/requests/{id} | ws viewer | — | Request |
+| GET /workspaces/{wid}/api-client/requests/{id}?shape=full\|agent | ws viewer | — | Request. `full` is the unchanged default; `agent` masks auth/header/query secrets and caps the body at 64 KiB |
 | PATCH /workspaces/{wid}/api-client/requests/{id} | ws editor | UpdateRequestReq | Request. Create/Update carry the persisted extras: `pre_request_script?`, `post_response_script?`, `settings?` (`{timeout_ms?, follow_redirects?, verify_ssl?}`), `docs?`, `graphql_variables?` |
+| POST /workspaces/{wid}/api-client/requests/{id}/execute | ws editor | `RunSavedRequestReq` | `RunSavedRequestResp`. 400: `vars override '<k>' must not contain '{{' (no nested substitution)`. 409: `needs_confirm=method: <METHOD> '<name>' → <url> is not a safe method; re-send with confirm:true` or `needs_confirm=new_host: host '<host>' is not used by any human-authored request or run in this workspace; re-send with confirm_new_host:true`. Network/send failure is 502 and still writes history |
 | DELETE /workspaces/{wid}/api-client/requests/{id} | ws editor | — | 204 |
 | GET /workspaces/{wid}/api-client/environments | ws viewer | — | `Environment[]` |
 | POST /workspaces/{wid}/api-client/environments | ws editor | CreateEnvironmentReq | Environment |
 | PATCH /workspaces/{wid}/api-client/environments/{id} | ws editor | UpdateEnvironmentReq | Environment |
 | DELETE /workspaces/{wid}/api-client/environments/{id} | ws editor | — | 204 |
 | POST /workspaces/{wid}/api-client/environments/{id}/activate | ws editor | — | set the active environment |
-| GET /workspaces/{wid}/api-client/history | ws viewer | — | request history |
+| GET /workspaces/{wid}/api-client/history?limit=&q=&status=&request_id=&source=agent\|human | ws viewer | — | filtered request history; `source=human` includes legacy rows with no source field |
+| GET /workspaces/{wid}/api-client/history/{id} | ws viewer | — | one history entry; cross-workspace ids return 404 |
 | DELETE /workspaces/{wid}/api-client/history | ws editor | — | clear history |
 | POST /workspaces/{wid}/api-client/execute | ws editor | ExecuteRequestReq | execute an HTTP request |
 | POST /workspaces/{wid}/api-client/secure-all | ws editor | — | `{requests_secured, env_keys_secured}` — one-pass Keychain sweep |
@@ -1829,6 +1832,13 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/automations/{id}/run | ws editor | — | run an automation |
 | POST /workspaces/{wid}/api-client/postman/sync | ws editor | `{api_key?, remember?}` | fetch EVERY collection + environment from the user's Postman account (api.getpostman.com) → `{collections: PostmanV21[], environments: PostmanEnv[], failed: [{name,error}], remembered}`. `api_key` optional when a prior sync stored one (`remember: true` → Keychain, ref `apiclient-postman`; only persisted after the key proved valid). Caps at 200 items per kind (Postman rate limits). The UI imports the returned docs through its normal import pipeline. |
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command |
+
+On request PATCH, absent/null `auth` keeps the stored auth row and Keychain blob,
+and absent `extras` keeps the stored extras. A non-empty `X-Otto-Session` header on
+request POST/PATCH stamps `extras.agent = {session_id, at}`. Every history request
+snapshot carries `request_id`, `name`, and `source: {kind: "agent"|"human",
+session_id}`; response bodies, history, and `api_history_appended` events never
+carry resolved secret values.
 
 **Durable request extras.** `CreateRequestReq` / `UpdateRequestReq` → `Request` carry an
 optional `extras` object persisting the once-draft-only fields:

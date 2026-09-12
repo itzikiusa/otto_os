@@ -10,6 +10,7 @@ import type {
   ApiCollection,
   ApiEnvironment,
   ApiHistoryEntry,
+  ApiHistorySource,
   ApiKeyVal,
   ApiRequest,
   ApiRequestExtras,
@@ -235,6 +236,7 @@ class ApiClientStore {
   requests: ApiRequest[] = $state([]);
   environments: ApiEnvironment[] = $state([]);
   history: ApiHistoryEntry[] = $state([]);
+  historyAgentOnly = $state(false);
   automations: ApiAutomation[] = $state([]);
   /** Workspace `ssh`-kind connections, for the Settings-tab "SSH tunnel" picker. */
   sshConnections: Connection[] = $state([]);
@@ -485,6 +487,23 @@ class ApiClientStore {
     } catch (e) {
       toasts.error('Could not load history', errMsg(e));
     }
+  }
+
+  private historyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Coalesce history events so automation bursts trigger a single reload. */
+  noteHistoryAppended(workspaceId: string): void {
+    if (workspaceId !== this.wsId()) return;
+    if (this.historyRefreshTimer !== null) clearTimeout(this.historyRefreshTimer);
+    this.historyRefreshTimer = setTimeout(() => {
+      this.historyRefreshTimer = null;
+      if (workspaceId === this.wsId()) void this.loadHistory();
+    }, 150);
+  }
+
+  /** Read the caller marker from a history request snapshot. */
+  historySource(h: ApiHistoryEntry): ApiHistorySource | null {
+    return (h.request as { source?: ApiHistorySource } | null)?.source ?? null;
   }
 
   // ── Cookie jar (daemon-global) ────────────────────────────────────────────

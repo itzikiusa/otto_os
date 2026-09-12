@@ -226,6 +226,7 @@ Coverage by category (✅ = read tools, ⚠ = mutating tools, approval-gated):
 | **Message Brokers** | ✅ list_clusters / list_topics / get_topic / list_consumer_groups / *consume*¹ | ⚠ produce |
 | **Git** | ✅ list_repos / status / list_prs / get_pr / *open_pr_draft*¹ | ⚠ create_pr, comment_pr, start_pr_review |
 | **Database** | ✅ list_connections / *query_db_readonly*¹ | — |
+| **API Client** | ✅ api_list / api_get_request / api_history (masked: no secret values, no tokens, JWTs as claims) | ⚠ api_execute (sends one saved request; method/new-host confirm flags), api_upsert_request, api_run_automation |
 | **Issues** | ✅ search_issues / get_issue / search_confluence | ⚠ comment_issue, transition_issue |
 | **Swarm** | ✅ list / get / list_runs / get_board / create_work_item² | ⚠ post_swarm_board |
 | **Vault (docs home)** | ✅ vault_list / vault_dir / vault_read / vault_search / vault_backlinks / vault_tags / vault_graph / vault_okf_validate | ⚠ vault_write, vault_rename, vault_delete (delete = soft move to `.trash/`) — `workspace_id` optional on all vault tools (vaults are global; omitted → token pin, else first accessible workspace) |
@@ -257,12 +258,35 @@ The same feature **reads** are also injected into Otto's *own* agent
 sessions through the inward `ottod mcp-tools` server (§5) as `otto_list_workflows`,
 `otto_list_broker_clusters`, `otto_search_memory` (keyword memory search),
 `otto_list_findings`, `otto_list_improvement_edits`, `otto_vault_read`,
-`aws_list_accounts`, `k8s_get_resources`, … so an Otto session can inspect every
-feature. That server stays read-only with named exceptions: the two canvas tools,
-the three Vault v3 doc writers (`otto_vault_write`/`_rename`/`_delete` —
-Editor-gated as the session owner; delete only trashes), and the three
-cloud-console writers `aws_athena_query` / `aws_sqs_send` / `k8s_action`
-(per-feature `Edit`-gated as the session owner).
+`otto_api_list`, `otto_api_get_request`, `otto_api_history`, `aws_list_accounts`,
+`k8s_get_resources`, … so an Otto session can inspect every feature. That server
+stays read-only with named exceptions: the two canvas tools, the three Vault v3
+doc writers (`otto_vault_write`/`_rename`/`_delete` — Editor-gated as the session
+owner; delete only trashes), the API-client writers `otto_api_execute`,
+`otto_api_upsert_request`, `otto_api_run_automation`, and the three cloud-console
+writers `aws_athena_query` / `aws_sqs_send` / `k8s_action` (per-feature
+`Edit`-gated as the session owner).
+
+### 3.4 API client through MCP
+
+For example, *“call the login request against staging and show me the token
+expiry”* maps to `otto_api_list {q:"login"}`, then `otto_api_execute` against the
+staging environment with `confirm:true` when the method is unsafe. The result
+contains the expiry as `jwt_claims.…exp_iso`; the JWT itself is never returned.
+
+The Activity trail records each tool call, including the confirm handshake. The
+API client's History shows the durable execution row with an `agent` chip and an
+**Agent runs** filter, and the `api_history_appended` WebSocket event refreshes it
+live.
+
+Secrets are resolved by the daemon and scrubbed from every agent-shaped result;
+`resolved.secrets_used` contains names only. Agents can execute saved requests
+only—there is no ad-hoc URL tool—and `vars` values containing `{{` are rejected
+to prevent nested substitution. The method and new-host confirm flags are
+agent-side speed bumps for inward tools; the three outward writers are also
+human-approval-gated as DANGEROUS tools. An inward session still holds its owner's
+API token and could use raw curl, so daemon-side response scrubbing protects that
+path too.
 
 ---
 
@@ -441,8 +465,9 @@ routes** the restricted token may reach (see §10).
 
 **Inward — `ottod mcp-tools`** (`mcp_tools.rs`): the per-session server Otto injects
 into its own agents' `.mcp.json` (read-only by construction — GETs or read-only-enforced
-viewer POSTs only, with the canvas + vault writers as the named Editor-gated
-exceptions; 20 s timeout, 1 MiB body cap, 500-row cap, redacted, audited). It
+viewer POSTs only, with the canvas, vault, API-client, and cloud-console writers
+as the named Editor-gated exceptions; 20 s timeout, 1 MiB body cap, 500-row cap,
+redacted, audited). It
 serves the first-party **read-only** tools: the DB connection tools
 (`otto_list_connections`, `otto_db_schema`/`_children`/`_object`, `otto_db_query`),
 `otto_git_pr_review`, `otto_product_story`, `canvas_list_scenes`/`canvas_get_scene`,
@@ -454,6 +479,8 @@ the Vault v3 doc tools (`otto_vault_list`/`_dir`/`_read`/`_search`/`_backlinks`/
 `otto_search_memory`, `otto_list_repos`, `otto_list_sessions`, `otto_get_session`, `otto_wait_session`,
 `otto_list_product_stories`, `otto_list_findings`, `otto_usage_summary`,
 `otto_list_improvement_runs`/`_edits` (the pure `read_route` map, unit-tested),
+the API-client tools `otto_api_list`, `otto_api_get_request`, `otto_api_history`,
+`otto_api_execute`, `otto_api_upsert_request`, `otto_api_run_automation`,
 and the **cloud consoles** — AWS: `aws_list_accounts`, `aws_s3_list_buckets`/
 `_list_objects`/`_preview`, `aws_sqs_list_queues`/`_peek`, `aws_ec2_list_instances`,
 `aws_athena_list_tables`/`_get_query`, `aws_eks_list_clusters`; Kubernetes:

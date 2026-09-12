@@ -55,6 +55,10 @@ const DEFAULT_ENABLED: &[&str] = &[
     "list_consumer_groups",
     // Connections / git
     "list_connections",
+    // API client reads — metadata + masked shapes only, no secret values.
+    "api_list",
+    "api_get_request",
+    "api_history",
     "list_repos",
     "git_status",
     "list_prs",
@@ -138,6 +142,10 @@ const DANGEROUS: &[&str] = &[
     "start_pr_review",
     "comment_issue",
     "transition_issue",
+    // API client writers send real HTTP requests and/or persist saved requests.
+    "api_execute",
+    "api_upsert_request",
+    "api_run_automation",
     // Confluence page writes publish to a real wiki everyone reads — same tier
     // as commenting on an issue or opening a PR.
     "create_confluence_page",
@@ -277,6 +285,40 @@ pub fn otto_tool_specs() -> Vec<Value> {
         json!({"name":"otto.list_connections","mutating":false,"category":"Database",
             "description":"List a workspace's connections (DB/SSH) — id, name, kind, environment. Secrets are never included. Read-only.",
             "inputSchema":{"type":"object","required":["workspace_id"],"properties":{"workspace_id":{"type":"string"}}}}),
+
+        // ================= API Client =================
+        json!({"name":"otto.api_list","mutating":false,"category":"API Client",
+            "description":"READ-ONLY: discover a workspace's API client collections, saved requests, environments and automations. Request URLs remain templates; environment secret values and tokens are never returned.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
+                "workspace_id":{"type":"string"},"q":{"type":"string","description":"optional substring filter"},
+                "collection_id":{"type":"string"},"kind":{"type":"string","enum":["all","requests","environments","automations"]}}}}),
+        json!({"name":"otto.api_get_request","mutating":false,"category":"API Client",
+            "description":"READ-ONLY: get one saved API request by id, including its agent-facing body and extras. Auth and sensitive header/query values are masked; the body is capped at 64 KiB.",
+            "inputSchema":{"type":"object","required":["workspace_id","request_id"],"properties":{
+                "workspace_id":{"type":"string"},"request_id":{"type":"string"}}}}),
+        json!({"name":"otto.api_history","mutating":false,"category":"API Client",
+            "description":"READ-ONLY: search past API executions, or pass `id` for one history entry and its response. Stored auth and sensitive response values are masked.",
+            "inputSchema":{"type":"object","required":["workspace_id"],"properties":{
+                "workspace_id":{"type":"string"},"id":{"type":"string"},"limit":{"type":"integer"},
+                "q":{"type":"string"},"status":{"type":"integer"},"request_id":{"type":"string"},
+                "source":{"type":"string","enum":["agent","human"]}}}}),
+        json!({"name":"otto.api_execute","mutating":true,"category":"API Client",
+            "description":"Execute one SAVED API request against an environment. Non-GET/HEAD/OPTIONS methods require `confirm:true`; an agent-authored request targeting a new host requires `confirm_new_host:true`. Secrets are resolved server-side and scrubbed from every result; JWTs are returned only as decoded claims. DANGEROUS: sends a real HTTP request — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","request_id"],"properties":{
+                "workspace_id":{"type":"string"},"request_id":{"type":"string"},"environment_id":{"type":"string"},
+                "vars":{"type":"object","additionalProperties":{"type":"string"}},"timeout_ms":{"type":"integer"},
+                "confirm":{"type":"boolean"},"confirm_new_host":{"type":"boolean"}}}}),
+        json!({"name":"otto.api_upsert_request","mutating":true,"category":"API Client",
+            "description":"Create or update a saved API request. Pass `request_id` to update; `name`, `method`, and `url` are required for both create and update. Omitted optional fields stay omitted, and the daemon preserves stored auth/extras on PATCH. DANGEROUS: persists a saved request — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","name","method","url"],"properties":{
+                "workspace_id":{"type":"string"},"request_id":{"type":"string"},"collection_id":{"type":["string","null"]},
+                "name":{"type":"string"},"method":{"type":"string"},"url":{"type":"string"},
+                "headers":{"type":"array"},"query":{"type":"array"},"body_mode":{"type":"string"},
+                "body":{"type":"string"},"auth":{"type":"object"},"extras":{"type":"object"}}}}),
+        json!({"name":"otto.api_run_automation","mutating":true,"category":"API Client",
+            "description":"Run a saved API automation and return its per-step report. DANGEROUS: sends the automation's real HTTP requests — approval-gated.",
+            "inputSchema":{"type":"object","required":["workspace_id","automation_id"],"properties":{
+                "workspace_id":{"type":"string"},"automation_id":{"type":"string"}}}}),
 
         // ================= Git =================
         json!({"name":"otto.list_repos","mutating":false,"category":"Git",
@@ -825,6 +867,29 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
             "Transition issue '{}' (transition '{}')",
             args.get("key").and_then(Value::as_str).unwrap_or("?"),
             args.get("transition_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "api_execute" => format!(
+            "API request '{}' executed against environment '{}' (confirm={}, confirm_new_host={}) in workspace '{}'",
+            args.get("request_id").and_then(Value::as_str).unwrap_or("?"),
+            args.get("environment_id").and_then(Value::as_str).unwrap_or("active"),
+            args.get("confirm").and_then(Value::as_bool).unwrap_or(false),
+            args.get("confirm_new_host").and_then(Value::as_bool).unwrap_or(false),
+            args.get("workspace_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "api_upsert_request" => format!(
+            "Save API request '{}' ({} {}) in workspace '{}'",
+            args.get("name").and_then(Value::as_str).unwrap_or("?"),
+            args.get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_ascii_uppercase(),
+            args.get("url").and_then(Value::as_str).unwrap_or("?"),
+            args.get("workspace_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "api_run_automation" => format!(
+            "Run API automation '{}' in workspace '{}'",
+            args.get("automation_id").and_then(Value::as_str).unwrap_or("?"),
+            args.get("workspace_id").and_then(Value::as_str).unwrap_or("?")
         ),
         "post_swarm_board" => format!(
             "Post to swarm '{}' board",
@@ -1419,6 +1484,126 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
         "list_connections" => {
             let ws = arg_str(args, "workspace_id")?;
             SelfCall::get(format!("/api/v1/workspaces/{}/connections", seg(&ws)))
+        }
+        // ---- API Client ----
+        "api_list" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let query = opt_query(
+                args,
+                &[("q", "q"), ("collection_id", "collection_id"), ("kind", "kind")],
+            );
+            let mut path = format!("/api/v1/workspaces/{}/api-client/overview", seg(&ws));
+            if !query.is_empty() {
+                path.push('?');
+                path.push_str(&query);
+            }
+            SelfCall::get(path)
+        }
+        "api_get_request" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let request = arg_str(args, "request_id")?;
+            SelfCall::get(format!(
+                "/api/v1/workspaces/{}/api-client/requests/{}?shape=agent",
+                seg(&ws),
+                seg(&request)
+            ))
+        }
+        "api_history" => {
+            let ws = arg_str(args, "workspace_id")?;
+            if let Some(id) = args.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                SelfCall::get(format!(
+                    "/api/v1/workspaces/{}/api-client/history/{}",
+                    seg(&ws),
+                    seg(id)
+                ))
+            } else {
+                let query = opt_query(
+                    args,
+                    &[
+                        ("limit", "limit"),
+                        ("q", "q"),
+                        ("status", "status"),
+                        ("request_id", "request_id"),
+                        ("source", "source"),
+                    ],
+                );
+                let mut path = format!("/api/v1/workspaces/{}/api-client/history", seg(&ws));
+                if !query.is_empty() {
+                    path.push('?');
+                    path.push_str(&query);
+                }
+                SelfCall::get(path)
+            }
+        }
+        "api_execute" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let request = arg_str(args, "request_id")?;
+            if let Some(vars) = args.get("vars").and_then(Value::as_object) {
+                for (key, value) in vars {
+                    if value.as_str().is_some_and(|s| s.contains("{{")) {
+                        return Err(Error::Invalid(format!(
+                            "vars override '{key}' must not contain '{{{{' (no nested substitution)"
+                        )));
+                    }
+                }
+            }
+            let mut body = json!({"shape": "agent"});
+            for key in ["environment_id", "vars", "timeout_ms", "confirm", "confirm_new_host"] {
+                if let Some(value) = args.get(key) {
+                    body[key] = value.clone();
+                }
+            }
+            SelfCall::post(
+                format!(
+                    "/api/v1/workspaces/{}/api-client/requests/{}/execute",
+                    seg(&ws),
+                    seg(&request)
+                ),
+                body,
+            )
+        }
+        "api_upsert_request" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let name = arg_str(args, "name")?;
+            let method = arg_str(args, "method")?;
+            let url = arg_str(args, "url")?;
+            let mut body = json!({"name": name, "method": method, "url": url});
+            for key in ["collection_id", "headers", "query", "body_mode", "body", "auth", "extras"] {
+                if let Some(value) = args.get(key) {
+                    body[key] = value.clone();
+                }
+            }
+            if let Some(request) = args
+                .get("request_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                SelfCall::patch(
+                    format!(
+                        "/api/v1/workspaces/{}/api-client/requests/{}",
+                        seg(&ws),
+                        seg(request)
+                    ),
+                    body,
+                )
+            } else {
+                SelfCall::post(
+                    format!("/api/v1/workspaces/{}/api-client/requests", seg(&ws)),
+                    body,
+                )
+            }
+        }
+        "api_run_automation" => {
+            let ws = arg_str(args, "workspace_id")?;
+            let automation = arg_str(args, "automation_id")?;
+            SelfCall::post(
+                format!(
+                    "/api/v1/workspaces/{}/api-client/automations/{}/run",
+                    seg(&ws),
+                    seg(&automation)
+                ),
+                json!({}),
+            )
         }
         // ---- Git ----
         "open_pr_draft" => {
@@ -2765,6 +2950,146 @@ mod tests {
         for n in DEFAULT_ENABLED.iter().chain(DANGEROUS.iter()).chain(OPT_IN_READS.iter()) {
             assert!(shorts.contains(*n), "classification names a non-existent tool '{n}'");
         }
+    }
+
+    #[test]
+    fn api_client_tools_present_classified_and_routed() {
+        const READS: &[&str] = &["api_list", "api_get_request", "api_history"];
+        const WRITES: &[&str] = &["api_execute", "api_upsert_request", "api_run_automation"];
+        let specs = otto_tool_specs();
+        for name in READS.iter().chain(WRITES) {
+            let spec = specs
+                .iter()
+                .find(|spec| spec["name"] == format!("otto.{name}"))
+                .unwrap_or_else(|| panic!("missing spec otto.{name}"));
+            assert_eq!(spec["category"], json!("API Client"));
+        }
+        for read in READS {
+            assert!(DEFAULT_ENABLED.contains(read), "{read} must be default-enabled");
+            assert!(!DANGEROUS.contains(read), "{read} must not be DANGEROUS");
+        }
+        for write in WRITES {
+            assert!(DANGEROUS.contains(write), "{write} must be DANGEROUS");
+            assert!(!DEFAULT_ENABLED.contains(write), "{write} must be off by default");
+        }
+
+        assert_eq!(
+            route_for(
+                "api_list",
+                &json!({"workspace_id":"w1","q":"login","kind":"requests"}),
+            )
+            .unwrap()
+            .path,
+            "/api/v1/workspaces/w1/api-client/overview?q=login&kind=requests"
+        );
+        assert_eq!(
+            route_for("api_get_request", &json!({"workspace_id":"w1","request_id":"r1"}))
+                .unwrap()
+                .path,
+            "/api/v1/workspaces/w1/api-client/requests/r1?shape=agent"
+        );
+        assert_eq!(
+            route_for(
+                "api_history",
+                &json!({"workspace_id":"w1","limit":5,"source":"agent"}),
+            )
+            .unwrap()
+            .path,
+            "/api/v1/workspaces/w1/api-client/history?limit=5&source=agent"
+        );
+        assert_eq!(
+            route_for("api_history", &json!({"workspace_id":"w1","id":"h1"}))
+                .unwrap()
+                .path,
+            "/api/v1/workspaces/w1/api-client/history/h1"
+        );
+
+        let execute = route_for(
+            "api_execute",
+            &json!({"workspace_id":"w1","request_id":"r1","confirm":true}),
+        )
+        .unwrap();
+        assert_eq!(execute.method, Method::Post);
+        assert_eq!(
+            execute.path,
+            "/api/v1/workspaces/w1/api-client/requests/r1/execute"
+        );
+        assert_eq!(execute.body.unwrap(), json!({"shape":"agent","confirm":true}));
+
+        let update = route_for(
+            "api_upsert_request",
+            &json!({"workspace_id":"w1","request_id":"r1","name":"Login","method":"post","url":"https://api.example/login"}),
+        )
+        .unwrap();
+        assert_eq!(update.method, Method::Patch);
+        assert_eq!(update.path, "/api/v1/workspaces/w1/api-client/requests/r1");
+        let create = route_for(
+            "api_upsert_request",
+            &json!({"workspace_id":"w1","name":"Login","method":"POST","url":"https://api.example/login"}),
+        )
+        .unwrap();
+        assert_eq!(create.method, Method::Post);
+        assert_eq!(create.path, "/api/v1/workspaces/w1/api-client/requests");
+
+        let run = route_for(
+            "api_run_automation",
+            &json!({"workspace_id":"w1","automation_id":"a1"}),
+        )
+        .unwrap();
+        assert_eq!(run.method, Method::Post);
+        assert_eq!(
+            run.path,
+            "/api/v1/workspaces/w1/api-client/automations/a1/run"
+        );
+        assert_eq!(run.body.unwrap(), json!({}));
+    }
+
+    #[test]
+    fn api_execute_rejects_brace_overrides_in_route_for() {
+        let error = route_for(
+            "api_execute",
+            &json!({
+                "workspace_id":"w1",
+                "request_id":"r1",
+                "vars":{"base_url":"https://evil.example/?token={{api_token}}"}
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid: vars override 'base_url' must not contain '{{' (no nested substitution)"
+        );
+    }
+
+    #[test]
+    fn dangerous_detail_surfaces_api_targets() {
+        assert_eq!(
+            dangerous_detail(
+                "otto.api_execute",
+                &json!({
+                    "workspace_id":"w1",
+                    "request_id":"r1",
+                    "environment_id":"staging",
+                    "confirm":true,
+                    "confirm_new_host":false
+                }),
+            ),
+            "API request 'r1' executed against environment 'staging' (confirm=true, confirm_new_host=false) in workspace 'w1'"
+        );
+        assert_eq!(
+            dangerous_detail(
+                "otto.api_upsert_request",
+                &json!({"workspace_id":"w1","name":"Login","method":"post","url":"https://api.example/login"}),
+            ),
+            "Save API request 'Login' (POST https://api.example/login) in workspace 'w1'"
+        );
+        assert_eq!(
+            dangerous_detail(
+                "otto.api_run_automation",
+                &json!({"workspace_id":"w1","automation_id":"smoke"}),
+            ),
+            "Run API automation 'smoke' in workspace 'w1'"
+        );
     }
 
     #[test]

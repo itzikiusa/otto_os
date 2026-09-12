@@ -26,6 +26,8 @@ pub async fn ingest(
 ) -> ApiResult<Json<IngestResp>> {
     ctx.roles.check(&user, &ws, WorkspaceRole::Editor).await?;
     let pm = otto_product::ProductMemory::new(ctx.memory.clone());
-    let ingested = pm.ingest_story(&ctx.product_repo, &ws, &sid, &user.id).await?;
+    let ingested = pm
+        .ingest_story(&ctx.product_repo, &ws, &sid, &user.id)
+        .await?;
     Ok(Json(IngestResp { ingested }))
 }

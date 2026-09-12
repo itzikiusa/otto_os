@@ -150,9 +150,7 @@ pub async fn search(
         if let Ok(reqs) = repo.list_requests(&ws_id, None).await {
             for r in reqs
                 .into_iter()
-                .filter(|r| {
-                    matches_title_or_sub(&r.name, &format!("{} {}", r.method, r.url), &q)
-                })
+                .filter(|r| matches_title_or_sub(&r.name, &format!("{} {}", r.method, r.url), &q))
                 .take(CAP)
             {
                 all.push(Scored {
@@ -252,7 +250,11 @@ pub async fn search(
                 all.push(Scored {
                     // Memory hits are always subtitle-level: their title is the key
                     // but score 2 would let them stomp over more-specific story hits.
-                    score: if mem.title.to_lowercase().contains(&q) { 2 } else { 1 },
+                    score: if mem.title.to_lowercase().contains(&q) {
+                        2
+                    } else {
+                        1
+                    },
                     updated_at: mem.created_at.clone(),
                     hit: SearchHit {
                         kind: "memory".into(),
@@ -271,11 +273,19 @@ pub async fn search(
     // UI can route to `#/vault` with the right vault + note selected.
     if let Ok(vaults) = ctx.vault.list(ws_id.as_str()).await {
         for v in vaults {
-            let req = otto_vault::types::SearchReq { query: q.clone(), limit: CAP, ..Default::default() };
+            let req = otto_vault::types::SearchReq {
+                query: q.clone(),
+                limit: CAP,
+                ..Default::default()
+            };
             if let Ok(hits) = ctx.vault.search(ws_id.as_str(), v.id, &req).await {
                 for h in hits.into_iter().take(CAP) {
                     all.push(Scored {
-                        score: if h.title.to_lowercase().contains(&q) { 2 } else { 1 },
+                        score: if h.title.to_lowercase().contains(&q) {
+                            2
+                        } else {
+                            1
+                        },
                         updated_at: String::new(),
                         hit: SearchHit {
                             kind: "vault_note".into(),
@@ -294,9 +304,7 @@ pub async fn search(
     if let Ok(repos) = ctx.git_store.list_repos(&ws_id).await {
         for r in repos
             .into_iter()
-            .filter(|r| {
-                matches_title_or_sub(&r.name, r.remote_url.as_deref().unwrap_or(""), &q)
-            })
+            .filter(|r| matches_title_or_sub(&r.name, r.remote_url.as_deref().unwrap_or(""), &q))
             .take(CAP)
         {
             all.push(Scored {
@@ -374,7 +382,11 @@ pub async fn search(
 
 /// 2 = title contains the query, 1 = only the secondary string does.
 fn score_title(title: &str, q: &str) -> i32 {
-    if title.to_lowercase().contains(q) { 2 } else { 1 }
+    if title.to_lowercase().contains(q) {
+        2
+    } else {
+        1
+    }
 }
 
 /// True when either the title or the secondary string contains the query.
@@ -388,8 +400,5 @@ fn matches_title_or_sub(title: &str, secondary: &str, q: &str) -> bool {
 
 /// Registers `GET /workspaces/{id}/search`; merged into `module_routers()`.
 pub fn search_routes() -> axum::Router<ServerCtx> {
-    axum::Router::new().route(
-        "/workspaces/{id}/search",
-        axum::routing::get(search),
-    )
+    axum::Router::new().route("/workspaces/{id}/search", axum::routing::get(search))
 }

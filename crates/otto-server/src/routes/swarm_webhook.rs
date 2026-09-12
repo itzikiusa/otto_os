@@ -66,7 +66,10 @@ pub struct SwarmTriggerReq {
 
 /// Pull the webhook key from `X-Otto-Webhook-Key`, else `Authorization: Bearer`.
 fn extract_key(headers: &HeaderMap) -> Option<String> {
-    if let Some(k) = headers.get("x-otto-webhook-key").and_then(|v| v.to_str().ok()) {
+    if let Some(k) = headers
+        .get("x-otto-webhook-key")
+        .and_then(|v| v.to_str().ok())
+    {
         if !k.is_empty() {
             return Some(k.to_string());
         }
@@ -135,11 +138,15 @@ pub async fn trigger(
             blocking: g.blocking,
         })
         .collect();
-    let origin = req.callback_url.clone().filter(|u| !u.trim().is_empty()).map(|url| Origin {
-        channel: "webhook".into(),
-        chat: url,
-        thread: None,
-    });
+    let origin = req
+        .callback_url
+        .clone()
+        .filter(|u| !u.trim().is_empty())
+        .map(|url| Origin {
+            channel: "webhook".into(),
+            chat: url,
+            thread: None,
+        });
     let opts = LaunchOpts {
         goal: req.goal.clone(),
         name: req.name.clone(),
