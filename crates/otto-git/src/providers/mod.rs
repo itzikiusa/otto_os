@@ -49,6 +49,22 @@ pub struct RemoteRepoSummary {
     pub updated_at: String,
 }
 
+/// One CI check / job / commit-status row for a pull request, as listed by
+/// [`GitProvider::list_checks`]. `state` is the normalized per-row verdict:
+/// `success` | `failure` | `pending` | `skipped` | `neutral` — the aggregate
+/// lives in [`crate::types::CiStatus`], this is the per-row detail the merge
+/// modal lists.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PrCheck {
+    pub name: String,
+    pub state: String,
+    /// Link to the run/job page, where the provider exposes one.
+    pub url: Option<String>,
+    /// RFC3339 start/finish timestamps; absent for providers that don't report them.
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
 /// Result of an authenticated token probe (`GitProvider::verify_token`).
 /// `scopes` is best-effort: echoed from response headers where the provider
 /// exposes them (`X-OAuth-Scopes`), empty otherwise.
@@ -96,7 +112,16 @@ pub trait GitProvider: Send + Sync {
         ))
     }
     async fn approve(&self, r: &RemoteRef, number: u64) -> Result<()>;
-    async fn merge(&self, r: &RemoteRef, number: u64, strategy: MergeStrategy) -> Result<()>;
+    /// Merge PR `number`. `delete_source_branch` asks the provider to drop the
+    /// source branch as part of (or right after) the merge — GitHub has no
+    /// merge-body flag for it, so its impl issues a follow-up ref delete.
+    async fn merge(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+    ) -> Result<()>;
     async fn decline(&self, r: &RemoteRef, number: u64) -> Result<()>;
     async fn request_changes(&self, r: &RemoteRef, number: u64, body: Option<&str>) -> Result<()>;
     async fn list_pr_commits(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCommit>>;
@@ -148,6 +173,26 @@ pub trait GitProvider: Send + Sync {
             },
             Err(_) => crate::types::CiStatus::default(),
         }
+    }
+
+    /// Per-check rows behind the aggregate [`Self::ci_status`] — the merge
+    /// modal lists them individually (name + state + run link). The default
+    /// collapses the aggregate into a single row so a provider without a
+    /// per-check API still answers something truthful; each provider overrides
+    /// it with the real list.
+    async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
+        let ci = self.ci_status(r, number).await;
+        Ok(if ci.state == "none" {
+            Vec::new()
+        } else {
+            vec![PrCheck {
+                name: "ci".into(),
+                state: ci.state.clone(),
+                url: ci.url.clone(),
+                started_at: None,
+                completed_at: None,
+            }]
+        })
     }
 }
 

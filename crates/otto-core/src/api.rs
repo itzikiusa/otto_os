@@ -1861,6 +1861,11 @@ pub enum MergeStrategy {
 pub struct MergePrReq {
     #[serde(default = "default_merge_strategy")]
     pub strategy: MergeStrategy,
+    /// Ask the provider to delete the PR's source branch as part of the merge
+    /// (GitHub: a follow-up ref delete; GitLab: `should_remove_source_branch`;
+    /// Bitbucket: `close_source_branch`). Additive — absent means "keep it".
+    #[serde(default)]
+    pub delete_source_branch: bool,
 }
 
 fn default_merge_strategy() -> MergeStrategy {

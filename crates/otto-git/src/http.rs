@@ -2094,7 +2094,9 @@ async fn pr_merge<S: GitCtx>(
 ) -> ApiResult<StatusCode> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
-    provider.merge(&remote, number, req.strategy).await?;
+    provider
+        .merge(&remote, number, req.strategy, req.delete_source_branch)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

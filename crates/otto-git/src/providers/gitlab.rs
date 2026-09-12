@@ -512,7 +512,13 @@ impl super::GitProvider for Gitlab {
             .await
     }
 
-    async fn merge(&self, r: &RemoteRef, number: u64, strategy: MergeStrategy) -> Result<()> {
+    async fn merge(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+    ) -> Result<()> {
         if strategy == MergeStrategy::Rebase {
             // Rebase the source branch first (async on GitLab's side), give it
             // a moment, then merge fast-forward style.
@@ -524,14 +530,13 @@ impl super::GitProvider for Gitlab {
                 .await?;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-        let squash = strategy == MergeStrategy::Squash;
         self.http
             .ok(self
                 .req(
                     reqwest::Method::PUT,
                     &Self::mr_path(r, &format!("/{number}/merge")),
                 )
-                .json(&json!({ "squash": squash })))
+                .json(&merge_body(strategy, delete_source_branch)))
             .await
     }
 
@@ -675,6 +680,30 @@ impl super::GitProvider for Gitlab {
         self.fetch_ci_status(r, number).await
     }
 
+    /// Jobs of the MR's latest pipeline — GitLab's per-check unit. Two hops:
+    /// `/merge_requests/:iid/pipelines` (newest-first) → `/pipelines/:id/jobs`.
+    /// An MR with no pipeline yields no rows rather than an error.
+    async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
+        let path = Self::mr_path(r, &format!("/{number}/pipelines?per_page=5"));
+        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let Some(pipeline_id) = varr(&v, &[])
+            .first()
+            .map(|p| vu64(p, &["id"]))
+            .filter(|id| *id > 0)
+        else {
+            return Ok(Vec::new());
+        };
+        let jobs_path = format!(
+            "/projects/{}/pipelines/{pipeline_id}/jobs?per_page=100",
+            Self::project_id(r)
+        );
+        let jobs = self
+            .http
+            .json(self.req(reqwest::Method::GET, &jobs_path))
+            .await?;
+        Ok(checks_from_jobs(&jobs))
+    }
+
     /// GitLab exposes the current PAT via `GET /personal_access_tokens/self`,
     /// whose `expires_at` is a `YYYY-MM-DD` date (or null = never expires).
     /// We treat the date as end-of-day UTC. Tokens that don't expire ⇒ `None`.
@@ -735,6 +764,42 @@ fn parse_pipeline_fixture(json_str: &str) -> crate::types::CiStatus {
         _ => ("none", 0, 0),
     };
     crate::types::CiStatus { state: state.to_string(), total: 1, passed, failed, url }
+}
+
+use super::PrCheck;
+
+/// Pipeline `jobs[]` → one [`PrCheck`] per job. GitLab job statuses:
+/// `success` → success, `failed`/`canceled` → failure, `skipped` → skipped,
+/// everything still queued or running (`created`, `pending`, `running`,
+/// `manual`, `waiting_for_resource`, `preparing`, `scheduled`) → pending.
+pub(crate) fn checks_from_jobs(v: &Value) -> Vec<PrCheck> {
+    varr(v, &[])
+        .iter()
+        .map(|job| {
+            let state = match vstr(job, &["status"]).as_str() {
+                "success" => "success",
+                "failed" | "canceled" => "failure",
+                "skipped" => "skipped",
+                _ => "pending",
+            };
+            PrCheck {
+                name: vstr(job, &["name"]),
+                state: state.to_string(),
+                url: vstr_opt(job, &["web_url"]),
+                started_at: vstr_opt(job, &["started_at"]),
+                completed_at: vstr_opt(job, &["finished_at"]),
+            }
+        })
+        .collect()
+}
+
+/// Merge-request merge body. GitLab takes the source-branch deletion as a flag
+/// on the merge itself, so this stays a pure function the tests can assert on.
+pub(crate) fn merge_body(strategy: MergeStrategy, delete_source_branch: bool) -> Value {
+    json!({
+        "squash": strategy == MergeStrategy::Squash,
+        "should_remove_source_branch": delete_source_branch,
+    })
 }
 
 #[cfg(test)]
@@ -868,5 +933,50 @@ mod tests {
     fn pipeline_empty_is_none() {
         let ci = parse_pipeline_fixture(r#"[]"#);
         assert_eq!(ci.state, "none");
+    }
+
+    // --- per-check rows (merge modal) ---------------------------------------
+
+    #[test]
+    fn checks_rows_from_jobs() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"[
+                {"name":"build","status":"success","web_url":"https://gl.example.com/j/1",
+                 "started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:02:00Z"},
+                {"name":"lint","status":"failed","web_url":null},
+                {"name":"deploy","status":"manual","web_url":null},
+                {"name":"docs","status":"skipped","web_url":null},
+                {"name":"e2e","status":"running","web_url":null}
+            ]"#,
+        )
+        .unwrap();
+        let rows = super::checks_from_jobs(&v);
+        let got: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("build", "success"),
+                ("lint", "failure"),
+                ("deploy", "pending"),
+                ("docs", "skipped"),
+                ("e2e", "pending"),
+            ]
+        );
+        assert_eq!(rows[0].url.as_deref(), Some("https://gl.example.com/j/1"));
+        assert_eq!(rows[0].completed_at.as_deref(), Some("2026-01-01T00:02:00Z"));
+    }
+
+    #[test]
+    fn merge_body_carries_delete_flag() {
+        use otto_core::api::MergeStrategy;
+        let b = super::merge_body(MergeStrategy::Squash, true);
+        assert_eq!(b["squash"], true);
+        assert_eq!(b["should_remove_source_branch"], true);
+        let b = super::merge_body(MergeStrategy::Merge, false);
+        assert_eq!(b["squash"], false);
+        assert_eq!(b["should_remove_source_branch"], false);
     }
 }
