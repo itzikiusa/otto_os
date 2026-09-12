@@ -104,6 +104,23 @@ async function postJson<T>(ctx: APIRequestContext, url: string, data: unknown): 
   return response.json() as Promise<T>;
 }
 
+/** Environment for the inward `ottod mcp-tools` bridge.
+ *
+ * Playwright itself is usually launched from INSIDE an Otto agent session, whose
+ * `OTTO_MCP_BASE` / `OTTO_MCP_TOKEN` / `OTTO_WORKSPACE_ID` point at the developer's
+ * REAL daemon on 7700. Inheriting them (`...process.env`) silently drives the
+ * bridge against that daemon instead of this run's isolated one — routes added in
+ * this tree come back "no such route", and none of the seeded data is visible. So
+ * drop every inherited `OTTO_*` var and hand the bridge only OUR routing.
+ */
+function bridgeEnv(routing: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith('OTTO_')) env[key] = value;
+  }
+  return { ...env, OTTO_SECRETS: process.env.OTTO_SECRETS ?? 'file', ...routing };
+}
+
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
   root = mkdtempSync(join(tmpdir(), 'otto-apimcp-'));
@@ -191,18 +208,51 @@ test('saved-request execute records an agent-sourced history row', async () => {
 
 test('inward mcp-tools advertises the API tools and lists the seeded request', async () => {
   test.setTimeout(120_000);
+  const { ctx, base, token } = await apiCtx();
   const { dataDir } = daemonMeta();
-  const mcpDoc = JSON.parse(readFileSync(join(root, '.mcp.json'), 'utf8')) as {
+
+  // Its OWN workspace: the bridge's `otto_api_execute` really does write a
+  // history row, and the row-count specs in this file must not see it whichever
+  // way Playwright schedules the tests across workers.
+  const bridgeRoot = mkdtempSync(join(tmpdir(), 'otto-apimcp-bridge-'));
+  const workspace = await postJson<{ id: string }>(ctx, `${base}/api/v1/workspaces`, {
+    name: 'API MCP Bridge',
+    root_path: bridgeRoot,
+  });
+  await postJson(ctx, `${base}/api/v1/workspaces/${workspace.id}/api-client/requests`, {
+    name: 'Alpha health',
+    method: 'GET',
+    url: 'http://alpha.e2e-nowhere.invalid/healthz',
+  });
+  // Spawning an agent session is what renders the workspace `.mcp.json`.
+  const session = await postJson<{ id: string }>(
+    ctx,
+    `${base}/api/v1/workspaces/${workspace.id}/sessions`,
+    { kind: 'agent', provider: 'shell', title: 'apimcp-bridge', cwd: bridgeRoot, meta: {} },
+  );
+  await ctx.dispose().catch(() => {});
+
+  const mcpDoc = JSON.parse(readFileSync(join(bridgeRoot, '.mcp.json'), 'utf8')) as {
     mcpServers?: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
   };
   const otto = mcpDoc.mcpServers?.otto;
   expect(otto, '.mcp.json must contain the otto MCP server').toBeTruthy();
 
-  const mcp = new McpStdio(otto!.command, otto!.args, {
-    ...process.env,
-    ...otto!.env,
-    OTTO_DATA_DIR: dataDir,
-  });
+  // `.mcp.json` is deliberately identity-neutral (command/args only — the daemon
+  // never persists a session token into a file several sessions share), so the
+  // routing env is ours to supply. Run the binary under test and point it at the
+  // isolated e2e daemon with a token/workspace that exist THERE.
+  const mcp = new McpStdio(
+    process.env.OTTO_E2E_BIN ?? otto!.command,
+    ['mcp-tools'],
+    bridgeEnv({
+      OTTO_MCP_BASE: base,
+      OTTO_MCP_TOKEN: token,
+      OTTO_SESSION_ID: session.id,
+      OTTO_WORKSPACE_ID: workspace.id,
+      OTTO_DATA_DIR: dataDir,
+    }),
+  );
   try {
     await mcp.request('initialize', {
       protocolVersion: '2024-11-05',
