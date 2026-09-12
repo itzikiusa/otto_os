@@ -229,6 +229,66 @@ impl Github {
     }
 }
 
+use super::PrCheck;
+
+/// `check_runs[]` → one [`PrCheck`] per run. The state mapping mirrors
+/// [`Github::fetch_ci_status`]'s aggregate walk, but keeps each row's own
+/// verdict instead of folding it: `success`/`neutral`/`skipped` survive
+/// verbatim, the four failing conclusions collapse to `failure`, and anything
+/// not yet concluded is `pending`.
+pub(crate) fn checks_from_check_runs(v: &Value) -> Vec<PrCheck> {
+    varr(v, &["check_runs"])
+        .iter()
+        .map(|run| {
+            let status = vstr(run, &["status"]);
+            let conclusion = vstr(run, &["conclusion"]);
+            let state = match (status.as_str(), conclusion.as_str()) {
+                (_, "success") => "success",
+                (_, "neutral") => "neutral",
+                (_, "skipped") => "skipped",
+                (_, "failure") | (_, "cancelled") | (_, "timed_out") | (_, "action_required") => {
+                    "failure"
+                }
+                _ => "pending",
+            };
+            PrCheck {
+                name: vstr(run, &["name"]),
+                state: state.to_string(),
+                url: vstr_opt(run, &["html_url"]),
+                started_at: vstr_opt(run, &["started_at"]),
+                completed_at: vstr_opt(run, &["completed_at"]),
+            }
+        })
+        .collect()
+}
+
+/// Legacy Statuses API → one [`PrCheck`] per `context`. Statuses are
+/// newest-first and repeat per context, so only the first row of each wins
+/// (same de-dup as [`Github::fetch_commit_status`]).
+pub(crate) fn checks_from_statuses(v: &Value) -> Vec<PrCheck> {
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut out = Vec::new();
+    for item in varr(v, &[]) {
+        let ctx = vstr(item, &["context"]);
+        if !seen.insert(ctx.clone()) {
+            continue;
+        }
+        let state = match vstr(item, &["state"]).as_str() {
+            "success" => "success",
+            "failure" | "error" => "failure",
+            _ => "pending",
+        };
+        out.push(PrCheck {
+            name: ctx,
+            state: state.to_string(),
+            url: vstr_opt(item, &["target_url"]),
+            started_at: None,
+            completed_at: None,
+        });
+    }
+    out
+}
+
 fn summary_from(v: &Value) -> PrSummary {
     let state = if vstr_opt(v, &["merged_at"]).is_some() {
         PrState::Merged
@@ -649,11 +709,25 @@ impl super::GitProvider for Github {
             .await
     }
 
-    async fn merge(&self, r: &RemoteRef, number: u64, strategy: MergeStrategy) -> Result<()> {
+    async fn merge(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+    ) -> Result<()> {
         let method = match strategy {
             MergeStrategy::Merge => "merge",
             MergeStrategy::Squash => "squash",
             MergeStrategy::Rebase => "rebase",
+        };
+        // Read the head ref BEFORE the merge: GitHub has no merge-body flag for
+        // deleting the source branch, and the PR payload is the only place the
+        // ref name is available.
+        let head_ref = if delete_source_branch {
+            vstr(&self.pr_raw(r, number).await?, &["head", "ref"])
+        } else {
+            String::new()
         };
         self.http
             .ok(self
@@ -662,7 +736,19 @@ impl super::GitProvider for Github {
                     &format!("{}/{number}/merge", Self::prs_path(r)),
                 )
                 .json(&json!({ "merge_method": method })))
-            .await
+            .await?;
+        if !head_ref.is_empty() {
+            let path = format!("/repos/{}/{}/git/refs/heads/{head_ref}", r.owner, r.repo);
+            if let Err(e) = self.http.ok(self.req(reqwest::Method::DELETE, &path)).await {
+                // The repo's "automatically delete head branches" setting may
+                // have got there first — a 422 "Reference does not exist" is
+                // the wanted end state, not a failure of a merge that landed.
+                if !e.to_string().contains("Reference does not exist") {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn decline(&self, r: &RemoteRef, number: u64) -> Result<()> {
@@ -806,6 +892,31 @@ impl super::GitProvider for Github {
 
     async fn ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
         self.fetch_ci_status(r, number).await
+    }
+
+    /// Check-runs for the PR head sha, falling back to the legacy Statuses API
+    /// when the commit has no check-runs — the same two-step walk
+    /// [`Github::fetch_ci_status`] does, kept per row.
+    async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
+        let sha = vstr(&self.pr_raw(r, number).await?, &["head", "sha"]);
+        if sha.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = format!(
+            "/repos/{}/{}/commits/{sha}/check-runs?per_page=100",
+            r.owner, r.repo
+        );
+        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        let rows = checks_from_check_runs(&v);
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+        let path = format!(
+            "/repos/{}/{}/commits/{sha}/statuses?per_page=100",
+            r.owner, r.repo
+        );
+        let v = self.http.json(self.req(reqwest::Method::GET, &path)).await?;
+        Ok(checks_from_statuses(&v))
     }
 
     /// GitHub returns `github-authentication-token-expiration` on any
@@ -1089,5 +1200,68 @@ mod tests {
         let ci = parse_check_runs_fixture(fixture);
         assert_eq!(ci.state, "none");
         assert_eq!(ci.total, 0);
+    }
+
+    // --- per-check rows (merge modal) ---------------------------------------
+
+    #[test]
+    fn checks_rows_from_check_runs() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"check_runs":[
+                {"name":"build","status":"completed","conclusion":"success",
+                 "html_url":"https://ci.example.com/1",
+                 "started_at":"2026-01-01T00:00:00Z","completed_at":"2026-01-01T00:04:00Z"},
+                {"name":"lint","status":"completed","conclusion":"timed_out","html_url":null},
+                {"name":"docs","status":"completed","conclusion":"skipped","html_url":null},
+                {"name":"e2e","status":"in_progress","conclusion":"","html_url":null}
+            ]}"#,
+        )
+        .unwrap();
+        let rows = super::checks_from_check_runs(&v);
+        let got: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("build", "success"),
+                ("lint", "failure"),
+                ("docs", "skipped"),
+                ("e2e", "pending"),
+            ]
+        );
+        assert_eq!(rows[0].url.as_deref(), Some("https://ci.example.com/1"));
+        assert_eq!(rows[0].started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(rows[0].completed_at.as_deref(), Some("2026-01-01T00:04:00Z"));
+        assert!(rows[1].url.is_none());
+    }
+
+    #[test]
+    fn checks_rows_from_statuses() {
+        // Newest-first with a repeated context: only the newest row survives.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"[
+                {"context":"ci/build","state":"success","target_url":"https://ci.example.com/b"},
+                {"context":"ci/build","state":"failure","target_url":"https://ci.example.com/old"},
+                {"context":"ci/lint","state":"error","target_url":null},
+                {"context":"ci/e2e","state":"pending","target_url":null}
+            ]"#,
+        )
+        .unwrap();
+        let rows = super::checks_from_statuses(&v);
+        let got: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("ci/build", "success"),
+                ("ci/lint", "failure"),
+                ("ci/e2e", "pending"),
+            ]
+        );
+        assert_eq!(rows[0].url.as_deref(), Some("https://ci.example.com/b"));
     }
 }

@@ -83,8 +83,10 @@ connection library unusable for every non-root account.)
 | 53 | POST /api/v1/repos/{id}/prs/{number}/comments | ws editor | NewPrCommentReq | PrComment (carries `resolved: bool` + `thread_id?: string` on thread heads — Bitbucket comment id, GitLab discussion id, GitHub GraphQL reviewThread node id) |
 | 53b | POST /api/v1/repos/{id}/prs/{number}/comments/{cid}/resolve | ws editor | ResolvePrThreadReq `{"resolved": bool}` — `{cid}` is `PrComment.thread_id`; `false` reopens | 204 |
 | 54 | POST /api/v1/repos/{id}/prs/{number}/approve | ws editor | — | 204 |
-| 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq | 204 |
+| 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq `{strategy, delete_source_branch?}` | 204 — `delete_source_branch:true` also drops the source branch (GitHub: a follow-up ref delete after the merge; GitLab: `should_remove_source_branch`; Bitbucket: `close_source_branch`) |
 | 56 | POST /api/v1/repos/{id}/prs/{number}/decline | ws editor | — | 204 |
+| 56b | GET /api/v1/repos/{id}/prs/{number}/checks | ws viewer | — | `PrChecksResp {ci: CiStatus, checks: PrCheck[] {name, state, url?, started_at?, completed_at?}}` |
+| 56c | GET /api/v1/repos/{id}/prs/{number}/readiness | ws viewer | — | `PrReadiness {ci_status, approvals, mergeable, conflicts, review?, unpushed, branch_freshness}` — PR-keyed twin of `/reviews/{id}/merge-readiness`; `unpushed`/`branch_freshness` computed from the local checkout when the source branch exists locally |
 | 57 | GET /api/v1/settings | root | — | `{ "<key>": <value_json>, ... }` |
 | 58 | PUT /api/v1/settings | root | same shape | same shape |
 

@@ -2651,6 +2651,41 @@ export type MergeStrategy = 'merge' | 'squash' | 'rebase';
 
 export interface MergePrReq {
   strategy: MergeStrategy;
+  /** Ask the provider to delete the PR's source branch as part of the merge. */
+  delete_source_branch?: boolean;
+}
+
+/** One CI check / job / commit-status row behind the PR's aggregate status
+ *  (GET /repos/{id}/prs/{number}/checks). */
+export interface PrCheck {
+  name: string;
+  state: 'success' | 'failure' | 'pending' | 'skipped' | 'neutral';
+  url?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface PrChecksResp {
+  ci: { state: string; total: number; passed: number; failed: number; url: string | null };
+  checks: PrCheck[];
+}
+
+/** GET /repos/{id}/prs/{number}/readiness — PR-keyed twin of
+ *  /reviews/{id}/merge-readiness. `review` is null when no review ever ran;
+ *  `unpushed`/`branch_freshness` come from the local checkout. */
+export interface PrReadiness {
+  ci_status: string;
+  approvals: number;
+  mergeable: boolean | null;
+  conflicts: boolean;
+  review: {
+    review_id: string;
+    unresolved_total: number;
+    unresolved_blocker_count: number;
+    total_findings: number;
+  } | null;
+  unpushed: number | null;
+  branch_freshness: 'fresh' | 'behind' | 'unknown';
 }
 
 export interface Problem {

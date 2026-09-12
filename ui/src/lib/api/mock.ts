@@ -471,6 +471,8 @@ const prs: MockPr[] = [
       target_branch: 'main',
       updated_at: ago(45),
       url: 'https://github.com/dev-otto/otto/pull/42',
+      // Failing CI so the merge modal has a real blocker to render.
+      ci_status: 'failing',
     },
     description_md:
       '## What\n\nRewrites the diff viewer to only render expanded files and adds a **side-by-side** mode.\n\n## Why\n\nLarge PRs (>5k lines) froze the old renderer.\n\n- virtualized file sections\n- `highlight.js` per-line\n- collapse files over 400 changed lines',
@@ -1704,6 +1706,56 @@ const routes: Route[] = [
     },
   },
   { method: 'GET', re: /^\/repos\/([^/]+)\/prs\/(\d+)\/diff$/, handle: () => ({ json: sampleDiff }) },
+  // The Git page is workspace-independent and reads every repo from here; the
+  // mock had no handler, so a PR deep-link found no repo to render.
+  { method: 'GET', re: /^\/git\/repos$/, handle: () => ({ json: repos }) },
+  // Merge-modal fixtures: one passing + one failing check, so the modal's
+  // "CI failing" reason and the "Merge anyway" override are both exercised.
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/prs\/(\d+)\/checks$/,
+    handle: () => ({
+      json: {
+        ci: { state: 'failure', total: 2, passed: 1, failed: 1, url: 'https://ci.example.com/run/9' },
+        checks: [
+          {
+            name: 'build',
+            state: 'success',
+            url: 'https://ci.example.com/run/9/build',
+            started_at: ago(30),
+            completed_at: ago(28),
+          },
+          {
+            name: 'lint',
+            state: 'failure',
+            url: 'https://ci.example.com/run/9/lint',
+            started_at: ago(30),
+            completed_at: ago(29),
+          },
+        ],
+      },
+    }),
+  },
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/prs\/(\d+)\/readiness$/,
+    handle: () => ({
+      json: {
+        ci_status: 'failing',
+        approvals: 1,
+        mergeable: true,
+        conflicts: false,
+        review: {
+          review_id: 'rev_mock_1',
+          unresolved_total: 3,
+          unresolved_blocker_count: 2,
+          total_findings: 7,
+        },
+        unpushed: 0,
+        branch_freshness: 'fresh',
+      },
+    }),
+  },
   {
     method: 'PATCH',
     re: /^\/repos\/([^/]+)\/prs\/(\d+)$/,

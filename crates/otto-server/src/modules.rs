@@ -3465,6 +3465,12 @@ pub fn pr_review_routes() -> Router<ServerCtx> {
             "/reviews/{review_id}/merge-readiness",
             get(get_merge_readiness),
         )
+        // PR-keyed twin of the row above: the merge modal asks by (repo, PR)
+        // and gets the same numbers whether or not a review run exists.
+        .route(
+            "/repos/{id}/prs/{number}/readiness",
+            get(get_pr_readiness),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -3540,6 +3546,149 @@ async fn set_finding_state(
     Ok(Json(row))
 }
 
+/// PR merge readiness: findings (only when a review run exists), the live
+/// provider numbers, and the two facts only the local checkout knows.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct PrReadiness {
+    /// Aggregate CI state as the provider reports it ("none" when unknown).
+    pub ci_status: String,
+    pub approvals: u64,
+    pub mergeable: Option<bool>,
+    pub conflicts: bool,
+    /// Findings block — `None` when no review has ever run for this PR.
+    pub review: Option<ReadinessReview>,
+    /// Commits on the local source branch that `origin/<source>` does not have;
+    /// `None` when the branch is not checked out locally.
+    pub unpushed: Option<u64>,
+    /// `fresh` (the target's tip is already an ancestor of the source),
+    /// `behind`, or `unknown` when either ref is missing locally.
+    pub branch_freshness: &'static str,
+}
+
+/// The findings half of [`PrReadiness`], keyed to the review run it came from.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ReadinessReview {
+    pub review_id: Id,
+    pub unresolved_total: u64,
+    pub unresolved_blocker_count: u64,
+    pub total_findings: u64,
+}
+
+/// `unpushed` = commits on the local `source` not on `origin/<source>` (None
+/// when the branch is not checked out locally); `branch_freshness` = whether
+/// `origin/<target>` is an ancestor of `source` (fresh) or not (behind);
+/// "unknown" when either ref is missing.
+pub(crate) async fn local_branch_facts(
+    repo_path: &str,
+    source: &str,
+    target: &str,
+) -> (Option<u64>, &'static str) {
+    let git = otto_git::LocalGit::new(repo_path);
+    // `is_ancestor_of` guard_refs BOTH arguments; run it first so an
+    // option-like provider value never reaches the `rev-list` argv below.
+    let fresh = match git.is_ancestor_of(&format!("origin/{target}"), source).await {
+        Ok(true) => "fresh",
+        Ok(false) => "behind",
+        Err(otto_core::Error::Invalid(_)) => return (None, "unknown"),
+        Err(_) => "unknown",
+    };
+    if !git.branch_exists(source).await {
+        return (None, "unknown");
+    }
+    let unpushed = git
+        .run(&[
+            "rev-list",
+            "--count",
+            &format!("origin/{source}..{source}"),
+            "--",
+        ])
+        .await
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+    (unpushed, fresh)
+}
+
+/// Shared body of both readiness routes. `review` is `Some` only when a review
+/// run exists for the PR; the provider and local-checkout blocks are
+/// best-effort and degrade to "unknown" rather than failing the request.
+pub(crate) async fn compute_readiness(
+    ctx: &ServerCtx,
+    user: &User,
+    repo: &otto_core::domain::Repo,
+    pr_number: u64,
+    review: Option<&Review>,
+) -> ApiResult<PrReadiness> {
+    // Findings aggregate from the persistent findings store, keyed on the
+    // WORKFLOW `status` axis (§15.1): unresolved = open|accepted|fixed; a
+    // blocker is an unresolved critical/high finding.
+    use otto_core::finding::{FindingSeverity, FindingStatus};
+    let review_block = match review {
+        None => None,
+        Some(rev) => {
+            let all_findings = ctx
+                .findings_store
+                .list_full_for_review(&rev.id)
+                .await
+                .map_err(ApiError)?;
+            let is_unresolved = |s: FindingStatus| {
+                matches!(s, FindingStatus::Open | FindingStatus::Accepted | FindingStatus::Fixed)
+            };
+            Some(ReadinessReview {
+                review_id: rev.id.clone(),
+                unresolved_total: all_findings
+                    .iter()
+                    .filter(|f| is_unresolved(f.status))
+                    .count() as u64,
+                unresolved_blocker_count: all_findings
+                    .iter()
+                    .filter(|f| {
+                        is_unresolved(f.status)
+                            && matches!(
+                                f.severity,
+                                FindingSeverity::Critical | FindingSeverity::High
+                            )
+                    })
+                    .count() as u64,
+                total_findings: all_findings.len() as u64,
+            })
+        }
+    };
+
+    // Best-effort: live PR detail for approvals + ci_status + mergeable. This
+    // call may fail (rate-limits, no token); silently degrade.
+    let detail = match resolve_provider_remote(ctx, user, repo).await {
+        Ok((provider, remote_ref)) => provider.get_pr(&remote_ref, pr_number).await.ok(),
+        Err(_) => None,
+    };
+
+    // The local facts are named by the PR's branches, so without a detail there
+    // is no ref to probe.
+    let (unpushed, branch_freshness) = match &detail {
+        Some(d) => {
+            local_branch_facts(
+                &repo.path,
+                &d.summary.source_branch,
+                &d.summary.target_branch,
+            )
+            .await
+        }
+        None => (None, "unknown"),
+    };
+
+    Ok(PrReadiness {
+        ci_status: detail
+            .as_ref()
+            .and_then(|d| d.summary.ci_status.clone())
+            .unwrap_or_else(|| "none".to_string()),
+        approvals: detail.as_ref().map(|d| d.approved_by.len() as u64).unwrap_or(0),
+        mergeable: detail.as_ref().and_then(|d| d.mergeable),
+        conflicts: false,
+        review: review_block,
+        unpushed,
+        branch_freshness,
+    })
+}
+
 /// `GET /reviews/{review_id}/merge-readiness` — assemble the full merge-readiness
 /// picture: open/total findings from `review_merge_readiness` view, the PR's
 /// ci_status, approvals, and mergeable flag from the provider.
@@ -3560,73 +3709,47 @@ async fn get_merge_readiness(
         .map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
 
-    // Findings aggregate from the persistent findings store, keyed on the
-    // WORKFLOW `status` axis (§15.1): unresolved = open|accepted|fixed; a
-    // blocker is an unresolved critical/high finding.
-    use otto_core::finding::{FindingSeverity, FindingStatus};
-    let all_findings = ctx
-        .findings_store
-        .list_full_for_review(&review_id)
-        .await
-        .map_err(ApiError)?;
-    let is_unresolved = |s: FindingStatus| {
-        matches!(s, FindingStatus::Open | FindingStatus::Accepted | FindingStatus::Fixed)
-    };
-    let total_findings = all_findings.len() as u64;
-    let open_findings = all_findings
-        .iter()
-        .filter(|f| is_unresolved(f.status))
-        .count() as u64;
-    let blocker_count = all_findings
-        .iter()
-        .filter(|f| {
-            is_unresolved(f.status)
-                && matches!(f.severity, FindingSeverity::Critical | FindingSeverity::High)
-        })
-        .count() as u64;
-
-    // Best-effort: fetch live PR detail for approvals + ci_status + mergeable.
-    // This call may fail (rate-limits, no token); silently degrade.
-    let (ci_status, approvals, mergeable, conflicts) =
-        match fetch_pr_details_for_readiness(&ctx, &user, &repo, &review).await {
-            Ok(detail) => {
-                let ci = detail
-                    .summary
-                    .ci_status
-                    .clone()
-                    .unwrap_or_else(|| "none".to_string());
-                let approved = detail.approved_by.len() as u64;
-                let can_merge = detail.mergeable;
-                (ci, approved, can_merge, false)
-            }
-            Err(_) => ("none".to_string(), 0u64, None, false),
-        };
+    let r = compute_readiness(&ctx, &user, &repo, review.pr_number, Some(&review)).await?;
+    // `review` is Some by construction here, so the findings numbers are real;
+    // the fallbacks only keep the JSON shape total.
+    let (unresolved_total, blocker_count, total_findings) = r
+        .review
+        .as_ref()
+        .map(|rv| (rv.unresolved_total, rv.unresolved_blocker_count, rv.total_findings))
+        .unwrap_or((0, 0, 0));
 
     Ok(Json(serde_json::json!({
-        "unresolved_total": open_findings,
+        "unresolved_total": unresolved_total,
         "unresolved_blocker_count": blocker_count,
         "total_findings": total_findings,
-        "resolved_count": total_findings.saturating_sub(open_findings),
-        "ci_status": ci_status,
-        "approvals": approvals,
-        "mergeable": mergeable,
-        "conflicts": conflicts,
-        "branch_freshness": null,
-        "unpushed": null,
+        "resolved_count": total_findings.saturating_sub(unresolved_total),
+        "ci_status": r.ci_status,
+        "approvals": r.approvals,
+        "mergeable": r.mergeable,
+        "conflicts": r.conflicts,
+        "branch_freshness": r.branch_freshness,
+        "unpushed": r.unpushed,
     })))
 }
 
-/// Helper: fetch the live PR detail (approvals, CI status, mergeable) for the
-/// repo/PR associated with a review. Best-effort: callers log-and-degrade on
-/// any error (rate limits, no token, no git account, etc.).
-async fn fetch_pr_details_for_readiness(
-    ctx: &ServerCtx,
-    user: &User,
-    repo: &otto_core::domain::Repo,
-    review: &Review,
-) -> Result<otto_core::api::PrDetail> {
-    let (provider, remote_ref) = resolve_provider_remote(ctx, user, repo).await?;
-    provider.get_pr(&remote_ref, review.pr_number).await
+/// `GET /repos/{id}/prs/{number}/readiness` — the same picture keyed by PR
+/// instead of by review run: the merge modal opens straight from a PR, which
+/// may never have been reviewed in Otto.
+async fn get_pr_readiness(
+    Path((id, number)): Path<(Id, u64)>,
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<PrReadiness>> {
+    let repo = ctx.git_store.get_repo(&id).await.map_err(ApiError)?;
+    crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Viewer).await?;
+    let review = ctx
+        .reviews_store
+        .latest_for_pr(&repo.id, number)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(
+        compute_readiness(&ctx, &user, &repo, number, review.as_ref()).await?,
+    ))
 }
 
 /// First `[A-Z]+-[0-9]+` token in a branch name (e.g. `feature/PROJ-16232-x` →
@@ -6612,6 +6735,94 @@ mod terminal_input_access_tests {
         assert!(
             input_user(&pool, &owner.id, &session).await.is_err(),
             "resource revoke applies even with workspace Admin"
+        );
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::local_branch_facts;
+    use std::path::Path;
+    use std::process::Command;
+
+    /// Run git in `dir`, panicking with git's own stderr on failure.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_fills_unpushed_and_freshness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin.git");
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+
+        // Bare origin with `main` and `feature`, then a clone that moves ahead.
+        git(&origin, &["init", "-q", "--bare", "--initial-branch=main", "."]);
+        git(tmp.path(), &["clone", "-q", origin.to_str().unwrap(), "work"]);
+        git(&work, &["config", "user.name", "t"]);
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(work.join("a.txt"), "one\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "init"]);
+        git(&work, &["push", "-q", "-u", "origin", "main"]);
+
+        git(&work, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(work.join("b.txt"), "two\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "feature 1"]);
+        git(&work, &["push", "-q", "-u", "origin", "feature"]);
+
+        // Two local commits that origin/feature has not seen …
+        for (name, body) in [("c.txt", "three\n"), ("d.txt", "four\n")] {
+            std::fs::write(work.join(name), body).unwrap();
+            git(&work, &["add", "-A"]);
+            git(&work, &["commit", "-q", "-m", name]);
+        }
+        // … and a main that moved on, so origin/main is NOT an ancestor.
+        git(&work, &["checkout", "-q", "main"]);
+        std::fs::write(work.join("e.txt"), "five\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "main moves"]);
+        git(&work, &["push", "-q", "origin", "main"]);
+        git(&work, &["checkout", "-q", "feature"]);
+
+        let path = work.to_str().unwrap();
+        assert_eq!(
+            local_branch_facts(path, "feature", "main").await,
+            (Some(2), "behind")
+        );
+
+        // Merging origin/main in makes it an ancestor → fresh. Unpushed grows to
+        // four: the two feature commits, main's commit, and the merge commit —
+        // none of them reachable from origin/feature.
+        git(&work, &["merge", "-q", "--no-edit", "origin/main"]);
+        assert_eq!(
+            local_branch_facts(path, "feature", "main").await,
+            (Some(4), "fresh")
+        );
+
+        // A source branch that does not exist locally is unknown on both axes.
+        assert_eq!(
+            local_branch_facts(path, "no-such-branch", "main").await,
+            (None, "unknown")
         );
     }
 }

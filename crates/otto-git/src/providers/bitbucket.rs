@@ -572,14 +572,14 @@ impl super::GitProvider for Bitbucket {
         .map(|_| ())
     }
 
-    async fn merge(&self, r: &RemoteRef, number: u64, strategy: MergeStrategy) -> Result<()> {
-        let strat = match strategy {
-            MergeStrategy::Merge => "merge_commit",
-            MergeStrategy::Squash => "squash",
-            // Bitbucket has no rebase-merge; fast_forward is the closest.
-            MergeStrategy::Rebase => "fast_forward",
-        };
-        let body = json!({ "merge_strategy": strat });
+    async fn merge(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+    ) -> Result<()> {
+        let body = merge_body(strategy, delete_source_branch);
         self.send(
             reqwest::Method::POST,
             &Self::pr_path(r, &format!("/{number}/merge")),
@@ -744,6 +744,17 @@ impl super::GitProvider for Bitbucket {
     async fn ci_status(&self, r: &RemoteRef, number: u64) -> CiStatus {
         self.fetch_ci_status(r, number).await
     }
+
+    /// The PR's commit build statuses, one row per status — the same endpoint
+    /// [`Bitbucket::fetch_ci_status`] aggregates, kept unfolded.
+    async fn list_checks(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCheck>> {
+        let path = format!(
+            "{}?pagelen=50",
+            Self::pr_path(r, &format!("/{number}/statuses"))
+        );
+        let v = self.send_json(reqwest::Method::GET, &path, None).await?;
+        Ok(checks_from_statuses(&v))
+    }
 }
 
 /// Parse a small inline build-statuses JSON fixture into a CiStatus aggregate.
@@ -780,6 +791,45 @@ fn parse_statuses_fixture(json_str: &str) -> CiStatus {
         "none"
     };
     CiStatus { state: state.to_string(), total, passed, failed, url }
+}
+
+use super::PrCheck;
+
+/// `values[]` of the PR statuses endpoint → one [`PrCheck`] per status.
+/// Bitbucket build states: `SUCCESSFUL` → success, `FAILED`/`STOPPED` →
+/// failure, everything else (`INPROGRESS`, …) → pending. `name` falls back to
+/// the integration `key` when the status carries no display name.
+pub(crate) fn checks_from_statuses(v: &Value) -> Vec<PrCheck> {
+    varr(v, &["values"])
+        .iter()
+        .map(|item| {
+            let state = match vstr(item, &["state"]).as_str() {
+                "SUCCESSFUL" => "success",
+                "FAILED" | "STOPPED" => "failure",
+                _ => "pending",
+            };
+            let name = vstr(item, &["name"]);
+            PrCheck {
+                name: if name.is_empty() { vstr(item, &["key"]) } else { name },
+                state: state.to_string(),
+                url: vstr_opt(item, &["url"]),
+                started_at: vstr_opt(item, &["created_on"]),
+                completed_at: vstr_opt(item, &["updated_on"]),
+            }
+        })
+        .collect()
+}
+
+/// Pull-request merge body. `close_source_branch` is Bitbucket's spelling of
+/// "delete the source branch"; kept pure so the flag is test-assertable.
+pub(crate) fn merge_body(strategy: MergeStrategy, delete_source_branch: bool) -> Value {
+    let strat = match strategy {
+        MergeStrategy::Merge => "merge_commit",
+        MergeStrategy::Squash => "squash",
+        // Bitbucket has no rebase-merge; fast_forward is the closest.
+        MergeStrategy::Rebase => "fast_forward",
+    };
+    json!({ "merge_strategy": strat, "close_source_branch": delete_source_branch })
 }
 
 #[cfg(test)]
@@ -886,5 +936,50 @@ mod tests {
     fn bb_ci_status_empty_is_none() {
         let ci = parse_statuses_fixture(r#"{"values":[]}"#);
         assert_eq!(ci.state, "none");
+    }
+
+    // --- per-check rows (merge modal) ---------------------------------------
+
+    #[test]
+    fn checks_rows_from_statuses() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"values":[
+                {"name":"build","key":"BUILD","state":"SUCCESSFUL",
+                 "url":"https://ci.example.com/b","created_on":"2026-01-01T00:00:00Z",
+                 "updated_on":"2026-01-01T00:03:00Z"},
+                {"name":"","key":"LINT","state":"FAILED","url":null},
+                {"name":"deploy","key":"DEPLOY","state":"STOPPED","url":null},
+                {"name":"e2e","key":"E2E","state":"INPROGRESS","url":null}
+            ]}"#,
+        )
+        .unwrap();
+        let rows = super::checks_from_statuses(&v);
+        let got: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|c| (c.name.as_str(), c.state.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("build", "success"),
+                // No display name → the integration key stands in.
+                ("LINT", "failure"),
+                ("deploy", "failure"),
+                ("e2e", "pending"),
+            ]
+        );
+        assert_eq!(rows[0].url.as_deref(), Some("https://ci.example.com/b"));
+        assert_eq!(rows[0].started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn merge_body_carries_delete_flag() {
+        use otto_core::api::MergeStrategy;
+        let b = super::merge_body(MergeStrategy::Rebase, true);
+        assert_eq!(b["merge_strategy"], "fast_forward");
+        assert_eq!(b["close_source_branch"], true);
+        let b = super::merge_body(MergeStrategy::Merge, false);
+        assert_eq!(b["merge_strategy"], "merge_commit");
+        assert_eq!(b["close_source_branch"], false);
     }
 }
