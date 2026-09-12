@@ -1187,6 +1187,13 @@ struct LogQuery {
     limit: Option<u32>,
     skip: Option<u32>,
     all: Option<bool>,
+    /// Scope history to one path (file history); `follow` walks it across
+    /// renames (git requires exactly one pathspec for that → 400 without one).
+    path: Option<String>,
+    follow: Option<bool>,
+    /// Server-side search (`--grep` / `--author`): literal, case-insensitive.
+    grep: Option<String>,
+    author: Option<String>,
 }
 
 async fn repo_log<S: GitCtx>(
@@ -1201,10 +1208,17 @@ async fn repo_log<S: GitCtx>(
     // must be able to walk back to the ROOT commit — a silent .min(500) here made
     // older commits unreachable no matter what the client asked for.
     let limit = q.limit.unwrap_or(50);
-    Ok(Json(
-        git.log(limit, q.skip.unwrap_or(0), q.all.unwrap_or(false))
-            .await?,
-    ))
+    let blank = |s: &Option<String>| s.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+    let opts = crate::history::LogOpts {
+        limit,
+        skip: q.skip.unwrap_or(0),
+        all: q.all.unwrap_or(false),
+        path: blank(&q.path),
+        follow: q.follow.unwrap_or(false),
+        grep: blank(&q.grep),
+        author: blank(&q.author),
+    };
+    Ok(Json(git.log_with(&opts).await?))
 }
 
 #[derive(Deserialize)]
@@ -1265,16 +1279,29 @@ async fn repo_discard<S: GitCtx>(
     Ok(Json(git.status().await?))
 }
 
+/// `CommitReq` plus the signing toggle. Module-local until the contract type
+/// carries `sign` itself (git batch): `true` → `-S`, `false` → `--no-gpg-sign`,
+/// absent → whatever the repo's `commit.gpgsign` says.
+#[derive(Debug, Deserialize)]
+struct CommitReqExt {
+    #[serde(flatten)]
+    base: CommitReq,
+    #[serde(default)]
+    sign: Option<bool>,
+}
+
 async fn repo_commit<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
-    Json(req): Json<CommitReq>,
+    Json(req): Json<CommitReqExt>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
-    let sha = git.commit(&req.message, req.amend).await?;
+    let sha = git
+        .commit_signed(&req.base.message, req.base.amend, req.sign)
+        .await?;
     Ok(Json(serde_json::json!({ "sha": sha })))
 }
 
@@ -1304,11 +1331,15 @@ async fn repo_push<S: GitCtx>(
 
 /// Optional pull body: `auto_stash` wraps the pull in stash → pull → pop when
 /// the tree is dirty (the retry the UI offers after a 409 "commit or stash
-/// first" refusal). Absent/empty body keeps the plain-pull behavior.
+/// first" refusal). `mode` overrides how the pull reconciles for this call
+/// only; absent, the repo's own git config decides (`pull.rebase` / `pull.ff`)
+/// instead of a silent `--no-rebase`.
 #[derive(Debug, Default, serde::Deserialize)]
 struct PullReq {
     #[serde(default)]
     auto_stash: bool,
+    #[serde(default)]
+    mode: Option<crate::ops::PullMode>,
 }
 
 async fn repo_pull<S: GitCtx>(
@@ -1331,11 +1362,16 @@ async fn repo_pull<S: GitCtx>(
     // unmerged paths are in `changes` as kind="conflicted") so the UI can route
     // the user into the conflict resolver instead of showing "Pull failed" and
     // leaving the incoming files looking like mystery WIP changes.
-    let note = if body.map(|Json(b)| b.auto_stash).unwrap_or(false) {
-        let (_, note) = git.pull_autostash(token).await?;
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let mode = match body.mode {
+        Some(m) => m,
+        None => git.pull_mode_default().await,
+    };
+    let note = if body.auto_stash {
+        let (_, note) = git.pull_autostash_mode(token, mode).await?;
         note
     } else {
-        git.pull_outcome(token).await?;
+        git.pull_outcome_mode(token, mode).await?;
         None
     };
     Ok(Json(serde_json::json!({

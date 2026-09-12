@@ -230,6 +230,42 @@ context menu (see §[Context menus](#context-menus)). Removing a repo
 - The **WORKTREES** section lists `git worktree list` entries; click opens,
   right-click removes/prunes.
 
+### Searching the graph
+
+Above the graph sits a **search box** (⌘F / Ctrl+F focuses it). Typing runs the
+query **on the daemon** — `git log --all --grep=<text> --fixed-strings
+--regexp-ignore-case` — rather than filtering the rows already on screen, so a
+match is found even when it is thousands of commits back. The **Author** chip
+switches the query from the subject to `--author=`. A banner reports
+`N matches for "…"` with a **Clear**; clicking a result selects that commit in
+the graph. Patterns are literal (a `*` or `(` matches itself, and no regex can
+stall the search) and case-insensitive for ASCII — every git spawn runs under
+`LC_ALL=C`, so non-ASCII case folding is not applied.
+
+### File history & blame
+
+The ⋯ menu on any diff's file header opens:
+
+- **History** — that file's commits (`log --follow --all -- <path>`), walking
+  **through renames**; clicking a commit selects it in the graph.
+- **Blame** — `git blame --porcelain <rev> -- <path>`, grouped into runs: one
+  row per consecutive block of lines from the same commit, showing
+  `author · short sha · date` and the commit's subject. Clicking a row selects
+  that commit in the graph.
+
+Both open as a right-side drawer over the graph and close with the ✕. The
+revision blamed defaults to `HEAD`; a `-`-leading filename is handled (the path
+always rides after `--`).
+
+### Remotes
+
+**Remotes** in the repo header lists the repo's remotes (`git remote -v`) with
+**Add**, **Edit URL** and **Remove**. URLs are shown with any `user:password@`
+userinfo stripped, and a new URL must be `https`/`http`/`ssh`/`git` or scp-like
+(`git@host:owner/repo.git`). Removing a remote keeps every local branch. Push
+and checkout still address `origin` by name — re-pointing another remote does
+not redirect them.
+
 ---
 
 ## 5. Stage / commit / discard / diff
@@ -485,6 +521,12 @@ distinction from the **"Draft message with agent"** button, which drafts the
 | `POST /repos/{id}/merge` · `/merge/preview` · `/merge/abort` · `/merge/commit` | ws editor/viewer | Local merge + conflict lifecycle |
 | `GET /repos/{id}/merge/status` · `/conflict` | ws viewer | Merge state / one file's conflict |
 | `POST /repos/{id}/conflict/resolve` | ws editor | `ResolveConflictReq` |
+| `POST /repos/{id}/rebase` | ws editor | `{onto, auto_stash?}` → `RepoStatusResp`; a conflicting rebase is a normal 200 with `op_in_progress:"rebase"` (continue/abort through the merge lifecycle routes) |
+| `GET /repos/{id}/rebase-preview?onto=` | ws viewer | `{commits, onto_sha}` — what a rebase would replay, before anything moves |
+| `GET /repos/{id}/pull-mode` | ws viewer | `{mode}` — the effective pull mode from the repo's own `pull.rebase` / `pull.ff` |
+| `GET` · `POST /repos/{id}/remotes` | ws viewer / editor | `RemoteInfo[]`; POST `{op: add\|set_url\|remove, name, url?}`. URLs come back with userinfo stripped |
+| `GET /repos/{id}/commit-config` | ws viewer | `{gpgsign, format, signing_key}` — what the repo's config says about signing |
+| `GET /repos/{id}/blame?path=&rev=HEAD` | ws viewer | `BlameResp` — one row per RUN of lines sharing a commit |
 
 ### Pull requests (#48–#56 + extras)
 
