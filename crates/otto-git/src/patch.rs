@@ -17,7 +17,6 @@
 //!   request and must match, or the call is a 409 with nothing applied.
 
 use std::collections::HashSet;
-use std::process::Stdio;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -28,7 +27,6 @@ use otto_core::auth::AuthUser;
 use otto_core::domain::WorkspaceRole;
 use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 
 use crate::http::{repo_ctx, repo_lock, ApiResult, GitCtx};
 use crate::local::{upstream_err, DiffTarget, LocalGit};
@@ -310,34 +308,12 @@ impl LocalGit {
         args.extend_from_slice(&["--recount", "--whitespace=nowarn", "-"]);
 
         for attempt in 1u64..=3 {
-            // git-batch: switch to run_raw_stdin once WP1's bounded spawn
-            // classes land (same argv, plus the timeout + detach behaviour).
-            let mut cmd = self.base_cmd();
-            cmd.args(&args).stdin(Stdio::piped());
-            let mut child = cmd
-                .spawn()
-                .map_err(|e| Error::Internal(format!("spawn git apply: {e}")))?;
-            {
-                let mut sin = child
-                    .stdin
-                    .take()
-                    .ok_or_else(|| Error::Internal("git apply stdin not piped".into()))?;
-                sin.write_all(patch.as_bytes())
-                    .await
-                    .map_err(|e| Error::Internal(format!("write patch: {e}")))?;
-                sin.shutdown()
-                    .await
-                    .map_err(|e| Error::Internal(format!("close patch stdin: {e}")))?;
-            }
-            let out = child
-                .wait_with_output()
-                .await
-                .map_err(|e| Error::Internal(format!("git apply: {e}")))?;
-            if out.status.success() {
+            // Bounded `LocalWrite` spawn: detached from the request so a client
+            // abort never SIGKILLs a half-written index.
+            let (ok, stdout, stderr, code) = self.run_raw_stdin(&args, patch.as_bytes()).await?;
+            if ok {
                 return Ok(());
             }
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             // A concurrent git (an agent session in the same repo) holding the
             // index lock is transient — the same bounded retry every other
             // index-writing command here uses.
@@ -354,7 +330,7 @@ impl LocalGit {
                     .unwrap_or("git apply refused the patch");
                 return Err(Error::Conflict(line.to_string()));
             }
-            return Err(upstream_err(&stderr, &stdout, out.status.code()));
+            return Err(upstream_err(&stderr, &stdout, code));
         }
         unreachable!("loop returns on its final attempt")
     }

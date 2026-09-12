@@ -1,7 +1,7 @@
 <script lang="ts">
   // PR list with state filter chips. Click → PrDetail route.
   import { api, ApiError } from '../../lib/api/client';
-  import type { PrState, PrSummary } from '../../lib/api/types';
+  import type { PrListResp, PrState, PrSummary } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -12,9 +12,6 @@
     repoId: string;
   }
   let { repoId }: Props = $props();
-
-  // git-batch: replace with the PrListResp export from lib/api/types once WP2 lands
-  type PrListResp = { items: PrSummary[]; has_more: boolean; page: number; per_page: number };
 
   const PER_PAGE = 50;
 

@@ -17,7 +17,7 @@ use otto_core::{Error, Id, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::http::{repo_ctx, repo_lock, ApiResult, GitCtx};
-use crate::local::{LocalGit, PullOutcome};
+use crate::local::{validate_remote_url, LocalGit, PullOutcome};
 
 /// How `git pull` reconciles diverged history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,56 +358,6 @@ fn validate_remote_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-// git-batch: replace with crate::local::validate_remote_url (WP1) after the merge.
-/// Refuse a remote URL git could read as an option or that names a transport we
-/// don't support. Same rules as WP1's clone-URL guard: a scheme from
-/// `https|http|ssh|git`, or the scp-like `[user@]host:path`; never a leading
-/// `-`, whitespace or a control character (all three split or redirect the
-/// argv).
-fn validate_remote_url(url: &str) -> Result<()> {
-    let u = url.trim();
-    if u.is_empty() {
-        return Err(Error::Invalid("remote url must not be empty".into()));
-    }
-    if u.starts_with('-') {
-        return Err(Error::Invalid(format!(
-            "refusing option-like remote url '{url}'"
-        )));
-    }
-    if u.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err(Error::Invalid(
-            "remote url contains whitespace or a control character".into(),
-        ));
-    }
-    if let Some((scheme, rest)) = u.split_once("://") {
-        if !matches!(
-            scheme.to_ascii_lowercase().as_str(),
-            "https" | "http" | "ssh" | "git"
-        ) {
-            return Err(Error::Invalid(format!(
-                "unsupported remote url scheme '{scheme}' — use https, http, ssh or git"
-            )));
-        }
-        if rest.is_empty() {
-            return Err(Error::Invalid("remote url has no host".into()));
-        }
-        return Ok(());
-    }
-    // scp-like `[user@]host:path`. A bare filesystem path is NOT accepted over
-    // HTTP: it would let a caller point a remote at anything on disk.
-    let Some((host, path)) = u.split_once(':') else {
-        return Err(Error::Invalid(
-            "remote url must be https/http/ssh/git or scp-like user@host:path".into(),
-        ));
-    };
-    let host = host.rsplit('@').next().unwrap_or(host);
-    if host.is_empty() || host.contains('/') || path.is_empty() {
-        return Err(Error::Invalid(
-            "remote url must be https/http/ssh/git or scp-like user@host:path".into(),
-        ));
-    }
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Routes

@@ -255,7 +255,6 @@ impl LocalGit {
     /// break the argv (empty, or a control character). Unlike [`guard_ref`]
     /// a leading `-` is allowed — `-notes.md` is a legal filename — because
     /// every path argument in this crate is emitted after `--`.
-    #[allow(dead_code)] // consumed by the patch/history/ops modules (git batch)
     pub(crate) fn guard_path(value: &str) -> Result<()> {
         if value.is_empty() {
             return Err(Error::Invalid("path must not be empty".into()));
@@ -348,7 +347,6 @@ impl LocalGit {
 
     /// Like [`Self::run_raw`] but feeds `stdin` to git (a patch for `git
     /// apply`). Index-writing, so it takes the `LocalWrite` class.
-    #[allow(dead_code)] // consumed by patch.rs (git batch)
     pub(crate) async fn run_raw_stdin(
         &self,
         args: &[&str],

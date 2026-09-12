@@ -1285,28 +1285,17 @@ async fn repo_discard<S: GitCtx>(
     Ok(Json(git.status().await?))
 }
 
-/// `CommitReq` plus the signing toggle. Module-local until the contract type
-/// carries `sign` itself (git batch): `true` → `-S`, `false` → `--no-gpg-sign`,
-/// absent → whatever the repo's `commit.gpgsign` says.
-#[derive(Debug, Deserialize)]
-struct CommitReqExt {
-    #[serde(flatten)]
-    base: CommitReq,
-    #[serde(default)]
-    sign: Option<bool>,
-}
-
 async fn repo_commit<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Id>,
-    Json(req): Json<CommitReqExt>,
+    Json(req): Json<CommitReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let lock = repo_lock(&id);
     let _g = lock.lock().await;
     let (_, git) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let sha = git
-        .commit_signed(&req.base.message, req.base.amend, req.sign)
+        .commit_signed(&req.message, req.amend, req.sign)
         .await?;
     Ok(Json(serde_json::json!({ "sha": sha })))
 }
