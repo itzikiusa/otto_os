@@ -58,6 +58,19 @@ const MAX_REMINDER_NUDGES: u32 = 2;
 const REMINDER_NUDGE: &str = "You have not done the task — you only restated the instructions. \
 Read the referenced context files, DO the actual work now, and write your handoff summary to the \
 required file. Do not repeat or restate these instructions.";
+/// Sent once, `NUDGE_AFTER` into the handoff-missing grace: the agent ended its
+/// turn natively but never wrote the file the engine treats as its done signal.
+const HANDOFF_NUDGE: &str =
+    "Write your handoff file now — the step cannot finish until it exists.";
+
+/// The prompt-landing confirm window, stretched by how busy the daemon is: a
+/// cold claude spawn competes with every other live PTY for CPU, so a flat 45 s
+/// fails spuriously on a machine already running a review fleet. `+5s` per 10
+/// live sessions, hard-capped at 3 minutes (past that the session is broken,
+/// not slow). See design R5.3.
+pub fn submit_confirm_for(live: usize) -> Duration {
+    (SUBMIT_CONFIRM + Duration::from_secs(5) * (live / 10) as u32).min(Duration::from_secs(180))
+}
 
 /// Extra turn-completion channels for providers WITHOUT a pollable transcript
 /// (codex/agy/grok/custom). Turn completion is transcript-based and only
@@ -89,6 +102,11 @@ pub struct TurnOpts {
     pub oracle: bool,
     /// Receives every phase change while the oracle watches the turn.
     pub phase_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::turn_oracle::Phase>>,
+    /// Receives HOW the turn completed, once, on the oracle's success path —
+    /// the engine turns it into the step's `✓`/`⚠` line. Dropped without a send
+    /// on every failure path (and on the E2E short-circuit), so a caller that
+    /// awaits it must treat `RecvError` as "nothing to report".
+    pub outcome_tx: Option<tokio::sync::oneshot::Sender<crate::turn_oracle::CompleteVia>>,
 }
 
 /// Run one turn. Returns `(reply_text, session_id)`. Persist the returned
@@ -140,7 +158,7 @@ pub async fn run_session_turn_with(
     // early "stuck" signal; interactive callers pass STUCK_IDLE (10h) to keep the
     // long backstop. Never lengthens past TURN_TIMEOUT.
     stuck_after: Duration,
-    opts: TurnOpts,
+    mut opts: TurnOpts,
     on_ready: impl FnOnce(&Id),
 ) -> ApiResult<(String, Id)> {
     // 1. E2E short-circuit: the offline test daemon points CLAUDE_BIN at a
@@ -199,7 +217,20 @@ pub async fn run_session_turn_with(
     let can_confirm = transcript_path(provider, &cwd_canon, psid.as_deref()).is_some();
     let needle = confirm_needle(prompt);
 
-    submit_once(&ctx.manager, &sid, prompt).await;
+    let phase = |p: crate::turn_oracle::Phase| {
+        if let Some(tx) = &opts.phase_tx {
+            let _ = tx.send(p);
+        }
+    };
+    phase(crate::turn_oracle::Phase::Booting);
+    // A submit that never found a real input box is a no-op turn — fail LOUD
+    // and retryable instead of polling a dead session (R5.3: `wait_for_tui`
+    // now reports a blank TUI instead of assuming it drew).
+    if !submit_once(&ctx.manager, &sid, prompt).await {
+        return Err(ApiError(Error::Upstream(
+            "agent TUI never drew — retrying".into(),
+        )));
+    }
     ctx.manager.record_user_message(&sid, prompt).await;
 
     // Baseline of completed assistant turns. For a resumed/non-claude session we
@@ -213,7 +244,7 @@ pub async fn run_session_turn_with(
         .unwrap_or(0);
 
     if can_confirm {
-        let confirm_deadline = Instant::now() + SUBMIT_CONFIRM;
+        let confirm_deadline = Instant::now() + submit_confirm_for(ctx.manager.live_count());
         let mut next_resubmit = Instant::now() + RESUBMIT_EVERY;
         let mut attempts: u32 = 1;
         let mut entered = false;
@@ -243,7 +274,7 @@ pub async fn run_session_turn_with(
                 break;
             }
             if Instant::now() >= next_resubmit && attempts < MAX_SUBMIT_ATTEMPTS {
-                submit_once(&ctx.manager, &sid, prompt).await;
+                let _ = submit_once(&ctx.manager, &sid, prompt).await;
                 attempts += 1;
                 next_resubmit = Instant::now() + RESUBMIT_EVERY;
             }
@@ -258,11 +289,22 @@ pub async fn run_session_turn_with(
             )));
         }
     }
+    phase(crate::turn_oracle::Phase::PromptAccepted);
 
     // 5. Watch for the NEW completed turn (count > baseline). Fail fast on a
     //    claude API error / no progress for `stuck_after` / exit / timeout. Leave
     //    the session OPEN.
     let deadline = Instant::now() + TURN_TIMEOUT;
+
+    // 5a. Workflow steps watch through the turn ORACLE instead: a claude
+    //     `end_turn` while sub-agents are still working is not completion (see
+    //     `turn_oracle`). Every other caller keeps the legacy channels below.
+    if opts.oracle {
+        let text =
+            oracle_watch(ctx, &sid, psid.as_deref(), provider, &cwd_canon, stuck_after, &mut opts, baseline, deadline)
+                .await?;
+        return Ok((text, sid));
+    }
     let mut reminder_nudges: u32 = 0;
     // Progress clock for the stall trip. PTY-output recency alone is a LIAR
     // for agent TUIs: a stuck agent's spinner keeps repainting, so
@@ -305,7 +347,7 @@ pub async fn run_session_turn_with(
                         // Advance the baseline past this echo so we wait for the
                         // NEXT (hopefully real) turn instead of re-tripping on it.
                         baseline = otto_orchestrator::claude_pty::completed_turn_count(&content);
-                        submit_once(&ctx.manager, &sid, REMINDER_NUDGE).await;
+                        let _ = submit_once(&ctx.manager, &sid, REMINDER_NUDGE).await;
                         tokio::time::sleep(POLL).await;
                         continue;
                     }
@@ -382,9 +424,317 @@ pub async fn run_session_turn_with(
 }
 
 /// One paste + Enter into the session, with a single re-`\r` when the first didn't
-/// visibly dispatch. Bracketed paste keeps a multi-line prompt atomic.
-async fn submit_once(manager: &Arc<SessionManager>, sid: &Id, prompt: &str) {
-    crate::review_session::submit_prompt(manager, sid, prompt).await;
+/// visibly dispatch. Bracketed paste keeps a multi-line prompt atomic. `false`
+/// when the CLI's input box never drew (the paste went nowhere).
+async fn submit_once(manager: &Arc<SessionManager>, sid: &Id, prompt: &str) -> bool {
+    crate::review_session::submit_prompt(manager, sid, prompt).await
+}
+
+/// Watch a workflow step's turn through the [`crate::turn_oracle`]: a claude
+/// `end_turn` is only completion once nothing it launched is pending and the
+/// handoff file is there (each hold bounded). Returns the turn text; the
+/// completion REASON rides `opts.outcome_tx` so the engine can log which rule
+/// accepted the step.
+#[allow(clippy::too_many_arguments)]
+async fn oracle_watch(
+    ctx: &ServerCtx,
+    sid: &Id,
+    psid: Option<&str>,
+    provider: &str,
+    cwd_canon: &str,
+    stuck_after: Duration,
+    opts: &mut TurnOpts,
+    baseline: usize,
+    deadline: Instant,
+) -> ApiResult<String> {
+    use crate::turn_oracle as oracle;
+
+    let started = Instant::now();
+    let tpath = transcript_path(provider, cwd_canon, psid);
+    // Where the harness records this session's children (flat: a depth-2
+    // grandchild sits beside its depth-1 parent) and its background-task output.
+    let subagent_dir = psid.map(|p| {
+        otto_orchestrator::claude_pty::project_dir(cwd_canon)
+            .join(p)
+            .join("subagents")
+    });
+    let mut tasks_dir: Option<std::path::PathBuf> = None;
+    let mut tasks_lookup_at = Instant::now();
+
+    let mut clock = oracle::OracleClock::default();
+    let mut oopts = oracle::OracleOpts { baseline_turns: baseline, ..Default::default() };
+    // The rollout/transcript, looked up lazily: codex/agy mint their session id
+    // a few seconds post-spawn.
+    let mut artifact: Option<std::path::PathBuf> = if provider == "codex" {
+        ctx.manager.activity_artifact(sid).await
+    } else {
+        None
+    };
+    let mut artifact_lookup_at = Instant::now() + Duration::from_secs(5);
+    // codex: baseline the rollout's ordinal ONCE, right after the submit — a
+    // resumed rollout already holds the prior turn's `task_complete`. If the
+    // rollout only shows up later the baseline stays 0, which is right for a
+    // session this turn just created.
+    let mut codex_baselined = false;
+    if provider == "codex" {
+        if let Some(p) = &artifact {
+            oopts.baseline_ordinal = tokio::fs::read_to_string(p)
+                .await
+                .map(|c| oracle::codex_last_ordinal(&c))
+                .unwrap_or(0);
+            codex_baselined = true;
+        }
+    }
+
+    let mut reminder_nudges: u32 = 0;
+    let mut last_phase: Option<(u8, usize, usize)> = None;
+    // Stall clock — the artifact's/child files' newest mtime, not PTY repaints
+    // (a stuck TUI spinner keeps painting forever).
+    let mut progress_mtime: Option<std::time::SystemTime> = None;
+    let mut last_progress = Instant::now();
+    loop {
+        // The handoff file (+ its mtime: rule 5's linger runs from when the
+        // agent wrote it, not from when we first looked).
+        let (handoff, handoff_mtime) = match &opts.done_file {
+            Some(df) => {
+                let text = tokio::fs::read_to_string(df)
+                    .await
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let mtime = match &text {
+                    Some(_) => tokio::fs::metadata(df).await.ok().and_then(|m| m.modified().ok()),
+                    None => None,
+                };
+                (text, mtime)
+            }
+            None => (None, None),
+        };
+        oopts.handoff_mtime = handoff_mtime;
+
+        if provider != "claude" && (artifact.is_none() && Instant::now() >= artifact_lookup_at) {
+            artifact = ctx.manager.activity_artifact(sid).await;
+            artifact_lookup_at = Instant::now() + Duration::from_secs(5);
+            if artifact.is_some() && !codex_baselined && started.elapsed() <= Duration::from_secs(6)
+            {
+                if let Some(p) = &artifact {
+                    oopts.baseline_ordinal = tokio::fs::read_to_string(p)
+                        .await
+                        .map(|c| oracle::codex_last_ordinal(&c))
+                        .unwrap_or(0);
+                }
+            }
+            codex_baselined = true;
+        }
+        if tasks_dir.is_none() && Instant::now() >= tasks_lookup_at {
+            tasks_dir = psid.and_then(|p| claude_tasks_dir(cwd_canon, p));
+            tasks_lookup_at = Instant::now() + Duration::from_secs(5);
+        }
+
+        let claude_scan = match &tpath {
+            Some(p) => tokio::fs::read_to_string(p).await.ok().map(|c| oracle::scan_claude(&c)),
+            None => None,
+        };
+        let codex_scan = match (provider, &artifact) {
+            ("codex", Some(p)) => tokio::fs::read_to_string(p)
+                .await
+                .ok()
+                .map(|c| oracle::scan_codex(&c, oopts.baseline_ordinal)),
+            _ => None,
+        };
+        oopts.subagent_moved_at = subagent_dir.as_deref().and_then(newest_subagent_write);
+
+        let mut v = oracle::verdict(
+            provider,
+            claude_scan.as_ref(),
+            codex_scan.as_ref(),
+            handoff.as_deref(),
+            &mut clock,
+            Instant::now(),
+            &oopts,
+        );
+        // Callers that never asked for a handoff file (goals eval, PR draft,
+        // canvas) have nothing to wait for: the turn ending with NOTHING pending
+        // — the R1 guarantee — is their completion, so rule 4's 90s grace and
+        // its nudge are skipped. The engine suppresses the ⚠ line for them too.
+        if opts.done_file.is_none() {
+            if let oracle::Verdict::Working(oracle::Phase::HandoffMissingGrace { .. }) = &v {
+                let text = claude_scan
+                    .as_ref()
+                    .and_then(|c| c.last_turn_text.clone())
+                    .or_else(|| codex_scan.as_ref().and_then(|x| x.last_agent_message.clone()))
+                    .unwrap_or_default();
+                v = oracle::Verdict::Complete { text, via: oracle::CompleteVia::IdleTurnNoHandoff };
+            }
+        }
+        match v {
+            oracle::Verdict::Complete { text, via } => {
+                // The reminder-echo guard stays in FRONT of the "no handoff,
+                // accept the final reply" rule: an agent that only parroted the
+                // injected reminder produced no work to accept.
+                if via == oracle::CompleteVia::IdleTurnNoHandoff
+                    && is_injected_reminder_echo(&text)
+                    && reminder_nudges < MAX_REMINDER_NUDGES
+                {
+                    reminder_nudges += 1;
+                    if let Some(c) = &claude_scan {
+                        oopts.baseline_turns = c.completed_turns;
+                    }
+                    clock.end_turn_since = None;
+                    let _ = submit_once(&ctx.manager, sid, REMINDER_NUDGE).await;
+                    tokio::time::sleep(POLL).await;
+                    continue;
+                }
+                if let Some(tx) = opts.outcome_tx.take() {
+                    let _ = tx.send(via);
+                }
+                return Ok(text);
+            }
+            oracle::Verdict::Failed(e) => {
+                // A codex abort is its own (retryable) error string; everything
+                // else is a provider/API error surfaced verbatim.
+                return Err(ApiError(Error::Upstream(if e == "codex turn aborted" {
+                    e
+                } else {
+                    format!("agent error: {e}")
+                })));
+            }
+            oracle::Verdict::Working(phase) => {
+                let key = oracle::phase_key(&phase);
+                if last_phase != Some(key) {
+                    last_phase = Some(key);
+                    if let Some(tx) = &opts.phase_tx {
+                        let _ = tx.send(phase.clone());
+                    }
+                }
+                // The turn ended but the handoff never appeared — one nudge,
+                // then rule 4's grace accepts the final reply.
+                if let oracle::Phase::HandoffMissingGrace { left } = &phase {
+                    if !clock.nudged
+                        && oracle::HANDOFF_MISSING_GRACE.saturating_sub(*left) >= oracle::NUDGE_AFTER
+                    {
+                        clock.nudged = true;
+                        let _ = submit_once(&ctx.manager, sid, HANDOFF_NUDGE).await;
+                    }
+                }
+                match ctx.manager.live_handle(sid) {
+                    Some(h) => {
+                        if h.on_exit().borrow().is_some() {
+                            return Err(ApiError(Error::Upstream(
+                                "agent session exited before replying".into(),
+                            )));
+                        }
+                        // Quiet fallback: only for providers with NO pollable
+                        // artifact at all (agy/custom) — codex completes on
+                        // `task_complete` now.
+                        if !matches!(provider, "claude" | "codex") {
+                            if let Some(q) = opts.quiet_done {
+                                if h.last_output_at().elapsed() >= q {
+                                    if let Some(tx) = opts.outcome_tx.take() {
+                                        let _ = tx.send(oracle::CompleteVia::QuietFallback);
+                                    }
+                                    return Ok(String::new());
+                                }
+                            }
+                        }
+                        // Progress = the transcript/rollout OR any child file
+                        // moving; a sweep whose sub-agents are writing while the
+                        // parent waits is progress, not a stall.
+                        let stamp = tpath
+                            .as_deref()
+                            .or(artifact.as_deref())
+                            .and_then(|m| {
+                                oracle::progress_stamp(m, subagent_dir.as_deref(), tasks_dir.as_deref())
+                            });
+                        match stamp {
+                            Some(m) => {
+                                if progress_mtime != Some(m) {
+                                    progress_mtime = Some(m);
+                                    last_progress = Instant::now();
+                                }
+                            }
+                            // No artifact yet: PTY output is all we have.
+                            None => {
+                                if h.last_output_at().elapsed() < POLL * 2 {
+                                    last_progress = Instant::now();
+                                }
+                            }
+                        }
+                        let pending = claude_scan.as_ref().map(|c| c.pending.len()).unwrap_or(0);
+                        if oracle::stall_trip_fires(
+                            &phase,
+                            pending,
+                            last_progress.elapsed(),
+                            stuck_after,
+                        ) {
+                            // Last guard: a child tree burning CPU (build, test
+                            // suite) is progress even when nothing is written.
+                            if ctx.manager.tree_active(sid).await {
+                                last_progress = Instant::now();
+                            } else {
+                                if opts.kill_on_stall {
+                                    let _ = ctx.manager.kill_session(sid).await;
+                                }
+                                return Err(ApiError(Error::Upstream(format!(
+                                    "step made no progress for {}m (agent looks stuck; {pending} tasks pending)",
+                                    stuck_after.as_secs() / 60
+                                ))));
+                            }
+                        }
+                    }
+                    None => {
+                        return Err(ApiError(Error::Upstream("agent session vanished".into())));
+                    }
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(ApiError(Error::Upstream("agent turn timed out".into())));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Newest `subagents/*.jsonl` mtime. A grandchild still writing resets the
+/// oracle's idle-confirm window — the only guard for nested sub-agents, whose
+/// launches are recorded in the CHILD's transcript (design §8.11).
+fn newest_subagent_write(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    rd.flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .max()
+}
+
+/// The harness scratchpad for background-task output:
+/// `<scratch>/claude-<uid>/<enc(cwd)>/<psid>/tasks/`. `enc` is the same
+/// non-alphanumeric→`-` map `project_dir` uses. Both `$TMPDIR` and `/tmp` are
+/// scanned (claude honours `$TMPDIR`, but the daemon's differs from the CLI's
+/// under launchd). Purely an extra stall-clock input — a miss degrades the
+/// clock to transcript + sub-agents, never to "no progress".
+fn claude_tasks_dir(cwd_canon: &str, psid: &str) -> Option<std::path::PathBuf> {
+    let enc: String = cwd_canon
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
+    let mut roots = vec![tmp];
+    if !roots.iter().any(|r| r.trim_end_matches('/') == "/tmp") {
+        roots.push("/tmp".into());
+    }
+    for root in roots {
+        let Ok(rd) = std::fs::read_dir(&root) else { continue };
+        for e in rd.flatten() {
+            if !e.file_name().to_string_lossy().starts_with("claude-") {
+                continue;
+            }
+            let p = e.path().join(&enc).join(psid).join("tasks");
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// Collapse every run of whitespace to a single space, so a paste reflow / newline
@@ -484,6 +834,65 @@ mod tests {
         assert!(!prompt_entered(other, &needle));
         // Empty transcript → not entered (so we keep re-submitting, then fail loud).
         assert!(!prompt_entered("", &needle));
+    }
+
+    #[test]
+    fn submit_confirm_scales_with_live_sessions() {
+        assert_eq!(submit_confirm_for(0), Duration::from_secs(45));
+        assert_eq!(submit_confirm_for(9), Duration::from_secs(45));
+        assert_eq!(submit_confirm_for(25), Duration::from_secs(55));
+        // Hard cap: past 3 minutes the session is broken, not busy.
+        assert_eq!(submit_confirm_for(1000), Duration::from_secs(180));
+    }
+
+    #[test]
+    fn stall_trip_does_not_fire_during_handoff_linger() {
+        use crate::turn_oracle::{stall_trip_fires, Phase};
+        let stuck = Duration::from_secs(5 * 60);
+        let idle = Duration::from_secs(6 * 60);
+        // Every BOUNDED hold carries its own cap — the 5-min trip must never
+        // pre-empt it and retry a step that already wrote its handoff.
+        assert!(!stall_trip_fires(&Phase::HandoffWrittenWaiting { pending: 1 }, 1, idle, stuck));
+        assert!(!stall_trip_fires(
+            &Phase::IdleConfirming { left: Duration::from_secs(3) },
+            0,
+            idle,
+            stuck
+        ));
+        assert!(!stall_trip_fires(
+            &Phase::HandoffMissingGrace { left: Duration::from_secs(3) },
+            0,
+            idle,
+            stuck
+        ));
+        assert!(!stall_trip_fires(
+            &Phase::BashLinger { pending: 1, left: Duration::from_secs(60) },
+            1,
+            idle,
+            stuck
+        ));
+    }
+
+    #[test]
+    fn stall_trip_skipped_while_pending_children_progress() {
+        use crate::turn_oracle::{stall_trip_fires, Phase};
+        let stuck = Duration::from_secs(5 * 60);
+        // `since_progress` already counts the sub-agent jsonls / task outputs
+        // (it comes from `progress_stamp`), so a live sweep never trips…
+        assert!(!stall_trip_fires(
+            &Phase::Subagents { running: 2, done: 0 },
+            2,
+            Duration::from_secs(30),
+            stuck
+        ));
+        // …while a genuinely frozen one still does.
+        assert!(stall_trip_fires(
+            &Phase::Subagents { running: 2, done: 0 },
+            2,
+            Duration::from_secs(6 * 60),
+            stuck
+        ));
+        assert!(stall_trip_fires(&Phase::Working, 0, Duration::from_secs(6 * 60), stuck));
     }
 
     #[test]
