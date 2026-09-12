@@ -425,7 +425,7 @@ class WorkspaceStore {
     // effect may `openSession` while sessions are still loading, and that
     // persist must land under this workspace so `restoreLayout` sees it.
     this.tabsKey = id;
-    layout.bindKey(id);
+    this.bindTabsKey(id);
     // No phantom-tab reconcile on a switch: it would prune the OLD workspace's
     // tabs against the NEW session list and persist that under the new key,
     // clobbering this workspace's saved layout before `restoreLayout` reads it.
@@ -443,9 +443,22 @@ class WorkspaceStore {
     this.activeWorkflowRuns = [];
     this.otherWsSessions = [];
     this.tabsKey = SCRATCH_WORKSPACE_ID;
-    layout.bindKey(SCRATCH_WORKSPACE_ID);
+    this.bindTabsKey(SCRATCH_WORKSPACE_ID);
     await this.refreshSessions({ reconcile: false });
     this.restoreLayout(SCRATCH_WORKSPACE_ID);
+  }
+
+  /** Point both persistence keys at `key` and stop writing under it until
+   *  {@link restoreLayout} has READ it — `select()` awaits the session refresh
+   *  in between, and an `openSession` landing in that window (the route→store
+   *  effect replaying `#/agents/<id>` on a reload) would otherwise persist a
+   *  one-tab / one-pane state over the very payload we are about to restore.
+   *  What it opened is not lost: both halves replay it after the read. */
+  private bindTabsKey(key: string): void {
+    this.tabsKey = key;
+    this.tabsHydrated = false;
+    this.pendingTabs = [];
+    layout.bindKey(key);
   }
 
   /** Restore the open tabs + split layout persisted under `key` (a workspace
@@ -462,10 +475,19 @@ class WorkspaceStore {
     const ids: Id[] = raw ? JSON.parse(raw) : [];
     // Keep real sessions + the DB-Explorer pane sentinel (it has no session row).
     const valid = ids.filter((t) => t === DB_PANE_ID || this.sessions.some((s) => s.id === t));
-    this.openTabs = valid;
+    // Tabs opened while this key was still un-hydrated (see {@link bindTabsKey})
+    // are appended — the route→store effect's session must survive the restore.
+    const pending = this.pendingTabs.filter(
+      (t) => !valid.includes(t) && (t === DB_PANE_ID || this.sessions.some((s) => s.id === t)),
+    );
+    this.pendingTabs = [];
+    this.tabsHydrated = true;
+    this.openTabs = [...valid, ...pending];
+    if (pending.length > 0) this.persistTabs();
     // Restore the split layout persisted alongside the tabs (v2 tree, or a v1
     // {panes, axis} payload migrated through the old window fractions).
-    layout.restore(key, (sid) => valid.includes(sid), valid[0] ?? null);
+    const open = this.openTabs;
+    layout.restore(key, (sid) => open.includes(sid), open[0] ?? null);
   }
 
   /** Whether a session with this workspace id belongs in `sessions`: the
@@ -544,8 +566,14 @@ class WorkspaceStore {
    *  (workspace-less sessions still keep their tabs). NOT derived from
    *  `currentId`: it must not move until the new workspace's tabs are loaded. */
   private tabsKey: string = SCRATCH_WORKSPACE_ID;
+  /** Mirrors the layout store's own gate: false between {@link bindTabsKey} and
+   *  the {@link restoreLayout} that reads the key. */
+  private tabsHydrated = true;
+  /** Tabs opened during that window, replayed by {@link restoreLayout}. */
+  private pendingTabs: Id[] = [];
 
   private persistTabs(): void {
+    if (!this.tabsHydrated) return;
     localStorage.setItem(winKey(LS_TABS + this.tabsKey), JSON.stringify(this.openTabs));
   }
 
@@ -575,6 +603,7 @@ class WorkspaceStore {
     this.clearNeedsYou(id);
     if (!this.openTabs.includes(id)) {
       this.openTabs = [...this.openTabs, id];
+      if (!this.tabsHydrated) this.pendingTabs = [...this.pendingTabs, id];
       this.persistTabs();
     }
     layout.setFocusedSession(id);

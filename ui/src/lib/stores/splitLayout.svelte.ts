@@ -53,6 +53,18 @@ class SplitLayoutStore {
   tileOrder: Id[] = $state([]);
   private wsKey = 'scratch';
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** False between `bindKey()` and the `restore()` that follows it. In that
+   *  window the tree on screen is still the PREVIOUS workspace's (or nothing at
+   *  all, on a reload) while `wsKey` already names the workspace being loaded,
+   *  so ANY write would overwrite the very payload `restore()` is about to read
+   *  — which is exactly how a reload used to collapse a 3-pane split back to
+   *  one leaf (the route→store effect opens the hash's session while
+   *  `refreshSessions()` is still in flight). Writes are skipped until then;
+   *  what the route opened is re-applied by `restore()` (see `pendingSession`). */
+  private hydrated = true;
+  /** The session `setFocusedSession()` was asked for before hydration — folded
+   *  back on top of the restored tree so a route-opened session is not lost. */
+  private pendingSession: Id | null = null;
 
   leaves: Leaf[] = $derived(leavesOf(this.tree));
   /** Projection read by ws.panes — sessions in leaf (reading) order; duplicates possible. */
@@ -70,6 +82,8 @@ class SplitLayoutStore {
    *  `restore()` that follows reads an empty payload and drops the pane. */
   bindKey(wsKey: string): void {
     this.wsKey = wsKey;
+    this.hydrated = false;
+    this.pendingSession = null;
   }
 
   /** Load the workspace's layout: v2 as-is, a v1 `{panes, axis}` payload through
@@ -101,6 +115,14 @@ class SplitLayoutStore {
       /* corrupt/private mode */
     }
     this.tileOrder = order;
+    // Writes are live again — the payload has been read.
+    const pending = this.pendingSession;
+    this.pendingSession = null;
+    this.hydrated = true;
+    // A session the route opened while the sessions were loading rides on top
+    // of the restored tree: its own leaf takes focus when it already has one,
+    // otherwise it lands in the focused pane (plain `openSession` semantics).
+    if (pending != null && valid(pending)) this.setFocusedSession(pending);
     // v1 (or absent) payload with something on screen → write it back as v2 now.
     let isV2 = false;
     try {
@@ -116,6 +138,7 @@ class SplitLayoutStore {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
+    if (!this.hydrated) return;
     try {
       localStorage.setItem(
         winKey(LS_PANES + this.wsKey),
@@ -155,9 +178,23 @@ class SplitLayoutStore {
     if (!this.focusedKey || !findLeaf(this.tree, this.focusedKey)) this.focusedKey = this.leaves[0]?.key ?? null;
   }
 
-  /** openSession: an empty tree becomes a leaf of `id`; otherwise the focused
-   *  leaf's session is replaced (its key kept). */
+  /** openSession: an empty tree becomes a leaf of `id`; a session ALREADY on
+   *  screen just takes focus in the pane that holds it; otherwise the focused
+   *  leaf's session is replaced (its key kept).
+   *
+   *  The "already on screen" arm matters beyond the click that asks for it:
+   *  `closeTab` routes to the neighbour it fell back to, and the route→store
+   *  effect replays that as an open — which used to stamp the fallback over
+   *  whatever the (re-focused) first pane was showing, duplicating one session
+   *  across two panes and dropping another. */
   setFocusedSession(id: Id): void {
+    if (!this.hydrated) this.pendingSession = id;
+    const on = this.leaves.find((l) => l.session === id);
+    if (on) {
+      this.focusedKey = on.key;
+      this.persist();
+      return;
+    }
     if (!this.tree) {
       const l = leaf(id);
       this.tree = l;
@@ -260,6 +297,13 @@ class SplitLayoutStore {
     return true;
   }
 
+  /** Write a debounced {@link setFrac} out NOW. Nothing pending ⇒ no-op.
+   *  Called on `pagehide`: a reload inside the 150 ms window would otherwise
+   *  drop the fraction the user just dragged (and restore the pre-drag tree). */
+  flush(): void {
+    if (this.persistTimer) this.persist();
+  }
+
   /** Gutter drag calls this per pointermove — persistence is debounced. */
   setFrac(splitKey: string, frac: number): void {
     if (!this.tree) return;
@@ -328,3 +372,9 @@ class SplitLayoutStore {
 }
 
 export const layout = new SplitLayoutStore();
+
+// The only debounced write in this store is the gutter drag; `pagehide` covers
+// reload / navigation / tab close, which all beat a 150 ms timer easily.
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => layout.flush());
+}
