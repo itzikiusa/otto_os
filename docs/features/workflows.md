@@ -29,8 +29,11 @@
 > (the review is the approval — no human gate). The separate **API-client
 > "Automations"** surface (a multi-step saved-request runner) is also fully
 > functional. A couple of honest caveats remain (the game `game_engine`/`verifier`
-> are scaffolds; agent output is cached) — stated inline; do not assume full
-> parity with mature n8n/Zapier engines.
+> are scaffolds) — stated inline; do not assume full parity with mature
+> n8n/Zapier engines. Agent-backed steps finish on a **turn oracle** (sub-agent-
+> and handoff-aware — §3), and `review_run` runs its lenses **fan-out** (one
+> agent per lens × provider) or **orchestrator** (one agent per provider running
+> every lens as its own sub-agents) — §4.
 
 The doc is grounded in the code in `crates/otto-server/src/workflow_engine.rs`,
 `crates/otto-server/src/workflow_context.rs` (run context files),
@@ -52,7 +55,7 @@ Otto has **two unrelated automation surfaces**. Keep them straight:
 
 | Surface | What it is | Where | Model | Backed by |
 |---|---|---|---|---|
-| **Workflow engine** | A visual node-graph you build and run, with branching, loops, retry, and versioning; nodes call agents, HTTP, DB, brokers, channels, swarm, product, review, git, etc. | `#/workflows` page | `Workflow` / `WorkflowRun` / `WorkflowGraph` / `WorkflowVersion` | `workflows`, `workflow_runs`, `workflow_node_cache`, `workflow_triggers`, `workflow_versions` tables |
+| **Workflow engine** | A visual node-graph you build and run, with branching, loops, retry, and versioning; nodes call agents, HTTP, DB, brokers, channels, swarm, product, review, git, etc. | `#/workflows` page | `Workflow` / `WorkflowRun` / `WorkflowGraph` / `WorkflowVersion` | `workflows`, `workflow_runs`, `workflow_triggers`, `workflow_versions` tables |
 | **API-client "Automations"** | A *collection runner*: an ordered list of saved API-client requests with per-step assertions + variable extraction (a tiny test/regression runner). | API client (`#/api`) → "Automations" view | `ApiAutomation` / `ApiAutomationStep` / `ApiRunResult` | `api_automations` table |
 
 This document covers **both**, but the bulk is the workflow engine. The
@@ -76,7 +79,7 @@ crates/otto-server/src/workflow_chat.rs                — `Action: Workflow` ch
 crates/otto-core/src/expr.rs                           — the safe expression language (edge conditions, condition/loop, {{ }} templating)
 crates/otto-core (otto_core::workflows)                — the Workflow/WorkflowRun/Node/Edge/Version domain types
 crates/otto-state/migrations/0020_workflows.sql        — workflows + workflow_runs
-crates/otto-state/migrations/0051_workflow_node_cache.sql — per-node output cache
+crates/otto-state/migrations/0051_workflow_node_cache.sql — historical (the per-node cache was removed; the table is dormant)
 crates/otto-state/migrations/0058_workflow_triggers.sql   — workflow_triggers + run approval columns
 crates/otto-state/migrations/0089_workflow_orchestrator.sql — workflow versioning + run→proof-pack link
 crates/otto-state/migrations/0014_api_client.sql          — API client base
@@ -161,38 +164,100 @@ parse or evaluate is treated as **not taken** (and logged), never a crash.
 sleep, clamped ≤60000), factor (multiplier, default 2.0) }`. Default is **no
 retry** (single attempt), so existing graphs are unchanged. The policy can also be
 supplied as a `params.retry` object. `human_approval` and `manual_trigger` are
-never retried. `NodeRunState.attempts` records how many attempts ran (`0` = a cache
-hit).
+never retried. `NodeRunState.attempts` records how many attempts ran.
 
-### Stall watchdog (agent-backed steps)
-Every agent-backed step carries a **no-real-progress trip**: if the agent makes
-no progress for `wf_step_stall_secs` (setting; default **300s**, `0` disables)
-the step fails with a retryable "stuck" error and the per-node retry policy
-re-runs it in a fresh session. "Progress" is measured on signals a stuck agent
-can't fake: the provider's activity artifact growing (claude's transcript
-JSONL, codex's rollout JSONL, agy's conversation DB) or the session's child
-processes burning CPU (a long quiet build/test). PTY output deliberately does
-**not** count — a hung TUI keeps repainting its spinner forever, which is
-exactly how stuck codex steps used to sit undetected for hours.
+### Step completion & the stall watchdog (agent-backed steps)
+An agent-backed step (`agent_prompt`, `prepare_context`'s analysis phase, the
+`product_*` / `canvas` / `git_pr` turns) is **not** done when the CLI ends a
+turn. A claude parent ends a turn every time a sub-agent reports back, and it
+ends one the instant it has *launched* them ("waiting on the four sweep
+agents") — so "the first `end_turn` wins" used to cut steps off mid-flight. The
+engine instead runs a **turn oracle**
+(`crates/otto-server/src/turn_oracle.rs`) over the provider's own transcript.
+A step completes only when **all three** hold:
+
+1. **The turn ended natively.** *claude:* the last message-bearing line is an
+   assistant `end_turn`, **nothing it launched is still pending** (async `Agent`
+   launches, `run_in_background` bashes and `SendMessage` resumes are tracked by
+   id and cleared only by the harness's
+   `<task-notification>…<task-id>…</task-id>` line, whatever the `<status>`),
+   and no notification is enqueued-but-undelivered. *codex:* a `task_complete`
+   carrying the **latest** `task_started` of this turn.
+2. **The handoff file exists** and is non-empty — the step's `.md` (§7) is the
+   agent's explicit done signal.
+3. **A 20 s idle confirm** passes: no new *message* line in the transcript (the
+   file's mtime alone does not count — claude appends attachment/queue
+   bookkeeping after an end_turn) and no `subagents/*.jsonl` mtime moves.
+
+Only then does the step log `✓ step complete (handoff + idle turn)`
+(`✓ step complete (codex task_complete + handoff)` for codex) and finish. Every
+fallback is **bounded**, so a missing signal can never hang a run:
+
+| Situation | Bound | Outcome |
+|---|---|---|
+| Turn ended, **no** handoff file | 90 s grace, with one "write your handoff file now" nudge at +10 s | accepts the agent's final reply — `⚠ handoff file missing — accepted the agent's final reply after 90s idle` |
+| Handoff written while tasks are still pending | 15 min from the handoff's mtime (`⚠ handoff written but 3 tasks still pending — waiting (up to 15m)` on entry) | completes anyway — `⚠ handoff written; 1 sub-agent never reported after 15m — moving on` |
+| Parent idle with only background (`Bash`) tasks left | 15 min from the moment the parent went idle — **not** from the task's launch, so a long test run the agent is still working alongside is never cut short | completes and stops the session (which hangs up the task) — `⚠ background task b5gvqf675 never finished after 15m — moving on` |
+| A notification enqueued but never delivered (`remove`d) | 60 s with no new message line | treated as delivered; the tail counts as `end_turn` again |
+| Provider with no transcript artifact (agy / custom) | 150 s of PTY silence (`WF_QUIET_DONE`) | completes — `⚠ no completion signal for this provider — accepted after 150s of silence` |
+| Anything | `TURN_TIMEOUT` (10 h) | the turn is abandoned |
+
+**Sub-agents are allowed.** The step preamble (`WF_STEP_RULES`) is a *completion
+protocol*, not a ban: delegate to sub-agents / background tasks freely, but fold
+every result back in, write the handoff **last** (never while something you
+launched is still running), never end with "waiting for …" (the harness wakes
+you when a task finishes), and stop every background process you started. The
+run-context preamble (§7) adds that the handoff file *is* the done signal —
+write it once, at the very end.
+
+**Evaluation order vs the stall trip.** Each 1 s tick the oracle's verdict is
+computed **first**. The **no-real-progress trip** (`wf_step_stall_secs` setting;
+default **300 s**, `0` disables) is consulted **only** while the step is in the
+`working` or `sub-agents` phase — never during the idle confirm, the
+missing-handoff grace, the handoff linger or the background-task linger, which
+carry their own bounds above. (Otherwise the 5-minute trip would kill a parent
+that had *already* written its handoff and re-run the whole step — a retry
+deletes the handoff first.) In those two phases "progress" is measured on
+signals a stuck agent can't fake: the newest mtime across the main transcript,
+`subagents/*.jsonl` **and** the harness's `tasks/*.output` files, or the
+session's child processes burning CPU (a long quiet build/test). PTY output
+deliberately does **not** count — a hung TUI keeps repainting its spinner
+forever, which is exactly how stuck codex steps used to sit undetected for
+hours. When the trip does fire the step fails with a retryable "stuck" error
+(`✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)`) and the
+per-node retry policy re-runs it in a fresh session.
+
+**Sessions are stopped when the step succeeds.** The engine **suspends** the
+step's session (kills the PTY, leaves the row `Reconnectable` so "Open session"
+on a finished step still resumes the transcript), or kills it outright for
+providers that can't resume. Only sessions belonging to *this* run's step are
+touched. Set `keep_session: true` on the node's params to leave it running;
+`review_run` is exempt (its reviewer sessions belong to the review, which tears
+them down itself when it reaches `done`/error).
+
+**Retry classes.** On top of the node's own `retry` policy the engine classifies
+the error string: `529`, "overloaded", rate limits, file-descriptor exhaustion
+("Too many open files" / "dup of fd") and spawn failures get a **20 s floor plus
+0–5 s jitter** and up to **5 attempts** (the ≤5 clamp is unchanged), logged as
+`↻ retry 2/5 in 23s (provider overloaded: 529)`. Every other error keeps the
+node's policy verbatim.
 
 ### Retrying steps of a finished run (`POST /workflow-runs/{id}/retry-node`)
 A **finished** run can be re-entered in place without re-running the earlier
 (possibly hours-long) steps: the run reopens, out-of-scope nodes keep their
 prior state/output/sessions, in-scope nodes re-execute — against the same run
 context dir and the same provisioned `otto-wf/<run_id>` worktree/branch — and
-the run's final status is recomputed. Retry re-entries bypass node-cache
-*reads*, so in-scope nodes genuinely re-execute instead of replaying a cached
-output. Two scopes, both on the run-view step cards once the run has finished:
+the run's final status is recomputed. Two scopes, both on the run-view step
+cards once the run has finished:
 - **Retry step** (errored steps only) — re-run just that step.
 - **Re-run from here** (any settled step) — re-run the step and everything
   downstream of it.
 
 ⚠ This is different from the **canvas** "Run from here" (`RunWorkflowReq.
 start_node`): that mints a **fresh run** — new context dir, new worktree cut
-from base — so files produced by the original run's steps are NOT there (the
-node cache replays *outputs*, not file state). To redo part of a run that
-produced files (implementations, test changes), use the run view's retry
-actions, which keep the original worktree.
+from base — so files produced by the original run's steps are NOT there. To
+redo part of a run that produced files (implementations, test changes), use the
+run view's retry actions, which keep the original worktree.
 
 ### How node inputs flow (`assemble_input`)
 Each node's input is assembled from its **predecessors' outputs**:
@@ -225,15 +290,14 @@ do simple `{key}` substitution from the incoming object (see §4).
 - **Partial runs:** `/run` accepts `start_node` and `only_node`:
   - `only_node: true` → run **only** that one node (everything else `skipped`).
   - `start_node` without `only_node` → run that node **and all descendants**
-    reachable via edges; ancestors are `skipped` but their **cached** outputs (if
-    any) still feed the entry node.
-- **Per-node output cache** (`workflow_node_cache`): keyed by
-  `(workflow_id, node_id, sha256(params), sha256(assembled_input))`. On a re-run,
-  a node whose params + input are unchanged is **skipped and its stored output
-  surfaced as "Success (cached)"** (duration `0ms`). **All** node kinds
-  participate in the cache — including `agent_prompt`, even though agent output is
-  non-deterministic — so "run from here" can skip expensive unchanged upstream
-  work. (This is the `finish/cached` transition referenced in `ws.md`.)
+    reachable via edges; ancestors are `skipped` and contribute no output, so the
+    entry node receives the run input.
+- **No cross-run node-result cache:** every node executes in its own run. (An
+  earlier per-node output cache keyed on `(node, params, upstream JSON)` was
+  removed — an agent node's real input includes the run's repos/worktrees and
+  external state, so a multi-repo run could replay a prior single-repo run's
+  checkout verbatim and review the wrong scope. `workflow_node_cache` survives
+  only as a dormant table: migrations are append-only.)
 - **Global wall clock:** a run cannot execute forever. At each node boundary the
   engine checks an overall `RUN_WALL_CLOCK_TIMEOUT`; exceeding it marks all
   un-run nodes `skipped` and fails the run with "run exceeded the N-minute time
@@ -271,7 +335,7 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 | Kind | Label / category | Purpose | Params (UI form) | Status |
 |---|---|---|---|---|
 | `manual_trigger` | Manual Trigger / Triggers | Entry node; emits the run input. `inputs:0`. | — | **Real** |
-| `agent_prompt` | Agent / AI | Runs an agent turn as a **real, openable session**; output `{ "reply", "session_id" }`. `skill`/`skills` inline a skill body ahead of the prompt (see *Per-step skills*). | `prompt`, `provider?` (empty ⇒ the run's resolved default agent), `model?`, `skill?`, `skills?` | **Real** |
+| `agent_prompt` | Agent / AI | Runs an agent turn as a **real, openable session**; output `{ "reply", "session_id" }`. `skill`/`skills` inline a skill body ahead of the prompt (see *Per-step skills*). | `prompt`, `provider?` (empty ⇒ the run's resolved default agent), `model?`, `skill?`, `skills?`, `keep_session?` (default `false` — leave the session running after the step succeeds, §3) | **Real** |
 | `prepare_context` | Prepare relevant data / AI | App-side context gathering: resolves + fetches a referenced Jira ticket into `jira-<KEY>.md`, then optionally runs an analysis agent turn over it (see *Prepare relevant data*). | `key?`, `require?`, `account_id?`, `prompt?`, `provider?`, `model?` | **Real** |
 | `http_request` | HTTP Request / Network | Calls an HTTP endpoint, captures response `{ status, body }`. | `method`, `url`, `body` (JSON) | **Real** |
 | `transform` | Set / Transform / Data | Merges a static JSON object into the data flowing through. | `json` (object) | **Real** |
@@ -292,8 +356,9 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 | `product_rewrite` | Product Rewrite / Product | Rewrites the story (**`jira-story-writer`**); outputs `{ story_id, body_md, session_id }`; `persist:true` saves a `suggested` product version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_plan` | Product Plan / Product | Breaks the story into a plan (**`story-task-breakdown`**); outputs `{ story_id, plan_md, session_id }`; `persist:true` saves a `plan` version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_publish` | Product Publish / Product | Publishes a story as a Confluence **RFC** or a **Jira** issue. **`dry_run` defaults true** (no-op note); a real publish needs `account_id` (+ `project_key`/`space_key`). | `kind` (`rfc`/`jira`), `dry_run`, `account_id`, … | **Real** |
-| `review_run` | Review Run / AI | Runs the **PR-review engine** (multi-provider × multi-lens reviewer agents + a scoring summarizer), polls to completion, emits a **0–100 `score`** (`100−20×blocking−5×advisory`), optional `goals` assessment blended in, `passed = score≥threshold && status==done`. `require_pass:true` **errors** the step when below threshold. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]` | **Real** |
+| `review_run` | Review Run / AI | Runs the **PR-review engine** (multi-provider × multi-lens reviewer agents + a scoring summarizer), polls to completion, emits a **0–100 `score`** (`100−20×blocking−5×advisory`), optional `goals` assessment blended in, `passed = score≥threshold && status==done`. `require_pass:true` **errors** the step when below threshold. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]`, `mode?` (`fan_out`/`orchestrator` — *Execution mode* below) | **Real** |
 | `canvas` | Canvas Diagram / Product | Asks an agent for a **mermaid/excalidraw** diagram and writes it under the data dir (`workflow-canvas/{run}/{node}.{ext}`); output `{ scene_id, path, diagram, … }`. | `prompt`, `mode` (`mermaid`/`excalidraw`), `provider?`, `model?` | **Real** |
+| `self_improve` | Self-Improve (offer) / AI | Runs the **self-improvement engine** in OFFER-ONLY mode (`Autonomy::Propose` — every skill/memory edit is queued for approval, **never** applied) over recent sessions and posts the offered list to the trigger's chat thread; output `{ run_id, summary, offered, edits }`. | `providers[]` or `provider?` (empty ⇒ the workspace's configured Self-Improvement providers) | **Real** |
 | `git_pr` | Git PR / Network | **Drafts** a pull request for a repo branch — the title/description are crafted by an agent (the node's `provider`/`model`, empty ⇒ run's resolved default; not the claude-only orchestrator). Default is draft-only (`opened:false`); **`open:true`** actually OPENS the PR on the remote (outward-facing, per-step opt-in) — gate it on the incoming edge (e.g. the review passing). | `repo_id`, `base` (default `main`), `open` (default `false`), `worktree_path?`, `provider?`, `model?` | **Real** |
 
 > **¹ `game_engine` / `verifier` are real but "scaffold" nodes.** They execute
@@ -351,9 +416,8 @@ unreliable Jira fetch never eats an agent's context or turn budget):
    default `claude`) over the gathered context as a real, openable session; its
    `reply`/`session_id`/`working_directory` merge into the output.
 
-`prepare_context` is the **only** kind excluded from the per-node output cache
-(§3 *Run-time graph behavior*) — a re-run always re-fetches, since the ticket
-can have changed since the last run. The `ui-test-authoring` and
+Every run re-fetches (there is no cross-run cache, §3), so a ticket edited since
+the last run is always picked up. The `ui-test-authoring` and
 `api-acceptance-test-authoring` templates (§6) both lead with this node.
 
 ### Per-step skills (`skill` / `skills`)
@@ -369,8 +433,8 @@ already inline their matching method skill **by kind** (`grill` / `jira-story-wr
 lens* skills (below) rather than prompt-prepended text.
 
 ### `review_run`, gating & auto-PR
-`review_run` drives the **same multi-agent engine as a PR review**: it fans out one
-reviewer agent per `providers[]` × `lenses[]` pair (e.g.
+`review_run` drives the **same multi-agent engine as a PR review**. By default it
+fans out one reviewer agent per `providers[]` × `lenses[]` pair (e.g.
 `providers:["claude","codex"]` × `lenses:["correctness-review","security-review",
 "test-review"]`; `skills[]` is accepted as an alias for `lenses[]`), and a
 summarizer consolidates + scores the findings into a **0–100 `score`** with
@@ -379,6 +443,40 @@ summarizer consolidates + scores the findings into a **0–100 `score`** with
 and `lenses` are empty it falls back to the stored/default PR-review config.
 `require_pass:true` makes the step **ERROR** when the score is below `threshold`, so
 any downstream step is error-skipped.
+
+#### Execution mode (`fan_out` / `orchestrator`)
+How the lenses are *run* is selectable — the result shape is identical either
+way, and **both modes end with the same single summarizer**:
+
+| Mode | Sessions opened | Per-lens findings | Reviewer row reads |
+|---|---|---|---|
+| **`fan_out`** (default) | one reviewer agent per **lens × provider** (3 lenses × 2 providers = 6) | each agent writes its own findings file | `claude · correctness-review` |
+| **`orchestrator`** | one agent per **provider** (2), each running **every lens as its own sub-agents** | each sub-agent writes `otto-review-<rid>-<i>-<lens-slug>.json`; the orchestrator merges them into the one findings file it writes **last** | `claude · orchestrator (3 lenses)`, with a live note `lenses 3/6 done · correctness ✓ security ✓ test ✓` |
+
+Findings carry a `lens` label in both modes (empty on an orchestrator row
+itself), so the summarizer — and the review panel — still see which lens
+produced what. Fan-out finishes sooner on a fast machine; orchestrator is far
+easier on file descriptors and CPU (N sessions instead of N × lenses) and is the
+mode to pick when a wide review used to trip "Too many open files".
+
+**Resolution order**, most specific first:
+
+1. **The run's override** — `review_mode` on `POST /workflows/{id}/run` (the Run
+   dialog's *Review mode* row, or the MCP `otto.run_workflow` argument). It is
+   seeded into the run input and **wins over every `review_run` node in that
+   run**, including nodes that set their own mode.
+2. **The node** — `params.mode` (the inspector's *Execution mode* select;
+   *Default* leaves the key absent).
+3. **The stored PR-review config** — `mode` inside the workspace's `pr_review`
+   settings.
+4. **`fan_out`.**
+
+The resolved mode and where it came from are the step's **first** log line:
+`review_run: mode orchestrator (node)` — the source reads `run override`, `node`,
+`stored config` or `default`. An unknown `review_mode` on `/run` is a **400**
+(`review_mode must be "fan_out" or "orchestrator"`), and a `review_mode` sent
+with a non-object, non-null `input` is a **400**
+(`input must be a JSON object when review_mode is set`).
 
 The review's comparison base resolves in order: node `base` param → input
 `base` → the run's ambient base → the repo's **detected default branch** — and
@@ -883,10 +981,9 @@ attachment.
 RunStatus  = 'pending' | 'running' | 'success' | 'error' | 'canceled';
 NodeStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped';
 ```
-A run is `error` if **any** node errored ("one or more nodes failed"). Cached
-nodes show as `success` with a "Success (cached)" log line. `pending` means the
-run is **queued** behind the parallel-run cap (the UI labels it "queued"); it
-flips to `running` the moment a gate slot frees.
+A run is `error` if **any** node errored ("one or more nodes failed"). `pending`
+means the run is **queued** behind the parallel-run cap (the UI labels it
+"queued"); it flips to `running` the moment a gate slot frees.
 
 ### Live progress over WebSocket (`workflow_run_updated`)
 The engine emits `Event::WorkflowRunUpdated` on the shared event bus at **every
@@ -928,6 +1025,46 @@ open/collapse always wins afterward — live updates never fight it. Steps that
 spawned **openable sessions** (`NodeRunState.sessions` — agent / product /
 canvas / loop turns) link to them so you can watch/inspect the agent **while the
 step runs**; the timeline strip at the top jumps between steps.
+
+#### Phase lines (agent-backed steps)
+The turn oracle (§3) narrates itself into the step's log as it goes, and those
+lines are **kept after the step succeeds** (they used to be overwritten by the
+final result). The vocabulary is fixed:
+
+| Line | Means |
+|---|---|
+| `⏳ starting claude session` | the CLI is booting (the provider's name varies) |
+| `✉ prompt accepted` | the prompt landed in the TUI and was submitted |
+| `⚙ working` | a turn is open, nothing delegated |
+| `🧩 sub-agents: 2 running · 1 done (Sweep diff chunk aa ✓)` | logged on every count change |
+| `⏸ agent idle — confirming completion (20s)` | the 20 s idle confirm — logged once, on entry |
+| `📄 handoff file written` | the step's `.md` appeared |
+| `✓ step complete (handoff + idle turn)` / `✓ step complete (codex task_complete + handoff)` | the oracle accepted the step |
+| `⚠ …` | a bounded fallback fired — see the table in §3 and §12 |
+| `↻ retry 2/5 in 23s (provider overloaded: 529)` | the step failed and is being retried |
+| `✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)` | the stall trip |
+
+`✓ step complete …` is **not** the last line — the turn's own
+`agent turn complete`, the handoff-persist line and the `edge → …` lines follow
+it. A step's log list is capped at **200 entries**; the cap evicts only *phase*
+lines (the `⏳ ✉ ⚙ 🧩 ⏸ 📄` prefixes), oldest first — `▶`, `✓`, `⚠`, `↻`, `✗`,
+retry, edge and persist lines are never dropped.
+
+#### Live sub-agent view (`NodeRunState.activity`)
+While an agent step runs it also carries an `activity` snapshot (phase,
+`pending_tasks`, and one entry per sub-agent / background task with
+`id`, `description`, `status`, `started_at`, `finished_at`), refreshed at most
+every 5 s and capped at 40 entries. The run view renders it in two places:
+- the step card shows a **chip** next to the live timer — `3 sub-agents ·
+  1 running` — plus the current phase as a muted line under the title;
+- the sidebar's **Agents** tab nests one row per sub-agent under that step —
+  `└ Sweep diff chunk aa — done in 1m12s` / `└ Sweep diff chunk ac — running
+  3m40s`. Sub-agents have no PTY of their own, so there is nothing to open; the
+  step appears in the tab even before its own session exists.
+
+`activity` is **cleared when the step finishes** — a settled step carries no
+`activity` key at all, so the chip and the phase line only ever show on a
+running step.
 
 ### Run → Proof Pack
 On completion the run links a **Proof Pack** (`WorkflowRun.proof_pack_id`)
@@ -1047,8 +1184,9 @@ report synchronously from the run endpoint and have no dedicated WS event.
 - **0020** `workflows` (id, workspace_id, name, description, `graph_json`,
   created_by/at, updated_at) + `workflow_runs` (id, workflow_id, workspace_id,
   status CHECK, `input_json`, `nodes_json`, error, started_at, finished_at).
-- **0051** `workflow_node_cache` (workflow_id, node_id, `params_hash`,
-  `input_hash`, `output_json`; unique on the 4-tuple).
+- **0051** `workflow_node_cache` — **historical**: the per-node output cache was
+  removed (§3) and nothing reads or writes this table any more. The file stays
+  because migrations are append-only.
 - **0058** `workflow_triggers` (kind CHECK in `schedule|webhook|event`,
   `spec_json`, enabled) **+ five ALTER columns** on `workflow_runs`:
   `waiting_approval`, `approval_node_id`, `approved_by`, `approval_note`,
@@ -1081,7 +1219,7 @@ are **append-only** — never edit or renumber an existing one.
 - Build graphs by description (AI), template (orchestrator flows + game pipelines),
   or hand; pan/zoom canvas editor.
 - Topological execution with failure propagation, partial runs (from-here / only),
-  per-node output caching, run cancellation, and a global wall-clock timeout.
+  run cancellation, and a global wall-clock timeout.
 - **Branching & loops:** edge `condition`s + a `condition` node (if/else, with clean
   branch-skip vs failure-poison semantics), and a bounded `loop` (iterate-until)
   that reuses inner-node execution — all driven by the safe `otto_core::expr`
@@ -1098,6 +1236,14 @@ are **append-only** — never edit or renumber an existing one.
   (PR draft, or `open:true` to auto-open on a passing review).
 - **Visible sessions per step** (openable while running) and a **Proof Pack** linked
   to each completed run.
+- **Sub-agent-aware step completion** — the turn oracle (§3): a step finishes only
+  once its agent's turn ended natively with nothing it launched still pending, the
+  handoff file is written, and a 20 s idle confirm passes; every fallback is
+  bounded, the live phase + sub-agent counts are visible in the run view, and the
+  session is suspended (resumable) when the step succeeds.
+- **Two review execution modes** — `review_run` fans out one agent per lens ×
+  provider, or runs one **orchestrator** agent per provider that delegates every
+  lens to its own sub-agents; selectable per node and overridable per run (§4).
 - **Versioning:** graph snapshot history with view + restore (append-only), now
   covering **standing `instructions`** alongside the graph.
 - Live WS run progress + per-step logs/output/"work product", plus a **Final
@@ -1130,14 +1276,21 @@ are **append-only** — never edit or renumber an existing one.
 - **Wired nodes have prerequisites** — `db_query`/`broker_peek`/`swarm_task`/
   `review_run`/`git_pr`/`product_*` need their backing connection/cluster/swarm/repo/
   story set up, or the node errors (and downstream active-path nodes skip).
-- **Agent-output caching is intentional but can surprise** — re-running a graph
-  with unchanged params+input serves the **prior agent reply from cache**
-  (duration `0ms`, `attempts:0`), not a fresh LLM call.
 - **Typed-output validation is warn-only** — schema mismatches log `⚠` but never
-  fail a run; `params_schema` is currently unpopulated (UI hint only).
+  fail a run; a kind's `params_schema` is a UI hint and never gates a run.
 - API-client automations have **no scheduler** — run-on-demand only.
-- **`prepare_context` has no dedicated inspector form yet** — configure it via
-  the canvas's raw-JSON params editor (§6).
+- **A silent *grandchild* can still slip past the idle confirm.** A sub-agent's
+  own sub-agent is recorded only in the child's transcript, and a child that
+  ends its turn "waiting" delivers its `completed` notification to the parent
+  early. The flat `subagents/` directory keeps the grandchild's JSONL visible to
+  the 20 s idle confirm and the progress clock (any movement resets them), which
+  is the only guard — a grandchild sitting inside one long, silent tool call can
+  still let the step finish ahead of it. Tell the child agent to wait for its own
+  delegates before reporting back.
+- **agy / custom providers have no completion signal** — they keep the old
+  fallback and finish after **150 s** of PTY silence, logged as
+  `⚠ no completion signal for this provider — accepted after 150s of silence`.
+  claude and codex use the turn oracle (§3).
 
 ---
 
@@ -1195,7 +1348,15 @@ are **append-only** — never edit or renumber an existing one.
 | A `product_*` / `review_run` node errors "missing story_id / repo_id" | These are **wired** now (§4) and need their target: a `story_id` (product) or `repo_id` (review/PR) in the node params or the run input. Provide it (the Run dialog / `Action: Workflow` message / template input). |
 | A `review_run` node "passes" too easily / never passes | `score = 100 − 20×blocking − 5×advisory` (optionally blended with a goals score), `passed` needs `score ≥ threshold` **and** the review reaching `done`. Tune `threshold` (default 80) or check the finding counts in the node output. |
 | A scheduled run never starts | The schedule scheduler **is** spawned at boot now (§5). Check the trigger is **enabled**, the cadence/`timezone` is right, and `last_run` shows it isn't mid-window; for cron, validate the `expr`. |
-| A node re-runs instantly with "Success (cached)" and stale output | Per-node cache hit (§3) — params + assembled input unchanged. Change a param to bust it, or accept the cached value. |
+| Step log: `⚠ handoff file missing — accepted the agent's final reply after 90s idle` | The agent ended its turn but never wrote the step's `.md` handoff (§3), so the engine accepted its final reply after the 90 s grace (a nudge was sent at +10 s). The step's "work product" is the chat reply, not a file — tighten the step prompt to write the handoff, or accept the reply. |
+| Step log: `⚠ handoff written but 3 tasks still pending — waiting (up to 15m)` | The agent wrote its handoff **while** sub-agents / background tasks it launched were still running — against the step protocol (§3). The engine waits up to 15 min for them rather than cutting them off. Fix the prompt so the handoff is written last. |
+| Step log: `⚠ handoff written; 1 sub-agent never reported after 15m — moving on` | The 15 min handoff linger expired: a sub-agent never delivered its `<task-notification>`. The step completes on the handoff and its session is stopped. Check that sub-agent's transcript under `subagents/` — it was probably killed or is genuinely stuck. |
+| Step log: `⚠ background task b5gvqf675 never finished after 15m — moving on` | The parent went idle with only a `run_in_background` bash left (a dev server, a `--watch`, a `tail`). The engine completes the step after 15 min and suspends the session, which hangs up the task. Add "stop every background process you started" work to the step, or don't background it. |
+| Step log: `⚠ no completion signal for this provider — accepted after 150s of silence` | agy / custom providers have no transcript artifact, so they still fall back to 150 s of PTY silence (§10). Use claude or codex for steps that delegate. |
+| Step log: `↻ retry 2/3 in 2s (codex turn aborted)`, then `✗ codex turn aborted` | codex wrote a `turn_aborted` for the turn we submitted and started no new one within 90 s (usually a dropped upstream connection or a cancelled TUI). The node's retry policy re-runs the step; with no retries left the step errors. |
+| Step log: `↻ retry 2/5 in 23s (provider overloaded: 529)` | An overload / rate-limit / fd-exhaustion / spawn error — the engine forces a ≥ 20 s backoff (plus jitter) and up to 5 attempts regardless of the node's policy (§3). Nothing to do but let it retry; repeated hits mean too many concurrent agents. |
+| Step log: `✗ step made no progress for 5m (agent looks stuck; 0 tasks pending)` | The stall trip fired (§3): no transcript, sub-agent or `tasks/*.output` movement for `wf_step_stall_secs`. The step is retried in a fresh session. Raise the setting for genuinely long quiet work, or `0` to disable. The trip is never consulted while a bounded hold (idle confirm / handoff grace / linger) is running. |
+| A review in **orchestrator** mode shows 2 agent rows instead of 6 | That is the mode working: one agent per **provider**, each running every lens as its own sub-agents, plus the summarizer (§4 *Execution mode*). The row reads `claude · orchestrator (3 lenses)` and its note counts the lenses (`lenses 3/6 done · …`). Switch the node's *Execution mode* to Fan-out — or start the run with `review_mode: "fan_out"` — to get one row per lens × provider. |
 | A branch I expected to run was `skipped (branch not taken)` | An incoming edge's `condition` evaluated false (or its upstream was branch-skipped). Inspect the `edge → … not taken` log line and the source node's output the condition tested. |
 | Run fails immediately, no node ran | The graph has a **cycle** (topo-sort failed) — remove the back-edge. |
 | A downstream node is `skipped` ("upstream did not succeed") | A predecessor errored or was skipped; fix/inspect the upstream node first. |
