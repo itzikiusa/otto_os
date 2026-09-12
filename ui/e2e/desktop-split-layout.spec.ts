@@ -228,3 +228,21 @@ test('⌘D stops at 15 panes and Layout: Grid re-equalises them', async ({ page 
   );
   for (const o of overflow) expect(o, 'pane header horizontal overflow (px)').toBeLessThanOrEqual(2);
 });
+
+test('the frame between two panes resizes from the pane edge, not only the divider', async ({ page }) => {
+  await openSession(page, 'Pirlo');
+  await page.keyboard.press('Meta+d');
+  await expect(leaves(page)).toHaveCount(2);
+  const gutter = page.locator('.gutter[aria-orientation="vertical"]').first();
+  await expect(gutter).toBeVisible();
+  const gb = (await gutter.boundingBox())!;
+  const before = Number(await gutter.getAttribute('aria-valuenow'));
+  // Press 5px INSIDE the right pane's edge (outside the 8px track) and drag.
+  const x = gb.x + gb.width + 5;
+  const y = gb.y + gb.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 120, y, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(async () => Number(await gutter.getAttribute('aria-valuenow'))).toBeGreaterThan(before);
+});
