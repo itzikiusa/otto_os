@@ -167,6 +167,48 @@ test('⌘⌥S swaps the focused pane with the next', async ({ page }) => {
   expect(await keyOrderOf(page)).toEqual(keysBefore);
 });
 
+test('tiled view: dragging the divider between two columns resizes them and a reload keeps it', async ({ page }) => {
+  await openSession(page, 'Costacurta');
+  await page.locator('button[aria-label="Tiled view"]').click();
+  await expect(page.locator('[data-tile-id]')).toHaveCount(3, { timeout: 20_000 });
+  const divider = page.getByTestId('tile-divider-col').first();
+  await expect(divider).toBeVisible();
+  const widthOf = (col: number) =>
+    page.locator(`[data-tile-id][data-col="${col}"]`).first().evaluate((el) => el.getBoundingClientRect().width);
+  const before = await widthOf(0);
+  const d = (await divider.boundingBox())!;
+  // Grab 5px INSIDE the right-hand tile's edge (outside the 8px track) — the
+  // frame must resize like a window border, not only the hairline.
+  const x = d.x + d.width + 5;
+  // Off the vertical centre: that is exactly where the full-width ROW divider
+  // crosses the column divider.
+  const y = d.y + 100;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 160, y, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(() => widthOf(0)).toBeGreaterThan(before + 100);
+  const after = await widthOf(0);
+  await page.reload();
+  await expect(page.locator('[data-tile-id]')).toHaveCount(3, { timeout: 20_000 });
+  await expect.poll(() => widthOf(0)).toBeGreaterThan(after - 4);
+  // Double-click equalises again.
+  await page.getByTestId('tile-divider-col').first().dblclick({ position: { x: 4, y: 100 } });
+  await expect.poll(() => widthOf(0)).toBeLessThan(after - 60);
+});
+
+test('tiled view: "Free layout" turns the tiles into an equal split grid with a gutter per edge', async ({ page }) => {
+  await openSession(page, 'Costacurta');
+  await page.locator('button[aria-label="Tiled view"]').click();
+  await expect(page.locator('[data-tile-id]')).toHaveCount(3, { timeout: 20_000 });
+  const order = await page.locator('[data-tile-id]').evaluateAll((els) => els.map((el) => (el as HTMLElement).dataset.tileId));
+  await page.getByTestId('tiled-free-layout').click();
+  // Split view, same sessions in the same order, and a draggable gutter per edge.
+  await expect(page.locator('[data-pane-key]')).toHaveCount(3, { timeout: 20_000 });
+  await expect.poll(() => sessionOrderOf(page)).toEqual(order);
+  await expect(page.locator('.gutter')).toHaveCount(2);
+});
+
 test('tiled view: drag a tile onto another reorders and a reload keeps it', async ({ page }) => {
   await openSession(page, 'Costacurta');
   await page.locator('button[aria-label="Tiled view"]').click();

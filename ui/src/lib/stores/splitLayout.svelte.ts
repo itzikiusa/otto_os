@@ -317,6 +317,18 @@ class SplitLayoutStore {
 
   /** Rebuild the same sessions (leaf order preserved) in a canonical shape;
    *  focus follows the focused SESSION. */
+  /** Replace the whole layout with `ids` laid out by `p` — the Tiled view's
+   *  "Free layout": the tiles, in their on-screen order, become split-tree
+   *  leaves the user can then resize edge by edge and nest any way. Caps at
+   *  MAX_PANES; focus lands on the first leaf. */
+  layoutSessions(ids: Id[], p: Preset): void {
+    const unique = [...new Set(ids)].slice(0, MAX_PANES);
+    if (unique.length === 0) return;
+    this.tree = buildPreset(unique, p);
+    this.focusedKey = this.leaves[0]?.key ?? null;
+    this.persist();
+  }
+
   applyPreset(p: Preset): void {
     const ids = this.panes;
     const focusedSession = this.focusedLeaf?.session ?? null;
