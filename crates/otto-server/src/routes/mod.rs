@@ -30,6 +30,7 @@ pub mod handover;
 pub mod impersonate;
 pub mod logs;
 pub mod mcp_servers;
+pub mod mcp_cp;
 pub mod meta;
 pub mod mission;
 pub mod workgraph;
@@ -297,6 +298,16 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route(
             "/mcp/tokens/{id}",
             delete(crate::mcp_outward::revoke_mcp_token),
+        )
+        // Admin is enforced in-handler because the path guard resolves
+        // `/mcp/*` non-GET requests to Edit.
+        .route(
+            "/mcp/tokens/{id}/rotate",
+            post(mcp_cp::rotate_mcp_token),
+        )
+        .route(
+            "/workspaces/{wid}/mcp/session-attach",
+            get(mcp_cp::get_session_attach).patch(mcp_cp::set_session_attach),
         )
         .route("/mcp/gateway/tools", get(crate::mcp_outward::gateway_tools))
         .route("/mcp/gateway/invoke", post(crate::mcp_outward::gateway_invoke))

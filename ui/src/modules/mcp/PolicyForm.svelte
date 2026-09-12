@@ -31,6 +31,20 @@
   let matchText = $state(
     init ? JSON.stringify(init.match ?? {}, null, 2) : '{\n  "tool_glob": "*"\n}',
   );
+  const matchKeys = [
+    'server_id',
+    'server_name',
+    'tool',
+    'tool_glob',
+    'risk_label',
+    'min_injection_risk',
+    'mutating',
+    'direction',
+    'caller_kind',
+    'workspace_id',
+  ] as const;
+  const matchKeysText = matchKeys.join(', ');
+  let matchError = $state<string | null>(null);
   let saving = $state(false);
 
   async function save(): Promise<void> {
@@ -39,13 +53,25 @@
       return;
     }
     let match: unknown = {};
+    matchError = null;
     if (matchText.trim()) {
       try {
         match = JSON.parse(matchText);
       } catch (e) {
-        toasts.error('Match must be valid JSON', e instanceof Error ? e.message : String(e));
+        matchError = `Match must be valid JSON: ${e instanceof Error ? e.message : String(e)}`;
         return;
       }
+    }
+    if (match === null || Array.isArray(match) || typeof match !== 'object') {
+      matchError = `Match must be a JSON object. Allowed keys: ${matchKeysText}.`;
+      return;
+    }
+    const unknownKeys = Object.keys(match).filter(
+      (key) => !matchKeys.includes(key as (typeof matchKeys)[number]),
+    );
+    if (unknownKeys.length) {
+      matchError = `Unknown match key${unknownKeys.length === 1 ? '' : 's'}: ${unknownKeys.join(', ')}. Allowed keys: ${matchKeysText}.`;
+      return;
     }
     saving = true;
     try {
@@ -116,11 +142,18 @@
 
     <label class="field">
       <span>Match (JSON)</span>
-      <textarea bind:value={matchText} rows="7" class="mono" spellcheck="false"></textarea>
+      <textarea
+        bind:value={matchText}
+        rows="7"
+        class="mono"
+        spellcheck="false"
+        aria-invalid={matchError != null}
+        oninput={() => (matchError = null)}
+      ></textarea>
       <span class="hint">
-        Keys (all optional, AND-combined): server_id, server_name, tool, tool_glob, risk_label,
-        min_injection_risk, mutating, direction, caller_kind, workspace_id.
+        Keys (all optional, AND-combined): {matchKeysText}.
       </span>
+      {#if matchError}<span class="field-error" role="alert">{matchError}</span>{/if}
     </label>
 
     <label class="field">
@@ -192,5 +225,9 @@
   .hint {
     font-size: 11px;
     color: var(--text-dim);
+  }
+  .field-error {
+    font-size: 11px;
+    color: var(--status-exited, #ff5f57);
   }
 </style>

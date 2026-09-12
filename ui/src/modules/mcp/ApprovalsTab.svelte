@@ -74,8 +74,9 @@
   }
 </script>
 
-<div class="appr">
+<div class="appr" data-testid="mcp-approvals">
   <div class="bar">
+    <h2>Approvals</h2>
     <span class="count">{approvals.length} {showAll ? 'total' : 'pending'}</span>
     <span class="grow"></span>
     <label class="check">
@@ -155,6 +156,11 @@
     gap: 10px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
+  }
+  h2 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
   }
   .count {
     font-size: 12px;

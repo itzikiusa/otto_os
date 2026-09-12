@@ -15,7 +15,8 @@ token**, itself governed by the same pipeline.
 
 This is the definitive end-user + operator guide. It documents what the code in
 `crates/otto-mcp/` (the engine), `crates/otto-server/src/mcp_outward.rs` +
-`mcp_capabilities.rs` (the outward server, gateway, and capability endpoints),
+`mcp_capabilities.rs` + `routes/mcp_cp.rs` (the outward server, gateway, token
+rotation, session attachment, and capability endpoints),
 `crates/ottod/src/mcp_server.rs` + `mcp_tools.rs` (the two stdio binaries),
 `crates/otto-state/migrations/0077_mcp_control_plane.sql`, and `ui/src/modules/mcp/`
 actually do — the real governance stages, the outward tool list, the server command,
@@ -42,11 +43,11 @@ the token kind, and the routes.
 | **Outbound client** | `otto-mcp` connects out to each server: `stdio` (spawn a command) or `http` (Streamable-HTTP, SSRF-pinned). |
 | **Governance** | One pipeline (`McpService::invoke`): allowlist → per-tool permission → policy → risk/approval → dry-run → execute → guaranteed audit → stats. |
 | **Outward server** | `ottod mcp-server` (stdio) **and** the Streamable-HTTP transport `POST /mcp/http`, authenticated by a **restricted `kind='mcp'` token** that can reach only the governed choke point. Reachable over loopback HTTP and (opt-in) the TLS `network_listener`. |
-| **Scoped tokens** | **Multiple** MCP tokens, each owned by a user and carrying an **McpScope** (tools / read-only / workspace pin) enforced at the choke point — different users get different access. `GET/POST/DELETE /mcp/tokens` (`mcp:admin`). |
+| **Scoped tokens** | **Multiple** MCP tokens, each owned by a user and carrying an **McpScope** (tools / read-only / workspace pin) enforced at the choke point — different users get different access. Tokens can be rotated or revoked individually (`mcp:admin`). |
 | **Gateway** | `ottod mcp-tools` surfaces governed downstream tools (namespaced `mcp__<server>__<tool>`) and proxies them through the same pipeline. |
 | **Persistence** | SQLite (migration **0077**): augmented `mcp_servers` + `mcp_tools`, `mcp_allowlist`, `mcp_policies`, `mcp_call_log`, `mcp_approvals`. |
 | **RBAC** | `Feature::Mcp` (`mcp`): reads = **View**, mutations/invoke = **Edit**, posture (policy writes/import, outward config, approvals) = **Admin**; stdio registration = **Admin** in-handler. |
-| **UI** | The **MCP Control Plane** page (`{ id:'mcp', icon:'plug', feature:'mcp' }`) with **8 tabs**. |
+| **UI** | Three sections replace eight tabs: **Otto server** is the default (`#/mcp`), **External servers** (`#/mcp/servers`) holds the registry/tools/rules, and **Activity** (`#/mcp/activity`) holds approvals, audit, and per-tool stats. Detailed controls use progressive disclosure. |
 | **Defaults** | Outward server **off**; dangerous-tool approval **on**; health sweep every **300 s**. |
 
 ---
@@ -85,14 +86,17 @@ the token kind, and the routes.
 | **Policy engine** | `crates/otto-mcp/src/policy.rs` | Most-restrictive-wins matcher (`mcp_policies`). |
 | **Control-plane HTTP** | `crates/otto-mcp/src/http.rs` (`api_router`) | The `/mcp/*` + `/workspaces/{wid}/mcp/*` governance routes. |
 | **Outward server** | `crates/otto-server/src/mcp_outward.rs` | `/mcp/otto-tools/invoke`, `/mcp/otto-server`, the gateway, the categorised `otto.*` tool catalog (`otto_tool_specs` + the pure `route_for` map). |
+| **CP extensions** | `crates/otto-server/src/routes/mcp_cp.rs` | Per-token rotation and per-workspace session attachment. |
 | **Capability endpoints** | `crates/otto-server/src/mcp_capabilities.rs` | `code-search`, `context-packet`, `proof-pack` (injection-safe). |
 | **stdio binaries** | `crates/ottod/src/{mcp_server,mcp_tools}.rs` | The outward (`ottod mcp-server`) + inward (`ottod mcp-tools`) servers. |
 | **Persistence** | `crates/otto-state/migrations/0077_mcp_control_plane.sql` + `mcp_control.rs` | The six tables + repos. |
-| **UI** | `ui/src/modules/mcp/` (`McpPage.svelte` + 8 tab components) | Servers, Tools, Allowlists, Policies, Approvals, Audit, Stats, Otto Server. |
+| **UI** | `ui/src/modules/mcp/` | Three-section shell: Otto server home, external servers with embedded tools/rules, and activity with approvals/audit/stats. |
 
-The **MCP Control Plane** page is workspace-scoped: with no workspace selected it
-shows *"No workspace selected — Select a workspace to manage its governed MCP servers
-and tools."* Servers are registered **per workspace**.
+The **External servers** section is workspace-scoped: with no workspace selected it
+asks you to select one before managing governed servers and tools. The default Otto
+server home and Activity remain available without a selected workspace; session
+attachment controls appear once a workspace is selected. Servers are registered
+**per workspace**.
 
 > This is distinct from the **legacy** per-workspace `.mcp.json` config CRUD
 > (`/mcp-servers`, migration 0036), which is unchanged and stays Exempt from
@@ -104,10 +108,12 @@ and tools."* Servers are registered **per workspace**.
 ## 3. Setup
 
 Open **MCP Control Plane** in the sidebar (it requires the `mcp` feature capability).
+The default `#/mcp` route opens Otto's built-in server. Use `#/mcp/servers` for the
+external-server registry and `#/mcp/activity` for approvals, audit, and stats.
 
 ### 3.1 Register a server (control plane)
 
-In the **Servers** tab → **Add server**. Choose a transport:
+Open `#/mcp/servers` (**External servers**) → **Add server**. Choose a transport:
 
 - **`stdio`** — a local command Otto spawns (`command`, `args`, `env`). **Registering
   a stdio server requires MCP Admin**, because it runs an arbitrary command *as the
@@ -119,8 +125,9 @@ In the **Servers** tab → **Add server**. Choose a transport:
 Secret env values / auth headers go in the **`secret_env` / `secret_headers`** fields
 — these are written to the macOS Keychain (`mcp-{id}`) and **never** stored in the DB
 or returned by the API (responses list only `secret_env_keys` / mask them). The
-server list shows columns **Name, Transport, Health, Tools, Injection, Enabled,
-Actions**, with per-server **Discover**, **Health**, and **Delete**.
+Expand a server row to inspect its discovered tools and use the tester. Per-server
+actions include **Discover**, **Health**, and **Delete**. Open **Rules** for the
+allowlists and policy-as-code controls.
 
 On create/enable Otto **discovers** the server's tools (`initialize` + `tools/list`),
 labels each (§6), and upserts the catalog. A background **health sweep** re-probes
@@ -129,12 +136,18 @@ every managed, enabled server every `mcp_health_interval_secs` (default **300 s*
 
 ### 3.2 Enable the outward Otto MCP server
 
-In the **Otto Server** tab: toggle **Enable**, pick which `otto.*` tools to expose
-(a **filterable checklist grouped by feature category**, with per-group **All/None**),
-and **Mint token** / **Rotate token**. The minted token is a restricted `kind='mcp'`
-token shown **once** (*"New token — shown once. Copy it now."*); only its 12-char
-prefix is shown thereafter. The tab generates an **install snippet** to paste into an
-external agent's `.mcp.json`:
+At `#/mcp`, use **Attach to sessions in _workspace_** to control whether newly
+started sessions in that workspace receive Otto's built-in MCP server. Toggle
+**Expose to external clients** and choose which `otto.*` tools external clients may
+use from the **External tool catalog**, a filterable checklist grouped by feature
+category with per-group **All/None**.
+
+The outward checklist does **not** affect Otto sessions: session tools come from the
+separate inward `ottod mcp-tools` catalog. Open **Connect an external client** to see
+the HTTP URL, install commands, network-access controls, and **Access tokens**. A new
+restricted `kind='mcp'` token is shown **once**; only its 12-character prefix is shown
+thereafter. The disclosure includes this install snippet for an external agent's
+`.mcp.json`:
 
 ```json
 {
@@ -176,8 +189,9 @@ claude mcp add --transport http otto http://127.0.0.1:7700/api/v1/mcp/http \
   self-signed TLS cert) it works for **remote** clients at
   `https://<host>:<port>/api/v1/mcp/http` — *MCP over HTTP, not only locally*.
 
-The **Otto Server** tab surfaces the loopback URL and an **Allow network access**
-toggle (it writes the `network_listener` setting; a daemon restart applies it). A
+The **Connect an external client** disclosure surfaces the loopback URL and an
+advanced **Allow network access** toggle (it writes the `network_listener` setting;
+a daemon restart applies it). A
 `kind='mcp'` token is route-confined by the feature guard to `/mcp/http` (+ the legacy
 `/mcp/otto-tools/invoke` and `GET /mcp/otto-server`), so even leaked it can never reach
 a feature endpoint directly. `GET /mcp/http` returns `405` (no standalone SSE stream).
@@ -201,14 +215,22 @@ shows tools the scope permits (a read-only token never even sees a mutating tool
 *before* the global-enable and approval gates. The scope can never *widen* access — it
 is always intersected with the server's enabled set and the owner's RBAC.
 
-Manage tokens in the **Otto Server → Access tokens** panel, or over the API
-(`mcp:admin`):
+Manage tokens under **Otto server → Connect an external client → Access tokens**, or
+over the API (`mcp:admin`):
 
 ```
 GET    /api/v1/mcp/tokens            # list all (no secrets), with owner + scope
 POST   /api/v1/mcp/tokens            # {user_id?, label?, scope?} → {token, info} (once)
+POST   /api/v1/mcp/tokens/{id}/rotate # replace only this token → {token, info, revoked_id} (once)
 DELETE /api/v1/mcp/tokens/{id}       # revoke (evicts the auth cache immediately)
 ```
+
+#### Rotate a token
+
+Choose **Rotate** on that token's row and confirm. Otto preserves its owner, label,
+and scope, immediately revokes only the selected old secret, and shows the replacement
+secret once. Every other token — including tokens owned by the same user — keeps
+working. Update the external client before dismissing the one-time secret.
 
 ### 3.3 The outward tool catalog — every Otto feature
 
@@ -377,9 +399,9 @@ write-guard flag.
 ## 6. Tool discovery & risk labeling
 
 On **Discover**, Otto runs `initialize` + `tools/list` and labels each tool
-(`risk.rs`). The **Tools** tab shows columns **Tool, Risk, Injection, Enabled,
-Approval, Override risk**, plus a **dry-run/invoke tester** (run a tool with JSON
-args, toggle **Dry run**, see the governed decision).
+(`risk.rs`). Expand a server in **External servers** to see **Tool, Risk, Injection,
+Enabled, Approval, Override risk**, plus a progressively disclosed **dry-run/invoke
+tester** (run a tool with JSON args, toggle **Dry run**, see the governed decision).
 
 - **Risk label** (`read` / `write` / `dangerous`) — from MCP `toolAnnotations` when
   present (`destructiveHint=true`→`dangerous`; `readOnlyHint=true`→`read`), refined by
@@ -400,11 +422,11 @@ args, toggle **Dry run**, see the governed decision).
 
 ## 7. Policy-as-code
 
-The **Policies** tab manages `mcp_policies` rules (global + per-workspace), with
-**Export** / **Import** of the full ruleset as one JSON document and a **Preview
-decision** evaluator. Columns: **Name, Scope, Prio, Effect, Match, On**. Each rule is
-a `match` object + an `effect` (`allow` / `deny` / `require_approval` /
-`require_dry_run`).
+The **Rules** drawer in External servers manages `mcp_policies` rules (global +
+per-workspace), with **Export** / **Import** of the full ruleset as one JSON document
+and a **Preview decision** evaluator. Columns: **Name, Scope, Prio, Effect, Match,
+On**. Each rule is a `match` object + an `effect` (`allow` / `deny` /
+`require_approval` / `require_dry_run`).
 
 Evaluation is **most-restrictive-wins**, *independent of priority* — among all
 matching enabled rules, `deny` beats `require_approval` beats `require_dry_run` beats
@@ -422,20 +444,21 @@ and evaluate are read-only (View).
 
 ## 8. Approvals, audit & stats
 
-- **Approvals** (`mcp_approvals`) — the **Approvals** tab is the queue for
+- **Approvals** (`mcp_approvals`) — the first panel in **Activity** is the queue for
   dangerous-tool calls and `otto.ask_human_approval` requests. Each card shows the
   **redacted** args (never full/secret values), a risk pill, and **Approve** / **Deny**
   with an optional note; a *"Show decided too"* toggle reveals history. A decision
   requires **MCP Admin**, and the repo enforces **approver ≠ requester** (separation
   of duties). Stale approvals expire (default TTL 120 min for tool-calls).
-- **Audit** (`mcp_call_log`) — the **Audit** tab is the ledger of **every** governed
-  call (UI tester, gateway, inbound `otto.*`, outbound downstream), filterable by
-  server / tool / decision. Columns: **Time, Server, Tool, Decision, Dir, OK, Latency,
-  Bytes**. Args are stored redacted; error text is redacted.
-- **Stats** (derived from the audit table) — the **Stats** tab shows per-tool **Calls,
-  Errors, Err rate, Avg/Max latency, Avg/Total bytes, Last called**. Cost in USD is a
-  **partial** signal — Otto meters latency/bytes/errors (the available signals) and
-  leaves true per-vendor cost out.
+- **Audit** (`mcp_call_log`) — the second **Activity** panel is the ledger of **every**
+  governed call (UI tester, gateway, inbound `otto.*`, outbound downstream). Its
+  server / tool / decision filters are collapsed by default. The **Log** view shows
+  **Time, Server, Tool, Decision, Dir, OK, Latency, Bytes**. Args and error text are
+  stored redacted.
+- **Stats** (derived from the audit table) — choose **By tool** in the Audit panel to
+  see **Calls, Errors, Err rate, Avg/Max latency, Avg/Total bytes, Last called**. Cost
+  in USD is a **partial** signal — Otto meters latency/bytes/errors (the available
+  signals) and leaves true per-vendor cost out.
 
 Both **Audit** and **Stats** are **filtered to the workspaces the caller can access**
 (or the global view for MCP Admin / root) — no cross-workspace governance via a
@@ -498,17 +521,25 @@ Otto's own agents, not just the UI tester and the outward tools. (In the shipped
 code the gateway tools are surfaced **additively**; there is no separate
 `mcp_gateway_enabled` toggle — a drift from the design doc, which proposed one.)
 
+**Known limitation — raw session injection.** Governed servers with `enabled=true`
+are also injected directly into session `.mcp.json` files. An agent can therefore
+reach that raw server entry without using the namespaced gateway tool and its
+governance pipeline. Keep a server disabled unless that direct session access is
+acceptable; the Activity audit covers calls routed through Otto, not calls made over
+the injected raw entry.
+
 ---
 
 ## 10. Security & permissions
 
 - **Restricted outward token.** The outward server authenticates with a **`kind='mcp'`
   token**, not a full PAT. Server-side, an `mcp`-scoped token sets an `mcp_only` flag,
-  and the auth/feature guard authorizes it for **only** `POST /api/v1/mcp/otto-tools/invoke`
-  and `GET /api/v1/mcp/otto-server` — **every other route returns 403** (enforced in
-  the guard, before the general policy table). So even if the external agent reads the
+  and the auth/feature guard authorizes it only for the MCP transport and legacy
+  outward status/invoke routes — **every other route returns 403** (enforced in the
+  guard, before the general policy table). So even if the external agent reads the
   token from its `.mcp.json`, it can reach only the governed choke point. The token is
-  long-lived (10 years) and not slid; **Rotate token** revokes it immediately.
+  long-lived (10 years) and not slid; rotating a selected token revokes that old
+  secret immediately without affecting other tokens.
 - **Two-axis + IDOR.** Routes are gated by `Feature::Mcp` (reads = View, mutations =
   Edit, posture = Admin) **and** every flat `/mcp/{servers,tools,approvals}/{id}`
   handler resolves the entity's workspace and re-checks the caller's role there.
@@ -572,15 +603,19 @@ the workspace role.
 | Method & path | Purpose | RBAC |
 |---|---|---|
 | `GET /mcp/otto-server` | Outward status + tool catalog + token prefix | View (or `mcp` token) |
-| `PATCH /mcp/otto-server` | Enable/disable, per-tool allow, mint/rotate token | **Admin** |
+| `PATCH /mcp/otto-server` | Enable/disable and per-tool allow; legacy-token rotation affects only `otto-mcp-server`-labelled tokens (prefer CP37) | **Admin** |
 | `POST /mcp/otto-tools/invoke` | The governed choke point for the `otto.*` tools | Edit (or `mcp` token) |
 | `GET /mcp/gateway/tools` (`?workspace_id=`) | Namespaced governed downstream tools | View |
 | `POST /mcp/gateway/invoke` | Proxy a downstream call through the pipeline | Edit |
+| `POST /mcp/tokens/{id}/rotate` | **CP37** — rotate only the selected token; returns its new secret once | **Admin** |
+| `GET /workspaces/{wid}/mcp/session-attach` | **CP38** — read whether new sessions receive Otto's built-in server | View + workspace Viewer |
+| `PATCH /workspaces/{wid}/mcp/session-attach` | **CP39** — set `{enabled}` in the per-workspace settings map | **Admin** + workspace Editor |
 | `GET /workspaces/{wid}/mcp/code-search` (`?q=&path=&max=`) | Pure-Rust confined code search | View |
 | `POST /workspaces/{wid}/mcp/context-packet` | Assemble a context packet | Edit |
 | `GET /workspaces/{wid}/mcp/proof-pack` (`?repo_id=&branch=&goal_loop_id=`) | Evidence bundle | View |
 
-**Settings keys** (`settings` table, JSON): `mcp_otto_server_enabled` (default
+**Settings keys** (`settings` table, JSON): `otto_mcp_enabled` (per-workspace map;
+unlisted workspaces default on), `mcp_otto_server_enabled` (default
 `false`), `mcp_otto_server_tools` (default = read subset + the two scheduled-task
 reads), `mcp_require_approval_dangerous` (default `true`), `mcp_health_interval_secs`
 (default `300`; `0` = off).
@@ -620,6 +655,9 @@ reads), `mcp_require_approval_dangerous` (default `true`), `mcp_health_interval_
   governed downstream tools additively (a drift from the design doc).
 - **No dedicated MCP WS event** — the gateway uses a generic `notice` nudge; the rest
   is poll/refresh.
+- **Enabled governed servers are also injected raw into sessions** — callers can use
+  those direct entries outside the gateway pipeline; disable the server unless that
+  access is intended.
 - **`stdio` registration runs arbitrary local commands** as the daemon — gated to
   MCP Admin, logged, and UI-warned, but inherently powerful.
 
@@ -636,9 +674,9 @@ applies.
 
 **A tool call returns `pending_approval`.** It hit the risk/approval gate (a
 `dangerous` tool with approval on, a `require_approval` policy, or a per-tool
-require-approval). Approve it in the **Approvals** tab (MCP Admin, and not the same
-user who requested it), then re-invoke — the approval is **single-use** and bound to
-the exact arguments, so changing the args invalidates it.
+require-approval). Approve it in **Activity → Approvals** (MCP Admin, and not the
+same user who requested it), then re-invoke — the approval is **single-use** and
+bound to the exact arguments, so changing the args invalidates it.
 
 **A tool is `denied`.** Walk the pipeline: is the server enabled + managed? Is there a
 workspace **deny** in the Allowlist (deny wins)? Is the per-tool **Enabled** switch
@@ -651,9 +689,15 @@ off? Does a **policy** deny it? The **Audit** row's `decision_reason` names the 
 directly.
 
 **The outward server "isn't there".** It is **off by default** — enable it in **Otto
-Server**, mint a token, paste the snippet into the external agent's `.mcp.json`, and
-confirm `OTTO_API_TOKEN` is set and `OTTO_MCP_BASE` (if used) points at the daemon. A
-disabled server returns `denied` to every invoke.
+server**, open **Connect an external client**, mint a token, paste the snippet into
+the external agent's `.mcp.json`, and confirm `OTTO_API_TOKEN` is set and
+`OTTO_MCP_BASE` (if used) points at the daemon. A disabled server returns `denied` to
+every invoke.
+
+**Rotating a token disabled my other tokens.** This defect is fixed: the row-level
+**Rotate** action uses CP37 and replaces only the selected token. Minted tokens for
+the same or another user remain valid. If a client still fails, make sure it received
+the new one-time secret for the token you intentionally rotated.
 
 **`otto.query_db_readonly` rejected my statement.** It permits a **single read-only**
 statement (`SELECT/SHOW/DESCRIBE/EXPLAIN/WITH`); writes, DDL, and multi-statement
@@ -674,5 +718,6 @@ cost is not tracked.
   [`mcp-control-plane-plan.md`](./mcp-control-plane-plan.md).
 - **Contracts (authoritative):** `docs/contracts/api.md` (MCP Control Plane).
 - **Source:** `crates/otto-mcp/`, `crates/otto-server/src/{mcp_outward,mcp_capabilities}.rs`,
+  `crates/otto-server/src/routes/mcp_cp.rs`,
   `crates/ottod/src/{mcp_server,mcp_tools}.rs`,
   `crates/otto-state/migrations/0077_mcp_control_plane.sql`, `ui/src/modules/mcp/`.

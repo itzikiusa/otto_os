@@ -39,6 +39,9 @@ const TOKEN_TTL_DAYS: i64 = 30;
 /// Fixed lifetime for `kind='api'` personal access tokens (~10 years). Long
 /// enough to behave as "create once"; the expiry is never slid for these.
 const API_TOKEN_TTL_DAYS: i64 = 3650;
+/// Label used by the legacy outward-server token minted through
+/// `PATCH /mcp/otto-server`.
+pub const LEGACY_OTTO_MCP_SERVER_LABEL: &str = "otto-mcp-server";
 /// Default fixed lifetime for `kind='impersonation'` tokens (30 minutes). Short
 /// and **never slid** — an admin acting-as a user gets a tight window, after
 /// which the overlay simply expires (the admin's own token is unaffected).
@@ -720,27 +723,76 @@ impl AuthRepo {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Revoke every `kind='mcp'` token for a user (used when rotating/disabling the
-    /// outward MCP server). Returns the number of tokens revoked.
-    pub async fn revoke_mcp_tokens(&self, user_id: &Id) -> Result<u64> {
-        let res = sqlx::query("DELETE FROM auth_sessions WHERE user_id = ? AND kind = 'mcp'")
-            .bind(user_id)
+    /// Replace exactly one outward MCP token while preserving its owner, label,
+    /// and scope. No other token is touched. Returns `None` when `id` does not
+    /// identify a `kind='mcp'` token.
+    pub async fn rotate_mcp_token(&self, id: &Id) -> Result<Option<(String, McpTokenInfo)>> {
+        let row = sqlx::query(
+            "SELECT user_id, label, mcp_scope
+             FROM auth_sessions
+             WHERE id = ? AND kind = 'mcp'",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("rotate mcp token (lookup): {e}")))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let user_id: Id = row.get("user_id");
+        let label: Option<String> = row.get("label");
+        let raw_scope: Option<String> = row.get("mcp_scope");
+        let scope = raw_scope
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<McpScope>(s).ok())
+            .unwrap_or_else(McpScope::unrestricted);
+        let (token, info) = self
+            .issue_mcp_token_with_scope(&user_id, label.as_deref(), &scope)
+            .await?;
+
+        sqlx::query("DELETE FROM auth_sessions WHERE id = ? AND kind = 'mcp'")
+            .bind(id)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Internal(format!("revoke mcp tokens: {e}")))?;
+            .map_err(|e| Error::Internal(format!("rotate mcp token (delete old): {e}")))?;
+        if let Some(cache) = &self.cache {
+            cache.evict_user(&user_id);
+        }
+        Ok(Some((token, info)))
+    }
+
+    /// Revoke the user's LEGACY outward-server tokens (label
+    /// `otto-mcp-server`, minted by the `rotate_token` path of `PATCH
+    /// /mcp/otto-server`). Scoped tokens (`POST /mcp/tokens`) are never touched
+    /// — rotating the legacy token must not wipe them (it used to). Per-token
+    /// rotation is [`Self::rotate_mcp_token`].
+    pub async fn revoke_mcp_tokens(&self, user_id: &Id) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM auth_sessions
+             WHERE user_id = ? AND kind = 'mcp' AND label = ?",
+        )
+        .bind(user_id)
+        .bind(LEGACY_OTTO_MCP_SERVER_LABEL)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("revoke mcp tokens: {e}")))?;
         if let Some(cache) = &self.cache {
             cache.evict_user(user_id);
         }
         Ok(res.rows_affected())
     }
 
-    /// The 12-char prefix of the user's current `kind='mcp'` token, if any (for the
-    /// UI to show which token is active without revealing it).
+    /// The 12-char prefix of the user's current legacy stdio token, if any (for
+    /// the UI to show which token is active without revealing it).
     pub async fn mcp_token_prefix(&self, user_id: &Id) -> Result<Option<String>> {
         let row = sqlx::query(
-            "SELECT token_prefix FROM auth_sessions WHERE user_id = ? AND kind = 'mcp' ORDER BY created_at DESC LIMIT 1",
+            "SELECT token_prefix FROM auth_sessions
+             WHERE user_id = ? AND kind = 'mcp' AND label = ?
+             ORDER BY created_at DESC LIMIT 1",
         )
         .bind(user_id)
+        .bind(LEGACY_OTTO_MCP_SERVER_LABEL)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("mcp token prefix: {e}")))?;
@@ -1449,6 +1501,131 @@ mod tests {
         );
         assert!(repo.list_mcp_tokens().await.unwrap().is_empty());
         assert!(!repo.revoke_mcp_token_by_id(&info.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn rotate_mcp_token_rotates_only_the_selected_token() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let alice = seed_user(&pool, "rotate-alice").await;
+        let bob = seed_user(&pool, "rotate-bob").await;
+        let a1_scope = McpScope {
+            tools: Some(vec!["list_workflows".into()]),
+            allow_writes: false,
+            workspace_id: Some("ws-a".into()),
+        };
+        let a2_scope = McpScope {
+            tools: Some(vec!["get_workflow".into()]),
+            allow_writes: true,
+            workspace_id: None,
+        };
+        let b1_scope = McpScope::unrestricted();
+        let (a1_token, a1_info) = repo
+            .issue_mcp_token_with_scope(&alice, Some("a1"), &a1_scope)
+            .await
+            .unwrap();
+        let (a2_token, a2_info) = repo
+            .issue_mcp_token_with_scope(&alice, Some("a2"), &a2_scope)
+            .await
+            .unwrap();
+        let (b1_token, b1_info) = repo
+            .issue_mcp_token_with_scope(&bob, Some("b1"), &b1_scope)
+            .await
+            .unwrap();
+
+        let (new_a1_token, new_a1_info) = repo
+            .rotate_mcp_token(&a1_info.id)
+            .await
+            .unwrap()
+            .expect("selected MCP token exists");
+        assert_ne!(new_a1_info.id, a1_info.id);
+        assert_ne!(new_a1_info.token_prefix, a1_info.token_prefix);
+        assert_eq!(new_a1_info.user_id, alice);
+        assert_eq!(new_a1_info.label.as_deref(), Some("a1"));
+        assert_eq!(new_a1_info.scope, a1_scope);
+
+        assert!(matches!(
+            repo.authenticate(&a1_token).await,
+            Err(Error::Unauthorized)
+        ));
+        assert_eq!(
+            repo.authenticate(&new_a1_token).await.unwrap().mcp_scope,
+            Some(a1_scope)
+        );
+        assert_eq!(
+            repo.authenticate(&a2_token)
+                .await
+                .unwrap()
+                .effective_user
+                .id,
+            alice
+        );
+        assert_eq!(
+            repo.authenticate(&b1_token)
+                .await
+                .unwrap()
+                .effective_user
+                .id,
+            bob
+        );
+
+        let mut listed_ids: Vec<Id> = repo
+            .list_mcp_tokens()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|info| info.id)
+            .collect();
+        listed_ids.sort();
+        let mut expected_ids = vec![new_a1_info.id, a2_info.id, b1_info.id];
+        expected_ids.sort();
+        assert_eq!(listed_ids, expected_ids);
+    }
+
+    #[tokio::test]
+    async fn rotate_mcp_token_unknown_id_is_none() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool);
+
+        assert!(repo
+            .rotate_mcp_token(&Id::from("unknown-mcp-token"))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_mcp_tokens_leaves_scoped_tokens_alone() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let alice = seed_user(&pool, "legacy-alice").await;
+        let legacy = repo
+            .issue_mcp_token(&alice, Some(LEGACY_OTTO_MCP_SERVER_LABEL))
+            .await
+            .unwrap();
+        let (scoped, scoped_info) = repo
+            .issue_mcp_token_with_scope(
+                &alice,
+                Some("ci"),
+                &McpScope {
+                    tools: Some(vec!["list_workflows".into()]),
+                    allow_writes: false,
+                    workspace_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(repo.revoke_mcp_tokens(&alice).await.unwrap(), 1);
+        assert!(matches!(
+            repo.authenticate(&legacy).await,
+            Err(Error::Unauthorized)
+        ));
+        assert_eq!(
+            repo.authenticate(&scoped).await.unwrap().effective_user.id,
+            alice
+        );
+        assert_eq!(repo.list_mcp_tokens().await.unwrap()[0].id, scoped_info.id);
     }
 
     #[tokio::test]
