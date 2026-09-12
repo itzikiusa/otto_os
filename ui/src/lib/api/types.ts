@@ -2288,6 +2288,40 @@ export interface CommitInfo {
   refs: string[];
 }
 
+/** One RUN of consecutive lines attributed to the same commit
+ *  (`GET /repos/{id}/blame`) — `count` lines starting at `line_start`. */
+export interface BlameLine {
+  sha: string;
+  short_sha: string;
+  author: string;
+  /** RFC3339 UTC. */
+  at: string;
+  orig_line: number;
+  line_start: number;
+  count: number;
+  summary: string;
+}
+
+export interface BlameResp {
+  path: string;
+  rev: string;
+  lines: BlameLine[];
+}
+
+/** `GET /repos/{id}/remotes` row — URLs come back with any `user:password@`
+ *  userinfo stripped. */
+export interface RemoteInfo {
+  name: string;
+  fetch_url: string;
+  push_url: string;
+}
+
+export interface RemoteOpReq {
+  op: 'add' | 'set_url' | 'remove';
+  name: string;
+  url?: string;
+}
+
 export interface RefBranch {
   name: string;
   is_current: boolean;

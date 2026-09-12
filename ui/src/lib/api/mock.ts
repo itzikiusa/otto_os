@@ -388,6 +388,43 @@ function mkLog(repo: string): CommitInfo[] {
 }
 const logs: Record<Id, CommitInfo[]> = { rep_otto: mkLog('aotto'), rep_wallet: mkLog('bwall') };
 
+// Remotes are mutated by the Remotes panel (add / set-url / remove), so each
+// repo gets its own copy of the defaults on first touch.
+const defaultRemotes = [
+  {
+    name: 'origin',
+    fetch_url: 'https://github.com/otto-os/otto.git',
+    push_url: 'https://github.com/otto-os/otto.git',
+  },
+];
+const gitRemotes: Record<Id, { name: string; fetch_url: string; push_url: string }[]> = {};
+
+/** Five blamed lines over two commits, with one run longer than a line. */
+function mockBlame(repo: string): {
+  sha: string;
+  short_sha: string;
+  author: string;
+  at: string;
+  orig_line: number;
+  line_start: number;
+  count: number;
+  summary: string;
+}[] {
+  const rows = logs[repo] ?? mkLog('aotto');
+  const [first, second] = [rows[0], rows[1] ?? rows[0]];
+  const run = (c: CommitInfo, orig: number, start: number, count: number) => ({
+    sha: c.sha,
+    short_sha: c.short_sha,
+    author: c.author,
+    at: c.date,
+    orig_line: orig,
+    line_start: start,
+    count,
+    summary: c.subject,
+  });
+  return [run(first, 1, 1, 2), run(second, 1, 3, 1), run(first, 4, 4, 2)];
+}
+
 function fdiff(path: string, oldPath: string | null, startOld: number, startNew: number, body: [('context' | 'add' | 'del'), string][]): FileDiff {
   let o = startOld;
   let n = startNew;
@@ -1522,11 +1559,63 @@ const routes: Route[] = [
   { method: 'GET', re: /^\/repos\/([^/]+)\/branches$/, handle: (m) => ({ json: branches[m[1]] ?? [] }) },
   {
     method: 'GET',
+    re: /^\/repos\/([^/]+)\/blame$/,
+    handle: (m, _b, q) => ({
+      json: {
+        path: q.get('path') ?? 'src/app.ts',
+        rev: q.get('rev') || 'HEAD',
+        lines: mockBlame(m[1]),
+      },
+    }),
+  },
+  {
+    method: 'GET',
+    re: /^\/repos\/([^/]+)\/remotes$/,
+    handle: (m) => ({ json: (gitRemotes[m[1]] ??= [...defaultRemotes]) }),
+  },
+  {
+    method: 'POST',
+    re: /^\/repos\/([^/]+)\/remotes$/,
+    handle: (m, body) => {
+      const list = (gitRemotes[m[1]] ??= [...defaultRemotes]);
+      const { op, name, url } = body as { op: string; name: string; url?: string };
+      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name ?? '')) {
+        return problem(400, 'invalid', `invalid remote name '${name}'`);
+      }
+      const i = list.findIndex((r) => r.name === name);
+      if (op === 'remove') {
+        if (i < 0) return problem(404, 'not_found', `no such remote '${name}'`);
+        list.splice(i, 1);
+      } else {
+        if (!url) return problem(400, 'invalid', 'a url is required to add or re-point a remote');
+        const row = { name, fetch_url: url, push_url: url };
+        if (op === 'add') {
+          if (i >= 0) return problem(409, 'conflict', `remote '${name}' already exists`);
+          list.push(row);
+        } else {
+          if (i < 0) return problem(404, 'not_found', `no such remote '${name}'`);
+          list[i] = row;
+        }
+      }
+      return { json: list };
+    },
+  },
+  {
+    method: 'GET',
     re: /^\/repos\/([^/]+)\/log$/,
     handle: (m, _b, q) => {
       const limit = Number(q.get('limit') ?? 50);
       const skip = Number(q.get('skip') ?? 0);
-      return { json: (logs[m[1]] ?? []).slice(skip, skip + limit) };
+      // Server-side search: `grep` matches the subject, `author` the author —
+      // both literal + case-insensitive, exactly like `--fixed-strings -i`.
+      const grep = (q.get('grep') ?? '').toLowerCase();
+      const author = (q.get('author') ?? '').toLowerCase();
+      let rows = logs[m[1]] ?? [];
+      if (grep) rows = rows.filter((c) => c.subject.toLowerCase().includes(grep));
+      if (author) rows = rows.filter((c) => c.author.toLowerCase().includes(author));
+      // `path` narrows history to one file; the fixture log has no per-file
+      // provenance, so it stays a no-op filter (the panel still renders).
+      return { json: rows.slice(skip, skip + limit) };
     },
   },
   { method: 'GET', re: /^\/repos\/([^/]+)\/diff$/, handle: () => ({ json: sampleDiff }) },

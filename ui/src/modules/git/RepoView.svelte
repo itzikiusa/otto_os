@@ -8,6 +8,11 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import GitToolbar from './GitToolbar.svelte';
   import GraphView from './GraphView.svelte';
+  import GraphSearchBar from './GraphSearchBar.svelte';
+  import BlamePanel from './BlamePanel.svelte';
+  import FileHistoryPanel from './FileHistoryPanel.svelte';
+  import RemotesPanel from './RemotesPanel.svelte';
+  import { gitBridge } from './gitBridge.svelte';
   import FocusView from './FocusView.svelte';
   import PrList from './PrList.svelte';
   import LocalReviewPanel from './LocalReviewPanel.svelte';
@@ -161,6 +166,18 @@
   // after a merge changes history.
   let graphKey = $state(0);
 
+  // Remote CRUD lives behind a header button + modal (the branch bar is a
+  // different owner's surface, and remotes are a repo-level setting, not a
+  // per-branch one).
+  let remotesOpen = $state(false);
+
+  // History / blame open as a right-side drawer over the graph. The request
+  // comes through `gitBridge` from whichever diff header asked for it, so a
+  // stale request for ANOTHER repo never renders here.
+  const fileTool = $derived(
+    gitBridge.fileTool?.repoId === repo.id ? gitBridge.fileTool : null,
+  );
+
   /** Host of a remote URL for the unsupported-forge message — handles
    *  https://, ssh:// and scp-like (git@host:path) forms (mirrors the daemon's
    *  detect.rs split). */
@@ -222,6 +239,9 @@
       <Icon name="chevronDown" size={11} />
     </button>
     {#if repo.provider}<span class="chip">{repo.provider}</span>{/if}
+    <button class="btn ghost small" onclick={() => (remotesOpen = true)} title="Manage remotes">
+      <Icon name="globe" size={12} /> Remotes
+    </button>
     <span class="grow"></span>
     {#if status}
       <GitToolbar repoId={repo.id} {status} onstatus={setStatus} onrefresh={() => graphKey++} />
@@ -311,22 +331,49 @@
     {:else if status}
       <!-- Graph is the default for 'graph' AND any legacy tab id (changes /
            history) still living in persisted state or old deep links. -->
-      {#key graphKey}
-        <GraphView
-          repoId={repo.id}
-          repoPath={repo.path}
-          workspaceId={repo.workspace_id}
-          {status}
-          onstatus={setStatus}
-          onmergerequest={requestMerge}
-          onresolveconflicts={openResolver}
-        />
-      {/key}
+      <div class="rv-graph">
+        <GraphSearchBar repoId={repo.id} />
+        <div class="rv-graph-body">
+          {#key graphKey}
+            <GraphView
+              repoId={repo.id}
+              repoPath={repo.path}
+              workspaceId={repo.workspace_id}
+              {status}
+              onstatus={setStatus}
+              onmergerequest={requestMerge}
+              onresolveconflicts={openResolver}
+            />
+          {/key}
+          {#if fileTool}
+            <aside class="rv-drawer">
+              {#if fileTool.kind === 'history'}
+                <FileHistoryPanel
+                  repoId={repo.id}
+                  path={fileTool.path}
+                  onclose={() => gitBridge.closeFileTool()}
+                />
+              {:else}
+                <BlamePanel
+                  repoId={repo.id}
+                  path={fileTool.path}
+                  rev={fileTool.rev}
+                  onclose={() => gitBridge.closeFileTool()}
+                />
+              {/if}
+            </aside>
+          {/if}
+        </div>
+      </div>
     {:else}
       <div style="padding: 16px"><Skeleton rows={5} height={36} /></div>
     {/if}
   </div>
 </div>
+
+{#if remotesOpen}
+  <RemotesPanel repoId={repo.id} onclose={() => (remotesOpen = false)} />
+{/if}
 
 {#if mergeReq}
   <MergeApprovalModal
@@ -457,6 +504,28 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+  }
+  .rv-graph {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .rv-graph-body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+  }
+  /* History / blame slide over the graph rather than squeezing it — the graph
+     keeps its lane layout, and the drawer never exceeds the viewport width. */
+  .rv-drawer {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 0;
+    width: min(520px, 90vw);
+    z-index: 6;
+    background: var(--surface);
+    box-shadow: var(--shadow);
   }
   /* The back arrow is a literal "←"; mirror it under RTL so it points the
      direction "back" actually goes (→) instead of always pointing left. */
