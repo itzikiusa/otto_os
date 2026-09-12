@@ -2073,6 +2073,7 @@ fn default_review_config(default_provider: &str) -> ReviewConfig {
         custom_presets: vec![],
         max_attempts: None,
         timeout_secs: None,
+        mode: None,
     }
 }
 
@@ -2148,6 +2149,18 @@ async fn load_review_config_for_repo(ctx: &ServerCtx, repo_id: &Id) -> ReviewCon
         }
     }
     load_review_config(ctx).await
+}
+
+/// The review mode a `review_run` step runs with when neither the run
+/// input nor the node set one: the repo's effective stored config (or the
+/// global one when `repo_id` is `None`), tagged with its source for the
+/// step log. Seeded stub — WP2 implements the lookup.
+#[allow(dead_code)] // seed — called by WP1, implemented by WP2
+pub(crate) async fn effective_review_mode(
+    _ctx: &ServerCtx,
+    _repo_id: Option<&Id>,
+) -> (otto_core::domain::ReviewMode, &'static str) {
+    (otto_core::domain::ReviewMode::FanOut, "default")
 }
 
 /// Derive the model `Option<&str>` for `run_agent` from an agent's model field.
@@ -4281,6 +4294,7 @@ pub(crate) async fn pr_draft_prompt(
 /// reviewer's prompt. Passing `None` makes the reviewers re-derive the system
 /// from raw hunks, which is how documented, intentional behavior gets reported
 /// as a defect of the change that happened to touch its line.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_review_for_branch(
     ctx: &ServerCtx,
     repo_id: &Id,
@@ -4289,7 +4303,9 @@ pub(crate) async fn run_review_for_branch(
     cfg_override: Option<ReviewConfig>,
     jira_context: Option<String>,
     run_context: Option<String>,
+    mode_override: Option<otto_core::domain::ReviewMode>,
 ) -> Result<(Id, otto_git::ResolvedBase, bool)> {
+    let _ = mode_override; // seeded — threaded into run_review_core by WP2
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
     let git = otto_git::LocalGit::new(worktree_path);

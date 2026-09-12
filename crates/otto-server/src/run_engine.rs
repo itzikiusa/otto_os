@@ -471,7 +471,7 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
     }
 
     let (review_id, _base, _no_changes) =
-        crate::modules::run_review_for_branch(ctx, &repo_id, &wt, base.as_deref(), None, None, None)
+        crate::modules::run_review_for_branch(ctx, &repo_id, &wt, base.as_deref(), None, None, None, None)
             .await?;
     ctx.runs
         .set_fields(

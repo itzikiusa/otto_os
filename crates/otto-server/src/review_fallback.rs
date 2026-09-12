@@ -138,6 +138,7 @@ mod tests {
             line: Some(line),
             severity: severity.to_string(),
             body: body.to_string(),
+            lens: None,
         }
     }
 

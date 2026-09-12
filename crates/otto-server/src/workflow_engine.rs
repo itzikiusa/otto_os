@@ -1180,6 +1180,7 @@ pub async fn run_workflow(
             duration_ms: None,
             attempts: None,
             sessions: vec![],
+            activity: None,
         })
         .collect();
     // Resolve the user this run acts as (for spawning visible agent sessions):
@@ -1420,6 +1421,7 @@ pub async fn run_workflow(
         run_base,
         files: files.clone(),
         default_provider,
+        run_input: input.clone(),
     };
     // 1-based number of the NEXT executed step — drives step-file naming.
     // Skipped nodes don't consume a number; cached nodes do (their files are
@@ -2284,6 +2286,12 @@ pub(crate) struct RunEnv {
     /// left on "default" honors the user's configured default, not a bare
     /// hardcoded "claude".
     pub default_provider: String,
+    /// The run's own input (what the trigger emitted / `POST /run` seeded),
+    /// verbatim. Node inputs lose keys hop by hop (`assemble_input`), so a
+    /// run-level override such as `review_mode` is read from HERE by the
+    /// `review_run` arm, wherever that node sits in the graph.
+    #[allow(dead_code)] // seed — read by WP1's review_run arm
+    pub run_input: Value,
 }
 
 /// Where a node execution sits in the run's step-file numbering: the 1-based
@@ -3768,6 +3776,7 @@ async fn execute_node(
                     cfg_override.clone(),
                     jira_context.clone(),
                     run_context.clone(),
+                    None,
                 )
                 .await
                 {
@@ -4907,6 +4916,8 @@ async fn run_node_agent(
             // The retry spawns a fresh session; don't leave the stuck one
             // alive (its spinner defeats the idle-suspend sweep).
             kill_on_stall: true,
+            oracle: false,
+            phase_tx: None,
         },
         move |id| {
             let _ = tx.send(id.to_string());
@@ -5766,6 +5777,7 @@ mod tests {
             duration_ms: None,
             attempts: None,
             sessions: vec![],
+            activity: None,
         }
     }
 
@@ -6125,6 +6137,7 @@ mod tests {
             duration_ms: Some(10),
             attempts: Some(1),
             sessions: vec![],
+            activity: None,
         };
         let states = vec![
             mk("a", NodeStatus::Success, json!({ "reply": "implemented the tests" })),

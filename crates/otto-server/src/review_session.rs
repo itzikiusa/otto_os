@@ -181,6 +181,7 @@ impl RawFinding {
             line: self.line,
             severity: normalize_severity(&self.severity),
             body,
+            lens: None,
         }
     }
 }

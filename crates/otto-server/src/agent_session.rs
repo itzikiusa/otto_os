@@ -83,6 +83,12 @@ pub struct TurnOpts {
     /// Interactive callers keep the default (false) — their session belongs
     /// to the user.
     pub kill_on_stall: bool,
+    /// Use the turn oracle (sub-agent/handoff-aware completion) instead of
+    /// the legacy "first end_turn" detection. Workflow steps set this;
+    /// single-turn chats (Discovery/Canvas/vault docs) keep the legacy path.
+    pub oracle: bool,
+    /// Receives every phase change while the oracle watches the turn.
+    pub phase_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::turn_oracle::Phase>>,
 }
 
 /// Run one turn. Returns `(reply_text, session_id)`. Persist the returned
