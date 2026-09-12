@@ -188,8 +188,18 @@ class WorkspaceStore {
   mainSessions: Session[] = $derived(
     // Background-spawned sessions (workflow steps, review agents, vault docs
     // writers, PR drafts, …) live in their own panels and stay out of the tiled
-    // grid unless the user explicitly opened them as a tab.
-    this.activeSessions.filter((s) => isForeground(s) || this.openTabs.includes(s.id)),
+    // grid unless the user explicitly opened them as a tab. Workspace-less
+    // (scratch) sessions are loaded in EVERY workspace for the sidebar's "No
+    // workspace" group — the same rule keeps them out of this workspace's grid
+    // (they are not its sessions, exactly as {@link agentSessions} has it)
+    // unless the user opened one. With no workspace selected they are all there
+    // is, so the grid is theirs.
+    this.activeSessions.filter(
+      (s) =>
+        (isForeground(s) &&
+          (this.currentId === null || s.workspace_id !== SCRATCH_WORKSPACE_ID)) ||
+        this.openTabs.includes(s.id),
+    ),
   );
 
   /** Active agent sessions (claude/codex/shell) of the current workspace —

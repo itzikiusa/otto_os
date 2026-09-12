@@ -151,7 +151,10 @@ trail, transcripts, shares — works unchanged. What differs:
   are loaded beside the current workspace's sessions on every refresh, so
   tabs, panes, status dots, archive and rename behave as usual; with zero
   workspaces the tab/pane layout is persisted under the `scratch` key
-  (`otto_tabs_scratch` / `otto_panes_scratch`) so it survives reloads too.
+  (`otto_tabs_scratch` / `otto_panes_scratch`) so it survives reloads too. The
+  **tiled grid** stays the current workspace's, though: a scratch session joins
+  it once you open it (it is then an open tab), and with no workspace selected
+  the grid is made of them alone.
 - **Handover stays same-workspace.** The daemon rejects cross-workspace
   handovers, so a scratch session hands over only to a *new* agent or to
   another scratch session; the target picker lists exactly those.
